@@ -26,6 +26,7 @@ describe("default-on compaction", () => {
 			responses: [
 				{ text: `first answer ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
 				{ text: `second answer ${"padding ".repeat(150)}`, usage: { totalTokens: 950 } },
+				{ text: "Refactor the parser safely." }, // goal distillation call
 				{ text: EXTRACT_JSON }, // subsystem extractor call (through the same faux stream)
 				{ text: "Subsystem narrative." }, // subsystem narrative call
 			],
@@ -153,6 +154,7 @@ describe("default-on compaction", () => {
 				{ text: `first ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
 				// Recoverable length stop on the second turn: output truncated → overflow recovery path.
 				{ text: `truncated ${"padding ".repeat(100)}`, stopReason: "length", usage: { totalTokens: 990 } },
+				{ text: "Fix the flaky test." }, // goal distillation call
 				{ text: EXTRACT_JSON },
 				{ text: "Narrative after overflow." },
 				{ text: "recovered final answer", usage: { totalTokens: 120 } },

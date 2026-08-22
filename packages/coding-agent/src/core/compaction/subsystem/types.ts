@@ -80,13 +80,25 @@ export interface TaskContract {
 	validUntil?: string;
 	/** Authority ids allowed to approve updates. */
 	allowedUpdaters: string[];
+	/**
+	 * Model-distilled goal proposal. Never authoritative while confirmed=false;
+	 * promotion to `goal` requires explicit user confirmation (new version).
+	 */
+	derivedGoal?: { text: string; confirmed: boolean; provenance: Provenance } | null;
 	schemaVersion: number;
 }
 
 export type ContractPatch = Partial<
 	Pick<
 		TaskContract,
-		"goal" | "acceptanceCriteria" | "constraints" | "permissions" | "budgets" | "outputContract" | "allowedUpdaters"
+		| "goal"
+		| "acceptanceCriteria"
+		| "constraints"
+		| "permissions"
+		| "budgets"
+		| "outputContract"
+		| "allowedUpdaters"
+		| "derivedGoal"
 	>
 >;
 

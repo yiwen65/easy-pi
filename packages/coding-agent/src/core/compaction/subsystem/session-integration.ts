@@ -24,6 +24,12 @@ import { completeSummarization } from "../compaction.ts";
 import { type ArtifactStore, FileSystemArtifactStore, InMemoryArtifactStore } from "./artifact-store.ts";
 import { type EventLog, InMemoryEventLog, JsonlEventLog, sessionEntriesToEvents } from "./event-log.ts";
 import { canonicalJson, sha256Hex } from "./hashing.ts";
+import {
+	COMPACTOR_POLICY_VERSION,
+	COMPACTOR_SYSTEM_POLICY,
+	detectInjections,
+	wrapUntrusted,
+} from "./injection-guard.ts";
 import { AuditTrail } from "./observability.ts";
 import { CompactionOrchestrator, type CompactResult, type OrchestratorDeps } from "./orchestrator.ts";
 import { buildPrompt } from "./prompt-builder.ts";
@@ -110,6 +116,7 @@ export class HfCompactionHost {
 	private readonly tenant: string;
 	private seededCount = 0;
 	private contractReady = false;
+	private goalDistilled = false;
 
 	constructor(options: {
 		sessionId: string;
@@ -253,6 +260,72 @@ export class HfCompactionHost {
 		reason?: string,
 	) {
 		return this.contractStore.proposeUpdate(this.sessionId, patch, proposedBy, reason);
+	}
+
+	/**
+	 * Distill the current task into a clear goal sentence via the compactor and
+	 * store it as an UNCONFIRMED derivedGoal (never the authority field).
+	 * Injection-flagged output is dropped entirely.
+	 */
+	private async maybeDistillGoal(entries: SessionEntry[], complete: CompleteFn): Promise<void> {
+		if (this.goalDistilled) return;
+		const active = this.contractStore.getActive(this.sessionId);
+		if (!active || active.derivedGoal || active.version !== 1) return;
+		this.goalDistilled = true;
+		const substantive = entries
+			.filter((e) => e.type === "message" && e.message.role === "user")
+			.map((e) => (e.type === "message" && e.message.role === "user" ? contentText(e.message.content, "") : ""))
+			.map((t) => t.replace(/\s+/g, " ").trim())
+			.filter((t) => t.length >= 8 && !t.startsWith("/"));
+		if (substantive.length === 0) return;
+		const recent = substantive.slice(-3).join("\n");
+		try {
+			const response = await complete({
+				systemPrompt: COMPACTOR_SYSTEM_POLICY,
+				messages: [
+					{
+						role: "user",
+						content: `${wrapUntrusted(recent)}\n\nState the user's current task goal in a single clear sentence. Output only the sentence.`,
+					},
+				],
+				maxTokens: 200,
+				promptVersion: COMPACTOR_POLICY_VERSION,
+			});
+			if (response.stopReason !== "stop") return;
+			const text = response.text.trim().replace(/\s+/g, " ").slice(0, 240);
+			if (text.length < 8) return;
+			if (detectInjections(text).some((f) => f.severity === "high")) return;
+			const proposal = this.contractStore.proposeUpdate(
+				this.sessionId,
+				{
+					derivedGoal: {
+						text,
+						confirmed: false,
+						provenance: { sourceEventIds: [], source: "extractor", note: "auto-distilled goal sentence" },
+					},
+				},
+				LOCAL_USER,
+				"store unconfirmed distilled goal",
+			);
+			this.contractStore.approveProposal(this.sessionId, proposal.proposalId, LOCAL_USER);
+		} catch {
+			// Distillation is best-effort; the raw derived goal remains as fallback.
+		}
+	}
+
+	/** Promote the pending distilled goal to the authoritative goal (new audited version). */
+	confirmDerivedGoal() {
+		const active = this.contractStore.getActive(this.sessionId);
+		if (!active?.derivedGoal) {
+			throw new Error("No derived goal to confirm");
+		}
+		const proposal = this.contractStore.proposeUpdate(
+			this.sessionId,
+			{ goal: active.derivedGoal.text, derivedGoal: null },
+			LOCAL_USER,
+			"user confirmed distilled goal",
+		);
+		return this.contractStore.approveProposal(this.sessionId, proposal.proposalId, LOCAL_USER);
 	}
 
 	/** Compactor LLM provided via config (tests); production passes one per attempt. */
@@ -409,6 +482,9 @@ export class HfCompactionHost {
 	}> {
 		this.syncFromEntries(options.branchEntries);
 		this.ensureContractFromEntries(options.branchEntries);
+		if (options.action !== "offload_only") {
+			await this.maybeDistillGoal(options.branchEntries, options.complete);
+		}
 		const orchestrator = new CompactionOrchestrator(
 			this.orchestratorDeps(options.complete, {
 				keepRecentTokens: options.keepRecentTokens,

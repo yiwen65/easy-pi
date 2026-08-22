@@ -455,6 +455,12 @@ export class AgentSession {
 		return this._hfHost.updateContract(patch, reason);
 	}
 
+	/** Promote the pending distilled goal proposal to the authoritative goal (new audited version). */
+	confirmDerivedGoal() {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		return this._hfHost.confirmDerivedGoal();
+	}
+
 	/** Unverified update attempts only ever become proposals. */
 	proposeTaskContractUpdate(
 		patch: Parameters<HfCompactionHost["proposeContractUpdate"]>[0],
