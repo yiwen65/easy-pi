@@ -1,0 +1,47 @@
+{
+	"name": "@earendil-works/pi-grok-tui",
+	"version": "0.84.2",
+	"description": "Action-driven terminal runtime for the Pi coding agent",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json",
+		"test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"keywords": [
+		"tui",
+		"terminal",
+		"state-machine",
+		"typescript"
+	],
+	"author": "Mario Zechner",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/earendil-works/pi.git",
+		"directory": "packages/grok-tui"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@earendil-works/pi-tui": "^0.84.2"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"shx": "0.4.0",
+		"typescript": "5.9.3"
+	}
+}
