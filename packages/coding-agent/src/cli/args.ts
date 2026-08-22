@@ -48,6 +48,7 @@ export interface Args {
 	listModels?: string | true;
 	offline?: boolean;
 	tuiMode?: TuiMode;
+	tuiEngine?: "legacy" | "grok";
 	verbose?: boolean;
 	projectTrustOverride?: boolean;
 	messages: string[];
@@ -205,6 +206,20 @@ export function parseArgs(args: string[]): Args {
 					message: `Invalid TUI mode "${mode}". Valid values: regular, fullscreen`,
 				});
 			}
+		} else if (arg === "--tui-engine") {
+			const engine = args[i + 1];
+			if (engine === "legacy" || engine === "grok") {
+				result.tuiEngine = engine;
+				i++;
+			} else if (engine === undefined || engine.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--tui-engine requires legacy or grok" });
+			} else {
+				i++;
+				result.diagnostics.push({
+					type: "error",
+					message: `Invalid TUI engine "${engine}". Valid values: legacy, grok`,
+				});
+			}
 		} else if (arg === "--verbose") {
 			result.verbose = true;
 		} else if (arg === "--approve" || arg === "-a") {
@@ -304,6 +319,7 @@ ${chalk.bold("Options:")}
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --tui-mode <mode>              TUI mode: regular (default) or fullscreen
+  --tui-engine <engine>          TUI renderer: legacy (default) or grok
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)

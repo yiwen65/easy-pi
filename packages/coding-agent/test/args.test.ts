@@ -388,6 +388,25 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--tui-engine flag", () => {
+		test.each(["legacy", "grok"] as const)("parses %s engine", (engine) => {
+			const result = parseArgs(["--tui-engine", engine]);
+			expect(result.tuiEngine).toBe(engine);
+		});
+
+		test("rejects invalid engines", () => {
+			const result = parseArgs(["--tui-engine", "other"]);
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid TUI engine "other". Valid values: legacy, grok' },
+			]);
+		});
+
+		test("requires an engine", () => {
+			const result = parseArgs(["--tui-engine"]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "--tui-engine requires legacy or grok" }]);
+		});
+	});
+
 	describe("tool flags", () => {
 		test("parses --no-tools flag", () => {
 			const result = parseArgs(["--no-tools"]);

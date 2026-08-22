@@ -1,5 +1,6 @@
+import { GrokTuiRuntime, GrokViewportTuiRuntime } from "@earendil-works/pi-grok-tui";
 import type { Component, Terminal, TUI } from "@earendil-works/pi-tui";
-import { Container, isViewportTUI, Text } from "@earendil-works/pi-tui";
+import { Container, isViewportTUI, Text, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
@@ -7,6 +8,7 @@ import {
 	createInteractiveTui,
 	createInteractiveTuiReference,
 	InteractiveMode,
+	type TuiEngine,
 } from "../src/modes/interactive/interactive-mode.ts";
 
 const clipboardMocks = vi.hoisted(() => ({
@@ -38,34 +40,35 @@ class RecordingTerminal extends VirtualTerminal implements Terminal {
 }
 
 describe("createInteractiveTui", () => {
-	it("selects the alternate-screen renderer only when requested", async () => {
-		const mainTerminal = new RecordingTerminal();
-		const mainTui = createInteractiveTui({
-			tuiMode: "regular",
+	it.each([
+		["legacy", "regular", TuiMainScreen, false],
+		["legacy", "fullscreen", TuiAltScreen, true],
+		["grok", "regular", GrokTuiRuntime, false],
+		["grok", "fullscreen", GrokViewportTuiRuntime, true],
+	] as const)("selects the %s %s renderer", async (tuiEngine, tuiMode, Renderer, fullscreen) => {
+		const terminal = new RecordingTerminal();
+		const tui = createInteractiveTui({
+			tuiEngine,
+			tuiMode,
 			showHardwareCursor: false,
 			logDirectory: "/tmp",
-			terminal: mainTerminal,
+			terminal,
 		});
-		expect(mainTui.mode).toBe("regular");
-		expect(isViewportTUI(mainTui)).toBe(false);
-		mainTui.start();
-		await mainTerminal.waitForRender();
-		expect(mainTerminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(false);
-		mainTui.stop();
+		expect(tui).toBeInstanceOf(Renderer);
+		expect(tui.mode).toBe(tuiMode);
+		expect(isViewportTUI(tui)).toBe(fullscreen);
+		if (tui instanceof GrokTuiRuntime || tui instanceof GrokViewportTuiRuntime) {
+			expect(tui.uiState.lifecycle).toBe("stopped");
+		}
 
-		const altTerminal = new RecordingTerminal();
-		const altTui = createInteractiveTui({
-			tuiMode: "fullscreen",
-			showHardwareCursor: false,
-			logDirectory: "/tmp",
-			terminal: altTerminal,
-		});
-		expect(altTui.mode).toBe("fullscreen");
-		expect(isViewportTUI(altTui)).toBe(true);
-		altTui.start();
-		await altTerminal.waitForRender();
-		expect(altTerminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(true);
-		altTui.stop();
+		tui.start();
+		await terminal.waitForRender();
+		expect(terminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(fullscreen);
+		if (tui instanceof GrokTuiRuntime || tui instanceof GrokViewportTuiRuntime) {
+			tui.flushActions();
+			expect(tui.uiState.lifecycle).toBe("running");
+		}
+		tui.stop();
 	});
 
 	it("replaces the renderer and restores the previous screen for resume-hint exits", async () => {
@@ -126,6 +129,76 @@ describe("createInteractiveTui", () => {
 		expect(stableUi.mode).toBe("fullscreen");
 		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
 	});
+
+	it("keeps the Grok renderer and stable TUI reference across layout mode switches", async () => {
+		const terminal = new RecordingTerminal(40, 8);
+		const renderer = createInteractiveTui({
+			tuiEngine: "grok",
+			tuiMode: "regular",
+			showHardwareCursor: false,
+			logDirectory: "/tmp",
+			terminal,
+		});
+		const handleInput = vi.fn<(data: string) => void>();
+		const component: Component & { focused: boolean } = {
+			focused: false,
+			render: () => ["content"],
+			invalidate: () => {},
+			handleInput,
+		};
+		renderer.addChild(component);
+		renderer.setFocus(component);
+
+		type SwitchContext = {
+			renderer: ReturnType<typeof createInteractiveTui>;
+			ui: TUI;
+			fullscreenLayoutRoot: Component;
+			options: { tuiMode?: TuiMode; tuiEngine?: TuiEngine };
+			themeController: { rebindTui: () => void };
+			extensionTerminalInputSubscriptions: Set<never>;
+		};
+		const context = Object.assign(Object.create(InteractiveMode.prototype), {
+			renderer,
+			ui: undefined as unknown as TUI,
+			fullscreenLayoutRoot: component,
+			options: { tuiMode: "regular" as TuiMode, tuiEngine: "grok" as TuiEngine },
+			themeController: { rebindTui: () => {} },
+			extensionTerminalInputSubscriptions: new Set<never>(),
+		}) as SwitchContext;
+		const stableUi = createInteractiveTuiReference(() => context.renderer);
+		context.ui = stableUi;
+		const { switchTuiMode } = InteractiveMode.prototype as unknown as {
+			switchTuiMode(this: SwitchContext, mode: TuiMode, restoreProgress?: boolean): boolean;
+		};
+
+		renderer.start();
+		await terminal.waitForRender();
+		expect(switchTuiMode.call(context, "fullscreen", false)).toBe(true);
+		await terminal.waitForRender();
+		expect(context.renderer).toBeInstanceOf(GrokViewportTuiRuntime);
+		expect(stableUi.mode).toBe("fullscreen");
+		expect(context.renderer.children).toEqual([component]);
+		expect(context.renderer.getFocusedComponent()).toBe(component);
+		expect(context.options.tuiEngine).toBe("grok");
+		terminal.sendInput("fullscreen input");
+		(context.renderer as GrokViewportTuiRuntime).flushActions();
+		expect(handleInput).toHaveBeenLastCalledWith("fullscreen input");
+
+		expect(switchTuiMode.call(context, "regular", false)).toBe(true);
+		await terminal.waitForRender();
+		expect(context.renderer).toBeInstanceOf(GrokTuiRuntime);
+		expect(stableUi.mode).toBe("regular");
+		expect(context.renderer.children).toEqual([component]);
+		expect(context.renderer.getFocusedComponent()).toBe(component);
+		expect(component.focused).toBe(true);
+		expect(context.options.tuiEngine).toBe("grok");
+		terminal.sendInput("regular input");
+		(context.renderer as GrokTuiRuntime).flushActions();
+		expect(handleInput).toHaveBeenLastCalledWith("regular input");
+		expect([terminal.startCount, terminal.stopCount]).toEqual([3, 2]);
+
+		context.renderer.stop();
+	});
 });
 
 describe("InteractiveMode right-click paste", () => {
@@ -170,59 +243,67 @@ describe("InteractiveMode copy confirmation", () => {
 		clipboardMocks.copyToClipboard.mockResolvedValue(undefined);
 	});
 
-	it("flashes Copied! for the copy shortcut in fullscreen mode", async () => {
-		const terminal = new RecordingTerminal(40, 4);
-		const ui = createInteractiveTui({
-			tuiMode: "fullscreen",
-			showHardwareCursor: false,
-			logDirectory: "/tmp",
-			terminal,
-		});
-		const showStatus = vi.fn();
-		const showError = vi.fn();
-		const context: CopyCommandContext = {
-			session: { getLastAssistantText: () => "assistant response" },
-			ui,
-			showStatus,
-			showError,
-		};
+	it.each(["legacy", "grok"] as const)(
+		"flashes Copied! for the copy shortcut in %s fullscreen mode",
+		async (tuiEngine) => {
+			const terminal = new RecordingTerminal(40, 4);
+			const ui = createInteractiveTui({
+				tuiEngine,
+				tuiMode: "fullscreen",
+				showHardwareCursor: false,
+				logDirectory: "/tmp",
+				terminal,
+			});
+			const showStatus = vi.fn();
+			const showError = vi.fn();
+			const context: CopyCommandContext = {
+				session: { getLastAssistantText: () => "assistant response" },
+				ui,
+				showStatus,
+				showError,
+			};
 
-		ui.start();
-		try {
-			await terminal.waitForRender();
+			ui.start();
+			try {
+				await terminal.waitForRender();
+				await copyCommandPrototype.handleCopyCommand.call(context, { flashConfirmation: true });
+				await terminal.waitForRender();
+
+				expect(clipboardMocks.copyToClipboard).toHaveBeenCalledWith("assistant response");
+				expect(showStatus).not.toHaveBeenCalled();
+				expect(showError).not.toHaveBeenCalled();
+				expect(terminal.getViewport().some((line) => line.includes("Copied!"))).toBe(true);
+			} finally {
+				ui.stop();
+			}
+		},
+	);
+
+	it.each(["legacy", "grok"] as const)(
+		"keeps the status-line confirmation for the copy shortcut in %s regular mode",
+		async (tuiEngine) => {
+			const ui = createInteractiveTui({
+				tuiEngine,
+				tuiMode: "regular",
+				showHardwareCursor: false,
+				logDirectory: "/tmp",
+				terminal: new RecordingTerminal(),
+			});
+			const showStatus = vi.fn();
+			const showError = vi.fn();
+			const context: CopyCommandContext = {
+				session: { getLastAssistantText: () => "assistant response" },
+				ui,
+				showStatus,
+				showError,
+			};
+
 			await copyCommandPrototype.handleCopyCommand.call(context, { flashConfirmation: true });
-			await terminal.waitForRender();
 
-			expect(clipboardMocks.copyToClipboard).toHaveBeenCalledWith("assistant response");
-			expect(showStatus).not.toHaveBeenCalled();
+			expect(showStatus).toHaveBeenCalledWith("Copied last agent message to clipboard");
 			expect(showError).not.toHaveBeenCalled();
-			expect(terminal.getViewport().some((line) => line.includes("Copied!"))).toBe(true);
-		} finally {
-			ui.stop();
-		}
-	});
-
-	it("keeps the status-line confirmation for the copy shortcut in regular mode", async () => {
-		const ui = createInteractiveTui({
-			tuiMode: "regular",
-			showHardwareCursor: false,
-			logDirectory: "/tmp",
-			terminal: new RecordingTerminal(),
-		});
-		const showStatus = vi.fn();
-		const showError = vi.fn();
-		const context: CopyCommandContext = {
-			session: { getLastAssistantText: () => "assistant response" },
-			ui,
-			showStatus,
-			showError,
-		};
-
-		await copyCommandPrototype.handleCopyCommand.call(context, { flashConfirmation: true });
-
-		expect(showStatus).toHaveBeenCalledWith("Copied last agent message to clipboard");
-		expect(showError).not.toHaveBeenCalled();
-	});
+		},
+	);
 });
 
 type ClearStatusContext = {

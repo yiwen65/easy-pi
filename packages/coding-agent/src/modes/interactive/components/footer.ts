@@ -43,6 +43,39 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }
 
+export interface SessionUsageStats {
+	totals: ReturnType<typeof createUsageTotals>;
+	latestCacheHitRate: number | undefined;
+}
+
+/**
+ * Accumulate usage totals across ALL session entries (not just post-compaction
+ * messages), plus the cache hit rate of the most recent assistant message.
+ * Shared by the legacy footer and the Grok stats bar so both report identical
+ * token/cost numbers.
+ */
+export function computeSessionUsageStats(session: AgentSession): SessionUsageStats {
+	const totals = createUsageTotals();
+	let latestCacheHitRate: number | undefined;
+
+	for (const entry of session.sessionManager.getEntries()) {
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			addUsageToTotals(totals, entry.message.usage);
+
+			const latestPromptTokens =
+				entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+			latestCacheHitRate =
+				latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
+		} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+			addUsageToTotals(totals, entry.message.usage);
+		} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+			addUsageToTotals(totals, entry.usage);
+		}
+	}
+
+	return { totals, latestCacheHitRate };
+}
+
 /**
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
@@ -85,23 +118,7 @@ export class FooterComponent implements Component {
 		const state = this.session.state;
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		const usageTotals = createUsageTotals();
-		let latestCacheHitRate: number | undefined;
-
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				addUsageToTotals(usageTotals, entry.message.usage);
-
-				const latestPromptTokens =
-					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-				latestCacheHitRate =
-					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
-			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-				addUsageToTotals(usageTotals, entry.message.usage);
-			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
-				addUsageToTotals(usageTotals, entry.usage);
-			}
-		}
+		const { totals: usageTotals, latestCacheHitRate } = computeSessionUsageStats(this.session);
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
