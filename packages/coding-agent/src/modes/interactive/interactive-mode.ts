@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
+import { createGrokTuiRuntime } from "@earendil-works/pi-grok-tui";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -21,6 +22,7 @@ import type {
 	OverlayOptions,
 	SlashCommand,
 	Terminal,
+	TuiAltScreenOptions,
 	TuiMainScreenRenderState,
 } from "@earendil-works/pi-tui";
 import * as TuiLayouts from "@earendil-works/pi-tui";
@@ -109,6 +111,13 @@ import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+import { GrokAssistantMessageComponent } from "../interactive-grok/components/grok-assistant-message.ts";
+import { GrokToolExecutionComponent } from "../interactive-grok/components/grok-tool-execution.ts";
+import type { GrokLocation } from "../interactive-grok/components/grok-top-bar.ts";
+import { GrokUserMessageComponent } from "../interactive-grok/components/grok-user-message.ts";
+import { GrokComponentFactory } from "../interactive-grok/grok-component-factory.ts";
+import type { GrokInteractiveView } from "../interactive-grok/grok-interactive-view.ts";
+import { PiSessionPort } from "../interactive-grok/pi-session-port.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -124,7 +133,7 @@ import { EarendilAnnouncementComponent } from "./components/earendil-announcemen
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
-import { FooterComponent, formatTokens } from "./components/footer.ts";
+import { FooterComponent, formatCwdForFooter, formatTokens } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
@@ -346,16 +355,28 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** TUI layout mode. */
 	tuiMode?: TuiMode;
+	/** Terminal renderer implementation. */
+	tuiEngine?: TuiEngine;
 	/** Initial interactive theme setting for this invocation. */
 	initialThemeSetting?: string;
 }
 
+export type TuiEngine = "legacy" | "grok";
+
 interface InteractiveTuiOptions {
 	tuiMode: TuiMode;
+	tuiEngine?: TuiEngine;
 	showHardwareCursor: boolean;
 	logDirectory: string;
 	terminal?: Terminal;
 	onRightClickPaste?: () => void;
+}
+
+const interactiveTuiTerminals = new WeakMap<TuiMainScreen | TuiAltScreen, Terminal>();
+
+function rememberInteractiveTerminal<T extends TuiMainScreen | TuiAltScreen>(tui: T, terminal: Terminal): T {
+	interactiveTuiTerminals.set(tui, terminal);
+	return tui;
 }
 
 /** Composition root for selecting the interactive terminal renderer. */
@@ -363,7 +384,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	const terminal = options.terminal ?? new ProcessTerminal();
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
-		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
+		const altScreen: TuiAltScreenOptions = {
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
 			openUrl: openBrowser,
@@ -376,9 +397,39 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 					return false;
 				}
 			},
-		});
+		};
+		if (options.tuiEngine === "grok") {
+			return rememberInteractiveTerminal(
+				createGrokTuiRuntime({
+					mode: "fullscreen",
+					terminal,
+					showHardwareCursor: options.showHardwareCursor,
+					logDirectory: options.logDirectory,
+					altScreen,
+				}),
+				terminal,
+			);
+		}
+		return rememberInteractiveTerminal(
+			new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, altScreen),
+			terminal,
+		);
 	}
-	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
+	if (options.tuiEngine === "grok") {
+		return rememberInteractiveTerminal(
+			createGrokTuiRuntime({
+				mode: "regular",
+				terminal,
+				showHardwareCursor: options.showHardwareCursor,
+				logDirectory: options.logDirectory,
+			}),
+			terminal,
+		);
+	}
+	return rememberInteractiveTerminal(
+		new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory),
+		terminal,
+	);
 }
 
 /** Stable reference for components while InteractiveMode replaces the active renderer. */
@@ -414,6 +465,7 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
+	private readonly sessionPort: PiSessionPort | undefined;
 	private renderer: TuiMainScreen | TuiAltScreen;
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
@@ -422,6 +474,8 @@ export class InteractiveMode {
 	private documentContainer: Container;
 	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
 	private fullscreenLayoutRoot: Component | undefined;
+	private readonly grokComponentFactory: GrokComponentFactory | undefined;
+	private grokView: GrokInteractiveView | undefined;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -556,8 +610,72 @@ export class InteractiveMode {
 		return this.session.settingsManager;
 	}
 
+	private getGrokLocation(): GrokLocation {
+		return {
+			path: formatCwdForFooter(this.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE),
+			branch: this.footerDataProvider.getGitBranch(),
+			sessionName: this.sessionManager.getSessionName(),
+		};
+	}
+
+	private refreshGrokChrome(): void {
+		if (!this.grokView) return;
+		this.grokView.setLocation(this.getGrokLocation());
+		this.grokView.setContextPercent(this.session.getContextUsage()?.percent ?? null);
+	}
+
+	private createUserMessageComponent(text: string, timestamp?: number): UserMessageComponent {
+		if (this.grokComponentFactory) {
+			return new GrokUserMessageComponent(
+				text,
+				this.getMarkdownThemeWithSettings(),
+				this.outputPad,
+				this.getMarkdownTransformers(),
+				timestamp,
+			);
+		}
+		return new UserMessageComponent(
+			text,
+			this.getMarkdownThemeWithSettings(),
+			this.outputPad,
+			this.getMarkdownTransformers(),
+		);
+	}
+
+	private createAssistantMessageComponent(message?: AssistantMessage): AssistantMessageComponent {
+		const ComponentClass = this.grokComponentFactory ? GrokAssistantMessageComponent : AssistantMessageComponent;
+		return new ComponentClass(
+			message,
+			this.hideThinkingBlock,
+			this.getMarkdownThemeWithSettings(),
+			this.hiddenThinkingLabel,
+			this.outputPad,
+			this.getMarkdownTransformers(),
+		);
+	}
+
+	private createToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent {
+		const ComponentClass = this.grokComponentFactory ? GrokToolExecutionComponent : ToolExecutionComponent;
+		const component = new ComponentClass(
+			toolName,
+			toolCallId,
+			args,
+			{
+				showImages: this.settingsManager.getShowImages(),
+				imageWidthCells: this.settingsManager.getImageWidthCells(),
+			},
+			this.getRegisteredToolDefinition(toolName),
+			this.ui,
+			this.sessionManager.getCwd(),
+		);
+		component.setExpanded(this.toolOutputExpanded);
+		return component;
+	}
+
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
+		this.sessionPort = options.tuiEngine === "grok" ? new PiSessionPort(runtimeHost) : undefined;
+		this.grokComponentFactory = options.tuiEngine === "grok" ? new GrokComponentFactory() : undefined;
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
@@ -567,10 +685,12 @@ export class InteractiveMode {
 		this.runtimeHost.setRebindSession(async () => {
 			await this.rebindCurrentSession({ renderBeforeBind: true });
 			await this.themeController.applyFromSettings();
+			this.refreshGrokChrome();
 		});
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
 			tuiMode,
+			tuiEngine: options.tuiEngine,
 			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 			logDirectory: getAgentDir(),
 			onRightClickPaste: this.onRightClickPaste,
@@ -603,7 +723,9 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerContainer = new Container();
-		this.footerContainer.addChild(this.footer);
+		if (!this.grokComponentFactory) {
+			this.footerContainer.addChild(this.footer);
+		}
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -824,7 +946,7 @@ export class InteractiveMode {
 
 		const components = [...previousUi.children];
 		const focus = previousUi.getFocusedComponent();
-		const terminal = previousUi.terminal;
+		const terminal = interactiveTuiTerminals.get(previousUi) ?? previousUi.terminal;
 		const showHardwareCursor = previousUi.getShowHardwareCursor();
 		const clearOnShrink = previousUi.getClearOnShrink();
 		const onDebug = previousUi.onDebug;
@@ -839,6 +961,7 @@ export class InteractiveMode {
 
 		const nextUi = createInteractiveTui({
 			tuiMode: mode,
+			tuiEngine: this.options.tuiEngine,
 			showHardwareCursor,
 			logDirectory: getAgentDir(),
 			terminal,
@@ -900,27 +1023,45 @@ export class InteractiveMode {
 			scrollbar: this.settingsManager.getFullscreenScrollbar(),
 			scrollbarStyle: (text) => theme.bg("scrollbarThumb", text),
 		});
-		const dock = new TuiLayouts.VStack([
-			{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
-			{ component: this.statusContainer, shrink: 1, minSize: 0 },
-			{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
-			{ component: this.editorContainer, shrink: 1, minSize: 3 },
-			{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
-			{ component: this.footerContainer, shrink: 1, minSize: 1 },
-		]);
-		this.fullscreenLayoutRoot = new TuiLayouts.VStack([
-			{ component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-		]);
-		this.mountInteractiveTui(this.renderer, [
-			this.documentContainer,
-			this.pendingMessagesContainer,
-			this.statusContainer,
-			this.widgetContainerAbove,
-			this.editorContainer,
-			this.widgetContainerBelow,
-			this.footerContainer,
-		]);
+		if (this.grokComponentFactory) {
+			this.grokView = this.grokComponentFactory.createInteractiveView({
+				document: this.documentContainer,
+				transcriptViewport: this.transcriptScrollView,
+				editorHost: this.editorContainer,
+				location: this.getGrokLocation(),
+				contextPercent: this.session.getContextUsage()?.percent ?? null,
+				session: this.session,
+				ui: this.ui,
+				pendingMessages: this.pendingMessagesContainer,
+				beforeEditor: [this.widgetContainerAbove],
+				afterEditor: [this.widgetContainerBelow, this.footerContainer],
+				footerData: this.footerDataProvider,
+			});
+			this.fullscreenLayoutRoot = this.grokView.fullscreenRoot;
+			this.mountInteractiveTui(this.renderer, this.grokView.regularComponents);
+		} else {
+			const dock = new TuiLayouts.VStack([
+				{ component: this.pendingMessagesContainer, shrink: 1, minSize: 0 },
+				{ component: this.statusContainer, shrink: 1, minSize: 0 },
+				{ component: this.widgetContainerAbove, shrink: 1, minSize: 0 },
+				{ component: this.editorContainer, shrink: 1, minSize: 3 },
+				{ component: this.widgetContainerBelow, shrink: 1, minSize: 0 },
+				{ component: this.footerContainer, shrink: 1, minSize: 1 },
+			]);
+			this.fullscreenLayoutRoot = new TuiLayouts.VStack([
+				{ component: this.transcriptScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+				{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			]);
+			this.mountInteractiveTui(this.renderer, [
+				this.documentContainer,
+				this.pendingMessagesContainer,
+				this.statusContainer,
+				this.widgetContainerAbove,
+				this.editorContainer,
+				this.widgetContainerBelow,
+				this.footerContainer,
+			]);
+		}
 		// Accept text while startup completes, but only enable interrupt, exit, and submission feedback.
 		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
@@ -933,8 +1074,12 @@ export class InteractiveMode {
 
 		await this.themeController.applyFromSettings();
 
-		// Add header with keybindings from config (unless silenced)
-		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
+		// Grok owns its persistent top bar and stats chrome. Keep one empty
+		// built-in header slot so extension setHeader() retains the Pi ABI.
+		if (this.grokView) {
+			this.builtInHeader = new Text("", 0, 0);
+			this.headerContainer.addChild(this.builtInHeader);
+		} else if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
 
 			// Build startup instructions using keybinding hint helpers
@@ -1941,6 +2086,8 @@ export class InteractiveMode {
 		this.applyFullscreenScrollbarSetting();
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.grokView?.setSession(this.session);
+		this.grokView?.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
@@ -2089,6 +2236,10 @@ export class InteractiveMode {
 		this.activeStatusIndicator = indicator;
 		this.statusContainer.clear();
 		this.statusContainer.addChild(indicator);
+		// Host Pi's authoritative indicator in the Grok status slot. This keeps
+		// extension working-message/frame/visibility semantics without drawing a
+		// duplicate Grok activity row.
+		this.grokView?.setStatusComponent(this.statusContainer);
 	}
 
 	private clearStatusIndicator(kind?: StatusIndicator["kind"]): void {
@@ -2099,6 +2250,10 @@ export class InteractiveMode {
 		this.activeStatusIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
 		this.statusContainer.clear();
+		if (this.grokView) {
+			this.grokView.setStatus({ kind: "idle", label: "Ready" });
+			this.grokView.setStatusComponent();
+		}
 		if (hadActiveStatusIndicator && this.options.tuiMode === "regular" && this.ui.getClearOnShrink()) {
 			this.statusContainer.addChild(this.idleStatus);
 		}
@@ -2107,7 +2262,9 @@ export class InteractiveMode {
 	private setWorkingVisible(visible: boolean): void {
 		this.workingVisible = visible;
 		if (!visible) {
+			const hidingWorkingIndicator = this.activeStatusIndicator?.kind === "working";
 			this.clearStatusIndicator("working");
+			if (hidingWorkingIndicator) this.grokView?.setStatusVisible(false);
 			this.ui.requestRender();
 			return;
 		}
@@ -2288,10 +2445,15 @@ export class InteractiveMode {
 			// Create and add custom footer, passing the data provider
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
 			this.footerContainer.addChild(this.customFooter);
+			this.grokView?.setFooterVisible(false);
 		} else {
-			// Restore built-in footer
+			// Restore built-in footer. Grok owns its model/context/shortcut chrome,
+			// so the Pi slot remains empty until an extension provides a footer.
 			this.customFooter = undefined;
-			this.footerContainer.addChild(this.footer);
+			this.grokView?.setFooterVisible(true);
+			if (!this.grokView) {
+				this.footerContainer.addChild(this.footer);
+			}
 		}
 
 		this.ui.requestRender();
@@ -3103,6 +3265,12 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(): void {
+		if (this.sessionPort) {
+			this.unsubscribe = this.sessionPort.subscribe(async (_uiEvent, sourceEvent) => {
+				await this.handleEvent(sourceEvent);
+			});
+			return;
+		}
 		this.unsubscribe = this.session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
@@ -3114,6 +3282,7 @@ export class InteractiveMode {
 		}
 
 		this.footer.invalidate();
+		if (this.grokView) this.refreshGrokChrome();
 
 		switch (event.type) {
 			case "agent_start":
@@ -3173,14 +3342,7 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
-					this.streamingComponent = new AssistantMessageComponent(
-						undefined,
-						this.hideThinkingBlock,
-						this.getMarkdownThemeWithSettings(),
-						this.hiddenThinkingLabel,
-						this.outputPad,
-						this.getMarkdownTransformers(),
-					);
+					this.streamingComponent = this.createAssistantMessageComponent();
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
@@ -3196,19 +3358,11 @@ export class InteractiveMode {
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
 							if (!this.pendingTools.has(content.id)) {
-								const component = new ToolExecutionComponent(
+								const component = this.createToolExecutionComponent(
 									content.name,
 									content.id,
 									content.arguments,
-									{
-										showImages: this.settingsManager.getShowImages(),
-										imageWidthCells: this.settingsManager.getImageWidthCells(),
-									},
-									this.getRegisteredToolDefinition(content.name),
-									this.ui,
-									this.sessionManager.getCwd(),
 								);
-								component.setExpanded(this.toolOutputExpanded);
 								this.chatContainer.addChild(component);
 								this.pendingTools.set(content.id, component);
 							} else {
@@ -3270,19 +3424,7 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
-					component = new ToolExecutionComponent(
-						event.toolName,
-						event.toolCallId,
-						event.args,
-						{
-							showImages: this.settingsManager.getShowImages(),
-							imageWidthCells: this.settingsManager.getImageWidthCells(),
-						},
-						this.getRegisteredToolDefinition(event.toolName),
-						this.ui,
-						this.sessionManager.getCwd(),
-					);
-					component.setExpanded(this.toolOutputExpanded);
+					component = this.createToolExecutionComponent(event.toolName, event.toolCallId, event.args);
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
@@ -3584,21 +3726,11 @@ export class InteractiveMode {
 						// Render user message separately if present
 						if (skillBlock.userMessage) {
 							this.chatContainer.addChild(new Spacer(1));
-							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
-								this.getMarkdownThemeWithSettings(),
-								this.outputPad,
-								this.getMarkdownTransformers(),
-							);
+							const userComponent = this.createUserMessageComponent(skillBlock.userMessage, message.timestamp);
 							this.chatContainer.addChild(userComponent);
 						}
 					} else {
-						const userComponent = new UserMessageComponent(
-							textContent,
-							this.getMarkdownThemeWithSettings(),
-							this.outputPad,
-							this.getMarkdownTransformers(),
-						);
+						const userComponent = this.createUserMessageComponent(textContent, message.timestamp);
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
@@ -3608,14 +3740,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "assistant": {
-				const assistantComponent = new AssistantMessageComponent(
-					message,
-					this.hideThinkingBlock,
-					this.getMarkdownThemeWithSettings(),
-					this.hiddenThinkingLabel,
-					this.outputPad,
-					this.getMarkdownTransformers(),
-				);
+				const assistantComponent = this.createAssistantMessageComponent(message);
 				this.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -3663,19 +3788,7 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
-						const component = new ToolExecutionComponent(
-							content.name,
-							content.id,
-							content.arguments,
-							{
-								showImages: this.settingsManager.getShowImages(),
-								imageWidthCells: this.settingsManager.getImageWidthCells(),
-							},
-							this.getRegisteredToolDefinition(content.name),
-							this.ui,
-							this.sessionManager.getCwd(),
-						);
-						component.setExpanded(this.toolOutputExpanded);
+						const component = this.createToolExecutionComponent(content.name, content.id, content.arguments);
 						this.chatContainer.addChild(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
@@ -6491,10 +6604,12 @@ export class InteractiveMode {
 		this.themeController.disableAutoSync();
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
+		this.grokView?.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
+		this.sessionPort?.dispose();
 		if (this.isInitialized) {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;

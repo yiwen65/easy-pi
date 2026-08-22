@@ -937,6 +937,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
 			tuiMode: parsed.tuiMode,
+			tuiEngine: parsed.tuiEngine,
 			initialThemeSetting: parsed.useTheme,
 		});
 		if (startupBenchmark) {

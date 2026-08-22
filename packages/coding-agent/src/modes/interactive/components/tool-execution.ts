@@ -105,7 +105,7 @@ export class ToolExecutionComponent extends Container {
 		return this.builtInToolDefinition !== undefined || this.toolDefinition !== undefined;
 	}
 
-	private getRenderShell(): "default" | "self" {
+	protected getRenderShell(): "default" | "self" {
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderShell ?? "default";
 		}

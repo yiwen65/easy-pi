@@ -46,9 +46,11 @@ type RenderSessionContextThis = {
 	sessionManager: { getCwd(): string; getEntries(): SessionEntry[] };
 	session: { retryAttempt: number; modelRegistry: { find(provider: string, modelId: string): undefined } };
 	toolOutputExpanded: boolean;
+	grokComponentFactory: undefined;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
+	createToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
 };
@@ -76,9 +78,15 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		sessionManager: { getCwd: () => process.cwd(), getEntries: () => [] },
 		session: { retryAttempt: 0, modelRegistry: { find: () => undefined } },
 		toolOutputExpanded: false,
+		grokComponentFactory: undefined,
 		isInitialized: true,
 		updateEditorBorderColor: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
+		createToolExecutionComponent: (
+			InteractiveMode.prototype as unknown as {
+				createToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
+			}
+		).createToolExecutionComponent,
 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
 			.renderSessionItems,
 		addMessageToChat(message: AgentMessage) {
