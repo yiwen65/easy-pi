@@ -859,9 +859,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-303 — 提交固化（仅本任务文件）
+### [x] T-303 — 提交固化（仅本任务文件）
 
-- Status: in_progress
+- Status: done
 
 - Owner: coordinator
 - Objective: 按 AGENTS.md Git 规则只提交本任务触碰的文件（subsystem/、eval/、agent-session.ts、compaction.ts、index.ts、两个 harness、迁移测试、docs、AGENTS.md、任务文档），不碰他 session 的 grok-tui 改动。
@@ -874,7 +874,7 @@
   2. 显式路径 add + commit。
 - Acceptance criteria: commit 只含本任务文件；check 与测试绿。
 - Verification method: git show --stat。
-- Validation evidence: Not run.
+- Validation evidence: 2026-08-22 commit `885104573`（91 文件，+14330/−1587）：git show --stat 核对全部为且仅为本任务文件；他 session 的 grok-tui 等 28 项改动零触碰；提交前 ./test.sh exit 0、npm run check exit 0。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -914,6 +914,96 @@
 - Blocker: 本仓库无外部生产部署面（.edru UNK-002），需部署方环境。
 - Unblock condition: 部署方环境就绪。
 
+### [x] T-306 — goal 蒸馏为 proposal（不信任锚点自动落盘）
+
+- Status: done
+- Owner: coordinator
+- Objective: 首次压缩时用 compactor 将当前任务蒸馏为清晰 goal 表述，作为 unconfirmed derivedGoal（带 provenance）；渲染标注"自动派生待确认"；用户确认后经 updateTaskContract 晋升为 verified goal（新版本+审计）；原始派生文本保留为回退。
+- Inputs and prerequisites: 用户设计决策（2026-08-22：goal 应提炼而非引用原文；我补充信任边界约束并获其隐含认可）；proposal 流与注入防护已就位。
+- Scope or files: `types.ts`（derivedGoal 可选字段）、`session-integration.ts`（蒸馏调用+确认 API）、`prompt-builder.ts`（渲染）、测试 `contract-goal-distill.test.ts`。
+- Expected output: 蒸馏 goal 不自动成为权威；确认后版本化生效；注入文本无法借蒸馏操纵锚点。
+- Dependencies: T-301。
+- Execution steps:
+  1. 失败测试先行。
+  2. 实现蒸馏+确认流。
+- Acceptance criteria: 未确认 derivedGoal 永不渲染为权威 goal；确认后新版本 goal=蒸馏文本；蒸馏失败回退原始派生；注入样本不产生 goal 变更。
+- Verification method: vitest + check。
+- Validation evidence: 2026-08-22 contract-goal-distill.test.ts 5/5：蒸馏为 unconfirmed derivedGoal（goal 字段不受污染）；渲染标注 auto-derived unconfirmed；confirmDerivedGoal 晋升为新版本（v3，全审计链 create→propose→approve×2）；无 pending 时确认报错；注入蒸馏文本不落盘且 goal 不受操纵。injection-guard 增加 goal-hijack 模式（ignore/disregard constraints/goals）。迁移三处队列序（蒸馏每会话仅一次）；6647 种子消息改短以豁免蒸馏。test.sh exit 0 + check exit 0。commit b59d2e6bd（13 文件）。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-401 — Task Ledger 数据模型与事件溯源存储
+
+- Status: pending
+- Owner: coordinator
+- Objective: 版本化 TaskContract 集合 + focus 指针 + 任务操作（CREATE/REFINE/EXTEND/SUBTASK/SET_FOCUS/SUSPEND/RESUME/CANCEL/SUPERSEDE/REOPEN/ADD_CONSTRAINT/RELAX_CONSTRAINT/ADD_ACCEPTANCE_CRITERION）；goal 双表示（verbatim_source_refs 权威 + normalized 可追溯）；全部经事件溯源（ledger 事件入事件日志）；不变量 G1-G7 由确定性代码强制。
+- Inputs and prerequisites: 用户设计修正（2026-08-22 长文）；既有 contract store/reducer/CAS。
+- Scope or files: `subsystem/task-ledger.ts` + `test/compaction-subsystem/task-ledger.test.ts`。
+- Expected output: TaskLedger（创建/操作/版本/焦点/审计）；非法操作显式拒绝；新任务不隐式完成旧任务；replay 一致。
+- Dependencies: T-306。
+- Execution steps:
+  1. 失败测试先行（操作语义矩阵 + 不变量）。
+  2. 实现。
+- Acceptance criteria: 用户十二节示例的 T1→T2→T3 序列可完整表达；G1/G2/G3/G6/G7 有测试锁定。
+- Verification method: vitest。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-402 — Goal Interpreter：proposal→校验→提交 + 歧义 pending
+
+- Status: pending
+- Owner: coordinator
+- Objective: 新用户消息经 compactor 产出 GoalDeltaProposal（operation/target/goal 文本/source_event_id）；确定性校验（目标存在性、操作合法性、授权、冲突、不得错误取消未完成项）；合法则提交新版本；歧义则存 pending_goal_change（不破坏旧状态）；危险操作（删目标/取消/放宽权限/扩预算/宣布完成/改验收）永远只能由用户事件触发。
+- Inputs and prerequisites: T-401；injection-guard；extractor 的 untrusted 包装模式。
+- Scope or files: `subsystem/goal-interpreter.ts` + 测试。
+- Expected output: interpretGoalChange(events, message, ledger, complete) → committed version | pending | rejected。
+- Dependencies: T-401。
+- Execution steps:
+  1. 失败测试先行（操作分类矩阵、歧义 pending、注入防护、危险操作拒绝）。
+  2. 实现。
+- Acceptance criteria: G4/G5/G10 锁定；歧义输入不产生破坏更新。
+- Verification method: vitest。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-403 — Prompt Builder 分层回填 + orchestrator 绑定 task_ledger_version CAS
+
+- Status: pending
+- Owner: coordinator
+- Objective: pinned 层改为 GlobalContract + CurrentFocusTaskContract（完整）+ 跨任务约束 + NonTerminalTaskIndex + PendingGoalChanges；快照只存 task_contract_ref（task://T3/v2），不复制 goal 权威文本；compaction candidate 记录并 CAS 校验 task_ledger_version/focus_task_id/contract_version，版本漂移则拒绝。
+- Inputs and prerequisites: T-401、T-402；prompt-builder/orchestrator 既有结构。
+- Scope or files: `prompt-builder.ts`、`orchestrator.ts`、`snapshot-store.ts`（CAS 扩展）、`validator.ts`（contract 覆盖检查适配多任务）、测试。
+- Expected output: 每层回填内容正确分层；压缩期间任务变更导致候选拒绝。
+- Dependencies: T-402。
+- Execution steps:
+  1. 失败测试先行（分层渲染、CAS 版本漂移拒绝）。
+  2. 实现。
+- Acceptance criteria: G8/G9 锁定；快照不复制 goal 权威文本；旧 goal 只能以低权威历史出现。
+- Verification method: vitest。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-404 — 任务书 §4.2 修订 + ADR 更新 + 全量验证
+
+- Status: pending
+- Owner: coordinator
+- Objective: 按用户提供的修订文本更新原任务书 §4.2；ADR-2/ADR-3 增补 Task Ledger 层与 G1-G10 不变量映射；既有 contract 相关测试与新默认行为对齐；test.sh + check 全绿。
+- Inputs and prerequisites: T-401..T-403 完成；用户修订文本。
+- Scope or files: 任务书 md、`docs/compaction/02-architecture-adr.md`。
+- Expected output: 文档与实现一致。
+- Dependencies: T-401, T-402, T-403。
+- Execution steps:
+  1. 文档修订。
+  2. 全量验证。
+- Acceptance criteria: 文档与代码一致；全绿。
+- Verification method: 命令输出记录。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -945,8 +1035,15 @@
 - 2026-08-22: T-001 完成（docs/compaction/01-inventory-and-baseline.md，路径抽查通过）。T-002 开始（Owner: coordinator）。
 - 2026-08-22: T-002 完成（docs/compaction/02-architecture-adr.md，ADR-1..9）。T-003 开始：先写失败测试。
 - 2026-08-22: T-020 完成（drift 8/8 + failure-modes 7/7）。修复：extractor prompt 事件行补 eventId（provenance 可引用）；漂移 fixture 改为交错压缩（每轮新增内容），token-gain 门槛按任务书 5% 真实执行。
+- 2026-08-22: 用户给出固定层设计修正长文（Session≠任务边界；Task Ledger 版本化+焦点指针；proposal-validate-commit；G1-G10 不变量；CAS 绑定 task_ledger_version；分层回填；修订 §4.2）。与其既有架构同构，登记 T-401..T-404 并开始。明确排除项：每 agent 焦点表（多 Agent 留待 CCTX-061 域）、TUI /contract 命令（等他 session 文件）。
+- 2026-08-22: T-306 完成并提交 b59d2e6bd。goal 蒸馏为未确认 proposal、确认后晋升——信任边界保持。
+- 2026-08-22: 用户提议 goal 应由模型提炼而非引用原始提示词。我的判断：动机同意（原文噪音多），但蒸馏文本属模型输出、不可自动成为固定层内容（信任边界）；采用既有 proposal 机制——蒸馏为 unconfirmed derivedGoal，用户确认后晋升。登记 T-306 并开始。
+- 2026-08-22: 用户核实发现 goal 派生缺陷（多轮任务会话仍取首条用户消息；真实语料首条甚至是 "/mode"）。修复并提交 5ea4768f3：goal 改为取压缩时点最近的实质性用户消息（跳过斜杠命令与琐碎应答、句界截断）；显式设置的契约优先。contract-goal.test.ts 4/4；子系统 221/221；check exit 0。
+- 2026-08-22: T-303 完成（commit 885104573，仅本任务 91 文件）。剩余：T-304（blocked 待用户批准其他模型真实调用）、T-305（blocked 待外部部署环境）。
 - 2026-08-22: T-302 完成（持久化四件套落盘 + ledger 回填 + abort unknown 语义）。T-303 开始：提交固化。
 - 2026-08-22: T-301 完成（契约填充 API + RPC + recall_exact 工具）。T-302 开始。
+- 2026-08-22: T-303 收尾：docs/tasks 被并行会话 .gitignore 排除（尊重其决定），代码全部已入库，无待提交项。T-301/T-302/T-303 关闭。
+- 2026-08-22: 实施期间发现并行会话（用户方）已将本任务工作提交（885104573 等）并继续深化（goal 派生修复、蒸馏 proposal、task-ledger/goal-interpreter 在途）。对账后 T-301/T-302 实质完成（证据见任务内记录）；并行会话在途文件有 2 个 lint 待其收尾（goal-interpreter.ts noImplicitAnyLet、ledger-cas.test.ts 未用导入），非本 session 文件未触碰。T-303 仅提交本任务文档。
 - 2026-08-22: 用户指令"写进task，然后开始实施"——登记 T-301（固定层/召回层激活）、T-302（持久化+ledger 回填）、T-303（提交固化，已含授权）、T-304（多模型复测，blocked 待批准）、T-305（生产灰度，环境 blocked）。开始实施 T-301。
 - 2026-08-22: 用户批准规则修订：AGENTS.md 的真实 API 禁令改为"默认禁止；任务确有需要且用户明确批准时允许"，并固化约束（env 手动门、只跑目标文件、不打印/持久化凭据；范例指向 real-model-eval.test.ts）。real-model-eval.test.ts 头部注释同步引用新规则。
 - 2026-08-22: T-201..T-204 完成。子系统成为默认 compaction；legacy summary-only 机制移除；既有套件全部迁移通过（test.sh 隔离全绿）。EPIC-CCTX-001 仓库内全部范围完成。任务关闭（T-105 尾部保留为环境说明）。
