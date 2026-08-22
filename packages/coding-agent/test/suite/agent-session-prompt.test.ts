@@ -451,26 +451,25 @@ describe("AgentSession prompt characterization", () => {
 			releaseCompaction = resolve;
 		});
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", async (event) => {
+					pi.on("session_before_compact", async () => {
 						markCompactionStarted();
 						await compactionReleased;
-						return {
-							compaction: {
-								summary: "manual compacted",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: event.preparation.tokensBefore,
-								details: {},
-							},
-						};
+						return undefined; // custom summaries are deprecated; cancel/observe only
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
+			fauxAssistantMessage("manual narrative"),
+		]);
 		await harness.session.prompt("first");
 		await harness.session.prompt("second");
 

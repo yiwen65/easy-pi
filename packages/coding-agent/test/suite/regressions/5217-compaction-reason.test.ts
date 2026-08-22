@@ -34,10 +34,19 @@ function recordingExtension(recorded: RecordedCompactionEvent[]): ExtensionFacto
 
 async function createCompactionHarness(recorded: RecordedCompactionEvent[]): Promise<Harness> {
 	const harness = await createHarness({
-		settings: { compaction: { keepRecentTokens: 1 } },
+		settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
 		extensionFactories: [recordingExtension(recorded)],
+		// Tiny wiring sessions can never beat the token-gain gate (snapshot zone
+		// overhead exceeds savings at this scale); disable it explicitly here.
+		hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
 	});
-	harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+	harness.setResponses([
+		fauxAssistantMessage("one"),
+		fauxAssistantMessage("two"),
+		// Subsystem compactor calls (extraction JSON, then narrative text).
+		fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
+		fauxAssistantMessage("narrative"),
+	]);
 	await harness.session.prompt("first");
 	await harness.session.prompt("second");
 	return harness;

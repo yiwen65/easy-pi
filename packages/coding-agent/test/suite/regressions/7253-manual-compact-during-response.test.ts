@@ -39,16 +39,13 @@ describe("issue #7253: manual compaction during an active response", () => {
 			tools: [createNoopTool()],
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: `${event.reason} summary`,
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
+					pi.on("session_before_compact", async () => ({
+						// Custom summaries are deprecated and ignored post-removal.
+						compaction: { summary: "extension summary", firstKeptEntryId: "x", tokensBefore: 1 },
 					}));
 				},
 			],
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
 		});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -58,18 +55,24 @@ describe("issue #7253: manual compaction during an active response", () => {
 				await secondResponseReleased;
 				return fauxAssistantMessage("second response");
 			},
+			// Subsystem compactor calls during the manual compaction.
+			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
+			fauxAssistantMessage("manual narrative"),
 		]);
 
 		const promptPromise = harness.session.prompt("Run the tool, then continue responding.");
 		await secondResponseStarted;
 
 		const compactPromise = harness.session.compact();
-		const compactExpectation = expect(compactPromise).resolves.toMatchObject({ summary: "manual summary" });
+		const compactExpectation = expect(compactPromise).resolves.toMatchObject({
+			summary: expect.stringContaining("[high-fidelity snapshot"),
+		});
 		releaseSecondResponse();
 		await Promise.all([promptPromise, compactExpectation]);
 
 		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toEqual(["manual"]);
 		expect(harness.eventsOfType("compaction_end").map((event) => event.reason)).toEqual(["manual"]);
-		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		// No legacy compaction entry is written anymore.
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 	});
 });

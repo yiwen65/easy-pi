@@ -29,6 +29,7 @@ import type {
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { HfCompactionConfig } from "../src/core/compaction/subsystem/session-integration.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -339,6 +340,10 @@ export interface HarnessOptions {
 	tools?: AgentTool[];
 	/** Base tools override (replaces built-in read/bash/edit/write). */
 	baseToolsOverride?: Record<string, AgentTool>;
+	/** High-fidelity compaction subsystem flag + injected compactor (CCTX-080). */
+	hfCompaction?: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] };
+	/** File-backed SessionManager override (durability tests); default in-memory. */
+	sessionManager?: SessionManager;
 	/** Optional resource loader override. */
 	resourceLoader?: ResourceLoader;
 	/** Inline extensions to load into the session resource loader. */
@@ -388,7 +393,7 @@ async function createHarnessWithResourceLoader(
 		streamFn: streamFn,
 	});
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 
 	if (options.settings) {
@@ -425,6 +430,7 @@ async function createHarnessWithResourceLoader(
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
+		hfCompaction: options.hfCompaction,
 	});
 
 	const events: AgentSessionEvent[] = [];

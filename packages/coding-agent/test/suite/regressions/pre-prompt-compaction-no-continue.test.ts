@@ -1,6 +1,6 @@
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, getUserTexts, type Harness } from "../harness.ts";
+import { createHarness, type Harness } from "../harness.ts";
 
 function createUsage(totalTokens: number) {
 	return {
@@ -29,16 +29,11 @@ describe("pre-prompt compaction regression", () => {
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "pre-prompt summary",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					}));
+					// Hook fires; custom summaries are deprecated and ignored post-removal.
+					pi.on("session_before_compact", async () => undefined);
 				},
 			],
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
 		});
 		harnesses.push(harness);
 
@@ -58,18 +53,26 @@ describe("pre-prompt compaction regression", () => {
 		};
 		harness.sessionManager.appendMessage(lengthStopAssistant);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		harness.setResponses([fauxAssistantMessage("answered next prompt")]);
+		harness.setResponses([
+			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
+			fauxAssistantMessage("pre-prompt narrative"),
+			fauxAssistantMessage("answered next prompt"),
+			// Post-answer compaction (threshold at this tiny window) also runs the compactor.
+			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
+			fauxAssistantMessage("post-answer narrative"),
+		]);
 		const continueSpy = vi.spyOn(harness.session.agent, "continue");
 
 		await expect(harness.session.prompt("next prompt")).resolves.toBeUndefined();
 
 		expect(continueSpy).not.toHaveBeenCalled();
-		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
-			reason: "overflow",
-			aborted: false,
-			willRetry: true,
-		});
-		expect(getUserTexts(harness)).toContain("next prompt");
-		expect(harness.faux.state.callCount).toBe(1);
+		// The pre-prompt overflow compaction (willRetry=true); a post-answer
+		// threshold compaction may also fire in this tiny-window setup.
+		const ends = harness.eventsOfType("compaction_end");
+		expect(ends.some((e) => e.reason === "overflow" && e.willRetry === true && !e.aborted)).toBe(true);
+		// The new prompt was sent and answered; its text may live in the compacted zone.
+		expect(harness.session.getLastAssistantText()).toBe("answered next prompt");
+		// extraction + narrative per compaction (pre-prompt and post-answer threshold) + the new prompt
+		expect(harness.faux.state.callCount).toBe(5);
 	});
 });

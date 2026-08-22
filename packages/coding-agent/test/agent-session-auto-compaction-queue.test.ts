@@ -45,6 +45,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			// Tiny sessions cannot beat the production token-gain gate; disable it here.
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
 		});
 	});
 
@@ -83,14 +85,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: now - 500,
 		});
 		session.agent.state.messages = sessionManager.buildSessionContext().messages;
-		session.agent.streamFunction = (summaryModel) => {
+		session.agent.streamFunction = (summaryModel, context) => {
+			// Subsystem compactor: extraction prompts demand JSON; narrative otherwise.
+			const wantsJson = JSON.stringify(context.messages).includes("ONLY a JSON object");
 			const stream = createAssistantMessageEventStream();
 			void Promise.resolve().then(() => {
 				stream.push({
 					type: "done",
 					reason: "stop",
 					message: {
-						...fauxAssistantMessage("compacted"),
+						...fauxAssistantMessage(
+							wantsJson ? JSON.stringify({ facts: [], decisions: [], nextActions: [] }) : "compacted",
+						),
 						api: summaryModel.api,
 						provider: summaryModel.provider,
 						model: summaryModel.id,
