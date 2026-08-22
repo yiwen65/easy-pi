@@ -302,6 +302,9 @@ interface ToolDefinitionEntry {
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
+const GOAL_CHANGE_PATTERN =
+	/\b(?:add|allow|also|budget|cancel|change|complete|constraint|deny|document|finish|focus|goal|improve|instead|new task|permission|rather|refine|replace|require|resume|stop|suspend|task|too|update)\b|do that|that one|另外|再做|改成|修改|取消|停止|暂停|恢复|完成|预算|权限|先做|继续完善|要求|必须|目标|任务|验收|约束/i;
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -402,6 +405,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._installAgentContextTransform();
 
 		// Default-on (EPIC-CCTX-001): the subsystem is pi's default compaction.
 		// Explicit config or PI_HF_COMPACTION overrides; "off" disables compaction.
@@ -446,19 +450,51 @@ export class AgentSession {
 		outputContract?: string;
 	}) {
 		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		return this._hfHost.setContract(input);
+		const contract = this._hfHost.setContract(input);
+		this._refreshPinnedSystemPrompt();
+		return contract;
 	}
 
 	/** Authorized contract update (local user): new version + audit. */
 	updateTaskContract(patch: Parameters<HfCompactionHost["updateContract"]>[0], reason?: string) {
 		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		return this._hfHost.updateContract(patch, reason);
+		const contract = this._hfHost.updateContract(patch, reason);
+		this._refreshPinnedSystemPrompt();
+		return contract;
 	}
 
 	/** Promote the pending distilled goal proposal to the authoritative goal (new audited version). */
 	confirmDerivedGoal() {
 		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		return this._hfHost.confirmDerivedGoal();
+		const contract = this._hfHost.confirmDerivedGoal();
+		this._refreshPinnedSystemPrompt();
+		return contract;
+	}
+
+	setCurrentTaskGoal(goal: string) {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		const task = this._hfHost.setCurrentTaskGoal(goal);
+		this._refreshPinnedSystemPrompt();
+		return task;
+	}
+
+	getTaskLedgerState() {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		return this._hfHost.getTaskLedgerState();
+	}
+
+	acceptPendingGoalChange(pendingChangeId: string, candidateTaskId?: string) {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		const tasks = this._hfHost.acceptPendingGoalChange(pendingChangeId, candidateTaskId);
+		this._refreshPinnedSystemPrompt();
+		return tasks;
+	}
+
+	rejectPendingGoalChange(pendingChangeId: string) {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		const rejected = this._hfHost.rejectPendingGoalChange(pendingChangeId);
+		this._refreshPinnedSystemPrompt();
+		return rejected;
 	}
 
 	/** Unverified update attempts only ever become proposals. */
@@ -537,6 +573,49 @@ export class AgentSession {
 		}
 	}
 
+	private async _processTaskGoalMessage(entryId: string, message: AgentMessage): Promise<void> {
+		const host = this._hfHost;
+		const model = this.model;
+		if (!host || !model || message.role !== "user") return;
+		const userMessage = contentText(message.content, "").trim();
+		if (!userMessage) return;
+		const branchEntries = this.sessionManager.getBranch();
+		if (host.getTaskLedgerState().tasks.length > 0 && !GOAL_CHANGE_PATTERN.test(userMessage)) {
+			host.syncFromEntries(branchEntries);
+			host.audit.record("goal_interpretation", this.sessionId, { outcome: "noop", deterministic: true });
+			this._refreshPinnedSystemPrompt();
+			return;
+		}
+		try {
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+			const complete =
+				host.goalComplete ??
+				host.configComplete ??
+				createPiAiCompleteFn({
+					model: requestModel,
+					apiKey,
+					headers,
+					env,
+					streamFn: this.agent.streamFunction,
+					retry: this.settingsManager.getRetrySettings(),
+				});
+			await host.processUserMessage({
+				branchEntries,
+				sourceEventId: entryId,
+				userMessage,
+				complete,
+			});
+			this._refreshPinnedSystemPrompt();
+		} catch (error) {
+			// Goal interpretation is advisory toward the main agent turn. A failed
+			// compactor call must not prevent the raw user message from being sent.
+			host.audit.record("goal_interpretation", this.sessionId, {
+				outcome: "rejected",
+				reason: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+			});
+		}
+	}
+
 	/**
 	 * Install tool hooks once on the Agent instance.
 	 *
@@ -603,6 +682,30 @@ export class AgentSession {
 		};
 	}
 
+	private _installAgentContextTransform(): void {
+		const previousTransform = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+			const host = this._hfHost;
+			if (!host || host.getTaskLedgerState().pending.length === 0) return transformed;
+			// Same-turn safety: the provider context snapshot predates user-message
+			// interpretation. Append the newly pending warning just before conversion;
+			// stable fixed state lives in the system prompt on subsequent turns.
+			const pendingMessage: AgentMessage = {
+				role: "user",
+				content: [{ type: "text", text: host.buildPinnedLedgerLayer() }],
+				timestamp: Date.now(),
+			};
+			return [...transformed, pendingMessage];
+		};
+	}
+
+	private _refreshPinnedSystemPrompt(): void {
+		const base = this._systemPromptOverride ?? this._baseSystemPrompt;
+		const pinned = this._hfHost?.buildPinnedLedgerLayer();
+		this.agent.state.systemPrompt = pinned ? `${base}\n\n${pinned}` : base;
+	}
+
 	private _installAgentNextTurnRefresh(): void {
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
@@ -613,11 +716,13 @@ export class AgentSession {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
 
+			const baseSystemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+			const pinnedLedgerLayer = this._hfHost?.buildPinnedLedgerLayer();
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
+					systemPrompt: pinnedLedgerLayer ? `${baseSystemPrompt}\n\n${pinnedLedgerLayer}` : baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
 				model: this.agent.state.model,
@@ -746,6 +851,7 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			let appendedEntryId: string | undefined;
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -761,9 +867,13 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				appendedEntryId = this.sessionManager.appendMessage(event.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+
+			if (event.message.role === "user" && appendedEntryId) {
+				await this._processTaskGoalMessage(appendedEntryId, event.message);
+			}
 
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
@@ -1367,6 +1477,10 @@ export class AgentSession {
 				this._systemPromptOverride = undefined;
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
+			// The current ledger state was established by prior turns or explicit
+			// /contract commands. Same-turn pending changes are appended later by
+			// transformContext after the user event is interpreted.
+			this._refreshPinnedSystemPrompt();
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -1969,6 +2083,7 @@ export class AgentSession {
 				keepRecentTokens: settings.keepRecentTokens,
 				outputReserveTokens: settings.reserveTokens,
 			});
+			this._refreshPinnedSystemPrompt();
 			if (outcome.shadow) {
 				// Shadow: candidate audited, live context unchanged.
 				const compactionResult: CompactionResult = {
@@ -2212,6 +2327,7 @@ export class AgentSession {
 			keepRecentTokens: settings.keepRecentTokens,
 			outputReserveTokens: settings.reserveTokens,
 		});
+		this._refreshPinnedSystemPrompt();
 		if (outcome.shadow) {
 			// Shadow (CCTX-081): candidate audited; the live context stays unchanged.
 			return willRetry;

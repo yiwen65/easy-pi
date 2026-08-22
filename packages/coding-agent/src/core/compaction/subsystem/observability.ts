@@ -25,6 +25,7 @@ export type AuditEventType =
 	| "reject"
 	| "rollback"
 	| "recall"
+	| "goal_interpretation"
 	| "compact_committed";
 
 export interface AuditEvent {

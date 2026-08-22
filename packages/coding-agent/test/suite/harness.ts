@@ -17,6 +17,10 @@ import type {
 import { registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import {
+	getHfCompactionModeFromEnv,
+	type HfCompactionConfig,
+} from "../../src/core/compaction/subsystem/session-integration.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -73,9 +77,7 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
 	/** Subsystem compaction config passthrough (default-on since EPIC-CCTX-001). */
-	hfCompaction?: Partial<import("../../src/core/compaction/subsystem/session-integration.ts").HfCompactionConfig> & {
-		mode: import("../../src/core/compaction/subsystem/session-integration.ts").HfCompactionConfig["mode"];
-	};
+	hfCompaction?: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] };
 }
 
 export interface Harness {
@@ -183,6 +185,14 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
 
+	const hfMode = options.hfCompaction?.mode ?? getHfCompactionModeFromEnv() ?? "full_pipeline";
+	const hfCompaction: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] } = {
+		...options.hfCompaction,
+		mode: hfMode,
+		goalComplete:
+			options.hfCompaction?.goalComplete ??
+			(async () => ({ text: JSON.stringify({ operations: [] }), stopReason: "stop" })),
+	};
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -195,7 +205,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
-		hfCompaction: options.hfCompaction,
+		hfCompaction,
 	});
 
 	const events: AgentSessionEvent[] = [];

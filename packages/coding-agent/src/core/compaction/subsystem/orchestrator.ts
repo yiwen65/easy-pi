@@ -50,6 +50,8 @@ export interface OrchestratorDeps {
 	minTokenGainFraction?: number;
 	/** structured_compaction mode disables the narrative bridge entirely. */
 	narrativeEnabled?: boolean;
+	/** Task ledger (design correction): binds candidates to a ledger version (G9). */
+	ledger?: import("./task-ledger.ts").TaskLedger;
 	/** Raw rebuild hook (T-019). When absent, rebuild escalation rejects. */
 	rebuildRunner?: (sessionId: string) => Promise<Omit<StructuredSnapshot, "snapshotVersion">>;
 }
@@ -78,6 +80,7 @@ const RECALL_GUIDE =
 
 export class CompactionOrchestrator {
 	private deps: OrchestratorDeps;
+	private lastLedgerAtFreeze: StructuredSnapshot["taskLedgerRef"];
 
 	constructor(deps: OrchestratorDeps) {
 		this.deps = deps;
@@ -97,6 +100,21 @@ export class CompactionOrchestrator {
 		// Freeze the boundary: later events belong to the next version.
 		const boundary = eventLog.freeze(sessionId);
 		audit.record("boundary_frozen", sessionId, { seq: boundary.seq });
+		// G9: bind the candidate to the task-ledger state at freeze time.
+		const focusAtFreeze = this.deps.ledger?.getFocusTask();
+		const ledgerAtFreeze = this.deps.ledger
+			? Object.freeze({
+					ledgerVersion: this.deps.ledger.getLedgerVersion(),
+					...(focusAtFreeze
+						? {
+								focusTaskId: focusAtFreeze.taskId,
+								focusContractVersion: focusAtFreeze.version,
+								taskRef: `task://${focusAtFreeze.taskId}/v${focusAtFreeze.version}`,
+							}
+						: {}),
+				})
+			: undefined;
+		this.lastLedgerAtFreeze = ledgerAtFreeze;
 		const allEvents = eventLog.range(sessionId, 1, boundary.seq);
 		if (allEvents.length === 0) {
 			return this.reject("no events to compact", undefined);
@@ -186,7 +204,7 @@ export class CompactionOrchestrator {
 		}
 
 		if (action === "full_rebuild") {
-			return this.runRebuild(sessionId, expectedActiveVersion);
+			return this.runRebuild(sessionId, expectedActiveVersion, contract.version);
 		}
 
 		if (compactedEvents.length === 0) {
@@ -210,6 +228,7 @@ export class CompactionOrchestrator {
 			candidate.tokenStats.total = tokensAfter;
 			const report = validateCandidate({
 				contract,
+				ledger: this.deps.ledger,
 				candidate: { ...candidate, snapshotVersion: -1 },
 				events: allEvents,
 				groups,
@@ -323,6 +342,7 @@ export class CompactionOrchestrator {
 
 			const validationCtx: ValidationContext = {
 				contract,
+				ledger: this.deps.ledger,
 				candidate: { ...candidate, snapshotVersion: -1 },
 				events: allEvents,
 				groups,
@@ -365,6 +385,29 @@ export class CompactionOrchestrator {
 			}
 
 			if (report.passed) {
+				// G9: the ledger must not have moved since the frozen boundary.
+				if (ledgerAtFreeze && this.deps.ledger) {
+					const currentVersion = this.deps.ledger.getLedgerVersion();
+					if (currentVersion !== ledgerAtFreeze.ledgerVersion) {
+						audit.record("cas_conflict", sessionId, {
+							ledgerExpected: ledgerAtFreeze.ledgerVersion,
+							ledgerActual: currentVersion,
+						});
+						return this.reject("task ledger drifted during compaction", {
+							...report,
+							passed: false,
+							rejected: true,
+							failures: [
+								...report.failures,
+								{
+									code: "task-ledger-drift",
+									severity: "P0",
+									message: `task ledger version moved ${ledgerAtFreeze.ledgerVersion} → ${currentVersion} during compaction`,
+								},
+							],
+						});
+					}
+				}
 				return this.tryActivate(
 					sessionId,
 					candidate,
@@ -383,7 +426,7 @@ export class CompactionOrchestrator {
 				continue; // one controlled repair: re-run extraction+narrative
 			}
 			if (plan === "rebuild") {
-				const rebuilt = await this.runRebuild(sessionId, expectedActiveVersion);
+				const rebuilt = await this.runRebuild(sessionId, expectedActiveVersion, contract.version);
 				if (rebuilt.status === "rebuilt" || rebuilt.status === "activated") {
 					return rebuilt;
 				}
@@ -421,6 +464,7 @@ export class CompactionOrchestrator {
 			baseEventSeq: active?.baseEventSeq ?? 0,
 			lineage: active ? [...active.lineage, active.snapshotVersion] : [],
 			contractRef: { contractId: contract.contractId, version: contract.version },
+			taskLedgerRef: this.lastLedgerAtFreeze,
 			constraints: contract.constraints.map((c) => ({ ...c })),
 			facts: active?.facts ?? [],
 			decisions: active?.decisions ?? [],
@@ -443,6 +487,7 @@ export class CompactionOrchestrator {
 		const deterministicState = reduceEvents(allEvents.filter((e) => e.seq <= candidate.baseEventSeq));
 		const report = validateCandidate({
 			contract,
+			ledger: this.deps.ledger,
 			candidate: { ...candidate, snapshotVersion: -1 },
 			events: allEvents,
 			groups,
@@ -468,18 +513,38 @@ export class CompactionOrchestrator {
 		);
 	}
 
-	private async runRebuild(sessionId: string, expectedActiveVersion: number): Promise<CompactResult> {
+	private async runRebuild(
+		sessionId: string,
+		expectedActiveVersion: number,
+		expectedContractVersion: number,
+	): Promise<CompactResult> {
 		const { audit } = this.deps;
 		if (!this.deps.rebuildRunner) {
 			audit.record("rebuild", sessionId, { available: false });
 			return { status: "rejected", reason: "raw rebuild unavailable" };
 		}
 		const started = Date.now();
-		const candidate = await this.deps.rebuildRunner(sessionId);
+		const rebuilt = await this.deps.rebuildRunner(sessionId);
+		const candidate: Omit<StructuredSnapshot, "snapshotVersion"> = this.deps.ledger
+			? { ...rebuilt, taskLedgerRef: this.lastLedgerAtFreeze }
+			: rebuilt;
 		const store = this.deps.snapshotStore;
 		const written = store.putCandidate(candidate);
 		audit.record("candidate_written", sessionId, { version: written.snapshotVersion, rebuild: true });
-		store.activate(sessionId, { expectedActiveVersion, candidateVersion: written.snapshotVersion });
+		try {
+			store.activate(sessionId, {
+				expectedActiveVersion,
+				candidateVersion: written.snapshotVersion,
+				assertExternalState: () => this.assertFrozenExternalState(expectedContractVersion),
+			});
+		} catch (error) {
+			audit.record("cas_conflict", sessionId, {
+				version: written.snapshotVersion,
+				rebuild: true,
+				error: String(error).slice(0, 120),
+			});
+			return { status: "rejected", reason: "CAS activation conflict" };
+		}
 		audit.record("rebuild", sessionId, { available: true, mttrMs: Date.now() - started }, written.snapshotVersion);
 		return { status: "rebuilt", snapshotVersion: written.snapshotVersion };
 	}
@@ -517,6 +582,7 @@ export class CompactionOrchestrator {
 			baseEventSeq,
 			lineage: active ? [...active.lineage, active.snapshotVersion] : [],
 			contractRef: { contractId: contract.contractId, version: contract.version },
+			taskLedgerRef: this.lastLedgerAtFreeze,
 			// Constraints are copied verbatim from the verified contract — never summarized.
 			constraints: contract.constraints.map((c) => ({ ...c })),
 			facts: extracted.facts,
@@ -545,6 +611,7 @@ export class CompactionOrchestrator {
 		const built = buildPrompt({
 			systemPrompt: this.deps.systemPrompt,
 			contract,
+			ledger: this.deps.ledger,
 			snapshot: snapshot as StructuredSnapshot | undefined,
 			recallGuide: this.deps.recallCatalog.entries().length > 0 ? RECALL_GUIDE : undefined,
 			tailEvents,
@@ -574,6 +641,33 @@ export class CompactionOrchestrator {
 		return this.countNextRequest(contract, snapshot, projected, currentInput);
 	}
 
+	private assertFrozenExternalState(expectedContractVersion: number): void {
+		const activeContract = this.deps.contractStore.getActive(this.deps.sessionId);
+		if (activeContract?.version !== expectedContractVersion) {
+			throw new Error(
+				`global contract version drifted: expected ${expectedContractVersion}, actual ${String(activeContract?.version)}`,
+			);
+		}
+
+		const expected = this.lastLedgerAtFreeze;
+		if (!expected) return;
+		const ledger = this.deps.ledger;
+		if (!ledger) throw new Error("task ledger unavailable at final activation");
+		const focus = ledger.getFocusTask();
+		const actual = {
+			ledgerVersion: ledger.getLedgerVersion(),
+			focusTaskId: ledger.getFocusTaskId(),
+			focusContractVersion: focus?.version,
+		};
+		for (const field of ["ledgerVersion", "focusTaskId", "focusContractVersion"] as const) {
+			if (actual[field] !== expected[field]) {
+				throw new Error(
+					`task ledger ${field} drifted: expected ${String(expected[field])}, actual ${String(actual[field])}`,
+				);
+			}
+		}
+	}
+
 	private tryActivate(
 		sessionId: string,
 		candidate: Omit<StructuredSnapshot, "snapshotVersion">,
@@ -592,12 +686,19 @@ export class CompactionOrchestrator {
 				expectedActiveVersion,
 				candidateVersion: written.snapshotVersion,
 				minBaseEventSeq: baseEventSeq,
+				assertExternalState: () => this.assertFrozenExternalState(candidate.contractRef.version),
 			});
 		} catch (error) {
-			// CAS conflict: the candidate stays auditable, old state untouched.
+			// CAS/external-state conflict: the candidate stays auditable, old state untouched.
+			const message = String(error);
+			const code = message.includes("task ledger")
+				? "task-ledger-drift"
+				: message.includes("global contract")
+					? "contract-drift"
+					: "cas-conflict";
 			audit.record("cas_conflict", sessionId, {
 				version: written.snapshotVersion,
-				error: String(error).slice(0, 120),
+				error: message.slice(0, 120),
 			});
 			return {
 				status: "rejected",
@@ -605,7 +706,7 @@ export class CompactionOrchestrator {
 					...report,
 					passed: false,
 					rejected: true,
-					failures: [...report.failures, { code: "cas-conflict", severity: "P0", message: String(error) }],
+					failures: [...report.failures, { code, severity: "P0", message }],
 				},
 				reason: "CAS activation conflict",
 			};

@@ -60,9 +60,7 @@ describe("distilled goal as proposal", () => {
 		await h.session.prompt("please migrate the auth handler to the v2 endpoint schema");
 		await h.session.waitForIdle();
 		await h.session.compact();
-		const first = h.session.messages[0];
-		if (first.role !== "user") throw new Error("expected pinned user message");
-		const text = JSON.stringify(first.content);
+		const text = h.session.hfCompactionHost!.buildPinnedLedgerLayer();
 		expect(text).toContain(DISTILLED);
 		expect(text).toMatch(/unconfirmed|待确认|auto-derived/i);
 	});
@@ -79,6 +77,7 @@ describe("distilled goal as proposal", () => {
 		expect(confirmed.version).toBe(3);
 		expect(confirmed.goal).toBe(DISTILLED);
 		expect(confirmed.derivedGoal).toBeUndefined();
+		expect(h.session.getTaskLedgerState().tasks[0].goal.normalized).toBe(DISTILLED);
 		// Audit trail shows every step.
 		const audit = h.session.hfCompactionHost!.contractStore.auditLog(h.session.sessionId);
 		expect(audit.map((a) => a.action)).toEqual(["create", "propose", "approve", "propose", "approve"]);

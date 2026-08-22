@@ -19,7 +19,7 @@
 | 层 | 组件（本 run 文件） | 真相地位 |
 |---|---|---|
 | 真相层 | `event-log.ts`（append-only EventEnvelope）、`artifact-store.ts`（content-addressed）、`tool-ledger.ts`（事件溯源 ledger） | **唯一真相**；compaction 永不删除/改写 |
-| 固定层 | `task-contract.ts`（版本化 TaskContract + 审计） | 永不参与 compaction；每轮完整回填 |
+| 固定层 | `task-contract.ts`（GlobalContract）、`task-ledger.ts`（版本化任务集合 + focus）、`goal-interpreter.ts`（proposal→确定性校验→提交）、`prompt-builder.ts`（分层回填） | 永不参与 compaction；每轮按 GlobalContract→完整 focus contract→跨任务约束→非终止索引→pending changes 回填 |
 | 状态层 | `reducer.ts`（确定性状态）+ `state-extractor.ts`（LLM delta，代码合并）+ `snapshot-store.ts`（版本化/CAS） | 可校验状态；关键字段带 provenance；不是真相 |
 | 工作层 | `narrative.ts`（叙事桥）、`atomic-groups.ts`（verbatim tail）、`recall-catalog.ts` | 有损、可重建；与 typed state 冲突时拒绝 |
 
@@ -39,6 +39,21 @@
 | 10 | 先外存与确定性压缩，再生成式压缩 | `orchestrator.ts`（阶段顺序固定） |
 | 11 | 禁止无限 summary-of-summary，周期性 raw rebuild | `trigger.ts`（FULL_REBUILD 条件）+ `rebuild.ts` |
 | 12 | 不绑定单一模型供应商 | 所有 LLM 调用经注入 `CompleteFn`（对齐 pi-ai `completeSimple` 最小签名），供应商中立 |
+
+### Task Ledger G1–G10 不变量映射
+
+| # | 不变量 | 唯一责任组件 |
+|---|---|---|
+| G1 | 首条任务消息只创建 T1，不形成永久 session goal | `session-integration.ts` + `task-ledger.ts` |
+| G2 | 每个 active task 的 source event 可解析且来自 verified user | `task-ledger.ts` strict event-source validation |
+| G3 | task/goal/constraint 不原地修改，更新只产生新版本 | `task-ledger.ts` version history + defensive clones |
+| G4 | goal、验收、权限和约束只能由 verified user event 改变 | `task-ledger.ts` authority/source checks |
+| G5 | 模型只能提 proposal，确定性代码校验后才能提交 | `goal-interpreter.ts` + `TaskLedger.applyAtomic` |
+| G6 | 创建新任务不隐式完成、取消或覆盖旧任务 | `task-ledger.ts` focus stack 与独立状态机 |
+| G7 | 完成必须有可解析 evidence event 或显式用户确认 | `TaskLedger.completeTask` |
+| G8 | 固定层按 Global/focus/cross-task/index/pending 分层回填 | `prompt-builder.ts` |
+| G9 | snapshot 绑定 ledger/focus/contract version，最终激活原子复核 | `orchestrator.ts` + `snapshot-store.ts` final assertion |
+| G10 | 歧义或危险 goal change 保留完整 proposal 并进入 pending | `goal-interpreter.ts` + `task-ledger.ts` accept/reject |
 
 ## ADR-4：风险分级
 
@@ -65,9 +80,9 @@ LLM 依赖只有一个注入点：`CompleteFn = (request: CompactionLLMRequest) 
 所有 schema 带 `schemaVersion: 1`；演进规则：只允许增加可选字段；破坏性变更 bump `schemaVersion` 并提供迁移函数；旧 snapshot 不可读时 fail closed 回滚到可重建路径（raw rebuild）。
 
 - **TaskContract**：`contractId, version, goal, acceptanceCriteria[], constraints[]{id,kind(positive|negative),text,authority}, permissions{allow[],deny[],approvalRequired[]}, budgets{maxTokens?,maxToolCalls?,maxDurationMs?}, outputContract?, authority, provenance, validFrom, validUntil?, allowedUpdaters[]`。
-- **EventEnvelope**：`eventId, sessionId, seq, agentId, taskId?, eventType, timestamp, causalParentIds[], toolCallId?, transactionId?, payloadRef?|payload, contentHash, authority, schemaVersion`。eventType ∈ `message|tool_call|tool_result|approval|state_change|artifact|error|compaction|contract|ledger`。
+- **EventEnvelope**：`eventId, sessionId, seq, agentId, taskId?, eventType, timestamp, causalParentIds[], toolCallId?, transactionId?, payloadRef?|payload, contentHash, authority, schemaVersion`。eventType ∈ `message|tool_call|tool_result|approval|state_change|artifact|error|compaction|contract|ledger|task`。
 - **LedgerEntry**：`operationId, toolCallId, idempotencyKey, sideEffectClass, riskLevel, requestRef, resultRef?, externalResourceId?, exitCode?, approval?, state, lastVerifiedAt?`；状态机 `planned→approved→started→succeeded|failed|unknown`（approved 可跳过当无需审批；迁移单调）。
-- **StructuredSnapshot**：`snapshotVersion, parentVersion, baseEventSeq, lineage[], contractRef, constraints[], facts[], decisions[], tasks[], tools, artifacts[], errors[], nextActions[], recallCatalogRefs[], sourceEventRanges[], compactor{model?,promptVersion,schemaVersion}, tokenStats, validatorReport, createdAt`。
+- **StructuredSnapshot**：`snapshotVersion, parentVersion, baseEventSeq, lineage[], contractRef, taskLedgerRef{ledgerVersion,focusTaskId?,focusContractVersion?,taskRef?}, constraints[], facts[], decisions[], tasks[], tools, artifacts[], errors[], nextActions[], recallCatalogRefs[], sourceEventRanges[], compactor{model?,promptVersion,schemaVersion}, tokenStats, validatorReport, createdAt`。`taskRef` 采用 `task://<task_id>/v<version>`，不得复制 task goal 权威文本。
 - **AtomicGroup**：`groupId, kind(turn|tool_pair|parallel_batch|tool_loop|transaction|patch_test), eventRange{fromSeq,toSeq}, tokenEstimate, closed`。
 - **CoverageManifest**：`cut{afterSeq}, keptGroupIds[], compactedGroupIds[], offloadedRefs[], unclosedGroupIds[]`。
 - **RecallEntry**：`refId, kind, createdAt, preview, artifactRef?, eventIds[], hash, tenant`。

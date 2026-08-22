@@ -43,10 +43,9 @@ describe("default-on compaction", () => {
 		expect(host!.audit.byType("compact_committed")).toHaveLength(1);
 		// No legacy summary entry was written.
 		expect(h.sessionManager.getBranch().filter((e) => e.type === "compaction")).toHaveLength(0);
-		// Context rebuilt with pinned contract zone.
-		const first = h.session.messages[0];
-		if (first.role !== "user") throw new Error("expected pinned user message");
-		expect(JSON.stringify(first.content)).toContain("Task Contract");
+		// Fixed layer is injected dynamically rather than persisted as a stale duplicate.
+		expect(host!.buildPinnedLedgerLayer()).toContain("Global Contract");
+		expect(host!.buildPinnedLedgerLayer()).toContain("Current focus task T1");
 	});
 
 	it("kill switch: compaction.enabled=false disables compaction entirely", async () => {

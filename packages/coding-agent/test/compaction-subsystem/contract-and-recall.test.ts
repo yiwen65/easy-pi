@@ -66,10 +66,8 @@ describe("TaskContract population API", () => {
 		await h.session.prompt("continue");
 		await h.session.waitForIdle();
 
-		// After subsystem compaction, the pinned contract zone carries both constraints verbatim.
-		const first = h.session.messages[0];
-		if (first.role !== "user") throw new Error("expected pinned user message");
-		const text = JSON.stringify(first.content);
+		// The dynamic fixed layer carries both constraints verbatim on every request.
+		const text = h.session.hfCompactionHost!.buildPinnedLedgerLayer();
 		expect(text).toContain("Never delete raw events");
 		expect(text).toContain("Always run npm run check after code changes");
 		expect(text).toContain("Refactor the parser without breaking tests");

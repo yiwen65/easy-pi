@@ -19,6 +19,7 @@
 export * from "./artifact-store.ts";
 export * from "./atomic-groups.ts";
 export * from "./event-log.ts";
+export * from "./goal-interpreter.ts";
 export * from "./hashing.ts";
 export * from "./injection-guard.ts";
 export * from "./multi-agent.ts";
@@ -34,6 +35,7 @@ export * from "./session-integration.ts";
 export * from "./snapshot-store.ts";
 export * from "./state-extractor.ts";
 export * from "./task-contract.ts";
+export * from "./task-ledger.ts";
 export * from "./tool-ledger.ts";
 export * from "./trigger.ts";
 export * from "./types.ts";

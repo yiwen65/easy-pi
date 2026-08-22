@@ -23,6 +23,7 @@ import { type SessionEntry, sessionEntryToContextMessages } from "../../session-
 import { completeSummarization } from "../compaction.ts";
 import { type ArtifactStore, FileSystemArtifactStore, InMemoryArtifactStore } from "./artifact-store.ts";
 import { type EventLog, InMemoryEventLog, JsonlEventLog, sessionEntriesToEvents } from "./event-log.ts";
+import { type GoalChangeOutcome, interpretGoalChange } from "./goal-interpreter.ts";
 import { canonicalJson, sha256Hex } from "./hashing.ts";
 import {
 	COMPACTOR_POLICY_VERSION,
@@ -32,10 +33,11 @@ import {
 } from "./injection-guard.ts";
 import { AuditTrail } from "./observability.ts";
 import { CompactionOrchestrator, type CompactResult, type OrchestratorDeps } from "./orchestrator.ts";
-import { buildPrompt } from "./prompt-builder.ts";
+import { buildPrompt, renderPinnedLedgerLayer } from "./prompt-builder.ts";
 import { RecallCatalog } from "./recall-catalog.ts";
 import { InMemorySnapshotStore, JsonlSnapshotStore, type SnapshotStore } from "./snapshot-store.ts";
 import { InMemoryContractStore, JsonlContractStore } from "./task-contract.ts";
+import { type PendingGoalChange, replayTaskLedger, type TaskLedger } from "./task-ledger.ts";
 import { ToolLedger } from "./tool-ledger.ts";
 import type { Authority, CompleteFn } from "./types.ts";
 
@@ -62,6 +64,8 @@ export interface HfCompactionConfig {
 	mode: HfCompactionMode;
 	/** Compactor LLM. Tests inject a faux; production uses createPiAiCompleteFn per attempt. */
 	complete?: CompleteFn;
+	/** Optional independent Goal Interpreter injection; production falls back to the compactor adapter. */
+	goalComplete?: CompleteFn;
 	tenant?: string;
 	keepRecentTokens?: number;
 	outputReserveTokens?: number;
@@ -107,6 +111,8 @@ export class HfCompactionHost {
 	readonly audit = new AuditTrail();
 	/** Side-effect ledger (CCTX-013), event-sourced into the session event log. */
 	readonly ledger: ToolLedger;
+	/** Versioned task ledger (T-401), replayed from task events in the same log. */
+	taskLedger: TaskLedger;
 	/** Mutable: syncFromEntries may rebuild the log when the branch shape changes. */
 	eventLog: EventLog;
 
@@ -139,6 +145,12 @@ export class HfCompactionHost {
 		this.contractStore = stateDir ? new JsonlContractStore(join(stateDir, "contracts")) : new InMemoryContractStore();
 		this.snapshotStore = stateDir ? new JsonlSnapshotStore(join(stateDir, "snapshots")) : new InMemorySnapshotStore();
 		this.recallCatalog = new RecallCatalog({ store: this.artifactStore, tenant: this.tenant });
+		const persistedEvents = this.eventLog.all(this.sessionId);
+		this.taskLedger = replayTaskLedger(persistedEvents, {
+			eventLog: this.eventLog,
+			sessionId: this.sessionId,
+			strictEventSourceValidation: true,
+		});
 		this.ledger = new ToolLedger({ eventLog: this.eventLog, sessionId: this.sessionId, agentId: "agent-local" });
 	}
 
@@ -319,6 +331,17 @@ export class HfCompactionHost {
 		if (!active?.derivedGoal) {
 			throw new Error("No derived goal to confirm");
 		}
+		const sourceEventId = this.appendUserControlEvent("/contract confirm");
+		const focus = this.taskLedger.getFocusTask();
+		if (!focus) {
+			this.taskLedger.createTask({ goal: active.derivedGoal.text }, LOCAL_USER, sourceEventId);
+		} else if (focus.goal.normalized !== active.derivedGoal.text) {
+			this.taskLedger.apply(
+				{ operation: "REFINE_TASK", taskId: focus.taskId, goal: active.derivedGoal.text },
+				LOCAL_USER,
+				sourceEventId,
+			);
+		}
 		const proposal = this.contractStore.proposeUpdate(
 			this.sessionId,
 			{ goal: active.derivedGoal.text, derivedGoal: null },
@@ -328,9 +351,111 @@ export class HfCompactionHost {
 		return this.contractStore.approveProposal(this.sessionId, proposal.proposalId, LOCAL_USER);
 	}
 
+	setCurrentTaskGoal(goal: string) {
+		const normalized = goal.trim();
+		if (!normalized) throw new Error("Task goal cannot be empty");
+		const sourceEventId = this.appendUserControlEvent(`/contract set ${normalized}`);
+		const focus = this.taskLedger.getFocusTask();
+		const task = focus
+			? this.taskLedger.apply(
+					{ operation: "REFINE_TASK", taskId: focus.taskId, goal: normalized },
+					LOCAL_USER,
+					sourceEventId,
+				)
+			: this.taskLedger.createTask({ goal: normalized }, LOCAL_USER, sourceEventId);
+		const contract = this.contractStore.getActive(this.sessionId);
+		if (!contract) {
+			this.setContract({ goal: normalized, constraints: [] });
+		} else if (contract.derivedGoal) {
+			this.updateContract({ derivedGoal: null }, "explicit focus goal replaced derived proposal");
+		}
+		return task;
+	}
+
+	buildPinnedLedgerLayer(): string {
+		return renderPinnedLedgerLayer(this.taskLedger, this.contractStore.getActive(this.sessionId));
+	}
+
+	getTaskLedgerState(): {
+		ledgerVersion: number;
+		focusTaskId: string | undefined;
+		tasks: ReturnType<TaskLedger["listTasks"]>;
+		pending: PendingGoalChange[];
+	} {
+		return {
+			ledgerVersion: this.taskLedger.getLedgerVersion(),
+			focusTaskId: this.taskLedger.getFocusTaskId(),
+			tasks: this.taskLedger.listTasks(),
+			pending: this.taskLedger.getPendingGoalChanges(),
+		};
+	}
+
+	private appendUserControlEvent(text: string): string {
+		return this.eventLog.append({
+			sessionId: this.sessionId,
+			agentId: "interactive",
+			eventType: "message",
+			payload: { role: "user", text, control: true },
+			authority: LOCAL_USER,
+		}).eventId;
+	}
+
+	acceptPendingGoalChange(pendingChangeId: string, candidateTaskId?: string) {
+		const sourceEventId = this.appendUserControlEvent(
+			`/contract accept ${pendingChangeId}${candidateTaskId ? ` ${candidateTaskId}` : ""}`,
+		);
+		return this.taskLedger.acceptPendingGoalChange(pendingChangeId, LOCAL_USER, sourceEventId, {
+			candidateTaskId,
+		});
+	}
+
+	rejectPendingGoalChange(pendingChangeId: string) {
+		const sourceEventId = this.appendUserControlEvent(`/contract reject ${pendingChangeId}`);
+		return this.taskLedger.rejectPendingGoalChange(pendingChangeId, LOCAL_USER, sourceEventId);
+	}
+
+	/**
+	 * Mirror and interpret one persisted user message before the assistant turn.
+	 * The first message creates only T1; later messages go through the untrusted
+	 * proposal → deterministic validation → commit path.
+	 */
+	async processUserMessage(input: {
+		branchEntries: SessionEntry[];
+		sourceEventId: string;
+		userMessage: string;
+		complete: CompleteFn;
+	}): Promise<GoalChangeOutcome> {
+		this.syncFromEntries(input.branchEntries);
+		const created = this.ensureTaskLedgerFromEntries(input.branchEntries);
+		if (created) {
+			const focus = this.taskLedger.getFocusTask();
+			const outcome: GoalChangeOutcome = focus
+				? { outcome: "committed", tasks: [focus] }
+				: { outcome: "rejected", reason: "no substantive user message available for initial task" };
+			this.audit.record("goal_interpretation", this.sessionId, { outcome: outcome.outcome, initial: true });
+			return outcome;
+		}
+		const outcome = await interpretGoalChange({
+			userMessage: input.userMessage,
+			sourceEventId: input.sourceEventId,
+			ledger: this.taskLedger,
+			complete: input.complete,
+			actor: LOCAL_USER,
+		});
+		this.audit.record("goal_interpretation", this.sessionId, {
+			outcome: outcome.outcome,
+			reason: "reason" in outcome ? outcome.reason.slice(0, 160) : undefined,
+		});
+		return outcome;
+	}
+
 	/** Compactor LLM provided via config (tests); production passes one per attempt. */
 	get configComplete(): CompleteFn | undefined {
 		return this.config.complete;
+	}
+
+	get goalComplete(): CompleteFn | undefined {
+		return this.config.goalComplete;
 	}
 
 	get mode(): HfCompactionMode {
@@ -343,6 +468,8 @@ export class HfCompactionHost {
 	 */
 	syncFromEntries(entries: SessionEntry[]): void {
 		try {
+			// Force durable logs to load before duplicate checks on a restarted host.
+			this.eventLog.all(this.sessionId);
 			if (entries.length < this.seededCount) {
 				// Branch changed shape: rebuild the event log from scratch.
 				this.seededCount = 0;
@@ -364,6 +491,11 @@ export class HfCompactionHost {
 					});
 				}
 				this.eventLog = fresh;
+				this.taskLedger = replayTaskLedger(fresh.all(this.sessionId), {
+					eventLog: fresh,
+					sessionId: this.sessionId,
+					strictEventSourceValidation: true,
+				});
 				this.seededCount = entries.length;
 				return;
 			}
@@ -390,6 +522,20 @@ export class HfCompactionHost {
 		} catch {
 			// Never let event mirroring break the session.
 		}
+	}
+
+	/** Seed T1 from the latest substantive user event when migrating an existing session. */
+	private ensureTaskLedgerFromEntries(entries: SessionEntry[]): boolean {
+		if (this.taskLedger.listTasks().length > 0) return false;
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index];
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			const text = contentText(entry.message.content, "").replace(/\s+/g, " ").trim();
+			if (!text || text.startsWith("/")) continue;
+			this.taskLedger.createTask({ goal: truncateGoalText(text, 200) }, LOCAL_USER, entry.id);
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -453,6 +599,7 @@ export class HfCompactionHost {
 			outputReserveTokens: overrides?.outputReserveTokens ?? this.config.outputReserveTokens ?? 4096,
 			minTokenGainFraction: this.config.minTokenGainFraction,
 			narrativeEnabled: this.config.mode === "full_pipeline",
+			ledger: this.taskLedger,
 		};
 	}
 
@@ -481,6 +628,7 @@ export class HfCompactionHost {
 		tokensAfter?: number;
 	}> {
 		this.syncFromEntries(options.branchEntries);
+		this.ensureTaskLedgerFromEntries(options.branchEntries);
 		this.ensureContractFromEntries(options.branchEntries);
 		if (options.action !== "offload_only") {
 			await this.maybeDistillGoal(options.branchEntries, options.complete);
@@ -549,13 +697,20 @@ export class HfCompactionHost {
 		const built = buildPrompt({
 			systemPrompt: this.getSystemPrompt(),
 			contract,
+			ledger: this.taskLedger,
 			snapshot: active,
 			recallGuide: this.recallCatalog.entries().length > 0 ? RECALL_GUIDE_TEXT : undefined,
 			tailEvents: [],
 			currentInput: "",
 			exactRecall: [],
 		});
-		const pinnedText = built.sections.map((s) => s.text).join("\n\n");
+		// The fixed layer is injected dynamically into the system prompt on every
+		// provider turn. Keep only snapshot/working zones in the persisted message
+		// projection so contract changes cannot leave a stale duplicate behind.
+		const pinnedText = built.sections
+			.filter((section) => section.zone !== "contract")
+			.map((section) => section.text)
+			.join("\n\n");
 
 		// Rebuild the tail from the session entries (the truth), keyed by the
 		// entryId each event references. Offloaded tool results are projected as

@@ -932,9 +932,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-401 — Task Ledger 数据模型与事件溯源存储
+### [x] T-401 — Task Ledger 数据模型与事件溯源存储
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 版本化 TaskContract 集合 + focus 指针 + 任务操作（CREATE/REFINE/EXTEND/SUBTASK/SET_FOCUS/SUSPEND/RESUME/CANCEL/SUPERSEDE/REOPEN/ADD_CONSTRAINT/RELAX_CONSTRAINT/ADD_ACCEPTANCE_CRITERION）；goal 双表示（verbatim_source_refs 权威 + normalized 可追溯）；全部经事件溯源（ledger 事件入事件日志）；不变量 G1-G7 由确定性代码强制。
 - Inputs and prerequisites: 用户设计修正（2026-08-22 长文）；既有 contract store/reducer/CAS。
@@ -946,13 +946,13 @@
   2. 实现。
 - Acceptance criteria: 用户十二节示例的 T1→T2→T3 序列可完整表达；G1/G2/G3/G6/G7 有测试锁定。
 - Verification method: vitest。
-- Validation evidence: Not run.
+- Validation evidence: 2026-08-23 `task-ledger.test.ts` 与 runtime/restart 联测通过：不可变读边界、SUPERSEDE replay、focus stack、no-op/悬空依赖拒绝、strict verified-user source/evidence、完整 pending proposal、单记录原子 accept/reject、持久化重启恢复均锁定；纳入目标汇总 312 passed / 6 skipped。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-402 — Goal Interpreter：proposal→校验→提交 + 歧义 pending
+### [x] T-402 — Goal Interpreter：proposal→校验→提交 + 歧义 pending
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 新用户消息经 compactor 产出 GoalDeltaProposal（operation/target/goal 文本/source_event_id）；确定性校验（目标存在性、操作合法性、授权、冲突、不得错误取消未完成项）；合法则提交新版本；歧义则存 pending_goal_change（不破坏旧状态）；危险操作（删目标/取消/放宽权限/扩预算/宣布完成/改验收）永远只能由用户事件触发。
 - Inputs and prerequisites: T-401；injection-guard；extractor 的 untrusted 包装模式。
@@ -964,13 +964,13 @@
   2. 实现。
 - Acceptance criteria: G4/G5/G10 锁定；歧义输入不产生破坏更新。
 - Verification method: vitest。
-- Validation evidence: Not run.
+- Validation evidence: 2026-08-23 `goal-interpreter.test.ts` + `task-ledger-runtime.test.ts`：显式 verified actor、模型 authority 伪造覆盖、权限/预算/完成等危险操作与歧义 pending、provider/schema fail-closed、消息流接线、同轮 pending 警告与 SDK accept/reject 全过；纳入目标汇总 312 passed / 6 skipped。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-403 — Prompt Builder 分层回填 + orchestrator 绑定 task_ledger_version CAS
+### [x] T-403 — Prompt Builder 分层回填 + orchestrator 绑定 task_ledger_version CAS
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: pinned 层改为 GlobalContract + CurrentFocusTaskContract（完整）+ 跨任务约束 + NonTerminalTaskIndex + PendingGoalChanges；快照只存 task_contract_ref（task://T3/v2），不复制 goal 权威文本；compaction candidate 记录并 CAS 校验 task_ledger_version/focus_task_id/contract_version，版本漂移则拒绝。
 - Inputs and prerequisites: T-401、T-402；prompt-builder/orchestrator 既有结构。
@@ -982,25 +982,45 @@
   2. 实现。
 - Acceptance criteria: G8/G9 锁定；快照不复制 goal 权威文本；旧 goal 只能以低权威历史出现。
 - Verification method: vitest。
-- Validation evidence: Not run.
+- Validation evidence: 2026-08-23 `prompt-builder`/`snapshot-store`/`validator`/`ledger-cas` 测试通过：完整 focus 层、跨任务约束顺序、stable task ref、offload/rebuild ref、最终激活瞬间 ledger/focus/contract CAS race、snapshot 深层不可变与持久化失败回滚均锁定；纳入目标汇总 312 passed / 6 skipped。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-404 — 任务书 §4.2 修订 + ADR 更新 + 全量验证
+### [x] T-404 — 任务书 §4.2 修订 + ADR 更新 + 全量验证
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 按用户提供的修订文本更新原任务书 §4.2；ADR-2/ADR-3 增补 Task Ledger 层与 G1-G10 不变量映射；既有 contract 相关测试与新默认行为对齐；test.sh + check 全绿。
-- Inputs and prerequisites: T-401..T-403 完成；用户修订文本。
+- Inputs and prerequisites: T-401..T-403 与 T-405 完成；用户修订文本。
 - Scope or files: 任务书 md、`docs/compaction/02-architecture-adr.md`。
 - Expected output: 文档与实现一致。
-- Dependencies: T-401, T-402, T-403。
+- Dependencies: T-401, T-402, T-403, T-405。
 - Execution steps:
   1. 文档修订。
   2. 全量验证。
 - Acceptance criteria: 文档与代码一致；全绿。
 - Verification method: 命令输出记录。
-- Validation evidence: Not run.
+- Validation evidence: 2026-08-23 已修订原任务书 §4.2 与 ADR-2/ADR-3/ADR-7。任务相关目标集 39 files（38 passed, 1 real-model gate skipped），312 passed / 6 skipped。2026-08-23 根级 `npm run check` exit 0：Biome 检查 1205 文件且明确 `No fixes applied`，pinned deps、TS relative imports、shrinkwrap/install lock、`tsgo --noEmit` 与 browser smoke 全过。随后 `./test.sh` exit 0：scripts 与全部 workspaces 全绿，其中 agent 464 passed / 1 skipped、AI 930 / 831、coding-agent 2263 / 53、subagent 107 / 0，其余 workspace 亦全部通过。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-405 — Runtime 接线与 TUI `/contract` 交互闭环
+
+- Status: done
+- Owner: coordinator
+- Objective: 将 Task Ledger 与 Goal Interpreter 接入真实 AgentSession 用户消息流，并提供 `/contract` 查看、设置、确认 derived goal、列出与接受/拒绝 pending goal change 的交互命令；确认必须重新执行确定性校验并原子提交，拒绝只关闭 proposal。
+- Inputs and prerequisites: 用户于 2026-08-23 明确授权接管 TUI 交互命令；T-401..T-403。
+- Scope or files: `subsystem/session-integration.ts`、`agent-session.ts`、`modes/interactive/interactive-mode.ts`、`core/slash-commands.ts`，以及目标交互/集成测试；必要时补齐 RPC/SDK 类型，但不新增第二套状态源。
+- Expected output: 新用户消息产生可追溯 task proposal；`/contract` 显示权威 contract、焦点任务与 pending；mutating 子命令在 session 空闲时执行；accept/reject 后 prompt 与 ledger 状态立即一致。
+- Dependencies: T-403。
+- Execution steps:
+  1. 先补失败测试锁定消息接线、pending 保真与 accept/reject 原子语义。
+  2. 接入 HfCompactionHost/AgentSession 公共 API。
+  3. 按现有 built-in slash-command 模式接入 `/contract` 与 autocomplete。
+  4. 运行目标测试、交互 tmux smoke、check。
+- Acceptance criteria: `/contract`、`set`、`confirm`、`pending`、`accept`、`reject` 均有可观察结果；无 proposal 时错误明确；歧义 accept 必须显式选择候选；危险操作不能绕过 verified user authority；无 TUI 时 SDK 仍可完成同一状态转换。
+- Verification method: 目标 vitest + interactive 测试 + tmux smoke + `npm run check`。
+- Validation evidence: 2026-08-23 `interactive-mode-contract-command.test.ts` 6/6；AgentSession/host runtime + durability tests 5/5；真实 tmux smoke（无 API）验证 `/contract` 空态显示与 `/contract set Verify TUI wiring` 后 T1 v1/global contract/ledger 同步显示。SDK 公共方法与同轮 pending provider warning 有集成测试。目标汇总 312 passed / 6 skipped。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -1027,6 +1047,10 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-08-23: 并行会话静态阻塞解除后完成 T-404：根 `npm run check` exit 0（1205 files, no fixes applied），`./test.sh` exit 0（全部 workspace 通过）；T-401..T-405 至此全部 done。
+- 2026-08-23: T-401/T-402/T-403/T-405 完成：Task Ledger/Goal Interpreter/runtime/最终 CAS 与 `/contract` 交互闭环落地；目标集 312 passed / 6 skipped，scoped biome 76 文件零问题，tmux 两条本地命令 smoke 通过。对抗复核后补强：同轮 pending 警告、Global goal 降为 legacy 非权威、event/snapshot defensive copy、task batch 单记录原子持久化、JSONL corrupt-tail fail closed。
+- 2026-08-23: T-404 文档修订完成但仓库级验证 blocked：`npm run check` 仅被并行会话未跟踪 `packages/subagent/*` 阻塞；`./test.sh` 所有任务相关/其他 workspace 通过，仅 reftable watcher 一次超时，目标复跑 8/8 通过。未触碰并行会话文件。
+- 2026-08-23: 用户明确授权“完成剩余工作，并接管 TUI 交互命令接线”。对账发现 T-401/T-402 仅有未提交库层实现，T-403 仅有局部 CAS/渲染，尚未接入 HfCompactionHost、AgentSession 或 TUI；登记 T-405，T-401 转 in_progress。决策：先修 ledger/replay/pending 原子确认，再做 runtime 与 `/contract`，避免只显示不能确认的假交互。
 - 2026-08-22: 任务文档创建。
 - 2026-08-22: 完成现状勘察：读取任务书全文、.edru 全部核心资产（passport/overview/stack/module-map/boundary/data-state/KP-001/history/risk-register）、现有 compaction.ts（全 1187 行）、session-manager.ts 关键段、agent-session.ts compaction 挂载点、AGENTS.md 规则。确认目标层为 coding-agent v3 JSONL（非 harness 脚手架）。
 - 2026-08-22: 决策——子系统落地 `packages/coding-agent/src/core/compaction/subsystem/`，全部为新增文件；本 run 范围 G0-G3 + 单元级故障/漂移套件；CCTX-061/071/080/081 记入 T-900 blocked。决策——协调者串行执行（共享 types.ts + 委托代理无法跑测试，纯串行图由协调者执行）。
@@ -1067,6 +1091,6 @@
 ## Final validation result
 
 - Result: partial
-- Evidence: 2026-08-22 (1) 任务文档 validator 通过；(2) `npm run check` exit 0；(3) 子系统测试 19 文件 169/169 通过（`node node_modules/vitest/dist/cli.js --run test/compaction-subsystem/`）；(4) 既有 compaction 回归 30 passed / 7 skipped（既有 skip 标记）；(5) 验收标准 17 项全部勾选且有上文测试证据。命令均在 packages/coding-agent 或仓库根执行。
-全部仓库内任务（T-001..T-111、T-201..T-204）完成并验证。结果保持 partial 的唯一原因：T-105 尾部（真正外部生产部署/灰度）环境性 blocked——本仓库不存在生产部署面（.edru UNK-002），需部署方环境执行 runbook。
-- Limitations: 真实模型保真度门槛（≥99.5% 精确率、token 中位数降 40%）未验证——需真实 provider 评测（T-900）；CCTX-061/071/080/081 未执行（T-900 blocked，需授权与环境）；faux LLM 证明的是管道逻辑正确性而非模型质量；worktree 中他 session 未提交改动未触碰。
+- Evidence: 截至 2026-08-23，T-401..T-405 全部完成并验证：任务相关目标集 39 files（38 passed, 1 real-model gate skipped），312 passed / 6 skipped；真实 tmux（无 API）`/contract` 与 `/contract set` smoke 通过；根 `npm run check` exit 0（Biome 1205 files/no fixes、全部静态门通过）；`./test.sh` exit 0（scripts 与全部 workspaces 全绿）；任务文档 validator 通过。历史真实 K3/CLI 指标与 T-105..T-111 证据保持有效。
+- Remaining: T-304 仍待额外真实模型授权；T-305 仍待仓库外生产部署面。
+- Limitations: Task Ledger 的 session tree 分支投影仍沿用既有 HF event-log 分支重建策略，未在本轮扩展为 branch-scoped durable ledger。

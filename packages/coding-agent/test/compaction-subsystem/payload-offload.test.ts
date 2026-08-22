@@ -65,8 +65,17 @@ describe("classifyPayload", () => {
 			payload: { contractId: "c-1", version: 1 },
 			authority,
 		});
+		const task = log.append({
+			sessionId: "s-1",
+			agentId: "task-ledger",
+			eventId: "task-1",
+			eventType: "task",
+			payload: { kind: "task_op", task: { goal: "x".repeat(5000) } },
+			authority,
+		});
 		expect(classifyPayload(approval, defaultPolicy())).toBe("must_keep_verbatim");
 		expect(classifyPayload(contract, defaultPolicy())).toBe("must_keep_verbatim");
+		expect(classifyPayload(task, defaultPolicy())).toBe("must_keep_verbatim");
 	});
 
 	it("classifies big tool results as offloadable, small as structured", () => {

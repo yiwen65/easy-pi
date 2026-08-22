@@ -144,10 +144,9 @@ describe("AgentSession compaction characterization", () => {
 		expect(result.summary).toContain("[high-fidelity snapshot");
 		expect(result.summary).toContain("subsystem narrative text");
 		expect(result.summary).not.toContain("summary from extension");
-		// No legacy entry is persisted; the context starts with the pinned contract zone.
+		// No legacy entry is persisted; the fixed layer is injected dynamically.
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
-		expect(harness.session.messages[0]?.role).toBe("user");
-		expect(getUserTexts(harness)[0]).toContain("Task Contract");
+		expect(harness.session.hfCompactionHost!.buildPinnedLedgerLayer()).toContain("Global Contract");
 	});
 
 	it("allows a queued prompt to start when manual compaction ends", async () => {

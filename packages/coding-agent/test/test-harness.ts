@@ -29,7 +29,10 @@ import type {
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import type { HfCompactionConfig } from "../src/core/compaction/subsystem/session-integration.ts";
+import {
+	getHfCompactionModeFromEnv,
+	type HfCompactionConfig,
+} from "../src/core/compaction/subsystem/session-integration.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -422,6 +425,16 @@ async function createHarnessWithResourceLoader(
 		],
 	});
 
+	const hfMode = options.hfCompaction?.mode ?? getHfCompactionModeFromEnv() ?? "full_pipeline";
+	const hfCompaction: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] } = {
+		...options.hfCompaction,
+		mode: hfMode,
+		// Goal interpretation is a separate compactor call. Keep general harness
+		// response queues stable unless a test explicitly opts into that flow.
+		goalComplete:
+			options.hfCompaction?.goalComplete ??
+			(async () => ({ text: JSON.stringify({ operations: [] }), stopReason: "stop" })),
+	};
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -430,7 +443,7 @@ async function createHarnessWithResourceLoader(
 		modelRuntime: getModelRuntime(modelRegistry),
 		resourceLoader,
 		baseToolsOverride: options.baseToolsOverride,
-		hfCompaction: options.hfCompaction,
+		hfCompaction,
 	});
 
 	const events: AgentSessionEvent[] = [];
