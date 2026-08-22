@@ -65,9 +65,12 @@ function installCompactorStream(
 		count++;
 		contexts.push(context);
 		onRequest?.(context, options);
-		const text = JSON.stringify(context.messages).includes("ONLY a JSON object")
+		const requestText = JSON.stringify(context.messages);
+		const text = requestText.includes("ONLY a JSON object")
 			? JSON.stringify({ facts: [], decisions: [], nextActions: [] })
-			: narrativeText;
+			: requestText.includes("single clear sentence")
+				? "Distilled goal sentence."
+				: narrativeText;
 		const stream = createAssistantMessageEventStream();
 		queueMicrotask(() => {
 			const message: AssistantMessage = {
@@ -155,6 +158,7 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		seedCompactableSession(harness);
 		harness.setResponses([
+			fauxAssistantMessage("Distilled goal sentence."),
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("compaction narrative"),
 			fauxAssistantMessage("queued response"),
@@ -205,8 +209,8 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(result.summary).toContain("summary from custom stream");
 		expect(result.summary).toContain("[high-fidelity snapshot");
-		// The custom streamFn serves both subsystem compactor calls (extraction + narrative).
-		expect(stream.callCount()).toBe(2);
+		// The custom streamFn serves all subsystem compactor calls (distill + extraction + narrative).
+		expect(stream.callCount()).toBe(3);
 	});
 
 	it("manually compacts with provider-resolved bearer auth", async () => {
@@ -235,6 +239,7 @@ describe("AgentSession compaction characterization", () => {
 		});
 		seedCompactableSession(harness);
 		harness.setResponses([
+			() => fauxAssistantMessage("Distilled goal sentence."),
 			(_context, options) => {
 				expect(options?.apiKey).toBeUndefined();
 				expect(options?.headers).toEqual({ Authorization: "Bearer ambient-token" });
@@ -250,7 +255,7 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(result.summary).toContain("summary with bearer auth");
 		expect(result.summary).toContain("[high-fidelity snapshot");
-		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.faux.state.callCount).toBe(3);
 	});
 
 	it("uses the subsystem compactor request context (isolated, untrusted-wrapped)", async () => {
@@ -271,8 +276,9 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.compact();
 
 		expect(transformContext).not.toHaveBeenCalled();
-		expect(stream.callCount()).toBe(2);
-		const extractionContext = stream.contexts()[0];
+		expect(stream.callCount()).toBe(3);
+		// contexts[0] is goal distillation; contexts[1] is structured extraction.
+		const extractionContext = stream.contexts()[1];
 		expect(extractionContext?.systemPrompt).not.toBe(harness.session.agent.state.systemPrompt);
 		expect(extractionContext?.systemPrompt).toContain("untrusted data");
 		expect(extractionContext?.tools).toBeUndefined();
@@ -316,7 +322,7 @@ describe("AgentSession compaction characterization", () => {
 		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
 		expect(compactionEnd?.result?.estimatedTokensAfter).toBeGreaterThanOrEqual(0);
 		expect(compactionEnd?.result?.summary).toContain("[high-fidelity snapshot");
-		expect(stream.callCount()).toBe(2);
+		expect(stream.callCount()).toBe(3);
 	});
 
 	it("notifies extensions when auto-compaction fails", async () => {
@@ -376,18 +382,20 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("partial response", { stopReason: "length" }),
+			fauxAssistantMessage("Distilled goal sentence."),
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("overflow narrative"),
 			fauxAssistantMessage("completed response"),
 			// The completed response's faux usage re-triggers a (case-2, no-retry)
-			// overflow compaction, same as the legacy flow; it needs its own pair.
+			// overflow compaction; distillation happens once per session, so the
+			// second compaction consumes only extraction + narrative.
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("second narrative"),
 		]);
 
 		await harness.session.prompt("x".repeat(5000));
 
-		expect(harness.faux.state.callCount).toBe(6);
+		expect(harness.faux.state.callCount).toBe(7);
 		// The resume-triggering compaction had willRetry=true; a trailing
 		// case-2 (successful overflow, no retry) compaction may follow it.
 		const ends = harness.eventsOfType("compaction_end");
@@ -417,6 +425,7 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			() => fauxAssistantMessage("x".repeat(64), { stopReason: "length", timestamp: Date.now() + 10_000 }),
+			() => fauxAssistantMessage("Distilled goal sentence."),
 			() => fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			() => fauxAssistantMessage("overflow narrative"),
 			() => fauxAssistantMessage("y".repeat(64), { stopReason: "length", timestamp: Date.now() + 10_000 }),
@@ -424,7 +433,7 @@ describe("AgentSession compaction characterization", () => {
 
 		await harness.session.prompt("x".repeat(5000));
 
-		expect(harness.faux.state.callCount).toBe(4);
+		expect(harness.faux.state.callCount).toBe(5);
 		expect(harness.eventsOfType("compaction_start").filter((event) => event.reason === "overflow")).toHaveLength(1);
 		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toBe(
 			"Truncated response recovery failed after one compact-and-retry attempt.",

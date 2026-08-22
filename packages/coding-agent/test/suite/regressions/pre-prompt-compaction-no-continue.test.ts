@@ -54,6 +54,7 @@ describe("pre-prompt compaction regression", () => {
 		harness.sessionManager.appendMessage(lengthStopAssistant);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 		harness.setResponses([
+			fauxAssistantMessage("Distilled goal sentence."),
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("pre-prompt narrative"),
 			fauxAssistantMessage("answered next prompt"),
@@ -72,7 +73,8 @@ describe("pre-prompt compaction regression", () => {
 		expect(ends.some((e) => e.reason === "overflow" && e.willRetry === true && !e.aborted)).toBe(true);
 		// The new prompt was sent and answered; its text may live in the compacted zone.
 		expect(harness.session.getLastAssistantText()).toBe("answered next prompt");
-		// extraction + narrative per compaction (pre-prompt and post-answer threshold) + the new prompt
-		expect(harness.faux.state.callCount).toBe(5);
+		// distill + extraction + narrative for the first compaction, extraction +
+		// narrative for the second, plus the new prompt turn.
+		expect(harness.faux.state.callCount).toBe(6);
 	});
 });

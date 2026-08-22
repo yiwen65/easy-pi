@@ -47,6 +47,7 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 		);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 		harness.setResponses([
+			fauxAssistantMessage("Distilled goal sentence."),
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("manual narrative"),
 			fauxAssistantMessage("probe response"), // unused: the probe prompt must be rejected

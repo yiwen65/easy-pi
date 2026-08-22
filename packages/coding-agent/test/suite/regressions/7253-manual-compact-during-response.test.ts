@@ -55,7 +55,8 @@ describe("issue #7253: manual compaction during an active response", () => {
 				await secondResponseReleased;
 				return fauxAssistantMessage("second response");
 			},
-			// Subsystem compactor calls during the manual compaction.
+			// Subsystem compactor calls during the manual compaction (distill + extract + narrative).
+			fauxAssistantMessage("Distilled goal sentence."),
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("manual narrative"),
 		]);

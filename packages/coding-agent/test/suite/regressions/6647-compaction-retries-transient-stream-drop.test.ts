@@ -35,7 +35,8 @@ describe("#6647 compaction retries transient summarization failures", () => {
 		const now = Date.now();
 		harness.sessionManager.appendMessage({
 			role: "user",
-			content: [{ type: "text", text: "message to compact" }],
+			// Trivially short text: no goal distillation call, keeping the retry scripts exact.
+			content: [{ type: "text", text: "x" }],
 			timestamp: now - 1000,
 		});
 		const model = harness.getModel();

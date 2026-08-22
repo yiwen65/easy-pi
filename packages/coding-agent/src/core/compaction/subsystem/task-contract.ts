@@ -61,6 +61,7 @@ function applyPatch(
 		contractId: base.contractId,
 		sessionId: base.sessionId,
 		goal: patch.goal ?? base.goal,
+		derivedGoal: patch.derivedGoal === null ? undefined : (patch.derivedGoal ?? base.derivedGoal),
 		acceptanceCriteria: patch.acceptanceCriteria ?? base.acceptanceCriteria,
 		constraints: patch.constraints ?? base.constraints,
 		permissions: patch.permissions ?? base.permissions,

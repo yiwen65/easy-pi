@@ -97,6 +97,7 @@ function renderContract(contract: TaskContract): string {
 	const lines = [
 		`# Task Contract (version ${contract.version}, id ${contract.contractId})`,
 		`Goal: ${contract.goal}`,
+		...(contract.derivedGoal ? [`Working goal (auto-derived, unconfirmed): ${contract.derivedGoal.text}`] : []),
 		"",
 		"## Acceptance criteria",
 		...contract.acceptanceCriteria.map((c) => `- ${c}`),

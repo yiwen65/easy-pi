@@ -64,7 +64,7 @@ const INJECTION_PATTERNS: InjectionPattern[] = [
 		id: "constraint-removal",
 		severity: "high",
 		pattern:
-			/(delete|remove|drop|disable)\s+(all\s+)?(the\s+)?(constraints?|restrictions?|rules?|safety|guardrails?)/i,
+			/(delete|remove|drop|disable|ignore|disregard)\s+(all\s+)?(the\s+)?(constraints?|restrictions?|rules?|safety|guardrails?|goals?)/i,
 	},
 	{ id: "constraint-removal-zh", severity: "high", pattern: /(删除|移除|取消|关闭).{0,6}(约束|限制|规则|安全)/ },
 	{ id: "mode-override", severity: "high", pattern: /\b(developer|debug|god|sudo)\s+mode\b|\bSYSTEM\s+OVERRIDE\b/i },
