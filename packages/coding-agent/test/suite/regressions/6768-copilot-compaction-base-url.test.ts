@@ -47,20 +47,25 @@ describe("issue #6768 Copilot compaction base URL", () => {
 	});
 
 	it("uses the auth-resolved base URL through the SDK-style stream wrapper", async () => {
-		harness = await createHarness();
+		harness = await createHarness({
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+		});
 		seedCompactableSession(harness);
 		const catalogModel = { ...harness.getModel(), baseUrl: INDIVIDUAL_BASE_URL };
 		harness.session.agent.state.model = catalogModel;
 
 		let requestBaseUrl: string | undefined;
-		const respond = (requestModel: Model<string>) => {
+		const respond = (requestModel: Model<string>, context: { messages?: unknown }) => {
 			requestBaseUrl = requestModel.baseUrl;
+			const wantsJson = JSON.stringify(context.messages).includes("ONLY a JSON object");
 			const stream = createAssistantMessageEventStream();
 			stream.push({
 				type: "done",
 				reason: "stop",
 				message: {
-					...fauxAssistantMessage("summary"),
+					...fauxAssistantMessage(
+						wantsJson ? JSON.stringify({ facts: [], decisions: [], nextActions: [] }) : "summary",
+					),
 					api: requestModel.api,
 					provider: requestModel.provider,
 					model: requestModel.id,
@@ -91,8 +96,8 @@ describe("issue #6768 Copilot compaction base URL", () => {
 				},
 			},
 			getModels: () => [catalogModel],
-			stream: (requestModel) => respond(requestModel),
-			streamSimple: (requestModel) => respond(requestModel),
+			stream: (requestModel, context) => respond(requestModel, context),
+			streamSimple: (requestModel, context) => respond(requestModel, context),
 		};
 
 		await harness.authStorage.modify(catalogModel.provider, async () => ({
@@ -109,6 +114,13 @@ describe("issue #6768 Copilot compaction base URL", () => {
 
 		await harness.session.compact();
 
+		const host = (
+			harness.session as unknown as {
+				hfCompactionHost?: { audit: { list(): { type: string; details: Record<string, unknown> }[] } };
+			}
+		).hfCompactionHost;
+		for (const a of host?.audit.list() ?? []) console.log("AUDIT", a.type, JSON.stringify(a.details).slice(0, 160));
+		console.log("requestBaseUrl:", requestBaseUrl);
 		expect(requestBaseUrl).toBe(ENTERPRISE_BASE_URL);
 	});
 });

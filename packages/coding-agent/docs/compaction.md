@@ -1,6 +1,18 @@
 # Compaction & Branch Summarization
 
-LLMs have limited context windows. When conversations grow too long, Pi uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
+LLMs have limited context windows. When conversations grow too long, Pi uses compaction to keep the active context bounded while preserving recent work.
+
+> **Default since EPIC-CCTX-001:** compaction now runs the high-fidelity subsystem (`packages/coding-agent/src/core/compaction/subsystem/`): append-only event truth, pinned task contract, deterministic typed snapshots with provenance, content-addressed offload with exact recall (`recall_exact`), atomic cut planning (tool pairs, parallel batches, tool loops, and transactions are never split), candidate validation with CAS activation, and fail-closed rejection. Raw events are never rewritten or deleted; old sessions' `CompactionEntry` summaries still render when resumed. The legacy summary-only compactor described further below has been **removed**.
+>
+> Internals and rollout: see `docs/compaction/` in the repo root (inventory, ADR, integration, runbook).
+>
+> Modes: `PI_HF_COMPACTION=off|shadow|offload_only|structured_compaction|full_pipeline` (default `full_pipeline`; `off` disables compaction entirely).
+
+**Source files** ([pi-mono](https://github.com/earendil-works/pi-mono)):
+- [`packages/coding-agent/src/core/compaction/subsystem/`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/subsystem/) - High-fidelity compaction subsystem (default)
+- [`packages/coding-agent/src/core/compaction/compaction.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) - Shared cut-point/token utilities (used by the extension hook payload and branch summarization)
+- [`packages/coding-agent/src/core/compaction/branch-summarization.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/branch-summarization.ts) - Branch summarization
+- [`packages/coding-agent/src/core/session-manager.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/session-manager.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
 
 **Source files** ([pi-mono](https://github.com/earendil-works/pi-mono)):
 - [`packages/coding-agent/src/core/compaction/compaction.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) - Auto-compaction logic

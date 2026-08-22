@@ -1,0 +1,36 @@
+# Project Learnings
+
+## `npm run check` 会在共享 worktree 中自动改写文件——运行后必须核对改动范围
+
+- What happened: 在实现 compaction 子系统后运行仓库规定的 `npm run check`，其中 `biome check --write` 自动修复了 34+ 个文件（包括本 session 的新增未跟踪文件）。
+- Risk: 多 session 共享 worktree 时，自动修复可能触及其他 session 的未跟踪文件；track 文件也可能被改。
+- Correct approach: 运行 `npm run check` 后立即用 `git diff --stat` / `git status --porcelain` 核对：tracked 文件 diff 必须与开工前基线一致（本任务已核对：16 个 M 文件与他 session 开工前完全相同）；biome 不可自动修的 lint（noImplicitAnyLet 等）要手工修。
+- Related pitfall（本任务实际踩到）: 正则中 `\b` 在 `/` 前不成立（两者均非 word char），匹配绝对路径需把路径分支放在 `\b` 之外（见 subsystem/narrative.ts EXACT_VALUE_PATTERN）；抽取 prompt 的事件序列化必须包含 eventId，否则 extractor 的 provenance 引用无法解析（validator P0）。
+- Verified by: 2026-08-22 高保真 compaction 任务，`npm run check` exit 0 且 169/169 子系统测试通过。
+
+## `packages/coding-agent` TUI 组件测试 — 宽度感知组件的测试主题必须用 ANSI 码而非可见标记
+
+- Wrong approach: 为断言样式给测试主题包可见标记（如 `text: (t) => \`<T>${t}</T>\``），再用它渲染按 `visibleWidth` 截断/对齐的布局组件（顶栏、footer/stats bar）。
+- Why it failed: `visibleWidth` 会把 `<T>` 等字面字符计入宽度，导致组件提前截断、右侧内容被丢弃，样式断言打在被截掉的文本上而失败。
+- Recognition signal: 断言 `toContain("<S>…</S>")` 失败，实际输出里出现截断省略号且右侧区段消失。
+- Correct approach: 测试主题用互不相同、可见宽度为零的 ANSI 转义序列包装（如 `\x1b[31m${t}\x1b[0m`），断言匹配转义序列本身；参见 `test/grok-shell-components.test.ts` 的 `markerTheme`。
+- Prevention: 给任何调用 `truncateToWidth`/`visibleWidth` 的组件写带样式断言时，先确认包装符的 `visibleWidth` 为 0。
+- Verified by: 2026-08-22 Grok stats bar 任务，`markerTheme` 从可见标记改为 ANSI 后 `grok-shell-components.test.ts` 19/19 通过。
+
+## 高保真 compaction——真实模型评测暴露的两类 schema 与断言陷阱
+
+- What happened: 用真实模型（kimi-coding K3）跑 T-105 评测时，(1) 抽取器因 K3 给 nextActions 项多加了 `kind` 键而整体拒绝（item 级 additionalProperties:false 过严）；(2) 评测最初报告 100% 保留率，但实际压缩从未激活（tokens 0/0 暴露了假阳性）。
+- Wrong assumption 1: "严格 schema = 每个键都必须精确匹配"。真实模型总会附加无害元数据键；真正危险的是 deterministic/forbidden 键（constraints/permissions/tasks/tools）。
+- Correct approach 1: 顶层 additionalProperties 保持 false；forbidden 键硬拒绝；item 级未知键确定性剥离并计数（`strippedUnknownKeys` 入审计）。见 `subsystem/state-extractor.ts`。
+- Wrong assumption 2: "atom 保留率高 = 压缩保真"。若压缩从未激活，tail 中逐字保留的内容会让 C/T/S 门 vacuously 通过。
+- Correct approach 2: 评测报告必须记录 `roundsActivated`/`roundsRejected`/`rejectReasons` 与 token 前后值；保留率指标只有在激活轮次 > 0 时才有意义。见 `test/compaction-subsystem/eval/runner.ts`。
+- Verified by: 2026-08-22 T-105 真实评测（kimi-coding K3）：修复后 coding/tool-heavy 各 2 轮全激活、100% 保留、oracle 一致、token −22%/−15%；drift-4 中 429 限流被正确 fail closed。
+
+## 真实长会话回放暴露的三类 token 膨胀陷阱（子系统）
+
+- What happened: pi-mono 真实会话（100 条目）回放时压缩后仍有 80k tokens，三个独立缺陷叠加：
+  1. **原子性 vs 卸载的作用域盲区**：巨型 parallel_batch（88k）因不可分割规则整体留在尾部——原子性是对的，但 offload 只扫压缩区，尾部旧大结果永远逐字驻留。
+  2. **适配器重复膨胀**：并行批次的 N 个 tool_call 事件共享整条目 payload（22k JSON），N×重复。
+  3. **模型输出截断**：K3 抽取输出超 maxTokens 4096 → JSON 截断 → fail closed 正确但永不激活。
+- Correct approach: (1) offload 扫全历史 + reverse budget 保近期 + priorRecords 跨轮幂等；(2) 适配器只存瘦身投影 + `entryId` 回指（真相仍在会话 JSONL）；(3) maxTokens 随输入规模缩放 + 确定性截断 salvage（切到最后完整数组项闭合并补括号，尾部丢项不产生错项，validator 继续把关）。
+- Verified by: 2026-08-22 T-108 修复后真实 K3 实测 token −71.3%/−72.0%、100% 保留、oracle 一致。

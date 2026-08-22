@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -54,17 +54,21 @@ import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
-	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
-	compact,
 	estimateContextTokens,
-	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { createRecallExactToolDefinition } from "./compaction/subsystem/recall-tool.ts";
+import {
+	createPiAiCompleteFn,
+	getHfCompactionModeFromEnv,
+	type HfCompactionConfig,
+	HfCompactionHost,
+} from "./compaction/subsystem/session-integration.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -227,6 +231,12 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * High-fidelity compaction subsystem (CCTX-080). When set (or PI_HF_COMPACTION env),
+	 * compaction goes through the transactional subsystem; failures fall back to the
+	 * legacy summary path. Default: off.
+	 */
+	hfCompaction?: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] };
 }
 
 export interface ExtensionBindings {
@@ -285,14 +295,6 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
-function estimateMessagesTokens(messages: AgentMessage[]): number {
-	let tokens = 0;
-	for (const message of messages) {
-		tokens += estimateTokens(message);
-	}
-	return tokens;
-}
-
 // ============================================================================
 // Constants
 // ============================================================================
@@ -324,6 +326,9 @@ export class AgentSession {
 	private _followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
+
+	// High-fidelity compaction subsystem host (CCTX-080); undefined when the flag is off.
+	private _hfHost: HfCompactionHost | undefined = undefined;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -398,10 +403,66 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
 
+		// Default-on (EPIC-CCTX-001): the subsystem is pi's default compaction.
+		// Explicit config or PI_HF_COMPACTION overrides; "off" disables compaction.
+		const hfMode = config.hfCompaction?.mode ?? getHfCompactionModeFromEnv() ?? "full_pipeline";
+		if (hfMode !== "off") {
+			// Durable subsystem state lives next to the session file; in-memory
+			// sessions (--no-session) keep in-memory stores.
+			const sessionFile = this.sessionManager.getSessionFile();
+			const stateDir = sessionFile ? join(dirname(sessionFile), "hf", this.sessionId) : undefined;
+			this._hfHost = new HfCompactionHost({
+				sessionId: this.sessionId,
+				getSystemPrompt: () => this.systemPrompt,
+				config: { ...config.hfCompaction, stateDir: config.hfCompaction?.stateDir ?? stateDir, mode: hfMode },
+			});
+		}
+
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+	}
+
+	/** The high-fidelity compaction host, when enabled (CCTX-080). */
+	get hfCompactionHost(): HfCompactionHost | undefined {
+		return this._hfHost;
+	}
+
+	/** Current verified task contract, if any. */
+	getTaskContract() {
+		return this._hfHost?.getContract();
+	}
+
+	/**
+	 * Create the session task contract (fixed layer). Once created, use
+	 * updateTaskContract; the contract never participates in compaction.
+	 */
+	setTaskContract(input: {
+		goal: string;
+		constraints: { id: string; kind: "positive" | "negative"; text: string }[];
+		permissions?: { allow: string[]; deny: string[]; approvalRequired: string[] };
+		budgets?: { maxTokens?: number; maxToolCalls?: number; maxDurationMs?: number };
+		outputContract?: string;
+	}) {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		return this._hfHost.setContract(input);
+	}
+
+	/** Authorized contract update (local user): new version + audit. */
+	updateTaskContract(patch: Parameters<HfCompactionHost["updateContract"]>[0], reason?: string) {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		return this._hfHost.updateContract(patch, reason);
+	}
+
+	/** Unverified update attempts only ever become proposals. */
+	proposeTaskContractUpdate(
+		patch: Parameters<HfCompactionHost["proposeContractUpdate"]>[0],
+		proposedBy: Parameters<HfCompactionHost["proposeContractUpdate"]>[1],
+		reason?: string,
+	) {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		return this._hfHost.proposeContractUpdate(patch, proposedBy, reason);
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -480,6 +541,7 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			this._hfHost?.recordToolStarted(toolCall.id, toolCall.name, args);
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -501,6 +563,7 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			this._hfHost?.recordToolFinished(toolCall.id, isError);
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
 				? await runner.emitToolResult({
@@ -573,6 +636,37 @@ export class AgentSession {
 			type: "queue_update",
 			steering: [...this._steeringMessages],
 			followUp: [...this._followUpMessages],
+		});
+	}
+
+	/**
+	 * Notify extensions that a subsystem compaction committed. The entry is
+	 * synthetic (never persisted): the subsystem does not write legacy
+	 * CompactionEntry items, but the extension notification contract remains.
+	 */
+	private async _emitHfSessionCompact(
+		result: CompactionResult,
+		reason: "manual" | "threshold" | "overflow",
+		willRetry: boolean,
+		snapshotVersion: number | undefined,
+	): Promise<void> {
+		if (!this._extensionRunner.hasHandlers("session_compact")) return;
+		const syntheticEntry: CompactionEntry = {
+			type: "compaction",
+			id: `hf-compaction-${Date.now()}`,
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			summary: result.summary,
+			firstKeptEntryId: "",
+			tokensBefore: result.tokensBefore,
+			details: { hf: true, snapshotVersion },
+		};
+		await this._extensionRunner.emit({
+			type: "session_compact",
+			compactionEntry: syntheticEntry,
+			fromExtension: false,
+			reason,
+			willRetry,
 		});
 	}
 
@@ -1558,6 +1652,8 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this.abortRetry();
 		this.agent.abort();
+		// Interrupted tool executions are marked unknown, never blindly replayed.
+		this._hfHost?.recordInflightUnknown("session aborted");
 		await this.waitForIdle();
 	}
 
@@ -1790,33 +1886,6 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
-	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
-	private async _runDefaultCompaction(
-		preparation: CompactionPreparation,
-		requestModel: Model<any>,
-		apiKey: string | undefined,
-		headers: Record<string, string> | undefined,
-		customInstructions: string | undefined,
-		signal: AbortSignal,
-		env: Record<string, string> | undefined,
-		reason: "manual" | "threshold" | "overflow",
-	): Promise<CompactionResult> {
-		return compact(
-			preparation,
-			requestModel,
-			apiKey,
-			headers,
-			customInstructions,
-			signal,
-			this.thinkingLevel,
-			this.agent.streamFunction,
-			env,
-			this.settingsManager.getRetrySettings(),
-			this._summarizationRetryCallbacks({ source: "compaction", reason }),
-			undefined, // cacheFriendly
-		);
-	}
-
 	/**
 	 * Manually compact the session context.
 	 *
@@ -1836,11 +1905,13 @@ export class AgentSession {
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
-		let fromExtension = false;
 
 		try {
 			if (!this.model) {
 				throw new Error(formatNoModelSelectedMessage());
+			}
+			if (!this._hfHost) {
+				throw new Error("Compaction is disabled (hf compaction mode is off)");
 			}
 
 			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
@@ -1848,19 +1919,13 @@ export class AgentSession {
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
 
-			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
-				// Check why we can't compact
-				const lastEntry = pathEntries[pathEntries.length - 1];
-				if (lastEntry?.type === "compaction") {
-					throw new Error("Already compacted");
-				}
-				throw new Error("Nothing to compact (session too small)");
-			}
+			// The subsystem owns cut/validation now; legacy preparation is computed
+			// only as hook input (best effort — skipped when nothing is cuttable).
+			const preparation = this._extensionRunner.hasHandlers("session_before_compact")
+				? prepareCompaction(pathEntries, settings)
+				: undefined;
 
-			let extensionCompaction: CompactionResult | undefined;
-
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
+			if (this._extensionRunner.hasHandlers("session_before_compact") && preparation) {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -1874,80 +1939,65 @@ export class AgentSession {
 				if (result?.cancel) {
 					throw new Error("Compaction cancelled");
 				}
-
-				if (result?.compaction) {
-					extensionCompaction = result.compaction;
-					fromExtension = true;
-				}
+				// result.compaction (extension-provided summary text) is deprecated and
+				// ignored: free-text summaries violate the subsystem's invariants.
 			}
 
-			let summary: string;
-			let firstKeptEntryId: string;
-			let tokensBefore: number;
-			let usage: Usage | undefined;
-			let details: unknown;
-
-			if (extensionCompaction) {
-				// Extension provided compaction content
-				summary = extensionCompaction.summary;
-				firstKeptEntryId = extensionCompaction.firstKeptEntryId;
-				tokensBefore = extensionCompaction.tokensBefore;
-				usage = extensionCompaction.usage;
-				details = extensionCompaction.details;
-			} else {
-				// Shared default summary generator, also used by automatic compaction.
-				const result = await this._runDefaultCompaction(
-					preparation,
-					requestModel,
+			const hfComplete =
+				this._hfHost.configComplete ??
+				createPiAiCompleteFn({
+					model: requestModel,
 					apiKey,
 					headers,
-					customInstructions,
-					this._compactionAbortController.signal,
 					env,
-					"manual",
-				);
-				summary = result.summary;
-				firstKeptEntryId = result.firstKeptEntryId;
-				tokensBefore = result.tokensBefore;
-				usage = result.usage;
-				details = result.details;
+					streamFn: this.agent.streamFunction,
+					retry: this.settingsManager.getRetrySettings(),
+					callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
+				});
+			const outcome = await this._hfHost.attemptCompaction({
+				action: this._hfHost.mode === "offload_only" ? "offload_only" : "soft_compact",
+				manual: true,
+				complete: hfComplete,
+				branchEntries: pathEntries,
+				signal: this._compactionAbortController.signal,
+				keepRecentTokens: settings.keepRecentTokens,
+				outputReserveTokens: settings.reserveTokens,
+			});
+			if (outcome.shadow) {
+				// Shadow: candidate audited, live context unchanged.
+				const compactionResult: CompactionResult = {
+					summary: outcome.summaryText,
+					firstKeptEntryId: "",
+					tokensBefore: outcome.tokensBefore ?? 0,
+					estimatedTokensAfter: outcome.tokensAfter,
+				};
+				this._compactionAbortController = undefined;
+				this._emit({
+					type: "compaction_end",
+					reason: "manual",
+					result: compactionResult,
+					aborted: false,
+					willRetry: false,
+				});
+				return compactionResult;
 			}
-
 			if (this._compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
-
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-					reason: "manual",
-					willRetry: false,
-				});
+			if (!outcome.activated) {
+				throw new Error(`Compaction rejected: ${outcome.summaryText}`);
 			}
-
+			if (outcome.messages) {
+				this.agent.state.messages = outcome.messages;
+			}
 			const compactionResult: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
-				estimatedTokensAfter,
-				usage,
-				details,
+				summary: outcome.summaryText,
+				firstKeptEntryId: "",
+				tokensBefore: outcome.tokensBefore ?? 0,
+				estimatedTokensAfter: outcome.tokensAfter,
 			};
-			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
 			this._compactionAbortController = undefined;
+			await this._emitHfSessionCompact(compactionResult, "manual", false, outcome.result?.snapshotVersion);
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -1974,7 +2024,7 @@ export class AgentSession {
 				errorMessage,
 				aborted,
 				willRetry: false,
-				fromExtension,
+				fromExtension: false,
 			});
 			throw error;
 		} finally {
@@ -2122,6 +2172,85 @@ export class AgentSession {
 	}
 
 	/**
+	 * Subsystem attempt for automatic compaction. Returns true when the turn
+	 * should continue (mirrors the legacy contract). On rejection or error the
+	 * compaction simply does not happen (fail closed) — there is no legacy
+	 * fallback anymore.
+	 */
+	private async _tryHfAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		settings: { reserveTokens: number; keepRecentTokens: number },
+	): Promise<boolean> {
+		const host = this._hfHost;
+		if (!host || !this.model) return false;
+
+		const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
+		const complete =
+			host.configComplete ??
+			createPiAiCompleteFn({
+				model: requestModel,
+				apiKey,
+				headers,
+				env,
+				streamFn: this.agent.streamFunction,
+				retry: this.settingsManager.getRetrySettings(),
+				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
+			});
+		const outcome = await host.attemptCompaction({
+			action:
+				host.mode === "offload_only" ? "offload_only" : reason === "overflow" ? "hard_compact" : "soft_compact",
+			complete,
+			branchEntries: this.sessionManager.getBranch(),
+			signal: this._autoCompactionAbortController?.signal,
+			keepRecentTokens: settings.keepRecentTokens,
+			outputReserveTokens: settings.reserveTokens,
+		});
+		if (outcome.shadow) {
+			// Shadow (CCTX-081): candidate audited; the live context stays unchanged.
+			return willRetry;
+		}
+		if (!outcome.activated) {
+			this._emit({
+				type: "compaction_end",
+				reason,
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage: `Compaction rejected: ${outcome.summaryText}`,
+			});
+			await this._emitSessionCompactFailed({
+				reason,
+				errorMessage: `Compaction rejected: ${outcome.summaryText}`,
+				aborted: false,
+				willRetry: false,
+				fromExtension: false,
+			});
+			return false;
+		}
+		if (outcome.messages) {
+			this.agent.state.messages = outcome.messages;
+		}
+		const result: CompactionResult = {
+			summary: outcome.summaryText,
+			firstKeptEntryId: "",
+			tokensBefore: outcome.tokensBefore ?? 0,
+			estimatedTokensAfter: outcome.tokensAfter,
+		};
+		await this._emitHfSessionCompact(result, reason, willRetry, outcome.result?.snapshotVersion);
+		this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+		if (willRetry) {
+			const messages = this.agent.state.messages;
+			const lastMsg = messages[messages.length - 1];
+			if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
+				this.agent.state.messages = messages.slice(0, -1);
+			}
+			return true;
+		}
+		return this.agent.hasQueuedMessages();
+	}
+
+	/**
 	 * Execute threshold or overflow compaction. Manual compaction uses
 	 * `AgentSession.compact()` instead. Both paths call the lower-level `compact()`
 	 * function imported from `./compaction/index.ts` after preparation and extension
@@ -2132,31 +2261,25 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		// Subsystem-only automatic compaction (legacy summary path removed, EPIC-CCTX-001).
+		if (!this.model) {
+			return false;
+		}
+		if (!this._hfHost) {
+			return false; // PI_HF_COMPACTION=off
+		}
+
+		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
-		let started = false;
-		let fromExtension = false;
+		const preparation = this._extensionRunner.hasHandlers("session_before_compact")
+			? prepareCompaction(pathEntries, settings)
+			: undefined;
+
+		this._emit({ type: "compaction_start", reason });
+		this._autoCompactionAbortController = new AbortController();
 
 		try {
-			if (!this.model) {
-				return false;
-			}
-
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
-
-			const pathEntries = this.sessionManager.getBranch();
-
-			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
-				return false;
-			}
-
-			this._emit({ type: "compaction_start", reason });
-			this._autoCompactionAbortController = new AbortController();
-			started = true;
-
-			let extensionCompaction: CompactionResult | undefined;
-
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
+			if (this._extensionRunner.hasHandlers("session_before_compact") && preparation) {
 				const extensionResult = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -2168,147 +2291,36 @@ export class AgentSession {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: true,
-						willRetry: false,
-					});
-					await this._emitSessionCompactFailed({
-						reason,
-						aborted: true,
-						willRetry: false,
-						fromExtension: false,
-					});
+					this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+					await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
 					return false;
 				}
-
-				if (extensionResult?.compaction) {
-					extensionCompaction = extensionResult.compaction;
-					fromExtension = true;
-				}
+				// extensionResult.compaction (custom summary text) is deprecated and ignored:
+				// free-text summaries violate the subsystem's invariants.
 			}
 
-			let summary: string;
-			let firstKeptEntryId: string;
-			let tokensBefore: number;
-			let usage: Usage | undefined;
-			let details: unknown;
-
-			if (extensionCompaction) {
-				// Extension provided compaction content
-				summary = extensionCompaction.summary;
-				firstKeptEntryId = extensionCompaction.firstKeptEntryId;
-				tokensBefore = extensionCompaction.tokensBefore;
-				usage = extensionCompaction.usage;
-				details = extensionCompaction.details;
-			} else {
-				// Shared default summary generator, also used by manual compaction.
-				const compactResult = await this._runDefaultCompaction(
-					preparation,
-					requestModel,
-					apiKey,
-					headers,
-					undefined,
-					this._autoCompactionAbortController.signal,
-					env,
-					reason,
-				);
-				summary = compactResult.summary;
-				firstKeptEntryId = compactResult.firstKeptEntryId;
-				tokensBefore = compactResult.tokensBefore;
-				usage = compactResult.usage;
-				details = compactResult.details;
-			}
-
-			if (this._autoCompactionAbortController.signal.aborted) {
-				this._emit({
-					type: "compaction_end",
-					reason,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
-				await this._emitSessionCompactFailed({
-					reason,
-					aborted: true,
-					willRetry: false,
-					fromExtension,
-				});
-				return false;
-			}
-
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-					reason,
-					willRetry,
-				});
-			}
-
-			const result: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
-				estimatedTokensAfter,
-				usage,
-				details,
-			};
-			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
-
-			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				// The overflow response was persisted on message_end before _checkCompaction() removed it
-				// from agent state. Rebuilding state from the new compaction can restore that kept entry,
-				// leaving an assistant as the final message. agent.continue() rejects that state, so remove
-				// the retriable error or truncated-length response again before continuing the interrupted turn.
-				if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
-					this.agent.state.messages = messages.slice(0, -1);
-				}
-				return true;
-			}
-
-			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
-			// Continue once so queued messages are delivered.
-			return this.agent.hasQueuedMessages();
+			return await this._tryHfAutoCompaction(reason, willRetry, settings);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
-			if (started) {
-				const formattedErrorMessage =
-					reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`;
-				this._emit({
-					type: "compaction_end",
-					reason,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-					errorMessage: formattedErrorMessage,
-				});
-				await this._emitSessionCompactFailed({
-					reason,
-					errorMessage: formattedErrorMessage,
-					aborted: false,
-					willRetry: false,
-					fromExtension,
-				});
-			}
+			const formattedErrorMessage =
+				reason === "overflow"
+					? `Context overflow recovery failed: ${errorMessage}`
+					: `Auto-compaction failed: ${errorMessage}`;
+			this._emit({
+				type: "compaction_end",
+				reason,
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage: formattedErrorMessage,
+			});
+			await this._emitSessionCompactFailed({
+				reason,
+				errorMessage: formattedErrorMessage,
+				aborted: false,
+				willRetry: false,
+				fromExtension: false,
+			});
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
@@ -2669,6 +2681,10 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		// recall_exact is available whenever the compaction subsystem is active (default-on).
+		if (this._hfHost) {
+			this._baseToolDefinitions.set("recall_exact", createRecallExactToolDefinition(this._hfHost));
+		}
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -2692,7 +2708,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", ...(this._hfHost ? ["recall_exact"] : [])];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

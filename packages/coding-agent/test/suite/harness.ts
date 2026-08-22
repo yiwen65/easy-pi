@@ -72,6 +72,10 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	/** Subsystem compaction config passthrough (default-on since EPIC-CCTX-001). */
+	hfCompaction?: Partial<import("../../src/core/compaction/subsystem/session-integration.ts").HfCompactionConfig> & {
+		mode: import("../../src/core/compaction/subsystem/session-integration.ts").HfCompactionConfig["mode"];
+	};
 }
 
 export interface Harness {
@@ -191,6 +195,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
+		hfCompaction: options.hfCompaction,
 	});
 
 	const events: AgentSessionEvent[] = [];

@@ -28,13 +28,11 @@ export { readStoredCredential } from "./core/auth-storage.ts";
 export {
 	type BranchPreparation,
 	type BranchSummaryResult,
-	type CacheFriendlySummaryOptions,
 	type CollectEntriesResult,
 	type CompactionResult,
 	type CutPointResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
-	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateTokens,
 	type FileOperations,
@@ -42,8 +40,6 @@ export {
 	findTurnStartIndex,
 	type GenerateBranchSummaryOptions,
 	generateBranchSummary,
-	generateSummary,
-	generateSummaryWithUsage,
 	getLastAssistantUsage,
 	prepareBranchEntries,
 	serializeConversation,
@@ -349,6 +345,7 @@ export {
 	type RpcSessionState,
 	runPrintMode,
 	runRpcMode,
+	type TuiEngine,
 } from "./modes/index.ts";
 // UI components for extensions
 export {

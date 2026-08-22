@@ -25,20 +25,14 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", async (event) => {
+					pi.on("session_before_compact", async () => {
 						markCompactionStarted();
 						await compactionReleased;
-						return {
-							compaction: {
-								summary: "manual compacted",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: event.preparation.tokensBefore,
-								details: {},
-							},
-						};
+						return undefined;
 					});
 				},
 			],
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
 		});
 		harnesses.push(harness);
 
@@ -52,7 +46,11 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 			fauxAssistantMessage("old assistant response", { timestamp: timestamp - 500 }),
 		);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		harness.setResponses([fauxAssistantMessage("probe response")]);
+		harness.setResponses([
+			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
+			fauxAssistantMessage("manual narrative"),
+			fauxAssistantMessage("probe response"), // unused: the probe prompt must be rejected
+		]);
 
 		const compactPromise = harness.session.compact();
 		await compactionStarted;

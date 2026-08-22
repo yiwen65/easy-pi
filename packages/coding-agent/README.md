@@ -271,13 +271,13 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 
 ### Compaction
 
-Long sessions can exhaust context windows. Compaction summarizes older messages while keeping recent ones.
+Long sessions can exhaust context windows. Compaction bounds the active context through a high-fidelity subsystem: raw history stays append-only, large tool results offload to content-addressed storage with exact recall, and validated typed snapshots replace verified state — never free-text summaries.
 
 **Manual:** `/compact` or `/compact <custom instructions>`
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+The full history remains append-only in the JSONL file; use `/tree` to revisit, and `recall_exact(ref)` restores offloaded content byte-exact. Extensions can observe or cancel compaction via `session_before_compact`; free-text custom summaries are deprecated. See [docs/compaction.md](docs/compaction.md) for internals.
 
 ---
 
