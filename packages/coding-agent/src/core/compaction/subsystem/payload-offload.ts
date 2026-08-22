@@ -109,6 +109,7 @@ export function classifyPayload(event: EventEnvelope, policy: OffloadPolicy, too
 		event.eventType === "approval" ||
 		event.eventType === "contract" ||
 		event.eventType === "ledger" ||
+		event.eventType === "task" ||
 		event.eventType === "compaction" ||
 		event.eventType === "state_change"
 	) {

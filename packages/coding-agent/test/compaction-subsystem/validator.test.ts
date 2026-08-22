@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildAtomicGroups, planSafeCut } from "../../src/core/compaction/subsystem/atomic-groups.ts";
 import { InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.ts";
 import { reduceEvents } from "../../src/core/compaction/subsystem/reducer.ts";
+import { TaskLedger } from "../../src/core/compaction/subsystem/task-ledger.ts";
 import type { StructuredSnapshot, TaskContract } from "../../src/core/compaction/subsystem/types.ts";
 import {
 	classifyRepairability,
@@ -141,6 +142,30 @@ describe("validateCandidate", () => {
 		const report = validateCandidate(baseContext());
 		expect(report.failures).toEqual([]);
 		expect(report.passed).toBe(true);
+	});
+
+	it("requires an exact stable task-ledger ref when a ledger is supplied", () => {
+		const ctx = baseContext();
+		const ledger = new TaskLedger({ sessionId: "s-1" });
+		ledger.createTask({ goal: "validate ledger refs" }, user, "ev-ledger");
+		ctx.ledger = ledger;
+		ctx.candidate.taskLedgerRef = {
+			ledgerVersion: 1,
+			focusTaskId: "T1",
+			focusContractVersion: 1,
+			taskRef: "task://T1/v1",
+		};
+		expect(validateCandidate(ctx).passed).toBe(true);
+
+		ctx.candidate.taskLedgerRef = { ...ctx.candidate.taskLedgerRef!, taskRef: "task://T1/v2" };
+		const wrong = validateCandidate(ctx);
+		expect(wrong.passed).toBe(false);
+		expect(
+			wrong.failures.some((failure) => failure.code === "task-ledger-ref" && failure.message.includes("taskRef")),
+		).toBe(true);
+
+		delete ctx.candidate.taskLedgerRef;
+		expect(validateCandidate(ctx).failures.some((failure) => failure.code === "task-ledger-ref")).toBe(true);
 	});
 
 	it("P0: detects a missing constraint (contract coverage)", () => {

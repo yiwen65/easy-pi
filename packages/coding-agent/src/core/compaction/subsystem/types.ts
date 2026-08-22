@@ -136,7 +136,8 @@ export type EventType =
 	| "error"
 	| "compaction"
 	| "contract"
-	| "ledger";
+	| "ledger"
+	| "task";
 
 export interface EventEnvelope {
 	eventId: string;
@@ -298,6 +299,17 @@ export interface StructuredSnapshot {
 	/** Snapshot versions this one derives from (oldest first). */
 	lineage: number[];
 	contractRef: { contractId: string; version: number };
+	/**
+	 * Task-ledger binding at the frozen boundary (G9): the snapshot references
+	 * the ledger state; it never duplicates the goal's authoritative text.
+	 */
+	taskLedgerRef?: {
+		ledgerVersion: number;
+		focusTaskId?: string;
+		focusContractVersion?: number;
+		/** Stable reference to the focused task contract version. */
+		taskRef?: string;
+	};
 	/** Snapshot copy of contract constraints at compaction time (for coverage checks). */
 	constraints: Constraint[];
 	facts: Fact[];

@@ -12,6 +12,7 @@
  */
 
 import { detectInjections } from "./injection-guard.ts";
+import type { VersionedTaskLedgerLike } from "./prompt-builder.ts";
 import type { DeterministicState } from "./reducer.ts";
 import type {
 	AtomicGroup,
@@ -25,6 +26,8 @@ import type {
 
 export interface ValidationContext {
 	contract: TaskContract;
+	/** Current task ledger used to verify the candidate's frozen ledger binding. */
+	ledger?: VersionedTaskLedgerLike;
 	candidate: StructuredSnapshot;
 	events: EventEnvelope[];
 	groups: AtomicGroup[];
@@ -96,6 +99,30 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 	}
 	if (ctx.candidate.schemaVersion !== 1) {
 		p0("schema", `unsupported snapshot schemaVersion ${ctx.candidate.schemaVersion}`);
+	}
+
+	// --- exact task-ledger binding ---
+	if (ctx.ledger) {
+		const focus = ctx.ledger.getFocusTask();
+		const expected = {
+			ledgerVersion: ctx.ledger.getLedgerVersion(),
+			focusTaskId: focus?.taskId,
+			focusContractVersion: focus?.version,
+			taskRef: focus ? `task://${focus.taskId}/v${focus.version}` : undefined,
+		};
+		const actual = ctx.candidate.taskLedgerRef;
+		if (!actual) {
+			p0("task-ledger-ref", "candidate is missing the required frozen task-ledger reference");
+		} else {
+			for (const field of ["ledgerVersion", "focusTaskId", "focusContractVersion", "taskRef"] as const) {
+				if (actual[field] !== expected[field]) {
+					p0(
+						"task-ledger-ref",
+						`task-ledger reference ${field} mismatch: expected ${String(expected[field])}, got ${String(actual[field])}`,
+					);
+				}
+			}
+		}
 	}
 
 	// --- contract coverage + contradiction ---
@@ -285,6 +312,7 @@ const NON_REPAIRABLE_CODES = new Set([
 	"injection",
 	"provenance",
 	"loop-atomicity",
+	"task-ledger-ref",
 ]);
 
 export function classifyRepairability(report: ValidatorReport): "repairable" | "not-repairable" {

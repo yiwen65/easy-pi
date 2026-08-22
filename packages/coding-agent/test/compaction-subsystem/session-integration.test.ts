@@ -100,12 +100,12 @@ describe("HfCompaction integration (structured_compaction)", () => {
 		const entries = h.sessionManager.getBranch();
 		expect(entries.filter((e) => e.type === "compaction")).toHaveLength(0);
 		expect(entries.filter((e) => e.type === "message").length).toBeGreaterThanOrEqual(3);
-		// The rebuilt context starts with the pinned contract zone containing the goal.
-		const first = h.session.messages[0];
-		if (first.role !== "user") throw new Error("expected pinned user message");
-		const text = typeof first.content === "string" ? first.content : "";
-		expect(text).toContain("Task Contract");
-		expect(text).toContain("analyze the build log");
+		// The fixed layer is injected dynamically on every provider request, so
+		// contract changes cannot leave a stale persisted duplicate.
+		const fixedLayer = host!.buildPinnedLedgerLayer();
+		expect(fixedLayer).toContain("Global Contract");
+		expect(fixedLayer).toContain("Current focus task T1");
+		expect(fixedLayer).toContain("analyze the build log");
 		// Session continues to work after subsystem compaction.
 		await h.session.prompt("continue");
 		await h.session.waitForIdle();

@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { InMemorySnapshotStore, type SnapshotStore } from "../../src/core/compaction/subsystem/snapshot-store.ts";
+import { appendFileSync, chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+	InMemorySnapshotStore,
+	JsonlSnapshotStore,
+	type SnapshotStore,
+} from "../../src/core/compaction/subsystem/snapshot-store.ts";
 import type { StructuredSnapshot } from "../../src/core/compaction/subsystem/types.ts";
 
 function makeSnapshot(
@@ -41,6 +48,11 @@ function makeSnapshot(
 	};
 }
 
+const tempDirs: string[] = [];
+afterEach(() => {
+	while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+});
+
 describe("InMemorySnapshotStore", () => {
 	let store: SnapshotStore;
 
@@ -55,6 +67,33 @@ describe("InMemorySnapshotStore", () => {
 		expect(store.getActive("s-1")?.snapshotVersion).toBe(1);
 	});
 
+	it("defensively isolates nested candidate and read values", () => {
+		store = new InMemorySnapshotStore();
+		const input = makeSnapshot("s-1", {
+			taskLedgerRef: { ledgerVersion: 1, focusTaskId: "T1", focusContractVersion: 1, taskRef: "task://T1/v1" },
+			facts: [
+				{
+					id: "f-1",
+					text: "trusted",
+					kind: "fact",
+					verified: true,
+					provenance: { sourceEventIds: ["e-1"], source: "event" },
+				},
+			],
+		});
+		const candidate = store.putCandidate(input);
+		input.facts[0].text = "mutated input";
+		candidate.facts[0].text = "mutated return";
+		candidate.taskLedgerRef!.taskRef = "task://forged/v9";
+		expect(store.getCandidate("s-1", 1)).toMatchObject({
+			facts: [{ text: "trusted" }],
+			taskLedgerRef: { taskRef: "task://T1/v1" },
+		});
+		const read = store.getCandidate("s-1", 1)!;
+		read.facts[0].text = "mutated read";
+		expect(store.getCandidate("s-1", 1)?.facts[0].text).toBe("trusted");
+	});
+
 	it("concurrent compaction: only one activation wins; loser stays an auditable candidate", () => {
 		store = new InMemorySnapshotStore();
 		const a = store.putCandidate(makeSnapshot("s-1"));
@@ -67,6 +106,27 @@ describe("InMemorySnapshotStore", () => {
 		// Loser candidate remains for audit, never activated.
 		expect(store.getCandidate("s-1", b.snapshotVersion)).toBeDefined();
 		expect(store.getActive("s-1")?.snapshotVersion).toBe(a.snapshotVersion);
+	});
+
+	it("runs the synchronous external-state assertion immediately before pointer mutation", () => {
+		store = new InMemorySnapshotStore();
+		const candidate = store.putCandidate(makeSnapshot("s-1"));
+		let asserted = false;
+		expect(() =>
+			store.activate("s-1", {
+				expectedActiveVersion: 0,
+				candidateVersion: candidate.snapshotVersion,
+				assertExternalState: () => {
+					asserted = true;
+					// The pointer has passed internal prechecks but has not moved yet.
+					expect(store.getActive("s-1")).toBeUndefined();
+					throw new Error("external ledger changed");
+				},
+			}),
+		).toThrow(/external ledger changed/);
+		expect(asserted).toBe(true);
+		expect(store.getActive("s-1")).toBeUndefined();
+		expect(store.getCandidate("s-1", candidate.snapshotVersion)).toBeDefined();
 	});
 
 	it("events appended after a candidate's boundary are never overwritten by that candidate", () => {
@@ -131,5 +191,34 @@ describe("InMemorySnapshotStore", () => {
 		const diff = store.diff("s-1", v1.snapshotVersion, v2.snapshotVersion);
 		expect(diff.changedFields).toContain("facts");
 		expect(diff.changedFields).not.toContain("contractRef");
+	});
+});
+
+describe("JsonlSnapshotStore failure semantics", () => {
+	it("rolls memory back when candidate or active-pointer persistence fails", () => {
+		const dir = mkdtempSync(join(tmpdir(), "snapshot-store-"));
+		tempDirs.push(dir);
+		const store = new JsonlSnapshotStore(dir);
+		const first = store.putCandidate(makeSnapshot("s-1"));
+		const file = join(dir, "snapshots.jsonl");
+		chmodSync(file, 0o400);
+		expect(() => store.putCandidate(makeSnapshot("s-1"))).toThrow();
+		expect(store.listVersions("s-1")).toHaveLength(1);
+		expect(() =>
+			store.activate("s-1", { expectedActiveVersion: 0, candidateVersion: first.snapshotVersion }),
+		).toThrow();
+		expect(store.getActive("s-1")).toBeUndefined();
+		chmodSync(file, 0o600);
+	});
+
+	it("never exposes a parsed prefix after a corrupt tail", () => {
+		const dir = mkdtempSync(join(tmpdir(), "snapshot-store-corrupt-"));
+		tempDirs.push(dir);
+		const store = new JsonlSnapshotStore(dir);
+		store.putCandidate(makeSnapshot("s-1"));
+		appendFileSync(join(dir, "snapshots.jsonl"), "{broken\n");
+		const reopened = new JsonlSnapshotStore(dir);
+		expect(() => reopened.listVersions("s-1")).toThrow();
+		expect(() => reopened.listVersions("s-1")).toThrow();
 	});
 });

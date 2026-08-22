@@ -18,6 +18,12 @@ export interface ActivateRequest {
 	candidateVersion: number;
 	/** Optional freshness guard: candidate must cover at least this event seq. */
 	minBaseEventSeq?: number;
+	/**
+	 * Synchronous final assertion for state owned outside this store. It runs
+	 * after all prechecks and immediately before the active pointer mutation.
+	 * Throwing aborts activation and leaves the current pointer unchanged.
+	 */
+	assertExternalState?: () => void;
 }
 
 export interface SnapshotDiff {
@@ -40,6 +46,18 @@ export interface SnapshotStore {
 interface SessionSnapshots {
 	versions: Map<number, StructuredSnapshot>;
 	activeVersion: number;
+}
+
+function deepFreeze<T>(value: T): T {
+	if (value && typeof value === "object" && !Object.isFrozen(value)) {
+		Object.freeze(value);
+		for (const nested of Object.values(value)) deepFreeze(nested);
+	}
+	return value;
+}
+
+function cloneSnapshot(snapshot: StructuredSnapshot): StructuredSnapshot {
+	return structuredClone(snapshot);
 }
 
 const SNAPSHOT_ARRAY_FIELDS: (keyof StructuredSnapshot)[] = [
@@ -68,16 +86,29 @@ export class InMemorySnapshotStore implements SnapshotStore {
 		return session;
 	}
 
+	protected removeCandidate(sessionId: string, version: number): void {
+		this.getSession(sessionId).versions.delete(version);
+	}
+
+	protected getActiveVersion(sessionId: string): number {
+		return this.getSession(sessionId).activeVersion;
+	}
+
+	protected restoreActiveVersion(sessionId: string, version: number): void {
+		this.getSession(sessionId).activeVersion = version;
+	}
+
 	putCandidate(snapshot: Omit<StructuredSnapshot, "snapshotVersion">): StructuredSnapshot {
 		const session = this.getSession(snapshot.sessionId);
 		const version = session.versions.size + 1;
-		const stored: StructuredSnapshot = Object.freeze({ ...snapshot, snapshotVersion: version }) as StructuredSnapshot;
+		const stored = deepFreeze(structuredClone({ ...snapshot, snapshotVersion: version })) as StructuredSnapshot;
 		session.versions.set(version, stored);
-		return stored;
+		return cloneSnapshot(stored);
 	}
 
 	getCandidate(sessionId: string, version: number): StructuredSnapshot | undefined {
-		return this.getSession(sessionId).versions.get(version);
+		const candidate = this.getSession(sessionId).versions.get(version);
+		return candidate ? cloneSnapshot(candidate) : undefined;
 	}
 
 	activate(sessionId: string, request: ActivateRequest): StructuredSnapshot {
@@ -96,22 +127,27 @@ export class InMemorySnapshotStore implements SnapshotStore {
 				`Stale candidate: base event seq ${candidate.baseEventSeq} < required ${request.minBaseEventSeq}; newer events would be overwritten`,
 			);
 		}
+		request.assertExternalState?.();
 		session.activeVersion = request.candidateVersion;
-		return candidate;
+		return cloneSnapshot(candidate);
 	}
 
 	getActive(sessionId: string): StructuredSnapshot | undefined {
 		const session = this.getSession(sessionId);
 		if (session.activeVersion === 0) return undefined;
-		return session.versions.get(session.activeVersion);
+		const active = session.versions.get(session.activeVersion);
+		return active ? cloneSnapshot(active) : undefined;
 	}
 
 	getVersion(sessionId: string, version: number): StructuredSnapshot | undefined {
-		return this.getSession(sessionId).versions.get(version);
+		const snapshot = this.getSession(sessionId).versions.get(version);
+		return snapshot ? cloneSnapshot(snapshot) : undefined;
 	}
 
 	listVersions(sessionId: string): StructuredSnapshot[] {
-		return [...this.getSession(sessionId).versions.values()].sort((a, b) => a.snapshotVersion - b.snapshotVersion);
+		return [...this.getSession(sessionId).versions.values()]
+			.sort((a, b) => a.snapshotVersion - b.snapshotVersion)
+			.map(cloneSnapshot);
 	}
 
 	rollback(sessionId: string, toVersion: number): StructuredSnapshot {
@@ -121,7 +157,7 @@ export class InMemorySnapshotStore implements SnapshotStore {
 			throw new Error(`Cannot rollback: snapshot version ${toVersion} does not exist`);
 		}
 		session.activeVersion = toVersion;
-		return target;
+		return cloneSnapshot(target);
 	}
 
 	diff(sessionId: string, fromVersion: number, toVersion: number): SnapshotDiff {
@@ -168,15 +204,17 @@ export class JsonlSnapshotStore extends InMemorySnapshotStore {
 
 	private ensureLoaded(): void {
 		if (this.loaded) return;
-		this.loaded = true;
-		if (!existsSync(this.filePath)) return;
-		const lines = readFileSync(this.filePath, "utf-8")
+		if (!existsSync(this.filePath)) {
+			this.loaded = true;
+			return;
+		}
+		const records = readFileSync(this.filePath, "utf-8")
 			.split("\n")
-			.filter((l) => l.trim().length > 0);
-		// Candidates are appended with incrementing versions, so replaying version
-		// records in file order reproduces the same numbering via putCandidate.
-		for (const line of lines) {
-			const record = JSON.parse(line) as SnapshotFileRecord;
+			.filter((line) => line.trim().length > 0)
+			.map((line) => JSON.parse(line) as SnapshotFileRecord);
+		// Parse the full file before exposing any prefix. A torn JSON tail keeps
+		// loaded=false and fails every subsequent read instead of failing open.
+		for (const record of records) {
 			if (record.kind === "version") {
 				const { snapshotVersion: _dropped, ...rest } = record.snapshot;
 				super.putCandidate(rest);
@@ -185,31 +223,49 @@ export class JsonlSnapshotStore extends InMemorySnapshotStore {
 				super.activate(record.sessionId, { expectedActiveVersion: current, candidateVersion: record.version });
 			}
 		}
+		this.loaded = true;
 	}
 
-	private appendRecord(record: SnapshotFileRecord): void {
+	protected appendRecord(record: SnapshotFileRecord): void {
 		appendFileSync(this.filePath, `${JSON.stringify(record)}\n`);
 	}
 
 	override putCandidate(snapshot: Omit<StructuredSnapshot, "snapshotVersion">): StructuredSnapshot {
 		this.ensureLoaded();
 		const stored = super.putCandidate(snapshot);
-		this.appendRecord({ kind: "version", sessionId: snapshot.sessionId, snapshot: stored });
-		return stored;
+		try {
+			this.appendRecord({ kind: "version", sessionId: snapshot.sessionId, snapshot: stored });
+			return stored;
+		} catch (error) {
+			this.removeCandidate(snapshot.sessionId, stored.snapshotVersion);
+			throw error;
+		}
 	}
 
 	override activate(sessionId: string, request: ActivateRequest): StructuredSnapshot {
 		this.ensureLoaded();
+		const previousVersion = this.getActiveVersion(sessionId);
 		const activated = super.activate(sessionId, request);
-		this.appendRecord({ kind: "active", sessionId, version: activated.snapshotVersion });
-		return activated;
+		try {
+			this.appendRecord({ kind: "active", sessionId, version: activated.snapshotVersion });
+			return activated;
+		} catch (error) {
+			this.restoreActiveVersion(sessionId, previousVersion);
+			throw error;
+		}
 	}
 
 	override rollback(sessionId: string, toVersion: number): StructuredSnapshot {
 		this.ensureLoaded();
+		const previousVersion = this.getActiveVersion(sessionId);
 		const restored = super.rollback(sessionId, toVersion);
-		this.appendRecord({ kind: "active", sessionId, version: toVersion });
-		return restored;
+		try {
+			this.appendRecord({ kind: "active", sessionId, version: toVersion });
+			return restored;
+		} catch (error) {
+			this.restoreActiveVersion(sessionId, previousVersion);
+			throw error;
+		}
 	}
 
 	override getActive(sessionId: string): StructuredSnapshot | undefined {

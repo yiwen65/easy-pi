@@ -65,6 +65,10 @@ function emptySessionEvents(): SessionEvents {
 	return { events: [], byId: new Map() };
 }
 
+function cloneEnvelope(envelope: EventEnvelope): EventEnvelope {
+	return structuredClone(envelope);
+}
+
 function appendToSession(session: SessionEvents, input: AppendEventInput): EventEnvelope {
 	const eventId = input.eventId ?? nextEventId();
 	if (session.byId.has(eventId)) {
@@ -78,13 +82,13 @@ function appendToSession(session: SessionEvents, input: AppendEventInput): Event
 		taskId: input.taskId,
 		eventType: input.eventType,
 		timestamp: input.timestamp ?? new Date().toISOString(),
-		causalParentIds: input.causalParentIds ?? [],
+		causalParentIds: [...(input.causalParentIds ?? [])],
 		toolCallId: input.toolCallId,
 		transactionId: input.transactionId,
 		payloadRef: input.payloadRef,
-		payload: input.payload,
+		payload: structuredClone(input.payload),
 		contentHash: input.payloadRef ? hashOfRefOrPayload(input) : hashPayload(input.payload ?? null),
-		authority: input.authority,
+		authority: { ...input.authority },
 		schemaVersion: COMPACTION_SCHEMA_VERSION,
 	};
 	return envelope;
@@ -123,7 +127,7 @@ export class InMemoryEventLog implements EventLog {
 		// Persist first: never report success for an event that was not durably written.
 		this.persist(envelope);
 		commitToSession(session, envelope);
-		return envelope;
+		return cloneEnvelope(envelope);
 	}
 
 	freeze(sessionId: string): EventBoundary {
@@ -133,11 +137,11 @@ export class InMemoryEventLog implements EventLog {
 
 	range(sessionId: string, fromSeq: number, toSeq: number): EventEnvelope[] {
 		const session = this.getSession(sessionId);
-		return session.events.filter((e) => e.seq >= fromSeq && e.seq <= toSeq);
+		return session.events.filter((e) => e.seq >= fromSeq && e.seq <= toSeq).map(cloneEnvelope);
 	}
 
 	all(sessionId: string): EventEnvelope[] {
-		return [...this.getSession(sessionId).events];
+		return this.getSession(sessionId).events.map(cloneEnvelope);
 	}
 
 	replay(sessionId: string): EventEnvelope[] {
@@ -147,7 +151,7 @@ export class InMemoryEventLog implements EventLog {
 	get(eventId: string): EventEnvelope | undefined {
 		for (const session of this.sessions.values()) {
 			const found = session.byId.get(eventId);
-			if (found) return found;
+			if (found) return cloneEnvelope(found);
 		}
 		return undefined;
 	}
@@ -174,16 +178,18 @@ export class JsonlEventLog extends InMemoryEventLog {
 
 	private ensureLoaded(sessionId: string): void {
 		if (this.loadedSessions.has(sessionId)) return;
-		this.loadedSessions.add(sessionId);
 		const path = this.filePath(sessionId);
-		if (!existsSync(path)) return;
-		const session = this.getSession(sessionId);
-		const lines = readFileSync(path, "utf-8")
+		if (!existsSync(path)) {
+			this.loadedSessions.add(sessionId);
+			return;
+		}
+		const envelopes = readFileSync(path, "utf-8")
 			.split("\n")
-			.filter((l) => l.trim().length > 0);
+			.filter((line) => line.trim().length > 0)
+			.map((line) => JSON.parse(line) as EventEnvelope);
+		const session = emptySessionEvents();
 		let expectedSeq = 1;
-		for (const line of lines) {
-			const envelope = JSON.parse(line) as EventEnvelope;
+		for (const envelope of envelopes) {
 			if (envelope.seq !== expectedSeq) {
 				throw new Error(
 					`Event log seq violation in ${path}: expected seq ${expectedSeq}, got ${envelope.seq} (event ${envelope.eventId}). Refusing to load out-of-order/duplicate/lossy log.`,
@@ -196,6 +202,8 @@ export class JsonlEventLog extends InMemoryEventLog {
 			session.byId.set(envelope.eventId, envelope);
 			expectedSeq += 1;
 		}
+		this.sessions.set(sessionId, session);
+		this.loadedSessions.add(sessionId);
 	}
 
 	protected override getSession(sessionId: string): SessionEvents {
@@ -255,6 +263,23 @@ export function appendWithOffload(log: EventLog, input: AppendEventInput, option
 // ============================================================================
 // SessionManager v3 adapter (read-only projection; SessionManager stays truth)
 // ============================================================================
+
+function projectedMessageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter(
+			(block): block is { type: "text"; text: string } =>
+				block !== null &&
+				typeof block === "object" &&
+				"type" in block &&
+				block.type === "text" &&
+				"text" in block &&
+				typeof block.text === "string",
+		)
+		.map((block) => block.text)
+		.join("\n");
+}
 
 /**
  * Project v3 session entries into event inputs. Lossless: the original entry
@@ -323,12 +348,13 @@ export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: strin
 				// user / bashExecution / custom and other roles: keep a slim text
 				// projection only when the role actually carries string content.
 				const content = (message as { content?: unknown }).content;
-				const text = typeof content === "string" ? content : "";
+				const text = projectedMessageText(content);
 				log.append({
 					...base,
 					eventId: entry.id,
 					eventType: "message",
 					payload: { entryId: entry.id, role: message.role, text },
+					authority: message.role === "user" ? { kind: "user", id: "local-user", verified: true } : base.authority,
 				});
 			}
 		} else if (entry.type === "compaction") {

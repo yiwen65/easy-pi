@@ -87,6 +87,32 @@ function logSuite(name: string, makeLog: (dir?: string) => EventLog) {
 			const e = log.append(input({ eventId: "e-1", payload: { n: 42 } }));
 			expect(e.contentHash).toMatch(/^[0-9a-f]{64}$/);
 		});
+
+		it("does not expose mutable event, payload, causal-parent, or authority references", () => {
+			const log = makeLog();
+			const mutableAuthority = { kind: "user" as const, id: "user-1", verified: true };
+			const mutablePayload = { text: "trusted" };
+			const mutableParents = ["parent-1"];
+			const appended = log.append(
+				input({
+					eventId: "immutable-1",
+					payload: mutablePayload,
+					causalParentIds: mutableParents,
+					authority: mutableAuthority,
+				}),
+			);
+			mutablePayload.text = "forged input";
+			mutableParents.push("forged-parent");
+			mutableAuthority.verified = false;
+			(appended.payload as { text: string }).text = "forged return";
+			appended.authority.verified = false;
+			const read = log.all("s-1")[0];
+			expect(read.payload).toEqual({ text: "trusted" });
+			expect(read.causalParentIds).toEqual(["parent-1"]);
+			expect(read.authority).toEqual({ kind: "user", id: "user-1", verified: true });
+			(read.payload as { text: string }).text = "forged read";
+			expect(log.get("immutable-1")?.payload).toEqual({ text: "trusted" });
+		});
 	});
 }
 
@@ -122,7 +148,9 @@ describe("JsonlEventLog", () => {
 		const filePath = join(dir, "s-1.jsonl");
 		const forged = { ...log.all("s-1")[0], eventId: "e-forged" };
 		appendFileSync(filePath, `${JSON.stringify(forged)}\n`);
-		expect(() => new JsonlEventLog(dir).all("s-1")).toThrow(/seq|order|duplicate/i);
+		const reopened = new JsonlEventLog(dir);
+		expect(() => reopened.all("s-1")).toThrow(/seq|order|duplicate/i);
+		expect(() => reopened.all("s-1")).toThrow(/seq|order|duplicate/i);
 	});
 });
 
@@ -174,7 +202,7 @@ describe("sessionEntriesToEvents adapter", () => {
 				id: "m-1",
 				parentId: null,
 				timestamp: "2026-08-22T00:00:00.000Z",
-				message: { role: "user", content: "do the thing", timestamp: 1 },
+				message: { role: "user", content: [{ type: "text", text: "do the thing" }], timestamp: 1 },
 			},
 			{
 				type: "message",
@@ -225,6 +253,8 @@ describe("sessionEntriesToEvents adapter", () => {
 		const events = sessionEntriesToEvents(entries, "s-1", "agent-1");
 		expect(events.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
 		expect(events[0].eventType).toBe("message");
+		expect(events[0].authority).toEqual({ kind: "user", id: "local-user", verified: true });
+		expect(events[0].payload).toMatchObject({ text: "do the thing" });
 		expect(events[1].eventType).toBe("tool_call");
 		expect(events[1].toolCallId).toBe("tc-1");
 		expect(events[2].eventType).toBe("tool_result");

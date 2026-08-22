@@ -4,7 +4,9 @@ import {
 	buildFocusView,
 	buildPassthroughPrompt,
 	buildPrompt,
+	type VersionedTaskLedgerLike,
 } from "../../src/core/compaction/subsystem/prompt-builder.ts";
+import type { LedgerTask } from "../../src/core/compaction/subsystem/task-ledger.ts";
 import type { StructuredSnapshot, TaskContract } from "../../src/core/compaction/subsystem/types.ts";
 
 const user = { kind: "user" as const, id: "user-1", verified: true };
@@ -96,6 +98,63 @@ const snapshot: StructuredSnapshot = {
 	schemaVersion: 1,
 };
 
+function taskLedger(): VersionedTaskLedgerLike {
+	const common = {
+		status: "active" as const,
+		createdAt: "2026-08-22T00:00:00Z",
+		updatedAt: "2026-08-22T00:00:00Z",
+	};
+	const focus: LedgerTask = {
+		...common,
+		taskId: "T-403",
+		version: 7,
+		goal: {
+			normalized: "Keep the focused task contract pinned",
+			verbatimSourceEventIds: ["ev-goal"],
+			scope: ["prompt"],
+			exclusions: ["TUI"],
+		},
+		acceptanceCriteria: ["token accounting includes the ledger"],
+		constraints: [{ id: "tc-1", kind: "negative", text: "Do not edit the TUI", authority: user }],
+		permissions: { allow: ["read", "edit"], deny: ["delete"], approvalRequired: ["network"] },
+		budgets: { maxTokens: 12000, maxToolCalls: 20, maxDurationMs: 60000 },
+		outputContract: "Return changed files and checks",
+		relations: { parentTaskId: "T-400", dependsOn: ["T-402"], supersedes: "T-399" },
+		provenance: { createdBy: user, createdFromEvent: "ev-create", updatedFromEvents: ["ev-update"] },
+		blockers: ["waiting for review"],
+	};
+	const other: LedgerTask = {
+		...common,
+		taskId: "T-404",
+		version: 2,
+		status: "background",
+		goal: { normalized: "Follow-up work", verbatimSourceEventIds: ["ev-other"] },
+		acceptanceCriteria: ["not copied into the focus contract"],
+		constraints: [{ id: "tc-2", kind: "positive", text: "Preserve compatibility", authority: user }],
+		permissions: { allow: ["read"], deny: [], approvalRequired: [] },
+		budgets: {},
+		outputContract: "This non-focus output contract must not be copied",
+		relations: { dependsOn: [] },
+		provenance: { createdBy: user, createdFromEvent: "ev-other", updatedFromEvents: ["ev-other"] },
+		blockers: [],
+	};
+	return {
+		getFocusTask: () => focus,
+		getFocusTaskId: () => focus.taskId,
+		getLedgerVersion: () => 11,
+		getTask: (taskId) => (taskId === focus.taskId ? focus : taskId === other.taskId ? other : undefined),
+		nonTerminalIndex: () =>
+			[focus, other].map((task) => ({
+				taskId: task.taskId,
+				status: task.status,
+				goal: task.goal.normalized,
+				blockers: task.blockers,
+				version: task.version,
+			})),
+		getPendingGoalChanges: () => [],
+	};
+}
+
 function tailEvents() {
 	const log = new InMemoryEventLog();
 	log.append({
@@ -147,6 +206,41 @@ describe("buildPrompt", () => {
 			expect(contractZone.text).toContain(c.text);
 		}
 		expect(contractZone.text).toContain("version 3");
+	});
+
+	it("pins the complete focus contract, global budgets, and only cross-task constraints", () => {
+		const built = buildPrompt({
+			systemPrompt: "S",
+			contract,
+			ledger: taskLedger(),
+			tailEvents: [],
+			currentInput: "go",
+			exactRecall: [],
+			estimateTextTokens: (text) => text.length,
+		});
+		const section = built.sections.find((candidate) => candidate.zone === "contract")!;
+		for (const expected of [
+			"max tokens: 50000",
+			"task://T-403/v7",
+			"Keep the focused task contract pinned",
+			"token accounting includes the ledger",
+			"Do not edit the TUI",
+			"allow: read, edit",
+			"max tool calls: 20",
+			"Return changed files and checks",
+			"waiting for review",
+			"parent: T-400",
+			"depends on: T-402",
+			"supersedes: T-399",
+			"ev-goal",
+			"Preserve compatibility",
+		]) {
+			expect(section.text).toContain(expected);
+		}
+		expect(section.text).not.toContain("This non-focus output contract must not be copied");
+		// The ledger projection is the contract zone, so its full text is counted.
+		expect(section.tokens).toBe(section.text.length);
+		expect(built.tokenStats.contract).toBe(section.text.length);
 	});
 
 	it("recent tail is verbatim event content in seq order", () => {

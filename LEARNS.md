@@ -17,6 +17,22 @@
 - Prevention: 给任何调用 `truncateToWidth`/`visibleWidth` 的组件写带样式断言时，先确认包装符的 `visibleWidth` 为 0。
 - Verified by: 2026-08-22 Grok stats bar 任务，`markerTheme` 从可见标记改为 ANSI 后 `grok-shell-components.test.ts` 19/19 通过。
 
+## AgentSession 固定层接线——不要把常驻 contract 注入成普通 user message
+
+- Wrong approach: 在 `transformContext` 中把完整 Task Ledger 固定层作为首条 user message 注入每次 provider 请求。
+- Why it failed: 它改变了用户消息序列与批处理语义，导致 image/template/extension/queue 断言错位，并让 provider 把固定层当成普通对话；全套件出现 14 个相关回归。
+- Correct approach: 稳定固定层写入下一请求的 system prompt；只有同轮刚产生、来不及进入 context snapshot 的 pending warning 才在 transform 阶段临时追加，且不持久化。
+- Prevention: 修改 provider context 分层后，除 compaction 测试外必须目标跑 prompt、extension、queue、concurrent/retry 套件。
+- Verified by: 2026-08-23 Task Ledger/TUI 接线；改为 system + pending-only transform 后相关回归文件 61/61 通过，coding-agent 整套仅剩无关 watcher flaky。
+
+## 多种内部 LLM 调用共用 faux stream——为 Goal Interpreter 单独注入 CompleteFn
+
+- Wrong approach: Goal Interpreter 与主 agent/compactor 共用测试 faux provider 的顺序响应队列。
+- Why it failed: 每条用户消息新增一次内部调用，消费原本属于 assistant/compaction 的下一条响应，表现为自动压缩不触发、queued response 丢失和 call-count 偏移。
+- Correct approach: `HfCompactionConfig.goalComplete` 独立注入；生产未配置时仍回退真实 compactor adapter，通用测试 harness 默认注入确定性 noop，只有目标测试显式提供 proposal。
+- Prevention: 新增任何内部模型调用时，先审计 faux response queue；不要静默复用主 agent 的测试序列。
+- Verified by: 2026-08-23 default-on/queued/retry 回归修复，目标 compaction + AgentSession 312 passed / 6 skipped。
+
 ## 高保真 compaction——真实模型评测暴露的两类 schema 与断言陷阱
 
 - What happened: 用真实模型（kimi-coding K3）跑 T-105 评测时，(1) 抽取器因 K3 给 nextActions 项多加了 `kind` 键而整体拒绝（item 级 additionalProperties:false 过严）；(2) 评测最初报告 100% 保留率，但实际压缩从未激活（tokens 0/0 暴露了假阳性）。

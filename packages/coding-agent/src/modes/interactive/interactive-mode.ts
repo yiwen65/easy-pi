@@ -3127,6 +3127,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/contract" || text.startsWith("/contract ")) {
+				this.handleContractCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -6272,6 +6277,216 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private handleContractCommand(text: string): void {
+		const args = text.slice("/contract".length).trim();
+		if (!args) {
+			this.showTaskContract();
+			return;
+		}
+
+		const separator = args.search(/\s/);
+		const action = separator === -1 ? args : args.slice(0, separator);
+		const remainder = separator === -1 ? "" : args.slice(separator).trim();
+
+		if (action === "pending" && !remainder) {
+			this.showPendingGoalChanges();
+			return;
+		}
+
+		if (action === "set") {
+			if (!remainder) {
+				this.showError("Usage: /contract set <goal>");
+				return;
+			}
+			if (!this.canMutateTaskContract()) return;
+			try {
+				const task = this.session.setCurrentTaskGoal(remainder);
+				this.showStatus(`Focus task ${task.taskId} updated to v${task.version}`);
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		if (action === "confirm" && !remainder) {
+			if (!this.canMutateTaskContract()) return;
+			try {
+				this.session.confirmDerivedGoal();
+				this.showStatus("Derived goal confirmed");
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		if (action === "accept") {
+			const commandArgs = remainder ? remainder.split(/\s+/) : [];
+			if (commandArgs.length < 1 || commandArgs.length > 2) {
+				this.showError("Usage: /contract accept <number-or-P-id> [task-id]");
+				return;
+			}
+			if (!this.canMutateTaskContract()) return;
+			try {
+				const pendingChangeId = this.resolvePendingGoalChangeSelector(commandArgs[0]!);
+				const candidateTaskId = commandArgs[1];
+				if (candidateTaskId) {
+					this.session.acceptPendingGoalChange(pendingChangeId, candidateTaskId);
+				} else {
+					this.session.acceptPendingGoalChange(pendingChangeId);
+				}
+				this.showStatus(`Accepted pending goal change ${pendingChangeId}`);
+			} catch (error) {
+				// In particular, preserve the ledger's ambiguity error when no candidate was supplied.
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		if (action === "reject") {
+			const commandArgs = remainder ? remainder.split(/\s+/) : [];
+			if (commandArgs.length !== 1) {
+				this.showError("Usage: /contract reject <number-or-P-id>");
+				return;
+			}
+			if (!this.canMutateTaskContract()) return;
+			try {
+				const pendingChangeId = this.resolvePendingGoalChangeSelector(commandArgs[0]!);
+				this.session.rejectPendingGoalChange(pendingChangeId);
+				this.showStatus(`Rejected pending goal change ${pendingChangeId}`);
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+			return;
+		}
+
+		this.showError(
+			"Usage: /contract [set <goal>|confirm|pending|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
+		);
+	}
+
+	private canMutateTaskContract(): boolean {
+		if (this.session.isCompacting) {
+			this.showWarning("Wait for compaction to finish before changing the task contract.");
+			return false;
+		}
+		if (!this.session.isIdle) {
+			this.showWarning("Wait for the current response to finish before changing the task contract.");
+			return false;
+		}
+		return true;
+	}
+
+	private resolvePendingGoalChangeSelector(selector: string): string {
+		if (/^P\d+$/.test(selector)) return selector;
+		if (!/^\d+$/.test(selector)) {
+			throw new Error(`Invalid pending goal change selector ${selector}`);
+		}
+
+		const position = Number(selector);
+		const pending = this.session.getTaskLedgerState().pending[position - 1];
+		if (!Number.isSafeInteger(position) || position < 1 || !pending) {
+			throw new Error(`No pending goal change at position ${selector}`);
+		}
+		return pending.pendingChangeId;
+	}
+
+	private formatPendingGoalChanges(pending: ReturnType<AgentSession["getTaskLedgerState"]>["pending"]): string[] {
+		if (pending.length === 0) return [theme.fg("dim", "None")];
+		return pending.flatMap((change, index) => {
+			const ambiguity = change.ambiguous ? " [ambiguous]" : "";
+			const candidates = change.candidateTaskIds.length > 0 ? change.candidateTaskIds.join(", ") : "None";
+			const operations =
+				change.operations.length > 0
+					? change.operations
+							.map((operation) => {
+								const taskId = operation.taskId ?? operation.parentTaskId;
+								return taskId ? `${operation.operation} ${taskId}` : operation.operation;
+							})
+							.join(", ")
+					: "None";
+			return [
+				`${index + 1}. ${change.pendingChangeId}${ambiguity}: ${change.reason}`,
+				theme.fg("dim", `   Candidates: ${candidates}`),
+				theme.fg("dim", `   Operations: ${operations}`),
+			];
+		});
+	}
+
+	private showPendingGoalChanges(): void {
+		try {
+			const { pending } = this.session.getTaskLedgerState();
+			const lines = [theme.bold("Pending Goal Changes"), ...this.formatPendingGoalChanges(pending)];
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private showTaskContract(): void {
+		try {
+			const contract = this.session.getTaskContract();
+			const ledger = this.session.getTaskLedgerState();
+			const lines = [theme.bold("Task Contract")];
+
+			if (!contract) {
+				lines.push(`${theme.fg("dim", "Authoritative contract:")} None`);
+				lines.push(`${theme.fg("dim", "Derived goal:")} None`);
+			} else {
+				lines.push(`${theme.fg("dim", "ID:")} ${contract.contractId}`);
+				lines.push(`${theme.fg("dim", "Contract version:")} ${contract.version}`);
+				lines.push(`${theme.fg("dim", "Global contract goal (legacy, non-authoritative):")} ${contract.goal}`);
+				lines.push(`${theme.fg("dim", "Derived goal:")} ${contract.derivedGoal?.text ?? "None"}`);
+				lines.push(`${theme.fg("dim", "Acceptance criteria:")} ${contract.acceptanceCriteria.length}`);
+				for (const criterion of contract.acceptanceCriteria) lines.push(`  - ${criterion}`);
+				lines.push(`${theme.fg("dim", "Constraints:")} ${contract.constraints.length}`);
+				for (const constraint of contract.constraints) {
+					lines.push(`  - [${constraint.kind}] ${constraint.text}`);
+				}
+				lines.push(
+					`${theme.fg("dim", "Permissions:")} allow=${contract.permissions.allow.join(", ") || "None"}; deny=${contract.permissions.deny.join(", ") || "None"}; approval=${contract.permissions.approvalRequired.join(", ") || "None"}`,
+				);
+				const budgets = Object.entries(contract.budgets)
+					.map(([name, value]) => `${name}=${value}`)
+					.join(", ");
+				lines.push(`${theme.fg("dim", "Budgets:")} ${budgets || "None"}`);
+				lines.push(`${theme.fg("dim", "Output contract:")} ${contract.outputContract ?? "None"}`);
+			}
+
+			const openTasks = ledger.tasks.filter(
+				(task) => !["completed", "cancelled", "superseded"].includes(task.status),
+			);
+			const focusTask = ledger.tasks.find((task) => task.taskId === ledger.focusTaskId);
+			lines.push("");
+			lines.push(theme.bold("Task Ledger"));
+			lines.push(`${theme.fg("dim", "Ledger version:")} ${ledger.ledgerVersion}`);
+			lines.push(
+				`${theme.fg("dim", "Focus task:")} ${
+					focusTask
+						? `${focusTask.taskId} [${focusTask.status}] ${focusTask.goal.normalized}`
+						: (ledger.focusTaskId ?? "None")
+				}`,
+			);
+			lines.push(theme.fg("dim", "Open tasks:"));
+			if (openTasks.length === 0) {
+				lines.push("  None");
+			} else {
+				for (const task of openTasks) {
+					lines.push(`  - ${task.taskId} [${task.status}] ${task.goal.normalized}`);
+				}
+			}
+			lines.push(theme.fg("dim", "Pending goal changes:"));
+			lines.push(...this.formatPendingGoalChanges(ledger.pending).map((line) => `  ${line}`));
+
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private handleChangelogCommand(): void {

@@ -13,6 +13,22 @@
 
 import type { EventEnvelope, StructuredSnapshot, TaskContract, TokenStats } from "./types.ts";
 
+/** Structural view of the task ledger used by the pinned layer renderer. */
+export interface TaskLedgerLike {
+	getFocusTask(): import("./task-ledger.ts").LedgerTask | undefined;
+	/** Optional for backwards-compatible renderers; enables cross-task constraints. */
+	getTask?(taskId: string): import("./task-ledger.ts").LedgerTask | undefined;
+	nonTerminalIndex(): { taskId: string; status: string; goal: string; blockers: string[]; version: number }[];
+	getPendingGoalChanges(): { candidateTaskIds: string[]; reason: string; sourceEventId: string }[];
+}
+
+/** Ledger surface needed when binding and validating a frozen snapshot ref. */
+export interface VersionedTaskLedgerLike extends TaskLedgerLike {
+	getFocusTaskId(): string | undefined;
+	getLedgerVersion(): number;
+	getTask(taskId: string): import("./task-ledger.ts").LedgerTask | undefined;
+}
+
 export type ZoneKind =
 	| "contract"
 	| "snapshot"
@@ -36,7 +52,9 @@ export interface BuiltPrompt {
 
 export interface PromptBuilderInput {
 	systemPrompt: string;
+	/** Global contract. When a ledger is supplied it is rendered with the live focused task layer. */
 	contract?: TaskContract;
+	ledger?: TaskLedgerLike;
 	snapshot?: StructuredSnapshot;
 	/** Overrides snapshot.narrative when provided. */
 	narrative?: string;
@@ -93,10 +111,104 @@ function eventText(event: EventEnvelope): string {
 	return "";
 }
 
-function renderContract(contract: TaskContract): string {
+/**
+ * Layered pinned injection (design correction 2026-08-22): global contract +
+ * current focus task contract in full + non-terminal task index + pending
+ * goal changes. What is pinned is the RE-INJECTION MECHANISM and its
+ * authority, not frozen content.
+ */
+export function renderPinnedLedgerLayer(ledger: TaskLedgerLike, globalContract?: TaskContract): string {
+	const parts: string[] = [];
+	if (globalContract) {
+		parts.push(renderContract(globalContract, true));
+	}
+	const focus = ledger.getFocusTask();
+	if (focus) {
+		const sourceRefs = new Set([
+			...focus.goal.verbatimSourceEventIds,
+			focus.provenance.createdFromEvent,
+			...focus.provenance.updatedFromEvents,
+		]);
+		const lines = [
+			`# Current focus task ${focus.taskId} (contract v${focus.version}, status ${focus.status})`,
+			`Task ref: task://${focus.taskId}/v${focus.version}`,
+			`Goal: ${focus.goal.normalized}`,
+			`Goal scope: ${focus.goal.scope?.join(", ") || "(none)"}`,
+			`Goal exclusions: ${focus.goal.exclusions?.join(", ") || "(none)"}`,
+			"## Acceptance criteria",
+			...(focus.acceptanceCriteria.length > 0 ? focus.acceptanceCriteria.map((c) => `- ${c}`) : ["- (none)"]),
+			"## Task constraints",
+			...(focus.constraints.length > 0 ? focus.constraints.map((c) => `- [${c.kind}] ${c.text}`) : ["- (none)"]),
+			"## Task permissions",
+			`- allow: ${focus.permissions.allow.join(", ") || "(none)"}`,
+			`- deny: ${focus.permissions.deny.join(", ") || "(none)"}`,
+			`- approval required: ${focus.permissions.approvalRequired.join(", ") || "(none)"}`,
+			"## Task budgets",
+			...renderBudgetLines(focus.budgets),
+			"## Output contract",
+			focus.outputContract ?? "(none)",
+			"## Blockers",
+			...(focus.blockers.length > 0 ? focus.blockers.map((b) => `- ${b}`) : ["- (none)"]),
+			"## Relations",
+			`- parent: ${focus.relations.parentTaskId ?? "(none)"}`,
+			`- depends on: ${focus.relations.dependsOn.join(", ") || "(none)"}`,
+			`- supersedes: ${focus.relations.supersedes ?? "(none)"}`,
+			"## Provenance",
+			`- created by: ${focus.provenance.createdBy.kind}:${focus.provenance.createdBy.id} (verified=${focus.provenance.createdBy.verified})`,
+			`- created at: ${focus.createdAt}`,
+			`- updated at: ${focus.updatedAt}`,
+			`- events: ${[...sourceRefs].filter(Boolean).join(", ") || "(none)"}`,
+		];
+		parts.push(lines.join("\n"));
+	}
+	const index = ledger.nonTerminalIndex().filter((t) => t.taskId !== focus?.taskId);
+	if (index.length > 0) {
+		const crossTaskConstraints = index.flatMap((entry) => {
+			const task = ledger.getTask?.(entry.taskId);
+			return (task?.constraints ?? []).map(
+				(constraint) => `- ${entry.taskId}: [${constraint.kind}] ${constraint.text}`,
+			);
+		});
+		if (crossTaskConstraints.length > 0) {
+			parts.push(["# Cross-task constraints from other open tasks", ...crossTaskConstraints].join("\n"));
+		}
+		parts.push(
+			[
+				"# Other open tasks (index only — recall for details)",
+				...index.map(
+					(t) =>
+						`- ${t.taskId} [${t.status}] v${t.version}: ${t.goal}${t.blockers.length ? ` (blockers: ${t.blockers.join("; ")})` : ""}`,
+				),
+			].join("\n"),
+		);
+	}
+	const pending = ledger.getPendingGoalChanges();
+	if (pending.length > 0) {
+		parts.push(
+			[
+				"# Pending goal changes (unconfirmed — do not act on them)",
+				...pending.map(
+					(p) =>
+						`- ${p.reason} (candidates: ${p.candidateTaskIds.join(", ") || "none"}; source ${p.sourceEventId})`,
+				),
+			].join("\n"),
+		);
+	}
+	return parts.join("\n\n");
+}
+
+function renderBudgetLines(budgets: TaskContract["budgets"]): string[] {
+	return [
+		`- max tokens: ${budgets.maxTokens ?? "(none)"}`,
+		`- max tool calls: ${budgets.maxToolCalls ?? "(none)"}`,
+		`- max duration ms: ${budgets.maxDurationMs ?? "(none)"}`,
+	];
+}
+
+function renderContract(contract: TaskContract, global = false): string {
 	const lines = [
-		`# Task Contract (version ${contract.version}, id ${contract.contractId})`,
-		`Goal: ${contract.goal}`,
+		`# ${global ? "Global Contract" : "Task Contract"} (version ${contract.version}, id ${contract.contractId})`,
+		global ? `Legacy session goal (non-authoritative): ${contract.goal}` : `Goal: ${contract.goal}`,
 		...(contract.derivedGoal ? [`Working goal (auto-derived, unconfirmed): ${contract.derivedGoal.text}`] : []),
 		"",
 		"## Acceptance criteria",
@@ -109,6 +221,9 @@ function renderContract(contract: TaskContract): string {
 		`- allow: ${contract.permissions.allow.join(", ") || "(none)"}`,
 		`- deny: ${contract.permissions.deny.join(", ") || "(none)"}`,
 		`- approval required: ${contract.permissions.approvalRequired.join(", ") || "(none)"}`,
+		"",
+		"## Budgets",
+		...renderBudgetLines(contract.budgets),
 	];
 	if (contract.outputContract) {
 		lines.push("", `## Output contract`, contract.outputContract);
@@ -188,7 +303,10 @@ export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 	};
 
 	// Frozen order: contract → snapshot → narrative → recall guide → tail → input → recall.
-	if (input.contract) push("contract", renderContract(input.contract));
+	// With a task ledger, the contract zone is the live pinned projection so its
+	// full token cost participates in both runtime projection and accounting.
+	if (input.ledger) push("contract", renderPinnedLedgerLayer(input.ledger, input.contract));
+	else if (input.contract) push("contract", renderContract(input.contract));
 	if (input.snapshot) push("snapshot", renderSnapshot(input.snapshot));
 	const narrative = input.narrative ?? input.snapshot?.narrative;
 	if (narrative) push("narrative", `# Progress so far\n${narrative}`);
