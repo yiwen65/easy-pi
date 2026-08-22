@@ -77,6 +77,19 @@ export interface HfCompactionConfig {
 /** Local CLI user is the verified principal for contract creation. */
 const LOCAL_USER = { kind: "user", id: "local-user", verified: true } as const;
 
+/** Truncate a derived goal at a sentence/clause boundary, never mid-word. */
+function truncateGoalText(text: string, max: number): string {
+	if (text.length <= max) return text;
+	const head = text.slice(0, max);
+	const lastStop = Math.max(
+		head.lastIndexOf(". "),
+		head.lastIndexOf("。"),
+		head.lastIndexOf("; "),
+		head.lastIndexOf(", "),
+	);
+	return lastStop > 40 ? head.slice(0, lastStop + 1) : `${head.trimEnd()}…`;
+}
+
 const RECALL_GUIDE_TEXT =
 	"Content moved out of the active context can be recalled exactly with recall_exact(refId). Stable refs are listed in the snapshot.";
 
@@ -306,24 +319,32 @@ export class HfCompactionHost {
 		}
 	}
 
-	/** Seed the contract from the first user message in the branch (local user is the verified principal). */
+	/**
+	 * Seed the contract when none exists. The goal is the CURRENT task: the
+	 * latest substantive user message in the branch (slash commands and trivial
+	 * acks are skipped). An explicitly set contract always wins — auto-derivation
+	 * only ever runs once, at the first compaction that needs a contract.
+	 */
 	private ensureContractFromEntries(entries: SessionEntry[]): void {
 		if (this.contractReady) return;
 		if (this.contractStore.getActive(this.sessionId)) {
 			this.contractReady = true;
 			return;
 		}
-		let goal = "(session work)";
+		let goal: string | undefined;
 		for (const entry of entries) {
-			if (entry.type === "message" && entry.message.role === "user") {
-				goal = contentText(entry.message.content, "").slice(0, 200) || goal;
-				break;
-			}
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			const text = contentText(entry.message.content, "");
+			const trimmed = text.replace(/\s+/g, " ").trim();
+			// Skip slash commands (/mode, /compact …) and trivial acknowledgements.
+			if (trimmed.startsWith("/") || trimmed.length < 8) continue;
+			goal = trimmed;
 		}
+		const derived = goal ? truncateGoalText(goal, 200) : "(no explicit goal captured)";
 		this.contractStore.create({
 			contractId: `contract-${this.sessionId}`,
 			sessionId: this.sessionId,
-			goal: goal || "(no goal captured)",
+			goal: derived,
 			acceptanceCriteria: [],
 			constraints: [],
 			permissions: { allow: [], deny: [], approvalRequired: [] },
