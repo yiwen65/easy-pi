@@ -58,9 +58,9 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	estimateContextTokens,
+	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
-	shouldCompact,
 } from "./compaction/index.ts";
 import { createRecallExactToolDefinition } from "./compaction/subsystem/recall-tool.ts";
 import {
@@ -69,6 +69,7 @@ import {
 	type HfCompactionConfig,
 	HfCompactionHost,
 } from "./compaction/subsystem/session-integration.ts";
+import type { TriggerDecision } from "./compaction/subsystem/trigger.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -302,6 +303,19 @@ interface ToolDefinitionEntry {
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
+/** Rough token estimate of the tool definitions sent with each provider request. */
+function estimateActiveToolsTokens(
+	tools: readonly { name: string; description: string; parameters: unknown }[],
+): number {
+	let total = 0;
+	for (const tool of tools) {
+		total += Math.ceil(
+			JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }).length / 4,
+		);
+	}
+	return total;
+}
+
 const GOAL_CHANGE_PATTERN =
 	/\b(?:add|allow|also|budget|cancel|change|complete|constraint|deny|document|finish|focus|goal|improve|instead|new task|permission|rather|refine|replace|require|resume|stop|suspend|task|too|update)\b|do that|that one|另外|再做|改成|修改|取消|停止|暂停|恢复|完成|预算|权限|先做|继续完善|要求|必须|目标|任务|验收|约束/i;
 
@@ -417,8 +431,9 @@ export class AgentSession {
 			const stateDir = sessionFile ? join(dirname(sessionFile), "hf", this.sessionId) : undefined;
 			this._hfHost = new HfCompactionHost({
 				sessionId: this.sessionId,
-				getSystemPrompt: () => this.systemPrompt,
+				getSystemPrompt: () => this._systemPromptOverride ?? this._baseSystemPrompt,
 				config: { ...config.hfCompaction, stateDir: config.hfCompaction?.stateDir ?? stateDir, mode: hfMode },
+				getToolsTokenEstimate: () => estimateActiveToolsTokens(this.agent.state.tools),
 			});
 		}
 
@@ -426,6 +441,9 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
+		const restoredProjection = this._hfHost?.buildActiveMessages(this.sessionManager.getBranch());
+		if (restoredProjection) this.agent.state.messages = restoredProjection;
 	}
 
 	/** The high-fidelity compaction host, when enabled (CCTX-080). */
@@ -1420,12 +1438,9 @@ export class AgentSession {
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
 
-			// Check if we need to compact before sending (catches aborted responses).
-			// The user's new prompt is sent below, so do not call agent.continue() here.
-			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant) {
-				await this._checkCompaction(lastAssistant, false);
-			}
+			// Build the complete pending turn before evaluating compaction so token
+			// prediction includes queued/extension messages and system-prompt changes.
+			// The local messages are sent after compaction; never call agent.continue() here.
 
 			// Build messages array (custom message if any, then user message)
 			messages = [];
@@ -1481,6 +1496,18 @@ export class AgentSession {
 			// /contract commands. Same-turn pending changes are appended later by
 			// transformContext after the user event is interpreted.
 			this._refreshPinnedSystemPrompt();
+
+			const lastAssistant = this._findLastAssistantMessage();
+			if (lastAssistant) {
+				const plainTextInput: AgentMessage = {
+					role: "user",
+					content: [{ type: "text", text: expandedText }],
+					timestamp: Date.now(),
+				};
+				const pendingTurnTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+				const currentInputExtraTokens = Math.max(0, pendingTurnTokens - estimateTokens(plainTextInput));
+				await this._checkCompaction(lastAssistant, false, expandedText, currentInputExtraTokens);
+			}
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -2180,16 +2207,21 @@ export class AgentSession {
 	 * 3. Threshold without retry: valid or estimated context usage crossed the
 	 *    configured threshold; compact without retrying the completed response.
 	 *
-	 * Each case calls `_runAutoCompaction()`. After preparation and the
-	 * `session_before_compact` hook, that method calls the lower-level `compact()`
-	 * function imported from `./compaction/index.ts`, unless the hook cancels or
-	 * supplies a custom result.
+	 * Each case obtains one TriggerDecision from HfCompactionHost and calls
+	 * `_runAutoCompaction()`. After the `session_before_compact` hook, the host
+	 * executes that exact action through CompactionOrchestrator; there is no
+	 * legacy summary fallback.
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		currentInput = "",
+		currentInputExtraTokens = 0,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
@@ -2209,24 +2241,48 @@ export class AgentSession {
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const hfBoundary = this._hfHost?.getActiveTriggerBoundary();
+		const latestCompactionTimestamp = Math.max(
+			compactionEntry ? new Date(compactionEntry.timestamp).getTime() : 0,
+			hfBoundary ? new Date(hfBoundary.timestamp).getTime() : 0,
+		);
 		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
-		if (assistantIsFromBeforeCompaction) {
+			latestCompactionTimestamp > 0 && assistantMessage.timestamp <= latestCompactionTimestamp;
+		if (assistantIsFromBeforeCompaction && currentInput.length === 0 && currentInputExtraTokens === 0) {
 			return false;
 		}
 
 		// Automatic cases 1 and 2: context overflow.
 		// A length stop is recoverable when output ended below the model's original desired limit,
 		// independent of the configured context size or any context-clamped provider request limit.
-		const contextOverflow = sameModel && isContextOverflow(assistantMessage, contextWindow);
-		const recoverableLength = sameModel && isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
+		const contextOverflow =
+			!assistantIsFromBeforeCompaction && sameModel && isContextOverflow(assistantMessage, contextWindow);
+		const recoverableLength =
+			!assistantIsFromBeforeCompaction &&
+			sameModel &&
+			isRecoverableLength(assistantMessage, this.model?.maxTokens ?? 0);
 		if (contextOverflow || recoverableLength) {
 			const willRetry = assistantMessage.stopReason !== "stop";
 
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				const evaluation = this._hfHost?.evaluateCompactionTrigger({
+					branchEntries: this.sessionManager.getBranch(),
+					modelContextLimit: contextWindow,
+					outputReserveTokens: settings.reserveTokens,
+					currentInput,
+					currentInputExtraTokens,
+					previousCallOverflowed: true,
+				});
+				if (!evaluation || evaluation.decision.action === "none") return false;
+				return await this._runAutoCompaction(
+					"overflow",
+					false,
+					evaluation.decision,
+					currentInput,
+					currentInputExtraTokens,
+				);
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -2251,23 +2307,36 @@ export class AgentSession {
 				return false;
 			}
 
-			// Case 1: remove the failed or truncated message from agent state, compact, and
-			// retry once. The message remains in session history but is excluded from retry context.
-			this._overflowRecoveryAttempted = true;
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
-			}
-			return await this._runAutoCompaction("overflow", willRetry);
+			// Mutate retry state only after a live compaction activates. Rejection,
+			// cancellation, CAS loss, and shadow mode must leave context untouched.
+			const evaluation = this._hfHost?.evaluateCompactionTrigger({
+				branchEntries: this.sessionManager.getBranch(),
+				modelContextLimit: contextWindow,
+				outputReserveTokens: settings.reserveTokens,
+				currentInput,
+				currentInputExtraTokens,
+				previousCallOverflowed: true,
+			});
+			if (!evaluation || evaluation.decision.action === "none") return false;
+			return await this._runAutoCompaction(
+				"overflow",
+				willRetry,
+				evaluation.decision,
+				currentInput,
+				currentInputExtraTokens,
+			);
 		}
 
 		// Case 3: threshold compaction without retry.
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
-		let contextTokens: number;
 		const directContextTokens = assistantMessage.usage ? calculateContextTokens(assistantMessage.usage) : 0;
-		if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
+		if (
+			currentInput.length === 0 &&
+			currentInputExtraTokens === 0 &&
+			(assistantMessage.stopReason === "error" || directContextTokens === 0)
+		) {
 			const messages = this.agent.state.messages;
 			const estimate = estimateContextTokens(messages);
 			if (estimate.lastUsageIndex === null) return false; // No usage data at all
@@ -2276,20 +2345,28 @@ export class AgentSession {
 			// trigger compaction right after one just finished.
 			const usageMsg = messages[estimate.lastUsageIndex];
 			if (
-				compactionEntry &&
+				latestCompactionTimestamp > 0 &&
 				usageMsg.role === "assistant" &&
-				(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
+				(usageMsg as AssistantMessage).timestamp <= latestCompactionTimestamp
 			) {
 				return false;
 			}
-			contextTokens = estimate.tokens;
-		} else {
-			contextTokens = directContextTokens;
 		}
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			return await this._runAutoCompaction("threshold", false);
-		}
-		return false;
+		const evaluation = this._hfHost?.evaluateCompactionTrigger({
+			branchEntries: this.sessionManager.getBranch(),
+			modelContextLimit: contextWindow,
+			outputReserveTokens: settings.reserveTokens,
+			currentInput,
+			currentInputExtraTokens,
+		});
+		if (!evaluation || evaluation.decision.action === "none") return false;
+		return await this._runAutoCompaction(
+			"threshold",
+			false,
+			evaluation.decision,
+			currentInput,
+			currentInputExtraTokens,
+		);
 	}
 
 	/**
@@ -2302,6 +2379,9 @@ export class AgentSession {
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
 		settings: { reserveTokens: number; keepRecentTokens: number },
+		decision: TriggerDecision,
+		currentInput: string,
+		currentInputExtraTokens: number,
 	): Promise<boolean> {
 		const host = this._hfHost;
 		if (!host || !this.model) return false;
@@ -2318,9 +2398,13 @@ export class AgentSession {
 				retry: this.settingsManager.getRetrySettings(),
 				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
 			});
+		if (decision.action === "none") return false;
+		const action = host.mode === "offload_only" ? "offload_only" : decision.action;
 		const outcome = await host.attemptCompaction({
-			action:
-				host.mode === "offload_only" ? "offload_only" : reason === "overflow" ? "hard_compact" : "soft_compact",
+			action,
+			triggerReasons: decision.reasons,
+			currentInput,
+			currentInputExtraTokens,
 			complete,
 			branchEntries: this.sessionManager.getBranch(),
 			signal: this._autoCompactionAbortController?.signal,
@@ -2329,8 +2413,9 @@ export class AgentSession {
 		});
 		this._refreshPinnedSystemPrompt();
 		if (outcome.shadow) {
-			// Shadow (CCTX-081): candidate audited; the live context stays unchanged.
-			return willRetry;
+			// Shadow never changes live context, so retrying an overflow would repeat
+			// the identical failing request and incorrectly consume recovery state.
+			return false;
 		}
 		if (!outcome.activated) {
 			this._emit({
@@ -2362,6 +2447,7 @@ export class AgentSession {
 		await this._emitHfSessionCompact(result, reason, willRetry, outcome.result?.snapshotVersion);
 		this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 		if (willRetry) {
+			this._overflowRecoveryAttempted = true;
 			const messages = this.agent.state.messages;
 			const lastMsg = messages[messages.length - 1];
 			if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
@@ -2374,15 +2460,20 @@ export class AgentSession {
 
 	/**
 	 * Execute threshold or overflow compaction. Manual compaction uses
-	 * `AgentSession.compact()` instead. Both paths call the lower-level `compact()`
-	 * function imported from `./compaction/index.ts` after preparation and extension
-	 * interception.
+	 * `AgentSession.compact()` instead. Both paths enter the HF host after
+	 * preparation and extension interception; legacy summary compaction is absent.
 	 *
 	 * @param reason Automatic trigger selected by `_checkCompaction()`
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		decision: TriggerDecision,
+		currentInput = "",
+		currentInputExtraTokens = 0,
+	): Promise<boolean> {
 		// Subsystem-only automatic compaction (legacy summary path removed, EPIC-CCTX-001).
 		if (!this.model) {
 			return false;
@@ -2421,7 +2512,14 @@ export class AgentSession {
 				// free-text summaries violate the subsystem's invariants.
 			}
 
-			return await this._tryHfAutoCompaction(reason, willRetry, settings);
+			return await this._tryHfAutoCompaction(
+				reason,
+				willRetry,
+				settings,
+				decision,
+				currentInput,
+				currentInputExtraTokens,
+			);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const formattedErrorMessage =

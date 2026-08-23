@@ -4,6 +4,7 @@ import { InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.
 import { AuditTrail } from "../../src/core/compaction/subsystem/observability.ts";
 import { CompactionOrchestrator, type OrchestratorDeps } from "../../src/core/compaction/subsystem/orchestrator.ts";
 import { renderPinnedLedgerLayer } from "../../src/core/compaction/subsystem/prompt-builder.ts";
+import { rawRebuild } from "../../src/core/compaction/subsystem/rebuild.ts";
 import { RecallCatalog } from "../../src/core/compaction/subsystem/recall-catalog.ts";
 import { type ActivateRequest, InMemorySnapshotStore } from "../../src/core/compaction/subsystem/snapshot-store.ts";
 import { InMemoryContractStore } from "../../src/core/compaction/subsystem/task-contract.ts";
@@ -211,11 +212,8 @@ describe("orchestrator + task ledger CAS", () => {
 		const rebuildDeps = setup();
 		const first = await new CompactionOrchestrator(rebuildDeps).compact("soft_compact", { currentInput: "go" });
 		expect(first.status).toBe("activated");
-		const prior = rebuildDeps.snapshotStore.getActive("s-1")!;
-		rebuildDeps.rebuildRunner = async () => {
-			const { snapshotVersion, ...candidate } = prior;
-			return { ...candidate, parentVersion: snapshotVersion };
-		};
+		rebuildDeps.rebuildRunner = async (_sessionId, boundarySeq) =>
+			(await rawRebuild(rebuildDeps, { toSeq: boundarySeq })).snapshot;
 		const rebuilt = await new CompactionOrchestrator(rebuildDeps).compact("full_rebuild", { currentInput: "go" });
 		expect(rebuilt.status).toBe("rebuilt");
 		expect(rebuildDeps.snapshotStore.getActive("s-1")?.taskLedgerRef).toEqual({
@@ -223,6 +221,39 @@ describe("orchestrator + task ledger CAS", () => {
 			focusTaskId: "T1",
 			focusContractVersion: 2,
 			taskRef: "task://T1/v2",
+		});
+	});
+	describe("orchestrator tools token accounting (T-005)", () => {
+		it("counts the tool-definition estimate into the next-request token totals", async () => {
+			const base = setup();
+			const withTools = setup((d) => {
+				d.toolsTokenEstimate = 5000;
+			});
+			const resultBase = await new CompactionOrchestrator(base).compact("soft_compact", { currentInput: "go" });
+			const resultTools = await new CompactionOrchestrator(withTools).compact("soft_compact", {
+				currentInput: "go",
+			});
+			expect(resultBase.status).toBe("activated");
+			expect(resultTools.status).toBe("activated");
+			const totalBase = base.snapshotStore.getActive("s-1")!.tokenStats.total;
+			const totalTools = withTools.snapshotStore.getActive("s-1")!.tokenStats.total;
+			expect(totalTools - totalBase).toBe(5000);
+		});
+
+		it("counts pending input image tokens in both activation totals", async () => {
+			const base = setup();
+			const withImages = setup();
+			const resultBase = await new CompactionOrchestrator(base).compact("soft_compact", { currentInput: "go" });
+			const resultImages = await new CompactionOrchestrator(withImages).compact("soft_compact", {
+				currentInput: "go",
+				currentInputExtraTokens: 2400,
+			});
+			expect(resultBase.status).toBe("activated");
+			expect(resultImages.status).toBe("activated");
+			expect(
+				withImages.snapshotStore.getActive("s-1")!.tokenStats.total -
+					base.snapshotStore.getActive("s-1")!.tokenStats.total,
+			).toBe(2400);
 		});
 	});
 });

@@ -21,7 +21,7 @@ const EXTRACT_JSON = JSON.stringify({
 describe("default-on compaction", () => {
 	it("no configuration: auto compaction runs the subsystem and appends no legacy entry", async () => {
 		const h = await createHarness({
-			contextWindow: 1000,
+			contextWindow: 3000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			responses: [
 				{ text: `first answer ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
@@ -50,7 +50,7 @@ describe("default-on compaction", () => {
 
 	it("kill switch: compaction.enabled=false disables compaction entirely", async () => {
 		const h = await createHarness({
-			contextWindow: 1000,
+			contextWindow: 3000,
 			settings: { compaction: { enabled: false, reserveTokens: 100, keepRecentTokens: 100 } },
 			responses: [
 				{ text: "one", usage: { totalTokens: 500 } },
@@ -67,7 +67,7 @@ describe("default-on compaction", () => {
 
 	it("kill switch: explicit mode off means no host, no compaction", async () => {
 		const h = await createHarness({
-			contextWindow: 1000,
+			contextWindow: 3000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			hfCompaction: { mode: "off" },
 			responses: [
@@ -85,7 +85,7 @@ describe("default-on compaction", () => {
 
 	it("extension cancel hook stops the subsystem compaction", async () => {
 		const h = await createHarnessWithExtensions({
-			contextWindow: 1000,
+			contextWindow: 3000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			extensionFactories: [
 				{
@@ -114,7 +114,7 @@ describe("default-on compaction", () => {
 
 	it("extension-provided custom summary is ignored (deprecated): result comes from the subsystem", async () => {
 		const h = await createHarnessWithExtensions({
-			contextWindow: 1000,
+			contextWindow: 3000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			extensionFactories: [
 				{
@@ -147,7 +147,7 @@ describe("default-on compaction", () => {
 
 	it("overflow recovery: subsystem compaction then retried turn completes", async () => {
 		const h = await createHarness({
-			contextWindow: 1000,
+			contextWindow: 3000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			responses: [
 				{ text: `first ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },

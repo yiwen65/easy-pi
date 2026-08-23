@@ -3,8 +3,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
+const DECISION = { action: "soft_compact" as const, reasons: ["test"] };
+
 type SessionWithCompactionInternals = {
-	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+	_runAutoCompaction: (
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		decision: typeof DECISION,
+	) => Promise<boolean>;
 };
 
 interface RecordedCompactionEvent {
@@ -80,7 +86,7 @@ describe("issue #5217 compaction reason on extension events", () => {
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await sessionInternals._runAutoCompaction("threshold", false);
+		await sessionInternals._runAutoCompaction("threshold", false, DECISION);
 
 		expect(recorded).toEqual([
 			{ type: "session_before_compact", reason: "threshold", willRetry: false },
@@ -94,7 +100,7 @@ describe("issue #5217 compaction reason on extension events", () => {
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await sessionInternals._runAutoCompaction("overflow", true);
+		await sessionInternals._runAutoCompaction("overflow", true, DECISION);
 
 		expect(recorded).toEqual([
 			{ type: "session_before_compact", reason: "overflow", willRetry: true },

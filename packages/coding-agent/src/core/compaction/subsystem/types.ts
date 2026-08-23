@@ -323,7 +323,14 @@ export interface StructuredSnapshot {
 	sourceEventRanges: EventSeqRange[];
 	/** Lossy narrative bridge; never a source of truth. */
 	narrative?: string;
-	compactor: { model?: string; promptVersion: string; schemaVersion: number };
+	compactor: {
+		model?: string;
+		promptVersion: string;
+		schemaVersion: number;
+		kind?: "incremental" | "offload_only" | "rebuild";
+		triggerEventSeq?: number;
+		triggerHeadEventId?: string;
+	};
 	tokenStats: TokenStats;
 	validatorReport?: ValidatorReport;
 	createdAt: string;

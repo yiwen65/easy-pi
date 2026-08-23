@@ -191,3 +191,52 @@ describe("planSafeCut", () => {
 		}
 	});
 });
+
+describe("deterministic group ids (T-005)", () => {
+	it("same event stream yields identical group ids across independent builds", async () => {
+		const { buildAtomicGroups } = await import("../../src/core/compaction/subsystem/atomic-groups.ts");
+		const makeEvents = () => [
+			{
+				sessionId: "s",
+				agentId: "a",
+				seq: 1,
+				eventId: "e1",
+				eventType: "message",
+				payload: { text: "u" },
+				contentHash: "h1",
+				authority: { kind: "user" as const, id: "u", verified: true },
+				timestamp: "t",
+				schemaVersion: 1,
+			},
+			{
+				sessionId: "s",
+				agentId: "a",
+				seq: 2,
+				eventId: "e2",
+				eventType: "tool_call",
+				toolCallId: "tc1",
+				payload: { name: "bash", arguments: {} },
+				contentHash: "h2",
+				authority: { kind: "user" as const, id: "u", verified: true },
+				timestamp: "t",
+				schemaVersion: 1,
+			},
+			{
+				sessionId: "s",
+				agentId: "a",
+				seq: 3,
+				eventId: "e3",
+				eventType: "tool_result",
+				toolCallId: "tc1",
+				payload: { isError: false },
+				contentHash: "h3",
+				authority: { kind: "user" as const, id: "u", verified: true },
+				timestamp: "t",
+				schemaVersion: 1,
+			},
+		];
+		const first = buildAtomicGroups(makeEvents() as never);
+		const second = buildAtomicGroups(makeEvents() as never);
+		expect(first.map((g) => g.groupId)).toEqual(second.map((g) => g.groupId));
+	});
+});

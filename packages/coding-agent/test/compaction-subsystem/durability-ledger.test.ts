@@ -73,6 +73,11 @@ describe("durable subsystem state", () => {
 		expect(existsSync(sessionFile)).toBe(true);
 		const s1Events = host1.eventLog.all(s1.sessionId).length;
 		expect(s1Events).toBeGreaterThan(0);
+		s1.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "unsynchronized crash tail" }],
+			timestamp: Date.now() + 1000,
+		});
 		expect(host1.snapshotStore.getActive(s1.sessionId)).toBeDefined();
 
 		// Reopen the same session file in a fresh session/host.
@@ -80,10 +85,15 @@ describe("durable subsystem state", () => {
 		const s2Harness = await makeFileSession(cwd, sessionDir, ["ok"], s2Manager);
 		const host2 = s2Harness.session.hfCompactionHost!;
 		// Same durable state: events replayed, contract intact, snapshot readable.
-		expect(host2.eventLog.all(s2Harness.session.sessionId).length).toBe(s1Events);
+		expect(host2.eventLog.all(s2Harness.session.sessionId).length).toBeGreaterThan(s1Events);
 		expect(host2.getContract()?.goal).toBe("durable goal");
 		expect(host2.getContract()?.constraints[0].text).toBe("Never delete raw events");
 		expect(host2.snapshotStore.getActive(s2Harness.session.sessionId)).toBeDefined();
+		const restored = s2Harness.session.messages[0];
+		expect(JSON.stringify(restored && "content" in restored ? restored.content : undefined)).toContain(
+			"# Verified state snapshot",
+		);
+		expect(JSON.stringify(s2Harness.session.messages)).toContain("unsynchronized crash tail");
 		s1.dispose();
 		s2Harness.cleanup();
 	});

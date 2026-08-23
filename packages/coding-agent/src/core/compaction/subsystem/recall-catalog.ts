@@ -8,6 +8,7 @@
  * never raw content.
  */
 
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import type { ArtifactStore } from "./artifact-store.ts";
 import { sha256Hex } from "./hashing.ts";
 import type { RecallEntry } from "./types.ts";
@@ -27,19 +28,71 @@ export interface RecallMetrics {
 	recallFailures: number;
 }
 
-let recallCounter = 0;
+/** Persistence for catalog entries, so restart keeps `rc-*` refs resolvable. */
+export interface RecallPersister {
+	append(entry: RecallEntry): void;
+	load(): RecallEntry[];
+}
+
+/** JSONL persister: one entry per line, tolerant of a torn final line. */
+export class JsonlRecallPersister implements RecallPersister {
+	private readonly filePath: string;
+
+	constructor(filePath: string) {
+		this.filePath = filePath;
+	}
+
+	append(entry: RecallEntry): void {
+		appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, "utf8");
+	}
+
+	load(): RecallEntry[] {
+		if (!existsSync(this.filePath)) return [];
+		const entries: RecallEntry[] = [];
+		for (const line of readFileSync(this.filePath, "utf8").split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				entries.push(JSON.parse(line) as RecallEntry);
+			} catch {
+				// Torn trailing line after a crash: ignore it; the entry is re-added on retry.
+			}
+		}
+		return entries;
+	}
+}
+
+/** Stable, content-derived ref id: identical content yields the identical ref, across restarts. */
+export function recallRefIdForHash(hash: string): string {
+	return `rc-${hash.slice(0, 16)}`;
+}
 
 export class RecallCatalog {
 	private store: ArtifactStore;
 	private tenant: string;
+	private persister: RecallPersister | undefined;
 	private entriesByRef = new Map<string, RecallEntry>();
 	private attempts = 0;
 	private hits = 0;
 	private failures = 0;
 
-	constructor(options: { store: ArtifactStore; tenant: string }) {
+	constructor(options: { store: ArtifactStore; tenant: string; persister?: RecallPersister }) {
 		this.store = options.store;
 		this.tenant = options.tenant;
+		this.persister = options.persister;
+		if (this.persister) {
+			for (const entry of this.persister.load()) {
+				if (entry.tenant === this.tenant) {
+					// JSONL updates are append-only; the newest record is authoritative.
+					this.entriesByRef.set(entry.refId, entry);
+				}
+			}
+		}
+	}
+
+	private register(entry: RecallEntry): RecallEntry {
+		this.entriesByRef.set(entry.refId, entry);
+		this.persister?.append(entry);
+		return entry;
 	}
 
 	add(input: AddRecallInput): RecallEntry {
@@ -52,12 +105,12 @@ export class RecallCatalog {
 		// same content was already cataloged for this tenant.
 		for (const entry of this.entriesByRef.values()) {
 			if (entry.hash === meta.hash && entry.tenant === input.tenant) {
-				return entry;
+				const eventIds = [...new Set([...entry.eventIds, ...input.eventIds])];
+				return eventIds.length === entry.eventIds.length ? entry : this.register({ ...entry, eventIds });
 			}
 		}
-		recallCounter += 1;
 		const entry: RecallEntry = {
-			refId: `rc-${recallCounter.toString(36)}-${meta.hash.slice(0, 12)}`,
+			refId: recallRefIdForHash(meta.hash),
 			kind: input.kind,
 			createdAt: new Date().toISOString(),
 			preview: input.preview.slice(0, 200),
@@ -66,9 +119,9 @@ export class RecallCatalog {
 			hash: meta.hash,
 			tenant: input.tenant,
 		};
-		this.entriesByRef.set(entry.refId, entry);
+		if (this.entriesByRef.has(entry.refId)) return this.entriesByRef.get(entry.refId)!;
 		this.store.pin(meta.ref);
-		return entry;
+		return this.register(entry);
 	}
 
 	/** Catalog an already-offloaded artifact (no re-put; content is content-addressed). */
@@ -78,12 +131,12 @@ export class RecallCatalog {
 	): RecallEntry {
 		for (const entry of this.entriesByRef.values()) {
 			if (entry.hash === record.hash && entry.tenant === this.tenant) {
-				return entry;
+				if (entry.eventIds.includes(record.eventId)) return entry;
+				return this.register({ ...entry, eventIds: [...entry.eventIds, record.eventId] });
 			}
 		}
-		recallCounter += 1;
 		const entry: RecallEntry = {
-			refId: `rc-${recallCounter.toString(36)}-${record.hash.slice(0, 12)}`,
+			refId: recallRefIdForHash(record.hash),
 			kind,
 			createdAt: new Date().toISOString(),
 			preview: record.preview.slice(0, 200),
@@ -92,9 +145,9 @@ export class RecallCatalog {
 			hash: record.hash,
 			tenant: this.tenant,
 		};
-		this.entriesByRef.set(entry.refId, entry);
+		if (this.entriesByRef.has(entry.refId)) return this.entriesByRef.get(entry.refId)!;
 		this.store.pin(record.artifactRef);
-		return entry;
+		return this.register(entry);
 	}
 
 	/**

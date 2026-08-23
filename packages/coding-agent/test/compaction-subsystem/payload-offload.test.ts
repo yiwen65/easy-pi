@@ -3,6 +3,7 @@ import { InMemoryArtifactStore } from "../../src/core/compaction/subsystem/artif
 import { InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.ts";
 import {
 	classifyPayload,
+	estimateRecoverableToolTokens,
 	offloadPayloads,
 	projectOffloadedEvent,
 } from "../../src/core/compaction/subsystem/payload-offload.ts";
@@ -78,7 +79,7 @@ describe("classifyPayload", () => {
 		expect(classifyPayload(task, defaultPolicy())).toBe("must_keep_verbatim");
 	});
 
-	it("classifies big tool results as offloadable, small as structured", () => {
+	it("classifies big tool results as offloadable, small and non-tool messages as structured", () => {
 		const log = new InMemoryEventLog();
 		const big = log.append({
 			sessionId: "s-1",
@@ -98,9 +99,18 @@ describe("classifyPayload", () => {
 			payload: { isError: false, content: "tiny" },
 			authority,
 		});
+		const largeMessage = log.append({
+			sessionId: "s-1",
+			agentId: "a-1",
+			eventId: "m-1",
+			eventType: "message",
+			payload: { text: "x".repeat(9000) },
+			authority,
+		});
 		const policy = defaultPolicy();
 		expect(classifyPayload(big, policy)).toBe("offloadable");
 		expect(classifyPayload(small, policy)).toBe("structured");
+		expect(classifyPayload(largeMessage, policy)).toBe("structured");
 	});
 });
 
@@ -116,6 +126,33 @@ function defaultPolicy() {
 		highRiskTools: [] as string[],
 	};
 }
+
+describe("estimateRecoverableToolTokens", () => {
+	it("matches execution eligibility, reverse budget, risk exclusions, and prior coverage", () => {
+		const { log, call, result } = makeLog();
+		call({ id: "tc-1", name: "read" });
+		result({ id: "r-1", callId: "tc-1", big: "a".repeat(40_000) });
+		call({ id: "tc-2", name: "read" });
+		result({ id: "r-2", callId: "tc-2", big: "b".repeat(40_000) });
+		const policy = { ...defaultPolicy(), keepRecentToolResults: 1 };
+		const recoverable = estimateRecoverableToolTokens({ events: log.all("s-1"), policy });
+		expect(recoverable).toBeGreaterThan(9000);
+		expect(recoverable).toBeLessThan(10_000);
+		expect(
+			estimateRecoverableToolTokens({
+				events: log.all("s-1"),
+				policy,
+				alreadyOffloadedEventIds: new Set(["r-1"]),
+			}),
+		).toBe(0);
+		expect(
+			estimateRecoverableToolTokens({
+				events: log.all("s-1"),
+				policy: { ...policy, highRiskTools: ["read"] },
+			}),
+		).toBe(0);
+	});
+});
 
 describe("offloadPayloads", () => {
 	it("offloads a big tool result: keeps call ID/status/exit code/preview/ref and stays recoverable", () => {

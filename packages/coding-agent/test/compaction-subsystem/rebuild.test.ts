@@ -3,6 +3,7 @@ import { InMemoryArtifactStore } from "../../src/core/compaction/subsystem/artif
 import { InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.ts";
 import { AuditTrail } from "../../src/core/compaction/subsystem/observability.ts";
 import { type RebuildDeps, rawRebuild, rollbackToVersion } from "../../src/core/compaction/subsystem/rebuild.ts";
+import { RecallCatalog } from "../../src/core/compaction/subsystem/recall-catalog.ts";
 import { reduceEvents } from "../../src/core/compaction/subsystem/reducer.ts";
 import { InMemorySnapshotStore } from "../../src/core/compaction/subsystem/snapshot-store.ts";
 import { InMemoryContractStore } from "../../src/core/compaction/subsystem/task-contract.ts";
@@ -32,6 +33,7 @@ function makeDeps(mutate?: (deps: RebuildDeps & { artifactStore: InMemoryArtifac
 		contractStore,
 		snapshotStore: new InMemorySnapshotStore(),
 		audit: new AuditTrail(),
+		recallCatalog: new RecallCatalog({ store: artifactStore, tenant: "t-1" }),
 	};
 	mutate?.(deps);
 	return deps;
@@ -91,6 +93,16 @@ describe("rawRebuild", () => {
 		expect(snapshot.narrative).toBeUndefined();
 	});
 
+	it("honors the orchestrator-frozen boundary and leaves later events out of the rebuilt snapshot", async () => {
+		const deps = makeDeps();
+		seed(deps);
+		const { snapshot } = await rawRebuild(deps, { toSeq: 2 });
+		expect(snapshot.baseEventSeq).toBe(2);
+		expect(snapshot.sourceEventRanges).toEqual([{ fromSeq: 1, toSeq: 2 }]);
+		expect(snapshot.compactor).toMatchObject({ kind: "rebuild", triggerEventSeq: 2, triggerHeadEventId: "e-2" });
+		expect(snapshot.tasks.some((task) => task.state === "done")).toBe(false);
+	});
+
 	it("reports missing objects as explicit gaps instead of failing silently", async () => {
 		const deps = makeDeps();
 		seed(deps);
@@ -118,6 +130,17 @@ describe("rawRebuild", () => {
 		expect(gaps[0]).toContain("artifact://sha256/");
 		// Rebuild still succeeds and marks the gap explicitly.
 		expect(snapshot.baseEventSeq).toBe(6);
+	});
+
+	it("reports dangling recall refs from the active snapshot as explicit gaps", async () => {
+		const deps = makeDeps();
+		seed(deps);
+		const { snapshot } = await rawRebuild(deps);
+		snapshot.recallCatalogRefs = ["rc-missing"];
+		const candidate = deps.snapshotStore.putCandidate(snapshot);
+		deps.snapshotStore.activate("s-1", { expectedActiveVersion: 0, candidateVersion: candidate.snapshotVersion });
+		const rebuilt = await rawRebuild(deps);
+		expect(rebuilt.gaps).toContainEqual(expect.stringContaining("unresolvable recall rc-missing"));
 	});
 
 	it("never re-executes tools or side effects during rebuild", async () => {

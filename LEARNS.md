@@ -52,3 +52,11 @@
   3. **模型输出截断**：K3 抽取输出超 maxTokens 4096 → JSON 截断 → fail closed 正确但永不激活。
 - Correct approach: (1) offload 扫全历史 + reverse budget 保近期 + priorRecords 跨轮幂等；(2) 适配器只存瘦身投影 + `entryId` 回指（真相仍在会话 JSONL）；(3) maxTokens 随输入规模缩放 + 确定性截断 salvage（切到最后完整数组项闭合并补括号，尾部丢项不产生错项，validator 继续把关）。
 - Verified by: 2026-08-22 T-108 修复后真实 K3 实测 token −71.3%/−72.0%、100% 保留、oracle 一致。
+
+## HF 自动压缩接线——TriggerDecision 与副作用必须共享同一激活边界
+
+- Wrong approach: 生产 AgentSession 继续用 `contextWindow-reserveTokens`，而 70/85/offload/rebuild 只存在于纯策略测试；offload 又在 validator/CAS 前发布 recall 状态。
+- Why it failed: policy 与真实下一请求脱节；shadow/reject/CAS loser 会污染后续 trigger；overflow 失败前删除 live message 会破坏重试上下文；无模型 raw rebuild 推进到最新消息会吞掉未抽取语义。
+- Correct approach: 完整 pending provider turn 只计算一次并交给 `evaluateTriggers()`；snapshot 持久化 trigger boundary/kind；recall 只有 active snapshot 引用才影响 projection/trigger；失败与 shadow 不改 live context；raw rebuild 使用 frozen boundary 但保留 active boundary 后的 verbatim tail。
+- Prevention: 修改自动 compact 时必须同时测试 trigger→offload/extract→validator→CAS→live projection→restart；至少覆盖 shadow、reject、CAS loser、overflow retry、重复 payload、重启未同步 tail 与第 8 次后 rebuild。
+- Verified by: 2026-08-23 T-406/T-407；目标 aggregate 341 passed / 8 skipped，根 check 与 `./test.sh` 全绿。

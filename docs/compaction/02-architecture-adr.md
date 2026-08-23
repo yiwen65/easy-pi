@@ -55,13 +55,22 @@
 | G9 | snapshot 绑定 ledger/focus/contract version，最终激活原子复核 | `orchestrator.ts` + `snapshot-store.ts` final assertion |
 | G10 | 歧义或危险 goal change 保留完整 proposal 并进入 pending | `goal-interpreter.ts` + `task-ledger.ts` accept/reject |
 
+### Live 自动触发策略（唯一生产入口）
+
+- `AgentSession` 在 agent run 结束及下一 prompt 完整组装后调用 `HfCompactionHost.evaluateCompactionTrigger()`；生产路径不再使用 legacy `contextWindow-reserveTokens`。
+- 预测值覆盖 system、tools、Global/Task Ledger 固定层、active snapshot、narrative、recall、已投影 tail、完整 pending turn（含图片估算）与 output reserve。
+- `>70%` 选择 SOFT，`>85%` 或 overflow 选择 HARD；可回收 tool payload 净收益达到 8192 tokens 时可独立选择 OFFLOAD_ONLY；一次成功激活后一个用户 turn 的 cooldown 只抑制 soft/offload，不抑制 hard/rebuild。
+- active lineage 中完成 8 次 incremental 后，下一次检查选择 FULL_REBUILD；offload/shadow/CAS loser 不计数，rebuild 重置。kind 与 trigger branch head 随 snapshot 持久化，重启后恢复。
+- raw rebuild 使用 orchestrator 已冻结边界，但 coverage 只推进到旧 active boundary；其后的语义消息继续作为 verbatim tail，避免无模型 rebuild 吞掉未抽取语义。shadow 永不激活，最终仍受 validator、contract/task-ledger assertion 与 snapshot CAS。
+- phase、numeric drift、critical contradiction、pre-tool irreversible 等字段仅是有权威 detector 的显式 policy hook；默认 runtime 当前不提供弱代理。
+
 ## ADR-4：风险分级
 
 - `low`：只读工具、纯文本消息。
 - `medium`：文件系统写入（edit/write）、可逆本地操作。
 - `high`：bash（任意进程/网络/删除）、外部服务写入、审批要求动作、扩展申报为高风险的工具。
 
-高风险约束：副作用错误/约束不得由模型修补（validator repair 排除）；高风险不可逆动作前强制 FULL_REBUILD + 自动召回（trigger + recall）；高风险结果不卸载（payload-offload 排除）。
+高风险约束：副作用错误/约束不得由模型修补（validator repair 排除）；已知 high-risk 工具结果不参与自动 offload。`trigger.ts` 保留高风险不可逆动作前 FULL_REBUILD 的显式策略 hook，但默认 runtime 尚无可靠的 pre-dispatch irreversibility signal，因此不伪造该信号；完整 pre-tool gate 留待 branch/tool-dispatch 专项。
 
 ## ADR-5：并发模型——单写者 + CAS 激活
 

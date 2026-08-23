@@ -1024,6 +1024,62 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-406 — 生产自动触发统一到 HF Trigger Policy
+
+- Status: done
+- Owner: coordinator
+- Objective: 移除 live `contextWindow-reserveTokens` 双轨判定；AgentSession 自动检查统一消费 `evaluateTriggers()`，以可观测的完整下一请求预测、可回收 tool payload、overflow、cooldown 与增量次数形成唯一 TriggerDecision；phase/drift/pre-tool high-risk 因无可靠生产来源，不伪造信号并从生产承诺中明确标记未支持。
+- Inputs and prerequisites: 2026-08-23 自动 compact 核查；T-201、T-401..T-405。
+- Scope or files: `agent-session.ts`、`subsystem/trigger.ts`、`session-integration.ts`、`payload-offload.ts`、相关 trigger/auto-compaction 测试。
+- Expected output: 70% soft、85% hard、独立 offload、overflow、cooldown 与可观测 trigger reason 在真实 runtime 生效；现有 retry/queue/stale-usage 保护保持。
+- Dependencies: T-405。
+- Execution steps:
+  1. 先补 live integration 失败测试，证明当前 70%/offload/cooldown 未接线。
+  2. 在 HF host 构造纯 TriggerInput，AgentSession 只消费 TriggerDecision。
+  3. 保留 overflow 一次 compact-and-retry 与跨模型/旧边界 guard。
+- Acceptance criteria: live 路径不再调用 `shouldCompact()`；70%/85% 边界、tool-only offload、cooldown 与 overflow 均有 runtime 测试；失败/取消/shadow 不提前删 live message、不消费 recovery attempt；无模型/host/disabled 时不触发。
+- Verification method: 目标 vitest + scoped biome/tsgo。
+- Validation evidence: 2026-08-23 live AgentSession 已移除 `shouldCompact()` 调用，统一经 `HfCompactionHost.evaluateCompactionTrigger()`；runtime tests 锁定 70% soft/85% hard、独立 tool offload、一个用户 turn cooldown、overflow、完整 pending turn/图片 token、HF stale boundary。失败/取消/shadow 保持 live context 与 recovery allowance；offload 成功立即安装 preview/ref 投影，shadow/reject/CAS orphan 不影响 active trigger。目标 aggregate 纳入 341 passed / 8 skipped。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-407 — Runtime full rebuild 与 durable trigger state
+
+- Status: done
+- Owner: coordinator
+- Objective: 为生产 host 注入 `rawRebuild` runner，持久记录 incremental/rebuild 类型并据此执行 8 次增量后的 full rebuild；shadow 永不激活，rebuild 继续受 CAS/contract/task-ledger 保护。
+- Inputs and prerequisites: T-406；既有 `rawRebuild()` 与 orchestrator full_rebuild 分支。
+- Scope or files: `types.ts`、`rebuild.ts`、`orchestrator.ts`、`session-integration.ts`、snapshot/rebuild/runtime 测试。
+- Expected output: 重启后仍能计算 since-rebuild；完成 8 次 incremental 后的下一次检查选择 deterministic rebuild；shadow 只产候选/审计不改 active；缺失 artifact 显式记录但不伪造。
+- Dependencies: T-406。
+- Execution steps:
+  1. 失败测试锁定 runtime runner 缺失、重启计数和 shadow 不激活。
+  2. 添加最小可选 snapshot compactor kind，并从 snapshot store 确定性恢复计数。
+  3. 注入 rawRebuild 并复用现有最终 CAS。
+- Acceptance criteria: `raw rebuild unavailable` 不再出现在正常 runtime；重启/第 8 次后下一检查/shadow/CAS 测试通过；旧 snapshot 缺少 kind 时安全按 incremental 处理。
+- Verification method: 目标 vitest + snapshot JSONL 往返。
+- Validation evidence: 2026-08-23 snapshot `compactor.kind/triggerEventSeq/triggerHeadEventId` 持久化；active parent lineage 排除 offload/shadow/CAS loser 并在 rebuild 重置。生产 host 注入 frozen-boundary rawRebuild；语义 tail 不被无模型 rebuild 覆盖；dangling/new recall refs、shadow、CAS、重启恢复、commit-event reconciliation 均有目标测试。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-408 — 触发文档对齐与全量回归
+
+- Status: done
+- Owner: coordinator
+- Objective: 删除过时 legacy/default-off 注释，记录 live trigger 的唯一公式、动作与 fallback；完成目标、根静态和全仓测试。
+- Inputs and prerequisites: T-406、T-407。
+- Scope or files: 相关源码注释、ADR/任务账本、测试证据。
+- Expected output: 文档、注释、生产控制流一致，无第二套未接线策略。
+- Dependencies: T-406, T-407。
+- Execution steps:
+  1. 对抗复核 trigger→attempt→activate/reject 全链路。
+  2. 运行目标测试、`npm run check`、`./test.sh`，核对共享 worktree 自动改写范围。
+- Acceptance criteria: 生产调用图可从 AgentSession 追到 `evaluateTriggers()`；过时 legacy/default-off 说法清除；所有可执行验证全绿或仅记录无关并行 blocker。
+- Verification method: rg 调用图 + vitest + check + test.sh。
+- Validation evidence: 2026-08-23 ADR 与源码注释已对齐唯一 live trigger，`rg` 确认 AgentSession 不再调用 `shouldCompact()` 且三处自动入口均走 `evaluateCompactionTrigger()`→`evaluateTriggers()`。目标 aggregate 42 files：40 passed / 2 real gates skipped，341 passed / 8 skipped。根 `npm run check` exit 0（Biome 1186 files、No fixes applied，全部静态门通过）；`./test.sh` exit 0，coding-agent 272 passed / 8 skipped、2294 passed / 55 skipped，其他全部 workspace 全绿。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -1047,6 +1103,11 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-08-23: T-408 完成：ADR/注释/call graph 对齐；根 `npm run check` exit 0（1186 files, no fixes），`./test.sh` exit 0（全部 workspace；coding-agent 2294 passed / 55 skipped）。T-406..T-408 全部 done。
+- 2026-08-23: T-406/T-407 完成：live 单一 TriggerDecision（70/85、独立 offload、cooldown、overflow）、失败/取消/shadow 原子语义、offload active projection/idempotency、HF stale boundary、完整 pending turn token；durable lineage count + frozen-boundary raw rebuild + shadow/CAS/recall gap + restart projection/commit reconciliation。目标 aggregate 40 passed / 2 real gates skipped，341 passed / 8 skipped；tsgo clean。T-408 开始。
+- 2026-08-23: 用户选择“限定安全修复”；T-406 解除 blocker 并恢复 in_progress。phase/drift/pre-tool high-risk 不以弱代理伪造，改为明确未支持；本轮交付可可靠验证的 token/overflow/offload/cooldown/rebuild 与失败原子性。
+- 2026-08-23: T-406 设计前对抗审查发现范围分叉，转 blocked 待用户决策：限定安全接线可在现有 session 语义内完成；完整 trigger policy 还要求 branch-scoped durable state、pre-tool high-risk gate、drift/phase source，属于更大的跨层工程。未在不明确边界下修改生产代码。
+- 2026-08-23: 用户要求修复自动 compact 核查发现项。登记 T-406..T-408 并开始 T-406。根因确认：live AgentSession 仍调用 legacy `shouldCompact(contextWindow-reserve)`，`evaluateTriggers()` 只有测试调用；runtime 未提供 rebuildRunner，也未持久化 cooldown/incremental/rebuild 状态。决策：单一 TriggerDecision 入口，状态从 event/snapshot/ledger 确定性恢复，不新增第二状态库。
 - 2026-08-23: 用户授权真实模型后完成 T-304：openai-codex gpt-5.4-mini/gpt-5.4 在真实 100-entry 语料上均 2/2 激活、全类 100% 保真、oracle 一致、token −73.3%/−71.8%；确定性缓存复跑指标一致。修复 real-runner HTTP dispatcher、extractor schema prompt 与 seq/唯一 UUID 前缀 provenance 规范化。
 - 2026-08-23: 并行会话静态阻塞解除后完成 T-404：根 `npm run check` exit 0（1205 files, no fixes applied），`./test.sh` exit 0（全部 workspace 通过）；T-401..T-405 至此全部 done。
 - 2026-08-23: T-401/T-402/T-403/T-405 完成：Task Ledger/Goal Interpreter/runtime/最终 CAS 与 `/contract` 交互闭环落地；目标集 312 passed / 6 skipped，scoped biome 76 文件零问题，tmux 两条本地命令 smoke 通过。对抗复核后补强：同轮 pending 警告、Global goal 降为 legacy 非权威、event/snapshot defensive copy、task batch 单记录原子持久化、JSONL corrupt-tail fail closed。
@@ -1092,6 +1153,6 @@
 ## Final validation result
 
 - Result: partial
-- Evidence: 截至 2026-08-23，T-401..T-405 全部完成并验证：任务相关目标集 39 files（38 passed, 1 real-model gate skipped），312 passed / 6 skipped；真实 tmux（无 API）`/contract` 与 `/contract set` smoke 通过；根 `npm run check` exit 0（Biome 1205 files/no fixes、全部静态门通过）；`./test.sh` exit 0（scripts 与全部 workspaces 全绿）；任务文档 validator 通过。历史真实 K3/CLI 指标与 T-105..T-111 证据保持有效；T-304 新增 openai-codex gpt-5.4-mini/gpt-5.4 两模型真实复测，均全类 100% 保真、2/2 激活，token 分别 −73.3%/−71.8%。
+- Evidence: 截至 2026-08-23，T-401..T-408 全部完成并验证：`/contract` 闭环、单一 live TriggerDecision（70/85、独立 offload、cooldown、overflow）、durable full rebuild 与失败原子性均落地。当前目标集 42 files（40 passed, 2 real gates skipped），341 passed / 8 skipped；根 `npm run check` exit 0（Biome 1186 files/no fixes、全部静态门通过）；`./test.sh` exit 0（scripts 与全部 workspaces 全绿，coding-agent 2294 passed / 55 skipped）；任务文档 validator 通过。历史真实 K3/CLI 与 T-105..T-111 证据保持有效；T-304 openai-codex gpt-5.4-mini/gpt-5.4 均全类 100% 保真、2/2 激活，token −73.3%/−71.8%。
 - Remaining: T-305 仍待仓库外生产部署面。
 - Limitations: Task Ledger 的 session tree 分支投影仍沿用既有 HF event-log 分支重建策略，未在本轮扩展为 branch-scoped durable ledger。

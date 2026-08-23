@@ -260,6 +260,21 @@ describe("buildPrompt", () => {
 		expect(secondIdx).toBeGreaterThan(firstIdx);
 	});
 
+	it("includes image token cost from tail tool results", () => {
+		const event = tailEvents()[0];
+		const built = buildPrompt({
+			systemPrompt: "S",
+			contract,
+			snapshot,
+			tailEvents: [{ ...event, payload: { text: "tool result with image", imageCount: 2 } }],
+			currentInput: "",
+			exactRecall: [],
+			estimateTextTokens: (text) => text.length,
+		});
+		const tailZone = built.sections.find((section) => section.zone === "recentTail")!;
+		expect(built.tokenStats.recentTail).toBe(tailZone.tokens + 2400);
+	});
+
 	it("token composition adds up to the total and includes all zones + reserves", () => {
 		const built = buildPrompt({
 			systemPrompt: "S".repeat(40),

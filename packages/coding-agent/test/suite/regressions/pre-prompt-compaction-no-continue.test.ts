@@ -58,23 +58,20 @@ describe("pre-prompt compaction regression", () => {
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("pre-prompt narrative"),
 			fauxAssistantMessage("answered next prompt"),
-			// Post-answer compaction (threshold at this tiny window) also runs the compactor.
-			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
-			fauxAssistantMessage("post-answer narrative"),
 		]);
 		const continueSpy = vi.spyOn(harness.session.agent, "continue");
 
 		await expect(harness.session.prompt("next prompt")).resolves.toBeUndefined();
 
 		expect(continueSpy).not.toHaveBeenCalled();
-		// The pre-prompt overflow compaction (willRetry=true); a post-answer
-		// threshold compaction may also fire in this tiny-window setup.
+		// The pre-prompt overflow compaction reports willRetry=true to preserve
+		// extension semantics, but prompt() sends the already-built new turn directly.
 		const ends = harness.eventsOfType("compaction_end");
 		expect(ends.some((e) => e.reason === "overflow" && e.willRetry === true && !e.aborted)).toBe(true);
 		// The new prompt was sent and answered; its text may live in the compacted zone.
 		expect(harness.session.getLastAssistantText()).toBe("answered next prompt");
-		// distill + extraction + narrative for the first compaction, extraction +
-		// narrative for the second, plus the new prompt turn.
-		expect(harness.faux.state.callCount).toBe(6);
+		// Distillation + extraction + narrative, then the new prompt turn. The
+		// post-answer request is below the policy threshold after projection.
+		expect(harness.faux.state.callCount).toBe(4);
 	});
 });

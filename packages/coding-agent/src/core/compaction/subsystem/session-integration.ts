@@ -3,16 +3,15 @@
  * subsystem.
  *
  * The host owns one set of subsystem stores per session and exposes a narrow
- * API to AgentSession: record messages as events, attempt compaction, rebuild
- * active messages, exact recall. All methods are fail-safe toward the host
- * session: unexpected subsystem errors surface as "not handled" so the caller
- * can fall back to the legacy compaction path.
+ * API to AgentSession: record messages as events, evaluate the single trigger
+ * policy, attempt compaction, rebuild active messages, and exact recall.
+ * Unexpected subsystem errors fail closed; no legacy summary fallback exists.
  *
  * Feature flags (任务书 CCTX-080):
  *   offload_only            — deterministic offload only, no LLM
  *   structured_compaction   — full typed-snapshot pipeline without narrative
  *   full_pipeline           — typed snapshot + narrative bridge
- * Default off; when off the legacy history path is bit-identical to before.
+ * AgentSession defaults to full_pipeline; explicit mode "off" disables the host.
  */
 
 import { join } from "node:path";
@@ -33,12 +32,15 @@ import {
 } from "./injection-guard.ts";
 import { AuditTrail } from "./observability.ts";
 import { CompactionOrchestrator, type CompactResult, type OrchestratorDeps } from "./orchestrator.ts";
+import { estimateRecoverableToolTokens, type OffloadPolicy } from "./payload-offload.ts";
 import { buildPrompt, renderPinnedLedgerLayer } from "./prompt-builder.ts";
-import { RecallCatalog } from "./recall-catalog.ts";
+import { rawRebuild } from "./rebuild.ts";
+import { JsonlRecallPersister, RecallCatalog } from "./recall-catalog.ts";
 import { InMemorySnapshotStore, JsonlSnapshotStore, type SnapshotStore } from "./snapshot-store.ts";
 import { InMemoryContractStore, JsonlContractStore } from "./task-contract.ts";
 import { type PendingGoalChange, replayTaskLedger, type TaskLedger } from "./task-ledger.ts";
 import { ToolLedger } from "./tool-ledger.ts";
+import { evaluateTriggers, type TriggerAction, type TriggerDecision } from "./trigger.ts";
 import type { Authority, CompleteFn } from "./types.ts";
 
 export type HfCompactionMode = "off" | "shadow" | "offload_only" | "structured_compaction" | "full_pipeline";
@@ -58,6 +60,14 @@ export function getHfCompactionModeFromEnv(
 		return raw;
 	}
 	return undefined;
+}
+
+export interface HfTriggerEvaluation {
+	decision: TriggerDecision;
+	predictedNextRequestTokens: number;
+	recoverableToolTokens: number;
+	compactionCooldownRemaining: number;
+	incrementalCompactionsSinceRebuild: number;
 }
 
 export interface HfCompactionConfig {
@@ -123,11 +133,14 @@ export class HfCompactionHost {
 	private seededCount = 0;
 	private contractReady = false;
 	private goalDistilled = false;
+	private readonly getToolsTokenEstimate: (() => number) | undefined;
 
 	constructor(options: {
 		sessionId: string;
 		getSystemPrompt: () => string;
 		config: HfCompactionConfig;
+		/** Token estimate of the tool definitions sent with the next provider request. */
+		getToolsTokenEstimate?: () => number;
 	}) {
 		this.sessionId = options.sessionId;
 		this.getSystemPrompt = options.getSystemPrompt;
@@ -144,7 +157,12 @@ export class HfCompactionHost {
 			: new InMemoryArtifactStore();
 		this.contractStore = stateDir ? new JsonlContractStore(join(stateDir, "contracts")) : new InMemoryContractStore();
 		this.snapshotStore = stateDir ? new JsonlSnapshotStore(join(stateDir, "snapshots")) : new InMemorySnapshotStore();
-		this.recallCatalog = new RecallCatalog({ store: this.artifactStore, tenant: this.tenant });
+		this.recallCatalog = new RecallCatalog({
+			store: this.artifactStore,
+			tenant: this.tenant,
+			persister: stateDir ? new JsonlRecallPersister(join(stateDir, "recall.jsonl")) : undefined,
+		});
+		this.getToolsTokenEstimate = options.getToolsTokenEstimate;
 		const persistedEvents = this.eventLog.all(this.sessionId);
 		this.taskLedger = replayTaskLedger(persistedEvents, {
 			eventLog: this.eventLog,
@@ -152,6 +170,7 @@ export class HfCompactionHost {
 			strictEventSourceValidation: true,
 		});
 		this.ledger = new ToolLedger({ eventLog: this.eventLog, sessionId: this.sessionId, agentId: "agent-local" });
+		this.reconcileActiveSnapshotCommit();
 	}
 
 	private static readonly TOOL_RISK: Record<
@@ -169,25 +188,25 @@ export class HfCompactionHost {
 	};
 
 	/** Record a tool execution start in the ledger (planned + started). Never throws. */
+	/** Record a tool execution start in the ledger (planned + started).
+	 * Throws on ledger rejection: the caller must treat that as a dispatch gate,
+	 * never as a best-effort mirror. */
 	recordToolStarted(toolCallId: string, toolName: string, args: unknown): void {
-		try {
-			const classification = HfCompactionHost.TOOL_RISK[toolName] ?? {
-				sideEffectClass: "none" as const,
-				riskLevel: "low" as const,
-			};
-			const argsHash = sha256Hex(canonicalJson(args ?? {}));
-			this.ledger.recordPlanned({
-				operationId: `op-${toolCallId}`,
-				toolCallId,
-				idempotencyKey: `${toolName}:${argsHash.slice(0, 16)}`,
-				sideEffectClass: classification.sideEffectClass,
-				riskLevel: classification.riskLevel,
-				authority: LOCAL_USER,
-			});
-			this.ledger.recordStarted(toolCallId);
-		} catch {
-			// Ledger mirroring must never break tool execution.
-		}
+		const classification = HfCompactionHost.TOOL_RISK[toolName] ?? {
+			// Unknown tools are conservatively treated as side-effecting/high risk.
+			sideEffectClass: "process" as const,
+			riskLevel: "high" as const,
+		};
+		const argsHash = sha256Hex(canonicalJson(args ?? {}));
+		this.ledger.recordPlanned({
+			operationId: `op-${toolCallId}`,
+			toolCallId,
+			idempotencyKey: `${toolName}:${argsHash.slice(0, 16)}`,
+			sideEffectClass: classification.sideEffectClass,
+			riskLevel: classification.riskLevel,
+			authority: LOCAL_USER,
+		});
+		this.ledger.recordStarted(toolCallId);
 	}
 
 	/** Record a tool execution outcome. Never throws. */
@@ -574,6 +593,161 @@ export class HfCompactionHost {
 		this.contractReady = true;
 	}
 
+	reconcileActiveSnapshotCommit(): void {
+		const active = this.snapshotStore.getActive(this.sessionId);
+		if (!active) return;
+		const alreadyLogged = this.eventLog.all(this.sessionId).some((event) => {
+			const payload = event.payload;
+			return (
+				event.eventType === "compaction" &&
+				payload !== null &&
+				typeof payload === "object" &&
+				"snapshotVersion" in payload &&
+				payload.snapshotVersion === active.snapshotVersion
+			);
+		});
+		if (alreadyLogged) return;
+		try {
+			this.eventLog.append({
+				sessionId: this.sessionId,
+				agentId: "compaction-recovery",
+				eventType: "compaction",
+				payload: {
+					kind: "compaction_commit_recovered",
+					snapshotVersion: active.snapshotVersion,
+					baseEventSeq: active.baseEventSeq,
+					tokensAfter: active.tokenStats.total,
+				},
+				authority: { kind: "system", id: "compaction-recovery", verified: true },
+			});
+		} catch (error) {
+			this.audit.record("commit_log_failed", this.sessionId, {
+				version: active.snapshotVersion,
+				recovery: true,
+				error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+			});
+		}
+	}
+
+	private offloadPolicy(): OffloadPolicy {
+		const highRiskTools = new Set(
+			Object.entries(HfCompactionHost.TOOL_RISK)
+				.filter(([, classification]) => classification.riskLevel === "high")
+				.map(([name]) => name),
+		);
+		return {
+			maxInlineBytes: this.config.offloadThresholdBytes ?? 2000,
+			keepRecentToolResults: this.config.keepRecentToolResults ?? 1,
+			toolExclusions: [],
+			highRiskTools: [...highRiskTools],
+		};
+	}
+
+	evaluateCompactionTrigger(input: {
+		branchEntries: SessionEntry[];
+		modelContextLimit: number;
+		outputReserveTokens: number;
+		currentInput?: string;
+		currentInputExtraTokens?: number;
+		previousCallOverflowed?: boolean;
+	}): HfTriggerEvaluation {
+		this.syncFromEntries(input.branchEntries);
+		// Trigger evaluation is read-only. Contract/task seeding happens only once
+		// an attempt is selected, so a no-op check cannot freeze an early goal.
+		const contract = this.contractStore.getActive(this.sessionId);
+		const active = this.snapshotStore.getActive(this.sessionId);
+		const allEvents = this.eventLog.all(this.sessionId);
+		const tailEvents = allEvents.filter((event) => event.seq > (active?.baseEventSeq ?? 0));
+		const activeRecallRefs = new Set(active?.recallCatalogRefs ?? []);
+		const activeRecallEntries = this.recallCatalog.entries().filter((entry) => activeRecallRefs.has(entry.refId));
+		const offloadByEventId = new Map(
+			activeRecallEntries.flatMap((entry) => entry.eventIds.map((eventId) => [eventId, entry] as const)),
+		);
+		const projectedTailEvents = tailEvents.map((event) => {
+			const offloaded = offloadByEventId.get(event.eventId);
+			return offloaded
+				? { ...event, payload: { text: `[offloaded ${offloaded.artifactRef}] ${offloaded.preview}` } }
+				: event;
+		});
+		const built = buildPrompt({
+			systemPrompt: this.getSystemPrompt(),
+			contract,
+			ledger: this.taskLedger,
+			snapshot: active,
+			recallGuide: activeRecallEntries.length > 0 ? RECALL_GUIDE_TEXT : undefined,
+			tailEvents: projectedTailEvents,
+			currentInput: input.currentInput ?? "",
+			exactRecall: [],
+			toolsTokenEstimate: this.getToolsTokenEstimate?.(),
+			outputReserveTokens: input.outputReserveTokens,
+		});
+		const alreadyOffloadedEventIds = new Set(activeRecallEntries.flatMap((entry) => entry.eventIds));
+		const policy = this.offloadPolicy();
+		const predictedNextRequestTokens = built.tokenStats.total + (input.currentInputExtraTokens ?? 0);
+		const recoverableToolTokens = estimateRecoverableToolTokens({
+			events: tailEvents,
+			policy,
+			alreadyOffloadedEventIds,
+		});
+		const triggerSeq = active?.compactor.triggerEventSeq;
+		const triggerEvent = triggerSeq === undefined ? undefined : allEvents.find((event) => event.seq === triggerSeq);
+		const triggerOnCurrentBranch =
+			triggerEvent !== undefined &&
+			(active?.compactor.triggerHeadEventId === undefined ||
+				active.compactor.triggerHeadEventId === triggerEvent.eventId);
+		const userTurnsAfterTrigger =
+			triggerOnCurrentBranch && triggerSeq !== undefined
+				? allEvents.filter(
+						(event) =>
+							event.seq > triggerSeq &&
+							event.eventType === "message" &&
+							event.authority.kind === "user" &&
+							event.authority.verified,
+					).length
+				: 1;
+		const compactionCooldownRemaining = triggerOnCurrentBranch && userTurnsAfterTrigger === 0 ? 1 : 0;
+		let incrementalCompactionsSinceRebuild = 0;
+		if (active && triggerOnCurrentBranch) {
+			const versions = new Map(
+				this.snapshotStore.listVersions(this.sessionId).map((snapshot) => [snapshot.snapshotVersion, snapshot]),
+			);
+			let cursor: typeof active | undefined = active;
+			while (cursor) {
+				const kind = cursor.compactor.kind ?? "incremental";
+				if (kind === "rebuild") break;
+				if (kind === "incremental") incrementalCompactionsSinceRebuild += 1;
+				cursor = cursor.parentVersion === null ? undefined : versions.get(cursor.parentVersion);
+			}
+		}
+		const decision = evaluateTriggers({
+			predictedNextRequestTokens,
+			modelContextLimit: input.modelContextLimit,
+			recoverableToolTokens,
+			previousCallOverflowed: input.previousCallOverflowed,
+			incrementalCompactionsSinceRebuild,
+			compactionCooldownRemaining,
+		});
+		return {
+			decision,
+			predictedNextRequestTokens,
+			recoverableToolTokens,
+			compactionCooldownRemaining,
+			incrementalCompactionsSinceRebuild,
+		};
+	}
+
+	getActiveTriggerBoundary(): { eventId: string; timestamp: string } | undefined {
+		const active = this.snapshotStore.getActive(this.sessionId);
+		if (!active) return undefined;
+		const seq = active.compactor.triggerEventSeq;
+		if (seq === undefined) return undefined;
+		const event = this.eventLog.all(this.sessionId).find((candidate) => candidate.seq === seq);
+		if (!event) return undefined;
+		if (active.compactor.triggerHeadEventId && active.compactor.triggerHeadEventId !== event.eventId)
+			return undefined;
+		return { eventId: event.eventId, timestamp: event.timestamp };
+	}
+
 	private orchestratorDeps(
 		complete: CompleteFn,
 		overrides?: { keepRecentTokens?: number; outputReserveTokens?: number },
@@ -588,30 +762,46 @@ export class HfCompactionHost {
 			audit: this.audit,
 			complete,
 			tenant: this.tenant,
-			policy: {
-				maxInlineBytes: this.config.offloadThresholdBytes ?? 2000,
-				keepRecentToolResults: this.config.keepRecentToolResults ?? 1,
-				toolExclusions: [],
-				highRiskTools: [],
-			},
+			policy: this.offloadPolicy(),
 			keepRecentTokens: overrides?.keepRecentTokens ?? this.config.keepRecentTokens ?? 8000,
 			systemPrompt: this.getSystemPrompt(),
+			toolsTokenEstimate: this.getToolsTokenEstimate?.(),
 			outputReserveTokens: overrides?.outputReserveTokens ?? this.config.outputReserveTokens ?? 4096,
 			minTokenGainFraction: this.config.minTokenGainFraction,
 			narrativeEnabled: this.config.mode === "full_pipeline",
 			ledger: this.taskLedger,
+			rebuildRunner: async (_sessionId, boundarySeq) => {
+				const active = this.snapshotStore.getActive(this.sessionId);
+				const rebuilt = await rawRebuild(
+					{
+						sessionId: this.sessionId,
+						eventLog: this.eventLog,
+						artifactStore: this.artifactStore,
+						contractStore: this.contractStore,
+						snapshotStore: this.snapshotStore,
+						audit: this.audit,
+						recallCatalog: this.recallCatalog,
+					},
+					{ toSeq: boundarySeq, coverageSeq: active?.baseEventSeq ?? 0 },
+				);
+				if (rebuilt.gaps.length > 0) throw new Error(rebuilt.gaps.join("; "));
+				return rebuilt.snapshot;
+			},
 		};
 	}
 
 	/**
 	 * Attempt one subsystem compaction. Returns activated=true plus the rebuilt
-	 * active messages on success; otherwise activated=false so the caller can
-	 * fall back to the legacy path.
+	 * active messages on success; otherwise activated=false and leaves the live
+	 * context unchanged.
 	 */
 	async attemptCompaction(options: {
-		action: "offload_only" | "soft_compact" | "hard_compact";
+		action: Exclude<TriggerAction, "none">;
 		complete: CompleteFn;
 		manual?: boolean;
+		triggerReasons?: readonly string[];
+		currentInput?: string;
+		currentInputExtraTokens?: number;
 		branchEntries: SessionEntry[];
 		signal?: AbortSignal;
 		/** Per-attempt overrides from live settings (defaults come from construction config). */
@@ -641,6 +831,9 @@ export class HfCompactionHost {
 		);
 		const result = await orchestrator.compact(options.action, {
 			manual: options.manual,
+			triggerReasons: options.triggerReasons,
+			currentInput: options.currentInput,
+			currentInputExtraTokens: options.currentInputExtraTokens,
 			signal: options.signal,
 			shadow: this.config.mode === "shadow",
 		});
@@ -655,18 +848,20 @@ export class HfCompactionHost {
 		if (result.status !== "activated" && result.status !== "rebuilt") {
 			return { activated: false, summaryText: result.reason ?? "rejected", result };
 		}
+		const messages = this.buildActiveMessages(options.branchEntries);
 		if (options.action === "offload_only") {
-			// Offload leaves representation unchanged; the caller keeps its messages.
 			const committed = this.audit.byType("compact_committed").at(-1);
+			if (!messages)
+				return { activated: false, summaryText: "no active offload projection after activation", result };
 			return {
 				activated: true,
+				messages,
 				summaryText: `offloaded ${committed?.details.offloadedBytes ?? 0} bytes`,
 				result,
 				tokensBefore: committed?.details.tokensBefore as number | undefined,
 				tokensAfter: committed?.details.tokensAfter as number | undefined,
 			};
 		}
-		const messages = this.buildActiveMessages(options.branchEntries);
 		if (!messages) {
 			return { activated: false, summaryText: "no active snapshot after activation", result };
 		}
@@ -703,6 +898,7 @@ export class HfCompactionHost {
 			tailEvents: [],
 			currentInput: "",
 			exactRecall: [],
+			toolsTokenEstimate: this.getToolsTokenEstimate?.(),
 		});
 		// The fixed layer is injected dynamically into the system prompt on every
 		// provider turn. Keep only snapshot/working zones in the persisted message
@@ -717,7 +913,13 @@ export class HfCompactionHost {
 		// preview + recall ref. Falls back to event payloads when entries are
 		// unavailable (library use without a SessionManager).
 		const entryById = new Map((branchEntries ?? []).map((e) => [e.id, e] as const));
-		const offloadByEntryId = new Map(this.recallCatalog.entries().map((r) => [r.eventIds[0], r]));
+		const activeRecallRefs = new Set(active.recallCatalogRefs);
+		const offloadByEntryId = new Map(
+			this.recallCatalog
+				.entries()
+				.filter((entry) => activeRecallRefs.has(entry.refId))
+				.flatMap((entry) => entry.eventIds.map((eventId) => [eventId, entry] as const)),
+		);
 		const tailMessages: AgentMessage[] = [];
 		const seenEntryIds = new Set<string>();
 		for (const event of tailEvents) {
@@ -761,7 +963,8 @@ export class HfCompactionHost {
 		const pinnedMessage: AgentMessage = {
 			role: "user",
 			content: pinnedText,
-			timestamp: Date.now(),
+			// Deterministic per snapshot: identical authoritative state → identical context.
+			timestamp: Date.parse(active.createdAt),
 		};
 		return [pinnedMessage, ...tailMessages];
 	}
