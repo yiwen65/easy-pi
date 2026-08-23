@@ -322,6 +322,8 @@ export class CompactionOrchestrator {
 				decisions: extracted.merged.decisions.length,
 				nextActions: extracted.merged.nextActions.length,
 				droppedUnsourced: extracted.droppedUnsourced,
+				droppedEmptyItems: extracted.droppedEmptyItems,
+				normalizedTextAliases: extracted.normalizedTextAliases,
 				outOfRangeRefs: extracted.outOfRangeRefs.length,
 			});
 

@@ -188,6 +188,66 @@ describe("extractState", () => {
 		await expect(extractState(makeInput(sourceEvents()), fauxComplete("not json"))).rejects.toThrow(ExtractionError);
 	});
 
+	it("drops zero-information placeholders and normalizes an unambiguous text alias", async () => {
+		const result = await extractState(
+			makeInput(sourceEvents()),
+			fauxComplete({
+				facts: [
+					{ text: "", kind: "fact", sourceEventIds: ["e-3"] },
+					{ description: "x.ts is at version 2.1.3", kind: "fact", sourceEventIds: ["e-3"] },
+				],
+				decisions: [],
+				nextActions: [],
+			}),
+		);
+
+		expect(result.merged.facts.map((fact) => fact.text)).toEqual(["x.ts is at version 2.1.3"]);
+		expect(result.droppedEmptyItems).toBe(1);
+		expect(result.normalizedTextAliases).toBe(1);
+	});
+
+	it("rejects conflicting or unknown semantic text aliases", async () => {
+		await expect(
+			extractState(
+				makeInput(sourceEvents()),
+				fauxComplete({
+					facts: [
+						{
+							value: "version 2.1.3",
+							description: "version 3.0.0",
+							kind: "fact",
+							sourceEventIds: ["e-3"],
+						},
+					],
+					decisions: [],
+					nextActions: [],
+				}),
+			),
+		).rejects.toThrow(/conflicting text aliases/);
+
+		await expect(
+			extractState(
+				makeInput(sourceEvents()),
+				fauxComplete({
+					facts: [{ fact: "version 2.1.3", kind: "fact", sourceEventIds: ["e-3"] }],
+					decisions: [],
+					nextActions: [],
+				}),
+			),
+		).rejects.toThrow(/non-empty "text"/);
+
+		await expect(
+			extractState(
+				makeInput(sourceEvents()),
+				fauxComplete({
+					facts: [],
+					decisions: [{ text: "", alternativesRejected: ["unsafe fallback"], sourceEventIds: ["e-4"] }],
+					nextActions: [],
+				}),
+			),
+		).rejects.toThrow(/alternativesRejected/);
+	});
+
 	it("rejects deltas that try to rewrite constraints, permissions, or deterministic task/tool state", async () => {
 		const malicious = {
 			...goodDelta,

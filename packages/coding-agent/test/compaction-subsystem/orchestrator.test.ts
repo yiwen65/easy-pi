@@ -259,6 +259,27 @@ describe("CompactionOrchestrator", () => {
 		expect(deps.snapshotStore.getActive("s-1")).toBeUndefined();
 	});
 
+	it("activates when extraction contains a blank placeholder and an unambiguous text alias", async () => {
+		const deps = makeDeps(
+			fauxComplete({
+				extraction: {
+					...goodExtraction,
+					facts: [
+						{ text: "", kind: "fact", sourceEventIds: ["e-5"] },
+						{ value: "TEST LOG shows 200 passed", kind: "fact", sourceEventIds: ["e-5"] },
+					],
+				},
+			}),
+		);
+		const orch = new CompactionOrchestrator(deps);
+		const result = await orch.compact("soft_compact", { currentInput: "continue" });
+
+		expect(result.status).toBe("activated");
+		const extractAudit = deps.audit.list().find((event) => event.type === "extract");
+		expect(extractAudit?.details.droppedEmptyItems).toBe(1);
+		expect(extractAudit?.details.normalizedTextAliases).toBe(1);
+	});
+
 	it("concurrent compaction: CAS conflict → loser rejected, winner's state intact", async () => {
 		const deps = makeDeps(
 			fauxComplete({
