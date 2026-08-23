@@ -186,6 +186,42 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.getLastAssistantText()).toBe("queued response");
 	});
 
+	it("keeps the session usable when extraction contains an empty placeholder and text alias", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
+			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const sourceEventId = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user")!.id;
+		harness.setResponses([
+			fauxAssistantMessage("Distilled goal sentence."),
+			fauxAssistantMessage(
+				JSON.stringify({
+					facts: [
+						{ text: "", kind: "fact", sourceEventIds: [sourceEventId] },
+						{ description: "Recovered fact", kind: "fact", sourceEventIds: [sourceEventId] },
+					],
+					decisions: [],
+					nextActions: [],
+				}),
+			),
+			fauxAssistantMessage("compaction narrative"),
+			fauxAssistantMessage("session still works"),
+		]);
+
+		await expect(harness.session.compact()).resolves.toEqual(
+			expect.objectContaining({ summary: expect.stringContaining("[high-fidelity snapshot") }),
+		);
+		await expect(harness.session.prompt("continue after compaction")).resolves.toBeUndefined();
+		expect(harness.session.getLastAssistantText()).toBe("session still works");
+		const extractAudit = harness.session.hfCompactionHost!.audit.byType("extract").at(-1);
+		expect(extractAudit?.details.droppedEmptyItems).toBe(1);
+		expect(extractAudit?.details.normalizedTextAliases).toBe(1);
+	});
+
 	it("throws when compacting without a model", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

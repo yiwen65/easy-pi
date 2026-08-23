@@ -51,6 +51,10 @@ export interface ExtractionResult {
 	merged: { facts: Fact[]; decisions: Decision[]; nextActions: NextAction[] };
 	droppedUnsourced: number;
 	outOfRangeRefs: string[];
+	/** Zero-information model placeholders omitted before strict schema validation. */
+	droppedEmptyItems: number;
+	/** Items whose sole non-empty `value`/`description` alias was normalized to `text`. */
+	normalizedTextAliases: number;
 	/** Benign unknown item keys stripped during schema validation. */
 	strippedUnknownKeys: number;
 	/** True when the model output was truncated and salvaged at the last complete item. */
@@ -139,16 +143,22 @@ function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
 
+const TEXT_ALIASES = ["value", "description"] as const;
+
 /** Hand-rolled strict validation against EXTRACTION_RESPONSE_SCHEMA (no runtime dep). */
 function validateDeltaSchema(value: unknown): {
 	facts: RawDeltaItem[];
 	decisions: RawDeltaItem[];
 	nextActions: RawDeltaItem[];
+	droppedEmptyItems: number;
+	normalizedTextAliases: number;
 	strippedUnknownKeys: number;
 } {
 	if (!isRecord(value)) {
 		throw new ExtractionError("Schema violation: extraction response is not an object");
 	}
+	let droppedEmptyItems = 0;
+	let normalizedTextAliases = 0;
 	let strippedUnknownKeys = 0;
 	for (const key of Object.keys(value)) {
 		if (FORBIDDEN_DELTA_KEYS.has(key)) {
@@ -160,13 +170,54 @@ function validateDeltaSchema(value: unknown): {
 			throw new ExtractionError(`Schema violation: unexpected key "${key}" (additionalProperties: false)`);
 		}
 	}
+	const validated = {
+		facts: [] as RawDeltaItem[],
+		decisions: [] as RawDeltaItem[],
+		nextActions: [] as RawDeltaItem[],
+	};
 	for (const required of ["facts", "decisions", "nextActions"] as const) {
 		if (!Array.isArray(value[required])) {
 			throw new ExtractionError(`Schema violation: "${required}" must be an array`);
 		}
-		for (const item of value[required] as unknown[]) {
-			if (!isRecord(item) || typeof item.text !== "string" || item.text.length === 0) {
-				throw new ExtractionError(`Schema violation: ${required} items require non-empty "text"`);
+		for (const rawItem of value[required] as unknown[]) {
+			if (!isRecord(rawItem)) {
+				throw new ExtractionError(`Schema violation: ${required} items must be objects`);
+			}
+			const item = { ...rawItem };
+			if (item.text !== undefined && typeof item.text !== "string") {
+				throw new ExtractionError(`Schema violation: ${required} items require string "text"`);
+			}
+			if (typeof item.text !== "string" || item.text.trim().length === 0) {
+				const aliases = TEXT_ALIASES.flatMap((key) => {
+					const alias = item[key];
+					return typeof alias === "string" && alias.trim().length > 0 ? [alias.trim()] : [];
+				});
+				const uniqueAliases = [...new Set(aliases)];
+				if (uniqueAliases.length > 1) {
+					throw new ExtractionError(`Schema violation: ${required} item has conflicting text aliases`);
+				}
+				if (uniqueAliases.length === 0) {
+					const unknownSemanticKeys = Object.entries(item)
+						.filter(([key, candidate]) => {
+							if (key === "text" || key === "kind" || key === "sourceEventIds") return false;
+							if (TEXT_ALIASES.includes(key as (typeof TEXT_ALIASES)[number])) return false;
+							if (candidate === null || candidate === undefined) return false;
+							if (typeof candidate === "string") return candidate.trim().length > 0;
+							if (Array.isArray(candidate)) return candidate.length > 0;
+							return true;
+						})
+						.map(([key]) => key);
+					if (unknownSemanticKeys.length > 0) {
+						throw new ExtractionError(
+							`Schema violation: ${required} items require non-empty "text" (unrecognized semantic keys: ${unknownSemanticKeys.join(", ")})`,
+						);
+					}
+					droppedEmptyItems += 1;
+					continue;
+				}
+				item.text = uniqueAliases[0];
+				normalizedTextAliases += 1;
+				for (const key of TEXT_ALIASES) delete item[key];
 			}
 			if (!isStringArray(item.sourceEventIds)) {
 				throw new ExtractionError(`Schema violation: ${required} items require "sourceEventIds" (string array)`);
@@ -181,19 +232,20 @@ function validateDeltaSchema(value: unknown): {
 				if (!allowed.includes(key)) {
 					// Benign extra metadata keys (models love adding "kind", "priority"…)
 					// are stripped deterministically and counted, not schema-fatal.
-					delete (item as Record<string, unknown>)[key];
+					delete item[key];
 					strippedUnknownKeys += 1;
 				}
 			}
 			if (required === "facts" && item.kind !== undefined && item.kind !== "fact" && item.kind !== "assumption") {
 				throw new ExtractionError(`Schema violation: fact kind must be "fact" or "assumption"`);
 			}
+			validated[required].push(item);
 		}
 	}
 	return {
-		facts: value.facts as RawDeltaItem[],
-		decisions: value.decisions as RawDeltaItem[],
-		nextActions: value.nextActions as RawDeltaItem[],
+		...validated,
+		droppedEmptyItems,
+		normalizedTextAliases,
 		strippedUnknownKeys,
 	};
 }
@@ -417,6 +469,8 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 		merged: { facts: mergedFacts, decisions: mergedDecisions, nextActions: mergedNextActions },
 		droppedUnsourced,
 		outOfRangeRefs,
+		droppedEmptyItems: delta.droppedEmptyItems,
+		normalizedTextAliases: delta.normalizedTextAliases,
 		strippedUnknownKeys: delta.strippedUnknownKeys,
 		salvaged,
 		modelUsage: response.usage,
