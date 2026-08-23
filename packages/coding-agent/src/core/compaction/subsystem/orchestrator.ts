@@ -22,7 +22,7 @@ import { generateNarrative } from "./narrative.ts";
 import type { AuditTrail } from "./observability.ts";
 import { type OffloadPolicy, type OffloadRecord, offloadPayloads } from "./payload-offload.ts";
 import { buildPrompt } from "./prompt-builder.ts";
-import type { RecallCatalog } from "./recall-catalog.ts";
+import { type RecallCatalog, recallRefIdForHash } from "./recall-catalog.ts";
 import { reduceEvents } from "./reducer.ts";
 import type { SnapshotStore } from "./snapshot-store.ts";
 import { ExtractionError, extractState } from "./state-extractor.ts";
@@ -46,6 +46,8 @@ export interface OrchestratorDeps {
 	policy: OffloadPolicy;
 	keepRecentTokens: number;
 	systemPrompt: string;
+	/** Token estimate of the tool definitions sent with the next request. */
+	toolsTokenEstimate?: number;
 	outputReserveTokens?: number;
 	minTokenGainFraction?: number;
 	/** structured_compaction mode disables the narrative bridge entirely. */
@@ -53,12 +55,14 @@ export interface OrchestratorDeps {
 	/** Task ledger (design correction): binds candidates to a ledger version (G9). */
 	ledger?: import("./task-ledger.ts").TaskLedger;
 	/** Raw rebuild hook (T-019). When absent, rebuild escalation rejects. */
-	rebuildRunner?: (sessionId: string) => Promise<Omit<StructuredSnapshot, "snapshotVersion">>;
+	rebuildRunner?: (sessionId: string, boundarySeq: number) => Promise<Omit<StructuredSnapshot, "snapshotVersion">>;
 }
 
 export interface CompactOptions {
 	currentInput?: string;
 	manual?: boolean;
+	triggerReasons?: readonly string[];
+	currentInputExtraTokens?: number;
 	/** Abort signal threaded into compactor model calls. */
 	signal?: AbortSignal;
 	/**
@@ -88,7 +92,11 @@ export class CompactionOrchestrator {
 
 	async compact(action: TriggerAction, options: CompactOptions = {}): Promise<CompactResult> {
 		const { eventLog, contractStore, snapshotStore, audit, sessionId } = this.deps;
-		audit.record("trigger", sessionId, { action, manual: options.manual === true });
+		audit.record("trigger", sessionId, {
+			action,
+			manual: options.manual === true,
+			reasons: options.triggerReasons?.join("; ") ?? "",
+		});
 
 		const contract = contractStore.getActive(sessionId);
 		if (!contract) {
@@ -120,12 +128,28 @@ export class CompactionOrchestrator {
 			return this.reject("no events to compact", undefined);
 		}
 		const currentInput = options.currentInput ?? "";
+		const currentInputExtraTokens = options.currentInputExtraTokens ?? 0;
+		const activeTailEvents = allEvents.filter((event) => event.seq > (active?.baseEventSeq ?? 0));
+		const priorRecords: OffloadRecord[] = this.deps.recallCatalog
+			.entries()
+			.filter((entry) => entry.artifactRef !== undefined)
+			.flatMap((entry) =>
+				entry.eventIds.map((eventId) => ({
+					eventId,
+					artifactRef: entry.artifactRef!,
+					preview: entry.preview,
+					hash: entry.hash,
+					bytesOffloaded: 0,
+				})),
+			);
 
-		const tokensBefore = this.countNextRequest(
+		const tokensBefore = this.countNextRequestWithProjections(
 			contract,
 			active,
-			allEvents.slice(active?.baseEventSeq ?? 0),
+			activeTailEvents,
 			currentInput,
+			currentInputExtraTokens,
+			priorRecords,
 		);
 
 		// Deterministic stages first: reduce, groups, cut, offload (约束 10).
@@ -142,52 +166,41 @@ export class CompactionOrchestrator {
 		});
 
 		if (action === "offload_only") {
-			// Offload scans the whole event range (no cut, no LLM).
+			// Offload only the live tail; history at/before the active snapshot
+			// boundary is already represented by that snapshot.
 			const offloadAll = offloadPayloads({
-				events: allEvents,
+				events: activeTailEvents,
 				store: this.deps.artifactStore,
 				policy: this.deps.policy,
 				tenant: this.deps.tenant,
+				priorRecords,
 			});
 			audit.record("offload", sessionId, {
 				offloaded: offloadAll.records.length,
 				failed: offloadAll.failed.length,
 				bytes: offloadAll.totalBytesOffloaded,
 			});
-			for (const record of offloadAll.effectiveRecords) {
-				this.deps.recallCatalog.addFromOffload(record, "tool_result");
-			}
 			return this.compactOffloadOnly(
 				sessionId,
 				contract,
 				active,
 				expectedActiveVersion,
-				allEvents,
+				activeTailEvents,
 				tokensBefore,
 				currentInput,
+				currentInputExtraTokens,
 				offloadAll.effectiveRecords,
+				options.shadow === true,
 			);
 		}
 
 		const compactedEvents = allEvents.filter((e) => e.seq <= manifest.cutAfterSeq);
 		const tailEvents = allEvents.filter((e) => e.seq > manifest.cutAfterSeq);
 
-		// Offload scope is the whole history, not just the compacted region: an old
-		// giant parallel batch kept whole by atomicity rules must not dominate the
-		// tail forever. The reverse budget in offloadPayloads keeps the newest
-		// tool results inline; prior rounds' records make this idempotent.
-		const priorRecords: OffloadRecord[] = this.deps.recallCatalog
-			.entries()
-			.filter((e) => e.artifactRef !== undefined)
-			.map((e) => ({
-				eventId: e.eventIds[0],
-				artifactRef: e.artifactRef!,
-				preview: e.preview,
-				hash: e.hash,
-				bytesOffloaded: 0,
-			}));
+		// Scan the whole live tail, not just the compacted region: a giant atomic
+		// batch retained in the tail must still be recoverable by reference.
 		const offload = offloadPayloads({
-			events: allEvents,
+			events: activeTailEvents,
 			store: this.deps.artifactStore,
 			policy: this.deps.policy,
 			tenant: this.deps.tenant,
@@ -199,12 +212,19 @@ export class CompactionOrchestrator {
 			bytes: offload.totalBytesOffloaded,
 		});
 		manifest.offloadedRefs = offload.effectiveRecords.map((r) => r.artifactRef);
-		for (const record of offload.effectiveRecords) {
-			this.deps.recallCatalog.addFromOffload(record, "tool_result");
-		}
 
 		if (action === "full_rebuild") {
-			return this.runRebuild(sessionId, expectedActiveVersion, contract.version);
+			return this.runRebuild(
+				sessionId,
+				expectedActiveVersion,
+				contract.version,
+				boundary.seq,
+				tokensBefore,
+				currentInput,
+				currentInputExtraTokens,
+				options.shadow === true,
+				offload.effectiveRecords,
+			);
 		}
 
 		if (compactedEvents.length === 0) {
@@ -223,8 +243,17 @@ export class CompactionOrchestrator {
 				},
 				active?.narrative,
 				offload.effectiveRecords,
+				boundary.seq,
+				allEvents.at(-1)?.eventId,
 			);
-			const tokensAfter = this.countNextRequest(contract, candidate, tailEvents, currentInput);
+			const tokensAfter = this.countNextRequestWithProjections(
+				contract,
+				candidate,
+				tailEvents,
+				currentInput,
+				currentInputExtraTokens,
+				offload.effectiveRecords,
+			);
 			candidate.tokenStats.total = tokensAfter;
 			const report = validateCandidate({
 				contract,
@@ -324,6 +353,8 @@ export class CompactionOrchestrator {
 				extracted.merged,
 				narrative.rejected ? undefined : narrative.text,
 				offload.effectiveRecords,
+				boundary.seq,
+				allEvents.at(-1)?.eventId,
 			);
 
 			// Build the REAL next request and recount tokens (验收: 完整下一请求重计).
@@ -333,6 +364,7 @@ export class CompactionOrchestrator {
 				candidate,
 				tailEvents,
 				currentInput,
+				currentInputExtraTokens,
 				offload.effectiveRecords,
 			);
 			candidate.tokenStats = {
@@ -417,6 +449,7 @@ export class CompactionOrchestrator {
 					tokensBefore,
 					tokensAfter,
 					offload.totalBytesOffloaded,
+					offload.effectiveRecords,
 				);
 			}
 
@@ -426,7 +459,17 @@ export class CompactionOrchestrator {
 				continue; // one controlled repair: re-run extraction+narrative
 			}
 			if (plan === "rebuild") {
-				const rebuilt = await this.runRebuild(sessionId, expectedActiveVersion, contract.version);
+				const rebuilt = await this.runRebuild(
+					sessionId,
+					expectedActiveVersion,
+					contract.version,
+					boundary.seq,
+					tokensBefore,
+					currentInput,
+					currentInputExtraTokens,
+					false,
+					offload.effectiveRecords,
+				);
 				if (rebuilt.status === "rebuilt" || rebuilt.status === "activated") {
 					return rebuilt;
 				}
@@ -446,7 +489,9 @@ export class CompactionOrchestrator {
 		allEvents: EventEnvelope[],
 		tokensBefore: number,
 		currentInput: string,
+		currentInputExtraTokens: number,
 		records: OffloadRecord[],
+		shadow: boolean,
 	): Promise<CompactResult> {
 		const { audit } = this.deps;
 		const groups = buildAtomicGroups(allEvents);
@@ -473,16 +518,34 @@ export class CompactionOrchestrator {
 			artifacts: active?.artifacts ?? [],
 			errors: active?.errors ?? [],
 			nextActions: active?.nextActions ?? [],
-			recallCatalogRefs: this.deps.recallCatalog.entries().map((e) => e.refId),
+			recallCatalogRefs: [
+				...new Set([
+					...this.deps.recallCatalog.entries().map((entry) => entry.refId),
+					...records.map((record) => recallRefIdForHash(record.hash)),
+				]),
+			],
 			sourceEventRanges: active?.sourceEventRanges ?? [],
 			narrative: active?.narrative,
-			compactor: { promptVersion: COMPACTOR_POLICY_VERSION, schemaVersion: COMPACTION_SCHEMA_VERSION },
+			compactor: {
+				promptVersion: COMPACTOR_POLICY_VERSION,
+				schemaVersion: COMPACTION_SCHEMA_VERSION,
+				kind: "offload_only",
+				triggerEventSeq: allEvents.at(-1)?.seq,
+				triggerHeadEventId: allEvents.at(-1)?.eventId,
+			},
 			tokenStats: emptyTokenStats(),
 			createdAt: new Date().toISOString(),
 			schemaVersion: COMPACTION_SCHEMA_VERSION,
 		};
 		// After-prompt: same events, with offloaded payloads projected as refs.
-		const tokensAfter = this.countNextRequestWithProjections(contract, active, allEvents, currentInput, records);
+		const tokensAfter = this.countNextRequestWithProjections(
+			contract,
+			active,
+			allEvents,
+			currentInput,
+			currentInputExtraTokens,
+			records,
+		);
 		candidate.tokenStats.total = tokensAfter;
 		const deterministicState = reduceEvents(allEvents.filter((e) => e.seq <= candidate.baseEventSeq));
 		const report = validateCandidate({
@@ -501,6 +564,16 @@ export class CompactionOrchestrator {
 		if (!report.passed) {
 			return this.reject("offload-only candidate failed validation", report);
 		}
+		if (shadow) {
+			const written = this.deps.snapshotStore.putCandidate({ ...candidate, validatorReport: report });
+			audit.record(
+				"shadow_candidate",
+				sessionId,
+				{ version: written.snapshotVersion, passed: true, offloadOnly: true, tokensBefore, tokensAfter },
+				written.snapshotVersion,
+			);
+			return { status: "shadow", snapshotVersion: written.snapshotVersion, report };
+		}
 		return this.tryActivate(
 			sessionId,
 			candidate,
@@ -510,6 +583,7 @@ export class CompactionOrchestrator {
 			tokensBefore,
 			tokensAfter,
 			0,
+			records,
 		);
 	}
 
@@ -517,36 +591,97 @@ export class CompactionOrchestrator {
 		sessionId: string,
 		expectedActiveVersion: number,
 		expectedContractVersion: number,
+		boundarySeq: number,
+		tokensBefore: number,
+		currentInput: string,
+		currentInputExtraTokens: number,
+		shadow: boolean,
+		offloadRecords: OffloadRecord[],
 	): Promise<CompactResult> {
-		const { audit } = this.deps;
+		const { audit, eventLog, contractStore } = this.deps;
 		if (!this.deps.rebuildRunner) {
 			audit.record("rebuild", sessionId, { available: false });
 			return { status: "rejected", reason: "raw rebuild unavailable" };
 		}
 		const started = Date.now();
-		const rebuilt = await this.deps.rebuildRunner(sessionId);
-		const candidate: Omit<StructuredSnapshot, "snapshotVersion"> = this.deps.ledger
-			? { ...rebuilt, taskLedgerRef: this.lastLedgerAtFreeze }
-			: rebuilt;
-		const store = this.deps.snapshotStore;
-		const written = store.putCandidate(candidate);
-		audit.record("candidate_written", sessionId, { version: written.snapshotVersion, rebuild: true });
+		let rebuilt: Omit<StructuredSnapshot, "snapshotVersion">;
 		try {
-			store.activate(sessionId, {
-				expectedActiveVersion,
-				candidateVersion: written.snapshotVersion,
-				assertExternalState: () => this.assertFrozenExternalState(expectedContractVersion),
-			});
+			rebuilt = await this.deps.rebuildRunner(sessionId, boundarySeq);
 		} catch (error) {
-			audit.record("cas_conflict", sessionId, {
-				version: written.snapshotVersion,
-				rebuild: true,
-				error: String(error).slice(0, 120),
-			});
-			return { status: "rejected", reason: "CAS activation conflict" };
+			return this.reject(`raw rebuild failed: ${error instanceof Error ? error.message : String(error)}`, undefined);
 		}
-		audit.record("rebuild", sessionId, { available: true, mttrMs: Date.now() - started }, written.snapshotVersion);
-		return { status: "rebuilt", snapshotVersion: written.snapshotVersion };
+		const stagedRecallRefs = offloadRecords.map((record) => recallRefIdForHash(record.hash));
+		const rebuiltWithRecall = {
+			...rebuilt,
+			recallCatalogRefs: [...new Set([...rebuilt.recallCatalogRefs, ...stagedRecallRefs])],
+		};
+		const candidate: Omit<StructuredSnapshot, "snapshotVersion"> = this.deps.ledger
+			? { ...rebuiltWithRecall, taskLedgerRef: this.lastLedgerAtFreeze }
+			: rebuiltWithRecall;
+		const contract = contractStore.getActive(sessionId);
+		if (!contract || contract.version !== expectedContractVersion) {
+			return this.reject("global contract drifted during raw rebuild", undefined);
+		}
+		const events = eventLog.range(sessionId, 1, boundarySeq);
+		const coveredEvents = events.filter((event) => event.seq <= candidate.baseEventSeq);
+		const groups = buildAtomicGroups(events);
+		const compactedGroups = groups.filter((group) => group.toSeq <= candidate.baseEventSeq);
+		const manifest = {
+			cutAfterSeq: candidate.baseEventSeq,
+			keptGroupIds: groups.filter((group) => group.toSeq > candidate.baseEventSeq).map((group) => group.groupId),
+			compactedGroupIds: compactedGroups.map((group) => group.groupId),
+			offloadedRefs: candidate.recallCatalogRefs,
+			unclosedGroupIds: groups.filter((group) => !group.closed).map((group) => group.groupId),
+		};
+		const tokensAfter = this.countNextRequestWithProjections(
+			contract,
+			candidate,
+			events.filter((event) => event.seq > candidate.baseEventSeq),
+			currentInput,
+			currentInputExtraTokens,
+			offloadRecords,
+		);
+		candidate.tokenStats.total = tokensAfter;
+		const report = validateCandidate({
+			contract,
+			ledger: this.deps.ledger,
+			candidate: { ...candidate, snapshotVersion: -1 },
+			events,
+			groups,
+			manifest,
+			deterministicState: reduceEvents(coveredEvents),
+			tokenStatsBefore: tokensBefore,
+			tokenStatsAfter: tokensAfter,
+			minTokenGainFraction: this.deps.minTokenGainFraction,
+		});
+		audit.record("validate", sessionId, { passed: report.passed, rebuild: true });
+		if (!report.passed) return this.reject("raw rebuild candidate failed validation", report);
+		if (shadow) {
+			const written = this.deps.snapshotStore.putCandidate({ ...candidate, validatorReport: report });
+			audit.record(
+				"shadow_candidate",
+				sessionId,
+				{ version: written.snapshotVersion, passed: true, rebuild: true, tokensBefore, tokensAfter },
+				written.snapshotVersion,
+			);
+			return { status: "shadow", snapshotVersion: written.snapshotVersion, report };
+		}
+		const result = this.tryActivate(
+			sessionId,
+			candidate,
+			expectedActiveVersion,
+			candidate.baseEventSeq,
+			report,
+			tokensBefore,
+			tokensAfter,
+			0,
+			offloadRecords,
+		);
+		if (result.status === "activated") {
+			audit.record("rebuild", sessionId, { available: true, mttrMs: Date.now() - started }, result.snapshotVersion);
+			return { ...result, status: "rebuilt" };
+		}
+		return result;
 	}
 
 	private assembleCandidate(
@@ -562,6 +697,8 @@ export class CompactionOrchestrator {
 		},
 		narrative: string | undefined,
 		offloadRecords: OffloadRecord[],
+		triggerEventSeq: number,
+		triggerHeadEventId: string | undefined,
 	): Omit<StructuredSnapshot, "snapshotVersion"> {
 		const artifacts = [...deterministicState.artifacts];
 		for (const record of offloadRecords) {
@@ -592,10 +729,21 @@ export class CompactionOrchestrator {
 			artifacts,
 			errors: deterministicState.errors,
 			nextActions: extracted.nextActions,
-			recallCatalogRefs: this.deps.recallCatalog.entries().map((e) => e.refId),
+			recallCatalogRefs: [
+				...new Set([
+					...this.deps.recallCatalog.entries().map((entry) => entry.refId),
+					...offloadRecords.map((record) => recallRefIdForHash(record.hash)),
+				]),
+			],
 			sourceEventRanges: baseEventSeq > 0 ? [{ fromSeq: 1, toSeq: baseEventSeq }] : [],
 			narrative,
-			compactor: { promptVersion: COMPACTOR_POLICY_VERSION, schemaVersion: COMPACTION_SCHEMA_VERSION },
+			compactor: {
+				promptVersion: COMPACTOR_POLICY_VERSION,
+				schemaVersion: COMPACTION_SCHEMA_VERSION,
+				kind: "incremental",
+				triggerEventSeq,
+				triggerHeadEventId,
+			},
 			tokenStats: emptyTokenStats(),
 			createdAt: new Date().toISOString(),
 			schemaVersion: COMPACTION_SCHEMA_VERSION,
@@ -607,19 +755,24 @@ export class CompactionOrchestrator {
 		snapshot: StructuredSnapshot | Omit<StructuredSnapshot, "snapshotVersion"> | undefined,
 		tailEvents: EventEnvelope[],
 		currentInput: string,
+		currentInputExtraTokens = 0,
 	): number {
 		const built = buildPrompt({
 			systemPrompt: this.deps.systemPrompt,
 			contract,
 			ledger: this.deps.ledger,
 			snapshot: snapshot as StructuredSnapshot | undefined,
-			recallGuide: this.deps.recallCatalog.entries().length > 0 ? RECALL_GUIDE : undefined,
+			recallGuide:
+				this.deps.recallCatalog.entries().length > 0 || (snapshot?.recallCatalogRefs.length ?? 0) > 0
+					? RECALL_GUIDE
+					: undefined,
 			tailEvents,
 			currentInput,
 			exactRecall: [],
+			toolsTokenEstimate: this.deps.toolsTokenEstimate,
 			outputReserveTokens: this.deps.outputReserveTokens ?? 0,
 		});
-		return built.tokenStats.total;
+		return built.tokenStats.total + currentInputExtraTokens;
 	}
 
 	private countNextRequestWithProjections(
@@ -627,6 +780,7 @@ export class CompactionOrchestrator {
 		snapshot: StructuredSnapshot | Omit<StructuredSnapshot, "snapshotVersion"> | undefined,
 		events: EventEnvelope[],
 		currentInput: string,
+		currentInputExtraTokens: number,
 		records: OffloadRecord[],
 	): number {
 		const byEvent = new Map(records.map((r) => [r.eventId, r]));
@@ -638,7 +792,7 @@ export class CompactionOrchestrator {
 				payload: { text: `[offloaded ${record.artifactRef}] ${record.preview}` },
 			};
 		});
-		return this.countNextRequest(contract, snapshot, projected, currentInput);
+		return this.countNextRequest(contract, snapshot, projected, currentInput, currentInputExtraTokens);
 	}
 
 	private assertFrozenExternalState(expectedContractVersion: number): void {
@@ -677,11 +831,15 @@ export class CompactionOrchestrator {
 		tokensBefore: number,
 		tokensAfter: number,
 		offloadedBytes: number,
+		offloadRecords: OffloadRecord[] = [],
 	): CompactResult {
 		const { snapshotStore, eventLog, audit } = this.deps;
 		const written = snapshotStore.putCandidate({ ...candidate, validatorReport: report });
 		audit.record("candidate_written", sessionId, { version: written.snapshotVersion, baseEventSeq });
 		try {
+			for (const record of offloadRecords) {
+				this.deps.recallCatalog.addFromOffload(record, "tool_result");
+			}
 			snapshotStore.activate(sessionId, {
 				expectedActiveVersion,
 				candidateVersion: written.snapshotVersion,
@@ -712,20 +870,27 @@ export class CompactionOrchestrator {
 			};
 		}
 		audit.record("cas_activated", sessionId, { version: written.snapshotVersion }, written.snapshotVersion);
-		eventLog.append({
-			sessionId,
-			agentId: "compaction-orchestrator",
-			eventType: "compaction",
-			payload: {
-				kind: "compaction_committed",
-				snapshotVersion: written.snapshotVersion,
-				baseEventSeq,
-				tokensBefore,
-				tokensAfter,
-				offloadedBytes,
-			},
-			authority: { kind: "system", id: "compaction-orchestrator", verified: true },
-		});
+		try {
+			eventLog.append({
+				sessionId,
+				agentId: "compaction-orchestrator",
+				eventType: "compaction",
+				payload: {
+					kind: "compaction_committed",
+					snapshotVersion: written.snapshotVersion,
+					baseEventSeq,
+					tokensBefore,
+					tokensAfter,
+					offloadedBytes,
+				},
+				authority: { kind: "system", id: "compaction-orchestrator", verified: true },
+			});
+		} catch (error) {
+			audit.record("commit_log_failed", sessionId, {
+				version: written.snapshotVersion,
+				error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+			});
+		}
 		audit.record(
 			"compact_committed",
 			sessionId,

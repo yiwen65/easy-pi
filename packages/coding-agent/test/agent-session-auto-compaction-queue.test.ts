@@ -129,16 +129,22 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const runAutoCompaction = (
 			session as unknown as {
-				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+				_runAutoCompaction: (
+					reason: "overflow" | "threshold",
+					willRetry: boolean,
+					decision: { action: "soft_compact"; reasons: string[] },
+				) => Promise<boolean>;
 			}
 		)._runAutoCompaction.bind(session);
 
-		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
+		await expect(runAutoCompaction("threshold", false, { action: "soft_compact", reasons: ["test"] })).resolves.toBe(
+			true,
+		);
 
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
-	it("should not compact repeatedly after overflow recovery already attempted", async () => {
+	it("should not compact repeatedly after a successful overflow recovery", async () => {
 		const model = session.model!;
 		const overflowMessage: AssistantMessage = {
 			role: "assistant",
@@ -162,11 +168,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
+					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
 				},
 				"_runAutoCompaction",
 			)
-			.mockResolvedValue();
+			.mockImplementationOnce(async () => {
+				(session as unknown as { _overflowRecoveryAttempted: boolean })._overflowRecoveryAttempted = true;
+				return true;
+			});
 
 		const events: Array<{ type: string; reason: string; errorMessage?: string }> = [];
 		session.subscribe((event) => {
@@ -303,6 +312,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 			errorAssistant,
 		];
 
+		const decision = { action: "soft_compact" as const, reasons: ["predicted request above soft limit"] };
+		vi.spyOn(session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
+			decision,
+			predictedNextRequestTokens: thresholdTokens,
+			recoverableToolTokens: 0,
+			compactionCooldownRemaining: 0,
+			incrementalCompactionsSinceRebuild: 0,
+		});
 		const runAutoCompactionSpy = vi
 			.spyOn(
 				session as unknown as {
@@ -320,7 +337,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		await checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false, decision, "", 0);
 	});
 
 	it("should not trigger threshold compaction for error messages when no prior usage exists", async () => {

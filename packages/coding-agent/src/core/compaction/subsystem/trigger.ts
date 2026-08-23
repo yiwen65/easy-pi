@@ -9,6 +9,12 @@
  *                  OR critical contradiction OR before a high-risk
  *                  irreversible action
  *
+ * AgentSession supplies only signals with deterministic runtime sources:
+ * token zones, recoverable tool payloads, overflow, cooldown, and durable
+ * incremental count. phase/manual/drift/contradiction/high-risk fields remain
+ * explicit policy hooks for callers that own authoritative detectors; the
+ * default runtime never fabricates them from weak proxies.
+ *
  * Offload-only is preferred when offloading recoverable tool payloads alone
  * clears the threshold. Cooldown hysteresis prevents threshold flapping, but
  * never suppresses HARD/FULL_REBUILD.

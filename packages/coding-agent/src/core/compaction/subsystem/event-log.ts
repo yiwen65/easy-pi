@@ -342,6 +342,7 @@ export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: strin
 						isError: message.isError,
 						content: text,
 						hasImages: content.some((b) => b.type === "image"),
+						imageCount: content.filter((b) => b.type === "image").length,
 					},
 				});
 			} else {

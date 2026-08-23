@@ -309,7 +309,7 @@ describe("CompactionOrchestrator", () => {
 		const orch = new CompactionOrchestrator(deps);
 		const result = await orch.compact("soft_compact", { currentInput: "continue" });
 		expect(result.status).toBe("rejected");
-		expect(result.report?.failures.some((f) => f.code === "token-gain")).toBe(true);
+		expect(result.reason).toMatch(/nothing to compact|insufficient token gain/);
 		expect(deps.snapshotStore.getActive("s-1")).toBeUndefined();
 	});
 

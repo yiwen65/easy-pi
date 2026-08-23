@@ -13,6 +13,7 @@ import type { ArtifactStore } from "./artifact-store.ts";
 import type { EventLog } from "./event-log.ts";
 import { COMPACTOR_POLICY_VERSION } from "./injection-guard.ts";
 import type { AuditTrail } from "./observability.ts";
+import type { RecallCatalog } from "./recall-catalog.ts";
 import { reduceEvents } from "./reducer.ts";
 import type { SnapshotStore } from "./snapshot-store.ts";
 import type { ContractStore } from "./task-contract.ts";
@@ -26,6 +27,7 @@ export interface RebuildDeps {
 	contractStore: ContractStore;
 	snapshotStore: SnapshotStore;
 	audit: AuditTrail;
+	recallCatalog?: RecallCatalog;
 }
 
 export interface RebuildResult {
@@ -41,14 +43,16 @@ export interface RebuildResult {
  */
 export async function rawRebuild(
 	deps: RebuildDeps,
-	options: { fromCheckpointSeq?: number } = {},
+	options: { fromCheckpointSeq?: number; toSeq?: number; coverageSeq?: number } = {},
 ): Promise<RebuildResult> {
 	const started = Date.now();
 	const { eventLog, artifactStore, contractStore, snapshotStore, audit, sessionId } = deps;
 
-	const boundary = eventLog.freeze(sessionId);
+	const toSeq = options.toSeq ?? eventLog.freeze(sessionId).seq;
+	const coverageSeq = options.coverageSeq ?? toSeq;
 	const fromSeq = options.fromCheckpointSeq ?? 1;
-	const events = eventLog.range(sessionId, 1, boundary.seq);
+	const events = eventLog.range(sessionId, 1, toSeq);
+	const coveredEvents = events.filter((event) => event.seq <= coverageSeq);
 
 	// Verify stable refs resolve; missing objects are explicit gaps.
 	const gaps: string[] = [];
@@ -63,7 +67,7 @@ export async function rawRebuild(
 	const checkpoint =
 		fromSeq > 1 ? snapshotStore.listVersions(sessionId).find((s) => s.baseEventSeq === fromSeq - 1) : undefined;
 
-	const deltaEvents = events.filter((e) => e.seq >= fromSeq);
+	const deltaEvents = coveredEvents.filter((e) => e.seq >= fromSeq);
 	const deterministicState = reduceEvents(
 		deltaEvents,
 		checkpoint
@@ -81,6 +85,15 @@ export async function rawRebuild(
 	);
 
 	const active = snapshotStore.getActive(sessionId);
+	if (deps.recallCatalog && active) {
+		for (const refId of active.recallCatalogRefs) {
+			try {
+				deps.recallCatalog.recallExact(refId);
+			} catch (error) {
+				gaps.push(`unresolvable recall ${refId}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
 	const contract = contractStore.getActive(sessionId);
 
 	// Prior extractor content survives only as unverified, with provenance intact.
@@ -93,7 +106,7 @@ export async function rawRebuild(
 	const snapshot: Omit<StructuredSnapshot, "snapshotVersion"> = {
 		sessionId,
 		parentVersion: active?.snapshotVersion ?? null,
-		baseEventSeq: boundary.seq,
+		baseEventSeq: coverageSeq,
 		lineage: active ? [...active.lineage, active.snapshotVersion] : [],
 		contractRef: contract
 			? { contractId: contract.contractId, version: contract.version }
@@ -107,9 +120,15 @@ export async function rawRebuild(
 		errors: deterministicState.errors,
 		nextActions: carriedNextActions,
 		recallCatalogRefs: active?.recallCatalogRefs ?? [],
-		sourceEventRanges: [{ fromSeq, toSeq: boundary.seq }],
+		sourceEventRanges: coverageSeq >= fromSeq ? [{ fromSeq, toSeq: coverageSeq }] : [],
 		// narrative intentionally dropped
-		compactor: { promptVersion: COMPACTOR_POLICY_VERSION, schemaVersion: COMPACTION_SCHEMA_VERSION },
+		compactor: {
+			promptVersion: COMPACTOR_POLICY_VERSION,
+			schemaVersion: COMPACTION_SCHEMA_VERSION,
+			kind: "rebuild",
+			triggerEventSeq: toSeq,
+			triggerHeadEventId: events.at(-1)?.eventId,
+		},
 		tokenStats: {
 			system: 0,
 			tools: 0,
@@ -129,7 +148,7 @@ export async function rawRebuild(
 	const mttrMs = Date.now() - started;
 	audit.record("rebuild", sessionId, {
 		fromSeq,
-		toSeq: boundary.seq,
+		toSeq,
 		gaps: gaps.length,
 		mttrMs,
 		checkpointUsed: checkpoint !== undefined,

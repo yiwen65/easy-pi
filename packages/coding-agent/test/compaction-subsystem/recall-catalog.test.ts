@@ -97,3 +97,55 @@ describe("RecallCatalog", () => {
 		expect(catalog.metrics()).toEqual({ recallAttempts: 1, recallHits: 1, recallFailures: 0 });
 	});
 });
+
+describe("recall catalog durability (T-005)", () => {
+	it("persists entries so a restarted catalog resolves the same deterministic ref", async () => {
+		const { mkdtempSync, rmSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const dir = mkdtempSync(join(tmpdir(), "recall-persist-"));
+		try {
+			const { FileSystemArtifactStore } = await import("../../src/core/compaction/subsystem/artifact-store.ts");
+			const { JsonlRecallPersister, RecallCatalog } = await import(
+				"../../src/core/compaction/subsystem/recall-catalog.ts"
+			);
+			const store = new FileSystemArtifactStore(join(dir, "artifacts"));
+			const persister = new JsonlRecallPersister(join(dir, "recall.jsonl"));
+			const first = new RecallCatalog({ store, tenant: "t", persister });
+			const entry = first.add({
+				kind: "tool_result",
+				preview: "big log preview",
+				content: "x".repeat(5000),
+				eventIds: ["e-1"],
+				tenant: "t",
+			});
+			const sameContent = first.add({
+				kind: "tool_result",
+				preview: "same bytes, different event",
+				content: "x".repeat(5000),
+				eventIds: ["e-2"],
+				tenant: "t",
+			});
+			expect(sameContent.refId).toBe(entry.refId);
+			expect(sameContent.eventIds).toEqual(["e-1", "e-2"]);
+
+			// Restart: new catalog over the same persister and artifact store.
+			const second = new RecallCatalog({ store, tenant: "t", persister });
+			const recalled = second.recallExact(entry.refId);
+			expect(new TextDecoder().decode(recalled.data)).toBe("x".repeat(5000));
+			expect(recalled.entry.eventIds).toEqual(["e-1", "e-2"]);
+			// Same content in a fresh catalog derives the identical ref id.
+			const third = new RecallCatalog({ store, tenant: "t" });
+			const again = third.add({
+				kind: "tool_result",
+				preview: "big log preview",
+				content: "x".repeat(5000),
+				eventIds: ["e-9"],
+				tenant: "t",
+			});
+			expect(again.refId).toBe(entry.refId);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

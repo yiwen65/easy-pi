@@ -10,9 +10,16 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
+const SOFT_DECISION = { action: "soft_compact" as const, reasons: ["test"] };
+
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
-	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+	_runAutoCompaction: (
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		decision: typeof SOFT_DECISION,
+	) => Promise<boolean>;
+	_overflowRecoveryAttempted: boolean;
 };
 
 function createUsage(totalTokens: number) {
@@ -315,7 +322,7 @@ describe("AgentSession compaction characterization", () => {
 		const stream = installCompactorStream(harness, "auto summary from custom stream");
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await sessionInternals._runAutoCompaction("threshold", false);
+		await sessionInternals._runAutoCompaction("threshold", false, SOFT_DECISION);
 
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
@@ -350,7 +357,7 @@ describe("AgentSession compaction characterization", () => {
 		};
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(false);
+		await expect(sessionInternals._runAutoCompaction("threshold", false, SOFT_DECISION)).resolves.toBe(false);
 
 		// The subsystem fails closed; the failure is observable with the root cause included.
 		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
@@ -394,9 +401,9 @@ describe("AgentSession compaction characterization", () => {
 
 		await harness.session.prompt("x".repeat(5000));
 
-		expect(harness.faux.state.callCount).toBe(7);
-		// The resume-triggering compaction had willRetry=true; a trailing
-		// case-2 (successful overflow, no retry) compaction may follow it.
+		expect(harness.faux.state.callCount).toBe(5);
+		// The activated recovery compaction retries exactly once. Cooldown prevents
+		// an immediate second compaction after the successful continuation.
 		const ends = harness.eventsOfType("compaction_end");
 		expect(ends.some((e) => e.reason === "overflow" && e.willRetry === true && !e.aborted)).toBe(true);
 		expect(harness.session.getLastAssistantText()).toBe("completed response");
@@ -439,7 +446,7 @@ describe("AgentSession compaction characterization", () => {
 		);
 	});
 
-	it("keeps overflow wording when a repeated length stop fills the context window", async () => {
+	it("keeps overflow wording after a successful recovery when a repeated length stop fills the context window", async () => {
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 100 }],
 		});
@@ -450,7 +457,10 @@ describe("AgentSession compaction characterization", () => {
 			totalTokens: 100,
 			timestamp: Date.now(),
 		});
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockImplementationOnce(async () => {
+			sessionInternals._overflowRecoveryAttempted = true;
+			return true;
+		});
 		const compactionErrors: string[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "compaction_end" && event.errorMessage) {
@@ -518,10 +528,10 @@ describe("AgentSession compaction characterization", () => {
 
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
-		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(true);
+		await expect(sessionInternals._runAutoCompaction("threshold", false, SOFT_DECISION)).resolves.toBe(true);
 	});
 
-	it("does not retry overflow recovery more than once", async () => {
+	it("does not retry overflow recovery more than once after a successful activation", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
@@ -530,7 +540,10 @@ describe("AgentSession compaction characterization", () => {
 			errorMessage: "prompt is too long",
 			timestamp: Date.now(),
 		});
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockImplementationOnce(async () => {
+			sessionInternals._overflowRecoveryAttempted = true;
+			return true;
+		});
 		const compactionErrors: string[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "compaction_end" && event.errorMessage) {
@@ -631,11 +644,18 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
+		vi.spyOn(harness.session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
+			decision: SOFT_DECISION,
+			predictedNextRequestTokens: 190_000,
+			recoverableToolTokens: 0,
+			compactionCooldownRemaining: 0,
+			incrementalCompactionsSinceRebuild: 0,
+		});
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false, SOFT_DECISION, "", 0);
 	});
 
 	it("does not trigger threshold compaction for error messages when no prior usage exists", async () => {

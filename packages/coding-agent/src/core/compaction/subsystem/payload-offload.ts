@@ -84,6 +84,69 @@ function payloadBytes(payload: unknown): number {
 	return new TextEncoder().encode(payloadText(payload)).length;
 }
 
+function offloadCandidateEvents(events: EventEnvelope[], policy: OffloadPolicy): EventEnvelope[] {
+	const toolNameByCall = new Map<string, string>();
+	for (const event of events) {
+		if (
+			event.eventType === "tool_call" &&
+			event.toolCallId &&
+			isRecord(event.payload) &&
+			typeof event.payload.name === "string"
+		) {
+			toolNameByCall.set(event.toolCallId, event.payload.name);
+		}
+		if (
+			event.eventType === "tool_call" &&
+			event.toolCallId &&
+			isRecord(event.payload) &&
+			isRecord(event.payload.message)
+		) {
+			const content = event.payload.message.content;
+			if (Array.isArray(content)) {
+				for (const block of content) {
+					if (
+						isRecord(block) &&
+						block.type === "toolCall" &&
+						block.id === event.toolCallId &&
+						typeof block.name === "string"
+					) {
+						toolNameByCall.set(event.toolCallId, block.name);
+					}
+				}
+			}
+		}
+	}
+	const keepInline = new Set(
+		events
+			.filter((event) => event.eventType === "tool_result")
+			.sort((a, b) => b.seq - a.seq)
+			.slice(0, Math.max(0, policy.keepRecentToolResults))
+			.map((event) => event.eventId),
+	);
+	return events.filter((event) => {
+		const toolName = event.toolCallId ? toolNameByCall.get(event.toolCallId) : undefined;
+		return classifyPayload(event, policy, toolName) === "offloadable" && !keepInline.has(event.eventId);
+	});
+}
+
+/** Pure estimate used by the trigger policy; applies the exact execution classifier and reverse budget. */
+export function estimateRecoverableToolTokens(input: {
+	events: EventEnvelope[];
+	policy: OffloadPolicy;
+	alreadyOffloadedEventIds?: ReadonlySet<string>;
+}): number {
+	return offloadCandidateEvents(input.events, input.policy)
+		.filter((event) => !input.alreadyOffloadedEventIds?.has(event.eventId))
+		.reduce((sum, event) => {
+			const text = payloadText(event.payload);
+			const inlineTokens = Math.max(1, Math.ceil(text.length / 4));
+			// Execution keeps a 200-char preview plus ref/status/call metadata.
+			// Subtract only the conservative net saving used by the trigger.
+			const projectedTokens = Math.ceil((Math.min(text.length, 200) + 160) / 4);
+			return sum + Math.max(0, inlineTokens - projectedTokens);
+		}, 0);
+}
+
 function resultInfo(event: EventEnvelope): { isError: boolean; exitCode?: number } {
 	const payload = event.payload;
 	if (isRecord(payload)) {
@@ -125,7 +188,7 @@ export function classifyPayload(event: EventEnvelope, policy: OffloadPolicy, too
 			return "must_keep_verbatim";
 		}
 	}
-	if (payloadBytes(event.payload) > policy.maxInlineBytes) {
+	if (event.eventType === "tool_result" && payloadBytes(event.payload) > policy.maxInlineBytes) {
 		return "offloadable";
 	}
 	if (event.eventType === "tool_result" || event.eventType === "message") {
@@ -149,47 +212,7 @@ export function offloadPayloads(input: {
 	const { events, store, policy, tenant } = input;
 	const priorByEvent = new Map((input.priorRecords ?? []).map((r) => [r.eventId, r]));
 
-	// Map toolCallId → tool name from call events.
-	const toolNameByCall = new Map<string, string>();
-	for (const event of events) {
-		if (
-			event.eventType === "tool_call" &&
-			event.toolCallId &&
-			isRecord(event.payload) &&
-			typeof event.payload.name === "string"
-		) {
-			toolNameByCall.set(event.toolCallId, event.payload.name);
-		}
-		// Session-adapter payloads carry the assistant message with toolCall blocks.
-		if (
-			event.eventType === "tool_call" &&
-			event.toolCallId &&
-			isRecord(event.payload) &&
-			isRecord(event.payload.message)
-		) {
-			const content = event.payload.message.content;
-			if (Array.isArray(content)) {
-				for (const block of content) {
-					if (
-						isRecord(block) &&
-						block.type === "toolCall" &&
-						block.id === event.toolCallId &&
-						typeof block.name === "string"
-					) {
-						toolNameByCall.set(event.toolCallId, block.name);
-					}
-				}
-			}
-		}
-	}
-
-	// Reverse budget: the newest N tool results are exempt from offload.
-	const toolResultIdsNewestFirst = events
-		.filter((e) => e.eventType === "tool_result")
-		.sort((a, b) => b.seq - a.seq)
-		.slice(0, Math.max(0, policy.keepRecentToolResults))
-		.map((e) => e.eventId);
-	const keepInline = new Set(toolResultIdsNewestFirst);
+	const candidates = new Set(offloadCandidateEvents(events, policy).map((event) => event.eventId));
 
 	const outcome: OffloadOutcome = {
 		records: [],
@@ -201,16 +224,13 @@ export function offloadPayloads(input: {
 	};
 
 	for (const event of events) {
-		const toolName = event.toolCallId ? toolNameByCall.get(event.toolCallId) : undefined;
-		const classification = classifyPayload(event, policy, toolName);
-		if (classification !== "offloadable") {
+		if (!candidates.has(event.eventId)) {
+			const classification = classifyPayload(event, policy);
 			if (classification === "must_keep_verbatim") {
 				outcome.skipped.push({ eventId: event.eventId, reason: "must_keep_verbatim" });
+			} else if (classification === "offloadable") {
+				outcome.skipped.push({ eventId: event.eventId, reason: "recent_tool_result_budget" });
 			}
-			continue;
-		}
-		if (keepInline.has(event.eventId)) {
-			outcome.skipped.push({ eventId: event.eventId, reason: "recent_tool_result_budget" });
 			continue;
 		}
 		const prior = priorByEvent.get(event.eventId);

@@ -316,6 +316,13 @@ export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 	if (input.exactRecall.length > 0) push("exactRecall", input.exactRecall.join("\n\n"));
 
 	const zoneTokens = (zone: ZoneKind) => sections.filter((s) => s.zone === zone).reduce((sum, s) => sum + s.tokens, 0);
+	const tailImageTokens = input.tailEvents.reduce((sum, event) => {
+		const payload = event.payload;
+		if (!isRecord(payload)) return sum;
+		const imageCount =
+			typeof payload.imageCount === "number" ? payload.imageCount : payload.hasImages === true ? 1 : 0;
+		return sum + imageCount * 1200;
+	}, 0);
 	const tokenStats: TokenStats = {
 		system: estimate(input.systemPrompt),
 		tools: input.toolsTokenEstimate ?? 0,
@@ -323,7 +330,7 @@ export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 		snapshot: zoneTokens("snapshot"),
 		narrative: zoneTokens("narrative"),
 		recall: zoneTokens("recallGuide") + zoneTokens("exactRecall"),
-		recentTail: zoneTokens("recentTail"),
+		recentTail: zoneTokens("recentTail") + tailImageTokens,
 		currentInput: zoneTokens("currentInput"),
 		outputReserve: input.outputReserveTokens ?? 0,
 		total: 0,

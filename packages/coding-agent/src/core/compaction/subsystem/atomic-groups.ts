@@ -27,12 +27,10 @@ function sumTokens(events: EventEnvelope[]): number {
 	return events.reduce((sum, e) => sum + estimateEventTokens(e), 0);
 }
 
-let groupCounter = 0;
-
 function makeGroup(kind: AtomicGroup["kind"], events: EventEnvelope[], closed: boolean): AtomicGroup {
-	groupCounter += 1;
+	// Deterministic id: same event range → same group id, across processes.
 	return {
-		groupId: `g-${groupCounter}`,
+		groupId: `g-${events[0].seq}-${events[events.length - 1].seq}-${kind}`,
 		kind,
 		fromSeq: events[0].seq,
 		toSeq: events[events.length - 1].seq,
@@ -40,11 +38,6 @@ function makeGroup(kind: AtomicGroup["kind"], events: EventEnvelope[], closed: b
 		closed,
 		eventIds: events.map((e) => e.eventId),
 	};
-}
-
-/** Reset group id counter (test determinism). */
-export function resetGroupCounterForTest(): void {
-	groupCounter = 0;
 }
 
 /**
