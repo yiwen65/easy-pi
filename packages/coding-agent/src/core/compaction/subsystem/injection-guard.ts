@@ -9,7 +9,7 @@
  */
 
 /** Versioned compactor policy identity (bump on any prompt/policy change). */
-export const COMPACTOR_POLICY_VERSION = "1.0.0";
+export const COMPACTOR_POLICY_VERSION = "1.1.0";
 export const NARRATIVE_PROMPT_VERSION = "1.0.0";
 export const EXTRACTION_SCHEMA_VERSION = 1;
 
