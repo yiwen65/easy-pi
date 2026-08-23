@@ -878,9 +878,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-304 — 多模型门槛复测
+### [x] T-304 — 多模型门槛复测
 
-- Status: blocked
+- Status: done
 - Owner: unassigned
 - Objective: 用 T-104/T-107 runner 对 Anthropic/OpenAI 等第二、第三模型跑真实评测，确认 token 门槛与保真指标跨模型稳定。
 - Inputs and prerequisites: T-107 batch runner；新 AGENTS.md 真实 API 规则。
@@ -892,9 +892,9 @@
   2. 运行并记录。
 - Acceptance criteria: 报告入档。
 - Verification method: 真实评测输出。
-- Validation evidence: 2026-08-22 规则事实：AGENTS.md 修订后真实 API 逐次需用户批准；当前仅 K3 获批并已完成评测（T-105 证据）。
-- Blocker: 新 AGENTS.md 规则要求逐次用户批准；尚未批准 Anthropic/OpenAI 等额外模型的真实调用（K3 已批准并完成）。
-- Unblock condition: 用户批准目标模型的真实 API 使用。
+- Validation evidence: 2026-08-23 用户明确授权真实模型调用。环境可用额外 provider 为 `openai-codex`（无 Anthropic 凭据），因此以第二、第三模型完成 100 条真实 pi-mono 会话前缀、2 轮压缩门槛复测：`gpt-5.4-mini` 2/2 激活、F/C/T/P 与 overall retention 100%、oracle 一致、42306→11295 tokens（−73.3%）；`gpt-5.4` 2/2 激活、同类保真 100%、oracle 一致、42305→11927（−71.8%）。两模型均超过 40% token 门槛。稳定 id/parentId 后隔离 staged-tree 缓存复跑 2/2 通过且 615ms、指标逐位一致，无新增 API 调用。真实复测暴露并修复：手动 runner 缺少生产 HTTP dispatcher；provider-neutral prompt 未列 item schema；模型将 provenance 写成 seq/唯一 UUID 前缀，现由确定性唯一映射规范化，未知/歧义引用仍 fail closed。目标回归 40 files：38 passed / 2 real-model gates skipped，317 passed / 8 skipped；T-304 五个变更文件 scoped biome 零问题。根静态复跑当前仅被并行会话的 `harness-service.ts`/`harness-service.test.ts` 在途格式与 `PromptInput` 类型错误阻塞。
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-305 — 生产灰度（外部部署面）
 
@@ -1047,6 +1047,7 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-08-23: 用户授权真实模型后完成 T-304：openai-codex gpt-5.4-mini/gpt-5.4 在真实 100-entry 语料上均 2/2 激活、全类 100% 保真、oracle 一致、token −73.3%/−71.8%；确定性缓存复跑指标一致。修复 real-runner HTTP dispatcher、extractor schema prompt 与 seq/唯一 UUID 前缀 provenance 规范化。
 - 2026-08-23: 并行会话静态阻塞解除后完成 T-404：根 `npm run check` exit 0（1205 files, no fixes applied），`./test.sh` exit 0（全部 workspace 通过）；T-401..T-405 至此全部 done。
 - 2026-08-23: T-401/T-402/T-403/T-405 完成：Task Ledger/Goal Interpreter/runtime/最终 CAS 与 `/contract` 交互闭环落地；目标集 312 passed / 6 skipped，scoped biome 76 文件零问题，tmux 两条本地命令 smoke 通过。对抗复核后补强：同轮 pending 警告、Global goal 降为 legacy 非权威、event/snapshot defensive copy、task batch 单记录原子持久化、JSONL corrupt-tail fail closed。
 - 2026-08-23: T-404 文档修订完成但仓库级验证 blocked：`npm run check` 仅被并行会话未跟踪 `packages/subagent/*` 阻塞；`./test.sh` 所有任务相关/其他 workspace 通过，仅 reftable watcher 一次超时，目标复跑 8/8 通过。未触碰并行会话文件。
@@ -1091,6 +1092,6 @@
 ## Final validation result
 
 - Result: partial
-- Evidence: 截至 2026-08-23，T-401..T-405 全部完成并验证：任务相关目标集 39 files（38 passed, 1 real-model gate skipped），312 passed / 6 skipped；真实 tmux（无 API）`/contract` 与 `/contract set` smoke 通过；根 `npm run check` exit 0（Biome 1205 files/no fixes、全部静态门通过）；`./test.sh` exit 0（scripts 与全部 workspaces 全绿）；任务文档 validator 通过。历史真实 K3/CLI 指标与 T-105..T-111 证据保持有效。
-- Remaining: T-304 仍待额外真实模型授权；T-305 仍待仓库外生产部署面。
+- Evidence: 截至 2026-08-23，T-401..T-405 全部完成并验证：任务相关目标集 39 files（38 passed, 1 real-model gate skipped），312 passed / 6 skipped；真实 tmux（无 API）`/contract` 与 `/contract set` smoke 通过；根 `npm run check` exit 0（Biome 1205 files/no fixes、全部静态门通过）；`./test.sh` exit 0（scripts 与全部 workspaces 全绿）；任务文档 validator 通过。历史真实 K3/CLI 指标与 T-105..T-111 证据保持有效；T-304 新增 openai-codex gpt-5.4-mini/gpt-5.4 两模型真实复测，均全类 100% 保真、2/2 激活，token 分别 −73.3%/−71.8%。
+- Remaining: T-305 仍待仓库外生产部署面。
 - Limitations: Task Ledger 的 session tree 分支投影仍沿用既有 HF event-log 分支重建策略，未在本轮扩展为 branch-scoped durable ledger。

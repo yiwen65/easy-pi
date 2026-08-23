@@ -114,6 +114,51 @@ describe("extractState", () => {
 		expect(result.merged.nextActions[0].text).toBe("Run the test suite");
 	});
 
+	it("canonicalizes cited event sequence numbers to stable event ids", async () => {
+		const result = await extractState(
+			makeInput(sourceEvents()),
+			fauxComplete({
+				facts: [{ text: "version fact", kind: "fact", sourceEventIds: ["3"] }],
+				decisions: [{ text: "version decision", sourceEventIds: ["4"] }],
+				nextActions: [{ text: "version action", sourceEventIds: ["4"] }],
+			}),
+		);
+		expect(result.outOfRangeRefs).toEqual([]);
+		expect(result.merged.facts[0].provenance.sourceEventIds).toEqual(["e-3"]);
+		expect(result.merged.decisions[0].provenance.sourceEventIds).toEqual(["e-4"]);
+		expect(result.merged.nextActions[0].provenance.sourceEventIds).toEqual(["e-4"]);
+	});
+
+	it("expands an unambiguous event-id prefix without guessing", async () => {
+		const fullEventId = "f95d8a6a-1234-7123-8123-123456789abc";
+		const events = sourceEvents().map((event) =>
+			event.eventId === "e-3" ? { ...event, eventId: fullEventId } : event,
+		);
+		const result = await extractState(
+			makeInput(events),
+			fauxComplete({
+				facts: [{ text: "version fact", kind: "fact", sourceEventIds: ["f95d8a6a"] }],
+				decisions: [],
+				nextActions: [],
+			}),
+		);
+		expect(result.outOfRangeRefs).toEqual([]);
+		expect(result.merged.facts[0].provenance.sourceEventIds).toEqual([fullEventId]);
+
+		const ambiguousEvents = events.map((event) =>
+			event.eventId === "e-2" ? { ...event, eventId: "f95d8a6a-ffff-7123-8123-123456789abc" } : event,
+		);
+		const ambiguous = await extractState(
+			makeInput(ambiguousEvents),
+			fauxComplete({
+				facts: [{ text: "ambiguous fact", kind: "fact", sourceEventIds: ["f95d8a6a"] }],
+				decisions: [],
+				nextActions: [],
+			}),
+		);
+		expect(ambiguous.outOfRangeRefs).toEqual(["f95d8a6a"]);
+	});
+
 	it("sends history wrapped as untrusted data with the versioned compactor policy and a strict schema", async () => {
 		const capture: { req?: CompactionLLMRequest } = {};
 		await extractState(makeInput(sourceEvents()), fauxComplete(goodDelta, capture));
@@ -121,6 +166,9 @@ describe("extractState", () => {
 		expect(req.systemPrompt).toContain("untrusted");
 		expect(req.messages[0].content).toContain("<untrusted-history>");
 		expect(req.messages[0].content).toContain("Never delete raw events");
+		expect(req.messages[0].content).toContain('Use the key "text", never "value"');
+		expect(req.messages[0].content).toContain('copied from the "id=" field');
+		expect(req.messages[0].content).toContain('Sequence numbers from "seq=" are not event ids');
 		expect(req.responseSchema).toBeDefined();
 		expect(req.promptVersion).toMatch(/^\d+\.\d+\.\d+$/);
 		// No tool capability exists in the request contract.

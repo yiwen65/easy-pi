@@ -40,7 +40,9 @@
 - Correct approach 1: 顶层 additionalProperties 保持 false；forbidden 键硬拒绝；item 级未知键确定性剥离并计数（`strippedUnknownKeys` 入审计）。见 `subsystem/state-extractor.ts`。
 - Wrong assumption 2: "atom 保留率高 = 压缩保真"。若压缩从未激活，tail 中逐字保留的内容会让 C/T/S 门 vacuously 通过。
 - Correct approach 2: 评测报告必须记录 `roundsActivated`/`roundsRejected`/`rejectReasons` 与 token 前后值；保留率指标只有在激活轮次 > 0 时才有意义。见 `test/compaction-subsystem/eval/runner.ts`。
-- Verified by: 2026-08-22 T-105 真实评测（kimi-coding K3）：修复后 coding/tool-heavy 各 2 轮全激活、100% 保留、oracle 一致、token −22%/−15%；drift-4 中 429 限流被正确 fail closed。
+- Cross-provider follow-up: `CompactionLLMRequest.responseSchema` 不等于 provider 已实施 structured output；`createPiAiCompleteFn` 当前仍靠 prompt 约束。provider-neutral prompt 必须逐项写明 `text`/`sourceEventIds` schema；模型把 provenance 写成 seq 或 UUID 唯一前缀时，只能由确定性唯一映射规范化，未知/歧义引用继续 fail closed。
+- Manual-runner networking: 直接 Vitest 调真实 provider 必须调用 CLI 同款 `configureHttpDispatcher()`；否则 Node 内置 Undici 在双栈路由上可能 `UND_ERR_CONNECT_TIMEOUT`，即使同机 CLI 正常。真实语料 fixture 还必须稳定化 id/parentId，否则随机迁移 ID 会让响应缓存每次 miss。
+- Verified by: 2026-08-22 T-105 K3 与 2026-08-23 T-304 openai-codex 真实评测；后者 gpt-5.4-mini/gpt-5.4 均 2/2 激活、100% 保真、token −73.3%/−71.8%，稳定缓存复跑 562ms 且指标一致。
 
 ## 真实长会话回放暴露的三类 token 膨胀陷阱（子系统）
 

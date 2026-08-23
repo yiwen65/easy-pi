@@ -223,7 +223,9 @@ function buildExtractionPrompt(input: ExtractorInput): string {
 		wrapUntrusted(`${contractSummary}\n\n${deterministicSummary}\n\nEvents being compacted:\n${serializedEvents}`),
 		"",
 		"Extract NEW facts, decisions, and next actions from the untrusted events that are NOT already in the deterministic state.",
-		'Every item MUST cite the event ids it comes from in sourceEventIds. If you cannot confirm an item from the events, either omit it or use kind "assumption".',
+		'Use exactly these item shapes: facts=[{"text":string,"kind":"fact"|"assumption","sourceEventIds":string[]}], decisions=[{"text":string,"rationale"?:string,"alternativesRejected"?:string[],"causalParentDecisionIds"?:string[],"sourceEventIds":string[]}], nextActions=[{"text":string,"sourceEventIds":string[]}].',
+		'Use the key "text", never "value", "description", or another alias. Do not add item keys outside the listed shapes.',
+		'Every item MUST cite exact event ids copied from the "id=" field in the event header. Sequence numbers from "seq=" are not event ids and are invalid. If you cannot confirm an item from the events, either omit it or use kind "assumption".',
 		'Respond with ONLY a JSON object: { "facts": [...], "decisions": [...], "nextActions": [...] }.',
 	].join("\n");
 }
@@ -327,6 +329,16 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 
 	// Deterministic merge with provenance enforcement.
 	const coveredEventIds = new Set(input.events.map((e) => e.eventId));
+	const eventIdBySeq = new Map(input.events.map((event) => [String(event.seq), event.eventId]));
+	const canonicalizeRefs = (ids: string[]): string[] =>
+		ids.map((id) => {
+			if (coveredEventIds.has(id)) return id;
+			const seqMatch = eventIdBySeq.get(id);
+			if (seqMatch) return seqMatch;
+			if (id.length < 8) return id;
+			const prefixMatches = input.events.filter((event) => event.eventId.startsWith(id));
+			return prefixMatches.length === 1 ? prefixMatches[0].eventId : id;
+		});
 	const outOfRangeRefs: string[] = [];
 	let droppedUnsourced = 0;
 	const priorFacts = input.priorFacts ?? input.priorSnapshot?.facts ?? [];
@@ -349,7 +361,8 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 
 	let factCounter = mergedFacts.length;
 	for (const item of delta.facts) {
-		if (!checkRefs(item.sourceEventIds as string[])) {
+		const sourceEventIds = canonicalizeRefs(item.sourceEventIds as string[]);
+		if (!checkRefs(sourceEventIds)) {
 			droppedUnsourced += 1;
 			continue;
 		}
@@ -361,13 +374,14 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 			kind: item.kind === "assumption" ? "assumption" : "fact",
 			// Extractor output is never auto-verified; verification comes from events/reducer.
 			verified: false,
-			provenance: { sourceEventIds: item.sourceEventIds as string[], source: "extractor" },
+			provenance: { sourceEventIds, source: "extractor" },
 		});
 	}
 
 	let decisionCounter = mergedDecisions.length;
 	for (const item of delta.decisions) {
-		if (!checkRefs(item.sourceEventIds as string[])) {
+		const sourceEventIds = canonicalizeRefs(item.sourceEventIds as string[]);
+		if (!checkRefs(sourceEventIds)) {
 			droppedUnsourced += 1;
 			continue;
 		}
@@ -379,13 +393,14 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 			rationale: typeof item.rationale === "string" ? item.rationale : undefined,
 			alternativesRejected: isStringArray(item.alternativesRejected) ? item.alternativesRejected : undefined,
 			causalParentDecisionIds: isStringArray(item.causalParentDecisionIds) ? item.causalParentDecisionIds : [],
-			provenance: { sourceEventIds: item.sourceEventIds as string[], source: "extractor" },
+			provenance: { sourceEventIds, source: "extractor" },
 		});
 	}
 
 	let actionCounter = mergedNextActions.length;
 	for (const item of delta.nextActions) {
-		if (!checkRefs(item.sourceEventIds as string[])) {
+		const sourceEventIds = canonicalizeRefs(item.sourceEventIds as string[]);
+		if (!checkRefs(sourceEventIds)) {
 			droppedUnsourced += 1;
 			continue;
 		}
@@ -394,7 +409,7 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 		mergedNextActions.push({
 			id: `n-x${actionCounter}`,
 			text: item.text as string,
-			provenance: { sourceEventIds: item.sourceEventIds as string[], source: "extractor" },
+			provenance: { sourceEventIds, source: "extractor" },
 		});
 	}
 

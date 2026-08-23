@@ -86,7 +86,14 @@ export async function runEval(fixture: EvalFixture, complete: CompleteFn): Promi
 			roundsActivated += 1;
 		} else {
 			roundsRejected += 1;
-			rejectReasons.push(result.reason ?? result.status);
+			const validationFailures = result.report?.failures
+				.map((failure) => `${failure.code}: ${failure.message}`)
+				.join(" | ");
+			rejectReasons.push(
+				validationFailures
+					? `${result.reason ?? result.status}: ${validationFailures}`
+					: (result.reason ?? result.status),
+			);
 		}
 		const committed = deps.audit.byType("compact_committed").at(-1);
 		if (roundsActivated === 1 && tokensBeforeFirst === 0 && committed) {
