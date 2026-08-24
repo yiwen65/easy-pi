@@ -90,9 +90,13 @@ describe("durable subsystem state", () => {
 		expect(host2.getContract()?.constraints[0].text).toBe("Never delete raw events");
 		expect(host2.snapshotStore.getActive(s2Harness.session.sessionId)).toBeDefined();
 		const restored = s2Harness.session.messages[0];
-		expect(JSON.stringify(restored && "content" in restored ? restored.content : undefined)).toContain(
-			"# Verified state snapshot",
-		);
+		const restoredText =
+			restored && "summary" in restored
+				? restored.summary
+				: restored && "content" in restored
+					? restored.content
+					: undefined;
+		expect(JSON.stringify(restoredText)).toContain("# Verified state snapshot");
 		expect(JSON.stringify(s2Harness.session.messages)).toContain("unsynchronized crash tail");
 		s1.dispose();
 		s2Harness.cleanup();

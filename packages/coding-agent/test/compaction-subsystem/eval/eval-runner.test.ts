@@ -56,6 +56,37 @@ describe("eval runner (faux compactor)", () => {
 		expect(report.tokensAfterLast).toBeLessThan(report.tokensBeforeFirst);
 	});
 
+	it("reveals closed trajectory growth before each compaction round", async () => {
+		const report = await runEval(
+			{
+				name: "two-round-growth",
+				contract: { goal: "exercise repeated compaction", constraints: [] },
+				compactionRounds: 2,
+				events: [
+					{ eventType: "tool_call", id: "c-1", toolCallId: "tc-1", payload: { name: "bash" } },
+					{
+						eventType: "tool_result",
+						id: "r-1",
+						toolCallId: "tc-1",
+						payload: { content: "first\n".repeat(1_000), isError: false },
+					},
+					{ eventType: "tool_call", id: "c-2", toolCallId: "tc-2", payload: { name: "bash" } },
+					{
+						eventType: "tool_result",
+						id: "r-2",
+						toolCallId: "tc-2",
+						payload: { content: "second\n".repeat(1_000), isError: false },
+					},
+				],
+				atoms: [],
+				needleQueries: [],
+			},
+			faithfulComplete,
+		);
+		expect(report.roundsActivated).toBe(2);
+		expect(report.roundsRejected).toBe(0);
+	});
+
 	it("tool-heavy fixture: failure states and needles survive", async () => {
 		const report = await runEval(toolHeavyFixture, faithfulComplete);
 		expect(report.oracleConsistent).toBe(true);

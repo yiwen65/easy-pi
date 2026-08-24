@@ -157,6 +157,8 @@ describe("extractState", () => {
 			}),
 		);
 		expect(ambiguous.outOfRangeRefs).toEqual(["f95d8a6a"]);
+		expect(ambiguous.merged.facts).toEqual([]);
+		expect(ambiguous.droppedUnsourced).toBe(1);
 	});
 
 	it("sends history wrapped as untrusted data with the versioned compactor policy and a strict schema", async () => {
@@ -274,15 +276,15 @@ describe("extractState", () => {
 		expect(result.droppedUnsourced).toBe(1);
 	});
 
-	it("marks items referencing events outside the covered range as unverified", async () => {
+	it("drops generated items referencing events outside the covered range", async () => {
 		const delta = {
 			facts: [{ text: "references ghost event", kind: "fact", sourceEventIds: ["e-999"] }],
 			decisions: [],
 			nextActions: [],
 		};
 		const result = await extractState(makeInput(sourceEvents()), fauxComplete(delta));
-		expect(result.merged.facts).toHaveLength(1);
-		expect(result.merged.facts[0].verified).toBe(false);
+		expect(result.merged.facts).toHaveLength(0);
+		expect(result.droppedUnsourced).toBe(1);
 		expect(result.outOfRangeRefs).toContain("e-999");
 	});
 

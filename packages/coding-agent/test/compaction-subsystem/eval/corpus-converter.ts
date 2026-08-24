@@ -26,6 +26,29 @@ export interface CorpusConvertOptions {
 	maxExactAtoms?: number;
 }
 
+/** Return at least `minEntries`, extending the prefix through open tool calls. */
+export function takeClosedSessionPrefix(entries: SessionEntry[], minEntries: number): SessionEntry[] {
+	const target = Math.min(entries.length, Math.max(0, Math.floor(minEntries)));
+	const selected: SessionEntry[] = [];
+	const openToolCallIds = new Set<string>();
+	for (let index = 0; index < entries.length && (index < target || openToolCallIds.size > 0); index++) {
+		const entry = entries[index];
+		selected.push(entry);
+		if (entry.type !== "message") continue;
+		if (entry.message.role === "user") {
+			// A new user turn abandons unresolved calls from the prior turn.
+			openToolCallIds.clear();
+		} else if (entry.message.role === "assistant" && Array.isArray(entry.message.content)) {
+			for (const block of entry.message.content) {
+				if (block.type === "toolCall") openToolCallIds.add(block.id);
+			}
+		} else if (entry.message.role === "toolResult") {
+			openToolCallIds.delete(entry.message.toolCallId);
+		}
+	}
+	return selected;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -58,6 +81,7 @@ export function convertSessionToFixture(entries: SessionEntry[], options: Corpus
 		eventType: e.eventType,
 		toolCallId: e.toolCallId,
 		payload: e.payload,
+		authority: e.authority,
 		id: e.eventId,
 	}));
 
@@ -105,6 +129,10 @@ export function convertSessionToFixture(entries: SessionEntry[], options: Corpus
 	const mined = new Set<string>();
 	for (const match of allText.matchAll(EXACT_VALUE_PATTERN)) {
 		const value = match[0];
+		// Globs describe a set of files rather than one exact value. Treating
+		// them as verbatim facts creates false retention failures such as
+		// `/*.test.ts` while adding no recoverability signal.
+		if (/[?*[\]{}]/.test(value)) continue;
 		if (value.length >= 4) mined.add(value);
 	}
 	const cap = options.maxExactAtoms ?? 12;

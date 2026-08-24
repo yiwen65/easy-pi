@@ -18,6 +18,26 @@ import { type GradingContext, gradeAtom, gradeNeedles } from "./grader.ts";
 
 const EVAL_USER = { kind: "user", id: "eval-user", verified: true } as const;
 
+function roundEnd(events: EvalFixture["events"], start: number, round: number, rounds: number): number {
+	if (round === rounds - 1) return events.length;
+	const target = Math.max(start + 1, Math.ceil((events.length * (round + 1)) / rounds));
+	const openToolCalls = new Set<string>();
+	let lastClosed = start;
+	for (let index = start; index < events.length; index++) {
+		const event = events[index];
+		if (event.eventType === "message" && event.authority?.kind === "user" && event.authority.verified) {
+			openToolCalls.clear();
+		}
+		if (event.eventType === "tool_call" && event.toolCallId) openToolCalls.add(event.toolCallId);
+		if (event.eventType === "tool_result" && event.toolCallId) openToolCalls.delete(event.toolCallId);
+		if (openToolCalls.size === 0) lastClosed = index + 1;
+		if (index + 1 === target && openToolCalls.size === 0) return target;
+		if (index + 1 === target && lastClosed > start) return lastClosed;
+		if (index + 1 > target && openToolCalls.size === 0) return index + 1;
+	}
+	return events.length;
+}
+
 export async function runEval(fixture: EvalFixture, complete: CompleteFn): Promise<EvalReport> {
 	const sessionId = `eval-${fixture.name}`;
 	const eventLog = new InMemoryEventLog();
@@ -40,21 +60,7 @@ export async function runEval(fixture: EvalFixture, complete: CompleteFn): Promi
 		allowedUpdaters: [EVAL_USER.id],
 	});
 
-	// Append the trajectory.
 	let counter = 0;
-	for (const spec of fixture.events) {
-		counter += 1;
-		eventLog.append({
-			sessionId,
-			agentId: "agent-eval",
-			eventId: spec.id ?? `ev-${counter}`,
-			eventType: spec.eventType,
-			toolCallId: spec.toolCallId,
-			payload: spec.payload,
-			authority: spec.authority ?? { kind: "agent", id: "agent-eval", verified: true },
-		});
-	}
-
 	const deps = {
 		sessionId,
 		eventLog,
@@ -72,14 +78,30 @@ export async function runEval(fixture: EvalFixture, complete: CompleteFn): Promi
 		minTokenGainFraction: 0,
 	};
 
-	// Interleave compaction rounds with synthetic growth pauses; each round
-	// compacts what exists so far (fixture trajectories are self-contained).
+	// Reveal a closed segment before each attempt so multi-round evaluation
+	// measures growth -> compaction -> growth -> compaction. Never split an open
+	// tool call from its result merely to hit an even segment size.
 	let tokensBeforeFirst = 0;
 	let tokensAfterLast = 0;
 	let roundsActivated = 0;
 	let roundsRejected = 0;
 	const rejectReasons: string[] = [];
+	let appended = 0;
 	for (let round = 0; round < fixture.compactionRounds; round++) {
+		const end = roundEnd(fixture.events, appended, round, fixture.compactionRounds);
+		for (const spec of fixture.events.slice(appended, end)) {
+			counter += 1;
+			eventLog.append({
+				sessionId,
+				agentId: "agent-eval",
+				eventId: spec.id ?? `ev-${counter}`,
+				eventType: spec.eventType,
+				toolCallId: spec.toolCallId,
+				payload: spec.payload,
+				authority: spec.authority ?? { kind: "agent", id: "agent-eval", verified: true },
+			});
+		}
+		appended = end;
 		const orchestrator = new CompactionOrchestrator(deps);
 		const result = await orchestrator.compact("soft_compact", { currentInput: "" });
 		if (result.status === "activated" || result.status === "rebuilt") {

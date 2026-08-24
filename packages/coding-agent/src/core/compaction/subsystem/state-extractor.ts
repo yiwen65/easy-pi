@@ -403,12 +403,14 @@ export async function extractState(input: ExtractorInput, complete: CompleteFn):
 
 	const checkRefs = (ids: string[]): boolean => {
 		if (ids.length === 0) return false;
+		let allCovered = true;
 		for (const id of ids) {
 			if (!coveredEventIds.has(id) && !outOfRangeRefs.includes(id)) {
 				outOfRangeRefs.push(id);
 			}
+			if (!coveredEventIds.has(id)) allCovered = false;
 		}
-		return true;
+		return allCovered;
 	};
 
 	let factCounter = mergedFacts.length;
