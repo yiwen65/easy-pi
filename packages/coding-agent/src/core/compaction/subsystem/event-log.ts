@@ -11,7 +11,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionEntry } from "../../session-manager.ts";
-import type { ArtifactStore } from "./artifact-store.ts";
+import { type ArtifactStore, putAgentMessageArtifact } from "./artifact-store.ts";
 import { canonicalJson, hashPayload } from "./hashing.ts";
 import type { Authority, EventEnvelope, EventType } from "./types.ts";
 import { COMPACTION_SCHEMA_VERSION } from "./types.ts";
@@ -22,6 +22,8 @@ export interface AppendEventInput {
 	taskId?: string;
 	eventType: EventType;
 	timestamp?: string;
+	/** Session tree head visible when appending this event. */
+	branchHeadId?: string;
 	causalParentIds?: string[];
 	toolCallId?: string;
 	transactionId?: string;
@@ -82,6 +84,7 @@ function appendToSession(session: SessionEvents, input: AppendEventInput): Event
 		taskId: input.taskId,
 		eventType: input.eventType,
 		timestamp: input.timestamp ?? new Date().toISOString(),
+		branchHeadId: input.branchHeadId,
 		causalParentIds: [...(input.causalParentIds ?? [])],
 		toolCallId: input.toolCallId,
 		transactionId: input.transactionId,
@@ -223,6 +226,191 @@ export class JsonlEventLog extends InMemoryEventLog {
 }
 
 // ============================================================================
+// Branch-scoped view over one durable session log
+// ============================================================================
+
+export interface BranchProjectionState {
+	branchHeadId?: string;
+	pathEntryIds: string[];
+	visibleEventIds: string[];
+	orphanEventIds: string[];
+}
+
+export interface BranchProjectionOptions {
+	onOrphan?: (event: EventEnvelope) => void;
+}
+
+function payloadEntryId(payload: unknown): string | undefined {
+	if (!payload || typeof payload !== "object" || !("entryId" in payload)) return undefined;
+	const entryId = (payload as { entryId?: unknown }).entryId;
+	return typeof entryId === "string" ? entryId : undefined;
+}
+
+function collectPayloadEventRefs(payload: unknown, output = new Set<string>(), depth = 0): Set<string> {
+	if (depth > 6 || payload === null || payload === undefined) return output;
+	if (Array.isArray(payload)) {
+		for (const item of payload) collectPayloadEventRefs(item, output, depth + 1);
+		return output;
+	}
+	if (typeof payload !== "object") return output;
+	for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
+		if ((key === "sourceEventId" || key === "resolutionSourceEventId") && typeof value === "string") {
+			output.add(value);
+		} else if (typeof value === "object" && value !== null) {
+			collectPayloadEventRefs(value, output, depth + 1);
+		}
+	}
+	return output;
+}
+
+/**
+ * Read/write branch projection backed by one append-only EventLog.
+ *
+ * Global `seq` and storage remain owned by the base log. Reads expose only the
+ * causal closure of the active SessionManager path; writes are tagged with the
+ * active head. The view is mutable so TaskLedger/ToolLedger can retain one log
+ * reference while navigation changes which events are visible.
+ */
+export class BranchScopedEventLog implements EventLog {
+	private readonly base: EventLog;
+	private readonly sessionId: string;
+	private readonly onOrphan: ((event: EventEnvelope) => void) | undefined;
+	private branchHeadId: string | undefined;
+	private pathEntryIds = new Set<string>();
+	private visibleEventIds = new Set<string>();
+	private orphanEventIds = new Set<string>();
+	private reportedOrphans = new Set<string>();
+
+	constructor(base: EventLog, sessionId: string, options: BranchProjectionOptions = {}) {
+		this.base = base;
+		this.sessionId = sessionId;
+		this.onOrphan = options.onOrphan;
+	}
+
+	getBaseLog(): EventLog {
+		return this.base;
+	}
+
+	setBranch(entries: Pick<SessionEntry, "id">[]): BranchProjectionState {
+		this.pathEntryIds = new Set(entries.map((entry) => entry.id));
+		this.branchHeadId = entries.at(-1)?.id;
+		this.recompute();
+		return this.getProjectionState();
+	}
+
+	getProjectionState(): BranchProjectionState {
+		return {
+			branchHeadId: this.branchHeadId,
+			pathEntryIds: [...this.pathEntryIds],
+			visibleEventIds: [...this.visibleEventIds],
+			orphanEventIds: [...this.orphanEventIds],
+		};
+	}
+
+	private recompute(): void {
+		const events = this.base.all(this.sessionId);
+		const visible = new Set<string>();
+		const causalVisible = new Set(this.pathEntryIds);
+		const visibleToolCallIds = new Set<string>();
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const event of events) {
+				if (visible.has(event.eventId)) continue;
+				const entryId = payloadEntryId(event.payload);
+				// Session-projected events belong only when their concrete entry is on
+				// the active path. A visible parent must not pull in a sibling entry.
+				if (entryId !== undefined && !this.pathEntryIds.has(entryId)) continue;
+				// New tagged internal events are authoritative about their append head;
+				// an older shared causal parent must not leak them to a sibling branch.
+				if (event.branchHeadId !== undefined && !this.pathEntryIds.has(event.branchHeadId)) continue;
+				const refs = collectPayloadEventRefs(event.payload);
+				const belongs =
+					this.pathEntryIds.has(event.eventId) ||
+					(entryId !== undefined && this.pathEntryIds.has(entryId)) ||
+					(event.branchHeadId !== undefined && this.pathEntryIds.has(event.branchHeadId)) ||
+					event.causalParentIds.some((parentId) => causalVisible.has(parentId)) ||
+					[...refs].some((ref) => causalVisible.has(ref)) ||
+					(event.toolCallId !== undefined && visibleToolCallIds.has(event.toolCallId));
+				if (!belongs) continue;
+				visible.add(event.eventId);
+				causalVisible.add(event.eventId);
+				if (event.toolCallId) visibleToolCallIds.add(event.toolCallId);
+				changed = true;
+			}
+		}
+
+		const allToolCallIds = new Set(
+			events.filter((event) => event.eventType === "tool_call").flatMap((event) => event.toolCallId ?? []),
+		);
+		const orphans = new Set<string>();
+		for (const event of events) {
+			if (visible.has(event.eventId)) continue;
+			const refs = collectPayloadEventRefs(event.payload);
+			const linkable =
+				event.branchHeadId !== undefined ||
+				event.causalParentIds.length > 0 ||
+				payloadEntryId(event.payload) !== undefined ||
+				refs.size > 0 ||
+				(event.toolCallId !== undefined && allToolCallIds.has(event.toolCallId));
+			if (!linkable) {
+				orphans.add(event.eventId);
+				if (!this.reportedOrphans.has(event.eventId)) {
+					this.reportedOrphans.add(event.eventId);
+					this.onOrphan?.(event);
+				}
+			}
+		}
+		this.visibleEventIds = visible;
+		this.orphanEventIds = orphans;
+	}
+
+	append(input: AppendEventInput): EventEnvelope {
+		if (input.sessionId !== this.sessionId) {
+			throw new Error(`BranchScopedEventLog for ${this.sessionId} cannot append session ${input.sessionId}`);
+		}
+		const appended = this.base.append({
+			...input,
+			branchHeadId: input.branchHeadId ?? this.branchHeadId,
+			causalParentIds:
+				input.causalParentIds && input.causalParentIds.length > 0
+					? input.causalParentIds
+					: this.branchHeadId
+						? [this.branchHeadId]
+						: [],
+		});
+		this.recompute();
+		return appended;
+	}
+
+	freeze(sessionId: string): EventBoundary {
+		const lastVisible = this.all(sessionId).at(-1);
+		return {
+			sessionId,
+			seq: lastVisible?.seq ?? 0,
+			at: new Date().toISOString(),
+		};
+	}
+
+	range(sessionId: string, fromSeq: number, toSeq: number): EventEnvelope[] {
+		return this.base.range(sessionId, fromSeq, toSeq).filter((event) => this.visibleEventIds.has(event.eventId));
+	}
+
+	all(sessionId: string): EventEnvelope[] {
+		return this.base.all(sessionId).filter((event) => this.visibleEventIds.has(event.eventId));
+	}
+
+	replay(sessionId: string): EventEnvelope[] {
+		return this.all(sessionId);
+	}
+
+	get(eventId: string): EventEnvelope | undefined {
+		if (!this.visibleEventIds.has(eventId)) return undefined;
+		return this.base.get(eventId);
+	}
+}
+
+// ============================================================================
 // Payload offload helper (deterministic offload at write time)
 // ============================================================================
 
@@ -281,23 +469,56 @@ function projectedMessageText(content: unknown): string {
 		.join("\n");
 }
 
+export interface ColdMessageRef {
+	schemaVersion: 1;
+	/** Content-addressed AgentMessage manifest. Image bytes live in child artifacts. */
+	artifactRef: string;
+	/** SHA-256 of the canonical manifest bytes. */
+	hash: string;
+}
+
+export interface SessionEventProjectionOptions {
+	artifactStore: ArtifactStore;
+	tenant: string;
+}
+
+function coldMessageRef(
+	entry: Extract<SessionEntry, { type: "message" }>,
+	options: SessionEventProjectionOptions | undefined,
+): ColdMessageRef | undefined {
+	if (!options) return undefined;
+	const artifact = putAgentMessageArtifact(options.artifactStore, entry.message, {
+		source: `session-entry:${entry.id}`,
+		tenant: options.tenant,
+	});
+	return { schemaVersion: 1, artifactRef: artifact.ref, hash: artifact.hash };
+}
+
 /**
- * Project v3 session entries into event inputs. Lossless: the original entry
- * is the payload; event types are derived for indexing. Label entries are UI
- * metadata and are skipped.
+ * Project v3 session entries into slim events. When an artifact store is
+ * supplied, each original AgentMessage is preserved as a content-addressed
+ * cold manifest while image bytes remain in deduplicated child artifacts.
+ * Label entries are UI metadata and are skipped.
  */
-export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: string, agentId: string): EventEnvelope[] {
+export function sessionEntriesToEvents(
+	entries: SessionEntry[],
+	sessionId: string,
+	agentId: string,
+	options?: SessionEventProjectionOptions,
+): EventEnvelope[] {
 	const log = new InMemoryEventLog();
 	for (const entry of entries) {
 		const base = {
 			sessionId,
 			agentId,
 			timestamp: entry.timestamp,
+			branchHeadId: entry.id,
 			causalParentIds: entry.parentId ? [entry.parentId] : [],
 			authority: { kind: "system", id: "session-adapter", verified: true } satisfies Authority,
 		};
 		if (entry.type === "message") {
 			const message = entry.message;
+			const coldMessage = coldMessageRef(entry, options);
 			if (message.role === "assistant") {
 				// Slim projections: the session JSONL entry remains the truth; events
 				// carry only what reducers/planners need, referenced by entryId.
@@ -311,7 +532,7 @@ export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: strin
 						...base,
 						eventId: entry.id,
 						eventType: "message",
-						payload: { entryId: entry.id, role: message.role, text },
+						payload: { entryId: entry.id, role: message.role, text, coldMessage },
 					});
 				}
 				for (const call of toolCalls) {
@@ -321,7 +542,13 @@ export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: strin
 						eventId: `${entry.id}:${call.id}`,
 						eventType: "tool_call",
 						toolCallId: call.id,
-						payload: { entryId: entry.id, toolCallId: call.id, name: call.name, arguments: call.arguments },
+						payload: {
+							entryId: entry.id,
+							toolCallId: call.id,
+							name: call.name,
+							arguments: call.arguments,
+							coldMessage,
+						},
 					});
 				}
 			} else if (message.role === "toolResult") {
@@ -343,6 +570,7 @@ export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: strin
 						content: text,
 						hasImages: content.some((b) => b.type === "image"),
 						imageCount: content.filter((b) => b.type === "image").length,
+						coldMessage,
 					},
 				});
 			} else {
@@ -354,7 +582,7 @@ export function sessionEntriesToEvents(entries: SessionEntry[], sessionId: strin
 					...base,
 					eventId: entry.id,
 					eventType: "message",
-					payload: { entryId: entry.id, role: message.role, text },
+					payload: { entryId: entry.id, role: message.role, text, coldMessage },
 					authority: message.role === "user" ? { kind: "user", id: "local-user", verified: true } : base.authority,
 				});
 			}

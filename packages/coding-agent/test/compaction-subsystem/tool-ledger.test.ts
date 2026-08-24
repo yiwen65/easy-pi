@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.ts";
+import { type AppendEventInput, InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.ts";
 import { replayLedger, ToolLedger } from "../../src/core/compaction/subsystem/tool-ledger.ts";
 
 const user = { kind: "user" as const, id: "user-1", verified: true };
@@ -16,6 +16,29 @@ function planned(ledger: ToolLedger, toolCallId: string, key?: string) {
 }
 
 describe("ToolLedger", () => {
+	it("commits memory only after durable transition append succeeds", () => {
+		class FailingLog extends InMemoryEventLog {
+			fail = false;
+			override append(input: AppendEventInput) {
+				if (this.fail) throw new Error("disk unavailable");
+				return super.append(input);
+			}
+		}
+		const log = new FailingLog();
+		const ledger = new ToolLedger({ eventLog: log, sessionId: "s-1", agentId: "a-1" });
+		log.fail = true;
+		expect(() => planned(ledger, "tc-unwritten")).toThrow(/disk unavailable/);
+		expect(ledger.get("tc-unwritten")).toBeUndefined();
+
+		log.fail = false;
+		planned(ledger, "tc-1");
+		ledger.recordStarted("tc-1");
+		log.fail = true;
+		expect(() => ledger.recordSucceeded("tc-1", { exitCode: 0 })).toThrow(/disk unavailable/);
+		expect(ledger.get("tc-1")?.state).toBe("started");
+		expect(replayLedger(log.all("s-1")).get("tc-1")?.state).toBe("started");
+	});
+
 	it("walks planned → approved → started → succeeded with legal monotonic transitions", () => {
 		const ledger = new ToolLedger();
 		planned(ledger, "tc-1");

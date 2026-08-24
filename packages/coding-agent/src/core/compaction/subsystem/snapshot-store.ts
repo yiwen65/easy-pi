@@ -37,6 +37,12 @@ export interface SnapshotStore {
 	getCandidate(sessionId: string, version: number): StructuredSnapshot | undefined;
 	activate(sessionId: string, request: ActivateRequest): StructuredSnapshot;
 	getActive(sessionId: string): StructuredSnapshot | undefined;
+	/** Select the latest actually-activated snapshot visible from the current branch. */
+	selectActiveForBranch(
+		sessionId: string,
+		branchPathEntryIds: readonly string[],
+		visibleEventIds: ReadonlySet<string>,
+	): StructuredSnapshot | undefined;
 	getVersion(sessionId: string, version: number): StructuredSnapshot | undefined;
 	listVersions(sessionId: string): StructuredSnapshot[];
 	rollback(sessionId: string, toVersion: number): StructuredSnapshot;
@@ -46,6 +52,8 @@ export interface SnapshotStore {
 interface SessionSnapshots {
 	versions: Map<number, StructuredSnapshot>;
 	activeVersion: number;
+	/** Candidates are not eligible until activate/rollback has succeeded at least once. */
+	activatedVersions: Set<number>;
 }
 
 function deepFreeze<T>(value: T): T {
@@ -80,7 +88,7 @@ export class InMemorySnapshotStore implements SnapshotStore {
 	private getSession(sessionId: string): SessionSnapshots {
 		let session = this.sessions.get(sessionId);
 		if (!session) {
-			session = { versions: new Map(), activeVersion: 0 };
+			session = { versions: new Map(), activeVersion: 0, activatedVersions: new Set() };
 			this.sessions.set(sessionId, session);
 		}
 		return session;
@@ -96,6 +104,16 @@ export class InMemorySnapshotStore implements SnapshotStore {
 
 	protected restoreActiveVersion(sessionId: string, version: number): void {
 		this.getSession(sessionId).activeVersion = version;
+	}
+
+	protected hasActivatedVersion(sessionId: string, version: number): boolean {
+		return this.getSession(sessionId).activatedVersions.has(version);
+	}
+
+	protected restoreActivatedVersion(sessionId: string, version: number, wasActivated: boolean): void {
+		const activated = this.getSession(sessionId).activatedVersions;
+		if (wasActivated) activated.add(version);
+		else activated.delete(version);
 	}
 
 	putCandidate(snapshot: Omit<StructuredSnapshot, "snapshotVersion">): StructuredSnapshot {
@@ -128,6 +146,7 @@ export class InMemorySnapshotStore implements SnapshotStore {
 			);
 		}
 		request.assertExternalState?.();
+		session.activatedVersions.add(request.candidateVersion);
 		session.activeVersion = request.candidateVersion;
 		return cloneSnapshot(candidate);
 	}
@@ -137,6 +156,31 @@ export class InMemorySnapshotStore implements SnapshotStore {
 		if (session.activeVersion === 0) return undefined;
 		const active = session.versions.get(session.activeVersion);
 		return active ? cloneSnapshot(active) : undefined;
+	}
+
+	selectActiveForBranch(
+		sessionId: string,
+		branchPathEntryIds: readonly string[],
+		visibleEventIds: ReadonlySet<string>,
+	): StructuredSnapshot | undefined {
+		const session = this.getSession(sessionId);
+		const pathDepth = new Map(branchPathEntryIds.map((entryId, index) => [entryId, index]));
+		const selected = [...session.activatedVersions]
+			.map((version) => session.versions.get(version))
+			.filter((snapshot): snapshot is StructuredSnapshot => snapshot !== undefined)
+			.filter((snapshot) => {
+				const branchId = snapshot.taskLedgerRef?.branchId;
+				// Legacy snapshots without an explicit branch binding cannot be
+				// ordered safely against sibling ancestry. Fail closed to raw replay.
+				return branchId ? visibleEventIds.has(branchId) : false;
+			})
+			.sort((left, right) => {
+				const leftDepth = pathDepth.get(left.taskLedgerRef?.branchId ?? "") ?? -1;
+				const rightDepth = pathDepth.get(right.taskLedgerRef?.branchId ?? "") ?? -1;
+				return rightDepth - leftDepth || right.snapshotVersion - left.snapshotVersion;
+			})[0];
+		session.activeVersion = selected?.snapshotVersion ?? 0;
+		return selected ? cloneSnapshot(selected) : undefined;
 	}
 
 	getVersion(sessionId: string, version: number): StructuredSnapshot | undefined {
@@ -156,6 +200,7 @@ export class InMemorySnapshotStore implements SnapshotStore {
 		if (!target) {
 			throw new Error(`Cannot rollback: snapshot version ${toVersion} does not exist`);
 		}
+		session.activatedVersions.add(toVersion);
 		session.activeVersion = toVersion;
 		return cloneSnapshot(target);
 	}
@@ -218,6 +263,8 @@ export class JsonlSnapshotStore extends InMemorySnapshotStore {
 			if (record.kind === "version") {
 				const { snapshotVersion: _dropped, ...rest } = record.snapshot;
 				super.putCandidate(rest);
+			} else if (record.version === 0) {
+				this.restoreActiveVersion(record.sessionId, 0);
 			} else {
 				const current = super.getActive(record.sessionId)?.snapshotVersion ?? 0;
 				super.activate(record.sessionId, { expectedActiveVersion: current, candidateVersion: record.version });
@@ -245,12 +292,14 @@ export class JsonlSnapshotStore extends InMemorySnapshotStore {
 	override activate(sessionId: string, request: ActivateRequest): StructuredSnapshot {
 		this.ensureLoaded();
 		const previousVersion = this.getActiveVersion(sessionId);
+		const wasActivated = this.hasActivatedVersion(sessionId, request.candidateVersion);
 		const activated = super.activate(sessionId, request);
 		try {
 			this.appendRecord({ kind: "active", sessionId, version: activated.snapshotVersion });
 			return activated;
 		} catch (error) {
 			this.restoreActiveVersion(sessionId, previousVersion);
+			this.restoreActivatedVersion(sessionId, request.candidateVersion, wasActivated);
 			throw error;
 		}
 	}
@@ -258,12 +307,14 @@ export class JsonlSnapshotStore extends InMemorySnapshotStore {
 	override rollback(sessionId: string, toVersion: number): StructuredSnapshot {
 		this.ensureLoaded();
 		const previousVersion = this.getActiveVersion(sessionId);
+		const wasActivated = this.hasActivatedVersion(sessionId, toVersion);
 		const restored = super.rollback(sessionId, toVersion);
 		try {
 			this.appendRecord({ kind: "active", sessionId, version: toVersion });
 			return restored;
 		} catch (error) {
 			this.restoreActiveVersion(sessionId, previousVersion);
+			this.restoreActivatedVersion(sessionId, toVersion, wasActivated);
 			throw error;
 		}
 	}
@@ -271,6 +322,25 @@ export class JsonlSnapshotStore extends InMemorySnapshotStore {
 	override getActive(sessionId: string): StructuredSnapshot | undefined {
 		this.ensureLoaded();
 		return super.getActive(sessionId);
+	}
+
+	override selectActiveForBranch(
+		sessionId: string,
+		branchPathEntryIds: readonly string[],
+		visibleEventIds: ReadonlySet<string>,
+	): StructuredSnapshot | undefined {
+		this.ensureLoaded();
+		const previousVersion = this.getActiveVersion(sessionId);
+		const selected = super.selectActiveForBranch(sessionId, branchPathEntryIds, visibleEventIds);
+		const selectedVersion = selected?.snapshotVersion ?? 0;
+		if (selectedVersion === previousVersion) return selected;
+		try {
+			this.appendRecord({ kind: "active", sessionId, version: selectedVersion });
+			return selected;
+		} catch (error) {
+			this.restoreActiveVersion(sessionId, previousVersion);
+			throw error;
+		}
 	}
 
 	override getCandidate(sessionId: string, version: number): StructuredSnapshot | undefined {

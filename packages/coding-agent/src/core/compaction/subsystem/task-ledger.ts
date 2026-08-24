@@ -15,6 +15,7 @@
  */
 
 import type { EventLog } from "./event-log.ts";
+import { hashPayload } from "./hashing.ts";
 import type { Authority, Constraint } from "./types.ts";
 
 export type TaskOperation =
@@ -31,6 +32,7 @@ export type TaskOperation =
 	| "ADD_CONSTRAINT"
 	| "RELAX_CONSTRAINT"
 	| "ADD_ACCEPTANCE_CRITERION"
+	| "PATCH_TASK_CONTRACT"
 	| "UPDATE_PERMISSIONS"
 	| "UPDATE_BUDGETS"
 	| "COMPLETE_TASK";
@@ -63,6 +65,20 @@ export interface LedgerTask {
 	updatedAt: string;
 }
 
+export interface TaskContractPatch {
+	addScope?: string[];
+	removeScope?: string[];
+	addExclusions?: string[];
+	removeExclusions?: string[];
+	addAcceptanceCriteria?: string[];
+	removeAcceptanceCriteria?: string[];
+	permissions?: Partial<LedgerTask["permissions"]>;
+	budgets?: Partial<Record<keyof LedgerTask["budgets"], number | null>>;
+	outputContract?: string | null;
+	addBlockers?: string[];
+	removeBlockers?: string[];
+}
+
 export interface OperationInput {
 	operation: TaskOperation;
 	taskId?: string;
@@ -70,6 +86,7 @@ export interface OperationInput {
 	goal?: string;
 	replacementGoal?: string;
 	acceptanceCriterion?: string;
+	taskPatch?: TaskContractPatch;
 	constraint?: Constraint;
 	permissions?: LedgerTask["permissions"];
 	budgets?: LedgerTask["budgets"];
@@ -90,6 +107,14 @@ export interface PendingGoalChange {
 	/** Exact proposed batch; confirmation never reconstructs it from a summary. */
 	operations: OperationInput[];
 	ambiguous: boolean;
+	/** Ledger version before recording this proposal. Missing only on legacy events. */
+	baseLedgerVersion?: number;
+	/** Ledger version immediately after this proposal was recorded. */
+	expectedLedgerVersion?: number;
+	/** Current versions of every existing task the proposal can target. */
+	baseTaskVersions?: Record<string, number>;
+	/** Canonical SHA-256 of `operations`; protects the exact approved batch. */
+	operationsHash?: string;
 }
 
 interface TaskHistory {
@@ -116,6 +141,39 @@ function cloneTask(task: LedgerTask): LedgerTask {
 
 function clonePending(change: PendingGoalChange): PendingGoalChange {
 	return cloneValue(change);
+}
+
+function normalizePatchList(values: string[] | undefined, label: string): string[] {
+	if (values === undefined) return [];
+	if (!Array.isArray(values) || values.some((value) => typeof value !== "string" || value.trim().length === 0)) {
+		throw new Error(`${label} requires non-empty strings`);
+	}
+	const normalized = values.map((value) => value.trim());
+	if (new Set(normalized).size !== normalized.length) throw new Error(`${label} contains duplicate values`);
+	return normalized;
+}
+
+function patchStringList(
+	current: string[],
+	addInput: string[] | undefined,
+	removeInput: string[] | undefined,
+	label: string,
+): string[] {
+	const additions = normalizePatchList(addInput, `${label}.add`);
+	const removals = normalizePatchList(removeInput, `${label}.remove`);
+	const overlap = additions.find((value) => removals.includes(value));
+	if (overlap) throw new Error(`${label} cannot add and remove the same value: ${overlap}`);
+	for (const value of additions) {
+		if (current.includes(value)) throw new Error(`${label} already contains: ${value}`);
+	}
+	for (const value of removals) {
+		if (!current.includes(value)) throw new Error(`${label} does not contain: ${value}`);
+	}
+	return [...current.filter((value) => !removals.includes(value)), ...additions];
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+	return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export class TaskLedger {
@@ -351,6 +409,151 @@ export class TaskLedger {
 				this.commit(next, op.operation, sourceEventId);
 				return cloneTask(next);
 			}
+			case "PATCH_TASK_CONTRACT": {
+				requireUser(actor, "Task-contract patch");
+				this.validateSourceEvent(sourceEventId, actor, true);
+				const history = this.mustGet(requiredTaskId(op));
+				this.assertMutable(history, op.operation);
+				if (!op.taskPatch || typeof op.taskPatch !== "object" || Array.isArray(op.taskPatch)) {
+					throw new Error("PATCH_TASK_CONTRACT requires taskPatch");
+				}
+				const patch = cloneValue(op.taskPatch);
+				const allowedPatchKeys = new Set([
+					"addScope",
+					"removeScope",
+					"addExclusions",
+					"removeExclusions",
+					"addAcceptanceCriteria",
+					"removeAcceptanceCriteria",
+					"permissions",
+					"budgets",
+					"outputContract",
+					"addBlockers",
+					"removeBlockers",
+				]);
+				const unknownKey = Object.keys(patch).find((key) => !allowedPatchKeys.has(key));
+				if (unknownKey) throw new Error(`PATCH_TASK_CONTRACT contains unknown field ${unknownKey}`);
+
+				const current = history.current;
+				const patchedScope =
+					patch.addScope !== undefined || patch.removeScope !== undefined
+						? patchStringList(current.goal.scope ?? [], patch.addScope, patch.removeScope, "scope")
+						: undefined;
+				const nextScope =
+					patchedScope !== undefined && !sameValue(patchedScope, current.goal.scope ?? [])
+						? patchedScope
+						: current.goal.scope;
+				const patchedExclusions =
+					patch.addExclusions !== undefined || patch.removeExclusions !== undefined
+						? patchStringList(
+								current.goal.exclusions ?? [],
+								patch.addExclusions,
+								patch.removeExclusions,
+								"exclusions",
+							)
+						: undefined;
+				const nextExclusions =
+					patchedExclusions !== undefined && !sameValue(patchedExclusions, current.goal.exclusions ?? [])
+						? patchedExclusions
+						: current.goal.exclusions;
+				const nextAcceptance =
+					patch.addAcceptanceCriteria !== undefined || patch.removeAcceptanceCriteria !== undefined
+						? patchStringList(
+								current.acceptanceCriteria,
+								patch.addAcceptanceCriteria,
+								patch.removeAcceptanceCriteria,
+								"acceptanceCriteria",
+							)
+						: current.acceptanceCriteria;
+				const nextBlockers =
+					patch.addBlockers !== undefined || patch.removeBlockers !== undefined
+						? patchStringList(current.blockers, patch.addBlockers, patch.removeBlockers, "blockers")
+						: current.blockers;
+
+				let nextPermissions = current.permissions;
+				if (patch.permissions !== undefined) {
+					if (
+						patch.permissions === null ||
+						typeof patch.permissions !== "object" ||
+						Array.isArray(patch.permissions)
+					) {
+						throw new Error("taskPatch.permissions must be an object");
+					}
+					const permissionKeys = ["allow", "deny", "approvalRequired"] as const;
+					const unknownPermission = Object.keys(patch.permissions).find(
+						(key) => !permissionKeys.includes(key as (typeof permissionKeys)[number]),
+					);
+					if (unknownPermission)
+						throw new Error(`taskPatch.permissions contains unknown field ${unknownPermission}`);
+					nextPermissions = { ...current.permissions };
+					for (const key of permissionKeys) {
+						const replacement = patch.permissions[key];
+						if (replacement !== undefined) {
+							nextPermissions[key] = normalizePatchList(replacement, `permissions.${key}`);
+						}
+					}
+				}
+
+				let nextBudgets = current.budgets;
+				if (patch.budgets !== undefined) {
+					if (patch.budgets === null || typeof patch.budgets !== "object" || Array.isArray(patch.budgets)) {
+						throw new Error("taskPatch.budgets must be an object");
+					}
+					const budgetKeys = ["maxTokens", "maxToolCalls", "maxDurationMs"] as const;
+					const unknownBudget = Object.keys(patch.budgets).find(
+						(key) => !budgetKeys.includes(key as (typeof budgetKeys)[number]),
+					);
+					if (unknownBudget) throw new Error(`taskPatch.budgets contains unknown field ${unknownBudget}`);
+					nextBudgets = { ...current.budgets };
+					for (const key of budgetKeys) {
+						const value = patch.budgets[key];
+						if (value === undefined) continue;
+						if (value === null) {
+							delete nextBudgets[key];
+						} else if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+							throw new Error(`taskPatch.budgets.${key} requires a finite non-negative number or null`);
+						} else {
+							nextBudgets[key] = value;
+						}
+					}
+				}
+
+				let nextOutputContract = current.outputContract;
+				if (Object.hasOwn(patch, "outputContract")) {
+					if (patch.outputContract !== null && typeof patch.outputContract !== "string") {
+						throw new Error("taskPatch.outputContract requires a non-empty string or null");
+					}
+					if (typeof patch.outputContract === "string" && patch.outputContract.trim().length === 0) {
+						throw new Error("taskPatch.outputContract requires a non-empty string or null");
+					}
+					nextOutputContract = patch.outputContract === null ? undefined : patch.outputContract?.trim();
+				}
+
+				const changed =
+					!sameValue(nextScope, current.goal.scope) ||
+					!sameValue(nextExclusions, current.goal.exclusions) ||
+					!sameValue(nextAcceptance, current.acceptanceCriteria) ||
+					!sameValue(nextPermissions, current.permissions) ||
+					!sameValue(nextBudgets, current.budgets) ||
+					nextOutputContract !== current.outputContract ||
+					!sameValue(nextBlockers, current.blockers);
+				if (!changed) throw new Error("PATCH_TASK_CONTRACT would make no change");
+
+				const next = this.nextVersion(
+					history,
+					(task) => {
+						task.goal = { ...task.goal, scope: nextScope, exclusions: nextExclusions };
+						task.acceptanceCriteria = [...nextAcceptance];
+						task.permissions = cloneValue(nextPermissions);
+						task.budgets = cloneValue(nextBudgets);
+						task.outputContract = nextOutputContract;
+						task.blockers = [...nextBlockers];
+					},
+					sourceEventId,
+				);
+				this.commit(next, op.operation, sourceEventId);
+				return cloneTask(next);
+			}
 			case "UPDATE_PERMISSIONS": {
 				requireUser(actor, "Permission change");
 				this.validateSourceEvent(sourceEventId, actor, true);
@@ -382,15 +585,18 @@ export class TaskLedger {
 				const history = this.mustGet(requiredTaskId(op));
 				this.assertMutable(history, op.operation);
 				if (!op.budgets) throw new Error("UPDATE_BUDGETS requires budgets");
+				const budgetKeys = ["maxTokens", "maxToolCalls", "maxDurationMs"];
+				const unknownBudget = Object.keys(op.budgets).find((key) => !budgetKeys.includes(key));
+				if (unknownBudget) throw new Error(`UPDATE_BUDGETS contains unknown field ${unknownBudget}`);
 				for (const value of Object.values(op.budgets)) {
 					if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
 						throw new Error("UPDATE_BUDGETS requires finite non-negative numbers");
 					}
 				}
-				if (JSON.stringify(op.budgets) === JSON.stringify(history.current.budgets)) {
+				const budgets = { ...history.current.budgets, ...cloneValue(op.budgets) };
+				if (sameValue(budgets, history.current.budgets)) {
 					throw new Error("UPDATE_BUDGETS would make no change");
 				}
-				const budgets = cloneValue(op.budgets);
 				const next = this.nextVersion(
 					history,
 					(task) => {
@@ -628,14 +834,30 @@ export class TaskLedger {
 		if (change.actor) requireUser(change.actor, "Pending goal-change proposal");
 		this.validateSourceEvent(change.sourceEventId, change.actor, true);
 		this.pendingCounter += 1;
+		const operations = cloneValue(change.operations ?? []);
+		const targetTaskIds = new Set(change.candidateTaskIds);
+		for (const operation of operations) {
+			if (operation.taskId) targetTaskIds.add(operation.taskId);
+			if (operation.parentTaskId) targetTaskIds.add(operation.parentTaskId);
+		}
+		const baseTaskVersions: Record<string, number> = {};
+		for (const taskId of [...targetTaskIds].sort()) {
+			const task = this.tasks.get(taskId)?.current;
+			if (task) baseTaskVersions[taskId] = task.version;
+		}
+		const baseLedgerVersion = this.ledgerVersion;
 		const pending: PendingGoalChange = {
 			pendingChangeId: `P${this.pendingCounter}`,
 			candidateTaskIds: [...change.candidateTaskIds],
 			reason: change.reason,
 			sourceEventId: change.sourceEventId,
 			recordedAt: new Date().toISOString(),
-			operations: cloneValue(change.operations ?? []),
+			operations,
 			ambiguous: change.ambiguous ?? change.candidateTaskIds.length > 1,
+			baseLedgerVersion,
+			expectedLedgerVersion: baseLedgerVersion + 1,
+			baseTaskVersions,
+			operationsHash: hashPayload(operations),
 		};
 		this.pendingGoalChanges.push(pending);
 		this.ledgerVersion += 1;
@@ -684,6 +906,33 @@ export class TaskLedger {
 		}
 		if (pending.operations.length === 0) {
 			throw new Error(`Pending goal change ${pendingChangeId} has no proposed operations`);
+		}
+		if (
+			pending.baseLedgerVersion === undefined ||
+			pending.expectedLedgerVersion === undefined ||
+			pending.baseTaskVersions === undefined ||
+			pending.operationsHash === undefined
+		) {
+			throw new Error(`STALE_PENDING ${pendingChangeId}: legacy proposal has no verifiable base version`);
+		}
+		if (hashPayload(pending.operations) !== pending.operationsHash) {
+			throw new Error(`STALE_PENDING ${pendingChangeId}: proposed operations no longer match their recorded hash`);
+		}
+		if (pending.expectedLedgerVersion !== pending.baseLedgerVersion + 1) {
+			throw new Error(`STALE_PENDING ${pendingChangeId}: invalid recorded ledger-version lineage`);
+		}
+		if (this.ledgerVersion !== pending.expectedLedgerVersion) {
+			throw new Error(
+				`STALE_PENDING ${pendingChangeId}: ledger moved from ${pending.expectedLedgerVersion} to ${this.ledgerVersion}`,
+			);
+		}
+		for (const [taskId, expectedVersion] of Object.entries(pending.baseTaskVersions)) {
+			const actualVersion = this.tasks.get(taskId)?.current.version;
+			if (actualVersion !== expectedVersion) {
+				throw new Error(
+					`STALE_PENDING ${pendingChangeId}: task ${taskId} moved from v${expectedVersion} to ${actualVersion === undefined ? "missing" : `v${actualVersion}`}`,
+				);
+			}
 		}
 		const operations = pending.operations.map((operation) => {
 			const resolved = cloneValue(operation);
@@ -799,6 +1048,14 @@ export class TaskLedger {
 				typeof payload.ambiguous === "boolean"
 					? payload.ambiguous
 					: ((payload.candidateTaskIds as string[] | undefined)?.length ?? 0) > 1,
+			baseLedgerVersion: typeof payload.baseLedgerVersion === "number" ? payload.baseLedgerVersion : undefined,
+			expectedLedgerVersion:
+				typeof payload.expectedLedgerVersion === "number" ? payload.expectedLedgerVersion : undefined,
+			baseTaskVersions:
+				payload.baseTaskVersions && typeof payload.baseTaskVersions === "object"
+					? cloneValue(payload.baseTaskVersions as Record<string, number>)
+					: undefined,
+			operationsHash: typeof payload.operationsHash === "string" ? payload.operationsHash : undefined,
 		});
 		this.ledgerVersion = Math.max(this.ledgerVersion, Number(payload.ledgerVersion ?? 0));
 	}

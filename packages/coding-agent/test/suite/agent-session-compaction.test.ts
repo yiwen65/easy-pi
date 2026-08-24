@@ -513,6 +513,149 @@ describe("AgentSession compaction characterization", () => {
 		);
 	});
 
+	it("keeps provider-side aborted extraction as failure without a local abort signal", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
+			hfCompaction: {
+				mode: "full_pipeline",
+				minTokenGainFraction: -1,
+				complete: async (request) => {
+					const prompt = JSON.stringify(request.messages);
+					return prompt.includes("single clear sentence")
+						? { text: "Distilled goal sentence.", stopReason: "stop" }
+						: { text: "", stopReason: "aborted" };
+				},
+			},
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		await expect(sessionInternals._runAutoCompaction("threshold", false, SOFT_DECISION)).resolves.toBe(false);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "threshold",
+			aborted: false,
+			willRetry: false,
+			errorMessage: expect.stringContaining("stopReason=aborted"),
+		});
+	});
+
+	it("classifies signal-aborted auto extraction as cancellation", async () => {
+		let extractionStarted = false;
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
+			hfCompaction: {
+				mode: "full_pipeline",
+				minTokenGainFraction: -1,
+				complete: async (request) => {
+					const prompt = JSON.stringify(request.messages);
+					if (prompt.includes("single clear sentence")) {
+						return { text: "Distilled goal sentence.", stopReason: "stop" };
+					}
+					if (!prompt.includes("ONLY a JSON object")) {
+						throw new Error("unexpected compactor stage");
+					}
+					extractionStarted = true;
+					return await new Promise((resolve) => {
+						const finish = () => resolve({ text: "", stopReason: "aborted" as const });
+						if (request.signal?.aborted) finish();
+						else request.signal?.addEventListener("abort", finish, { once: true });
+					});
+				},
+			},
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		const compactPromise = sessionInternals._runAutoCompaction("threshold", false, SOFT_DECISION);
+		await vi.waitFor(() => expect(extractionStarted).toBe(true));
+		harness.session.abortCompaction();
+
+		await expect(compactPromise).resolves.toBe(false);
+		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
+		expect(compactionEnd).toMatchObject({
+			reason: "threshold",
+			aborted: true,
+			willRetry: false,
+		});
+		expect(compactionEnd).not.toHaveProperty("errorMessage");
+	});
+
+	it("cancels auto compaction while goal distillation is in progress", async () => {
+		let distillationStarted = false;
+		let releaseDistillation: (() => void) | undefined;
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
+			hfCompaction: {
+				mode: "full_pipeline",
+				minTokenGainFraction: -1,
+				complete: async (request) => {
+					const prompt = JSON.stringify(request.messages);
+					if (!prompt.includes("single clear sentence")) {
+						return { text: "", stopReason: "aborted" };
+					}
+					distillationStarted = true;
+					return await new Promise((resolve) => {
+						const finish = () => resolve({ text: "", stopReason: "aborted" as const });
+						releaseDistillation = finish;
+						if (request.signal?.aborted) finish();
+						else request.signal?.addEventListener("abort", finish, { once: true });
+					});
+				},
+			},
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		let settled = false;
+		const compactPromise = sessionInternals._runAutoCompaction("threshold", false, SOFT_DECISION).then((result) => {
+			settled = true;
+			return result;
+		});
+		await vi.waitFor(() => expect(distillationStarted).toBe(true));
+		harness.session.abortCompaction();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const settledFromAbort = settled;
+		releaseDistillation?.();
+
+		await expect(compactPromise).resolves.toBe(false);
+		expect(settledFromAbort).toBe(true);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "threshold",
+			aborted: true,
+			willRetry: false,
+		});
+	});
+
+	it("does not report cancellation when manual activation won the abort race", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			hfCompaction: { mode: "full_pipeline" },
+		});
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const projectedMessages = [...harness.session.agent.state.messages];
+		vi.spyOn(harness.session.hfCompactionHost!, "attemptCompaction").mockImplementation(async () => {
+			harness.session.abortCompaction();
+			return {
+				activated: true,
+				messages: projectedMessages,
+				summaryText: "activated before abort",
+				tokensBefore: 100,
+				tokensAfter: 50,
+			};
+		});
+
+		await expect(harness.session.compact()).resolves.toMatchObject({ summary: "activated before abort" });
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "manual",
+			aborted: false,
+			result: { summary: "activated before abort" },
+		});
+	});
+
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
@@ -683,6 +826,7 @@ describe("AgentSession compaction characterization", () => {
 		vi.spyOn(harness.session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
 			decision: SOFT_DECISION,
 			predictedNextRequestTokens: 190_000,
+			tokenEstimateProvenance: "provider_projection",
 			recoverableToolTokens: 0,
 			compactionCooldownRemaining: 0,
 			incrementalCompactionsSinceRebuild: 0,

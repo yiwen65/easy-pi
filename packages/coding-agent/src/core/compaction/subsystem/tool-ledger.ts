@@ -65,6 +65,11 @@ export class ToolLedger {
 	private agentId: string | undefined;
 
 	constructor(options?: { eventLog?: EventLog; sessionId?: string; agentId?: string }) {
+		this.bind(options);
+	}
+
+	/** Rebind durable emission after a read-only replay. */
+	bind(options?: { eventLog?: EventLog; sessionId?: string; agentId?: string }): void {
 		this.eventLog = options?.eventLog;
 		this.sessionId = options?.sessionId;
 		this.agentId = options?.agentId;
@@ -82,7 +87,7 @@ export class ToolLedger {
 		});
 	}
 
-	private transition(entry: LedgerEntry, to: SideEffectState, what: string): void {
+	private assertTransition(entry: LedgerEntry, to: SideEffectState, what: string): void {
 		const legal = LEGAL_TRANSITIONS[entry.state];
 		if (!legal.includes(to)) {
 			if (entry.state === "succeeded" || entry.state === "failed") {
@@ -90,6 +95,10 @@ export class ToolLedger {
 			}
 			throw new Error(`Illegal ledger transition: ${entry.state} → ${to} (${what})`);
 		}
+	}
+
+	private transition(entry: LedgerEntry, to: SideEffectState, what: string): void {
+		this.assertTransition(entry, to, what);
 		entry.state = to;
 		entry.history.push({ state: to, at: new Date().toISOString(), eventId: `ledger-${entry.history.length + 1}` });
 		entry.lastVerifiedAt = new Date().toISOString();
@@ -123,8 +132,6 @@ export class ToolLedger {
 			state: "planned",
 			history: [{ state: "planned", at: new Date().toISOString(), eventId: "ledger-1" }],
 		};
-		this.entries.set(input.toolCallId, entry);
-		if (input.idempotencyKey) this.byKey.set(input.idempotencyKey, entry);
 		this.emit({
 			kind: "ledger_transition",
 			toolCallId: input.toolCallId,
@@ -135,6 +142,8 @@ export class ToolLedger {
 			riskLevel: input.riskLevel,
 			requestRef: input.requestRef,
 		});
+		this.entries.set(input.toolCallId, entry);
+		if (input.idempotencyKey) this.byKey.set(input.idempotencyKey, entry);
 		return entry;
 	}
 
@@ -143,9 +152,10 @@ export class ToolLedger {
 			throw new Error("Approval requires a verified approver");
 		}
 		const entry = this.mustGet(toolCallId);
+		this.assertTransition(entry, "approved", "recordApproved");
+		this.emit({ kind: "ledger_transition", toolCallId, operationId: entry.operationId, to: "approved", approval });
 		this.transition(entry, "approved", "recordApproved");
 		entry.approval = approval;
-		this.emit({ kind: "ledger_transition", toolCallId, operationId: entry.operationId, to: "approved", approval });
 		return entry;
 	}
 
@@ -154,17 +164,15 @@ export class ToolLedger {
 		if (options?.requiresApproval && entry.state === "planned") {
 			throw new Error(`Tool call ${toolCallId} requires approval before it can start`);
 		}
-		this.transition(entry, "started", "recordStarted");
+		this.assertTransition(entry, "started", "recordStarted");
 		this.emit({ kind: "ledger_transition", toolCallId, operationId: entry.operationId, to: "started" });
+		this.transition(entry, "started", "recordStarted");
 		return entry;
 	}
 
 	recordSucceeded(toolCallId: string, completion: CompletionInput): LedgerEntry {
 		const entry = this.mustGet(toolCallId);
-		this.transition(entry, "succeeded", "recordSucceeded");
-		entry.exitCode = completion.exitCode;
-		entry.resultRef = completion.resultRef ?? entry.resultRef;
-		entry.externalResourceId = completion.externalResourceId ?? entry.externalResourceId;
+		this.assertTransition(entry, "succeeded", "recordSucceeded");
 		this.emit({
 			kind: "ledger_transition",
 			toolCallId,
@@ -172,23 +180,29 @@ export class ToolLedger {
 			to: "succeeded",
 			completion,
 		});
+		this.transition(entry, "succeeded", "recordSucceeded");
+		entry.exitCode = completion.exitCode;
+		entry.resultRef = completion.resultRef ?? entry.resultRef;
+		entry.externalResourceId = completion.externalResourceId ?? entry.externalResourceId;
 		return entry;
 	}
 
 	recordFailed(toolCallId: string, completion: CompletionInput): LedgerEntry {
 		const entry = this.mustGet(toolCallId);
+		this.assertTransition(entry, "failed", "recordFailed");
+		this.emit({ kind: "ledger_transition", toolCallId, operationId: entry.operationId, to: "failed", completion });
 		this.transition(entry, "failed", "recordFailed");
 		entry.exitCode = completion.exitCode;
 		entry.resultRef = completion.resultRef ?? entry.resultRef;
-		this.emit({ kind: "ledger_transition", toolCallId, operationId: entry.operationId, to: "failed", completion });
 		return entry;
 	}
 
 	/** Mark an in-flight operation whose outcome is unknowable (timeout, disconnect). */
 	recordUnknown(toolCallId: string, reason: string): LedgerEntry {
 		const entry = this.mustGet(toolCallId);
-		this.transition(entry, "unknown", "recordUnknown");
+		this.assertTransition(entry, "unknown", "recordUnknown");
 		this.emit({ kind: "ledger_transition", toolCallId, operationId: entry.operationId, to: "unknown", reason });
+		this.transition(entry, "unknown", "recordUnknown");
 		return entry;
 	}
 
@@ -225,7 +239,10 @@ export class ToolLedger {
  * Rebuild a ledger from ledger events (event-sourced recovery).
  * Events of other types are ignored.
  */
-export function replayLedger(events: { eventType: string; payload?: unknown }[]): ToolLedger {
+export function replayLedger(
+	events: { eventType: string; payload?: unknown }[],
+	options?: { eventLog?: EventLog; sessionId?: string; agentId?: string },
+): ToolLedger {
 	const ledger = new ToolLedger();
 	for (const event of events) {
 		if (event.eventType !== "ledger") continue;
@@ -267,5 +284,6 @@ export function replayLedger(events: { eventType: string; payload?: unknown }[])
 				break;
 		}
 	}
+	ledger.bind(options);
 	return ledger;
 }

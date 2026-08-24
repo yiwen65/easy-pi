@@ -277,7 +277,7 @@ Long sessions can exhaust context windows. Compaction bounds the active context 
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-The full history remains append-only in the JSONL file; use `/tree` to revisit, and `recall_exact(ref)` restores offloaded content byte-exact. Extensions can observe or cancel compaction via `session_before_compact`; free-text custom summaries are deprecated. See [docs/compaction.md](docs/compaction.md) for internals.
+The full history remains append-only in the JSONL file; use `/tree` to revisit, and `recall_exact(ref)` restores offloaded content byte-exact. Task/tool ledgers and activated snapshots follow the current tree branch by ancestry, so sibling branches restore independently. `/contract` shows the focused task ledger and latest reconciliation status; `/contract reconcile` runs a read-only semantic check of recent verified-user requirements and displays evidence/suggestions without applying them. Extensions can observe or cancel compaction via `session_before_compact`; free-text custom summaries are deprecated. See [docs/compaction.md](docs/compaction.md) for internals.
 
 ---
 

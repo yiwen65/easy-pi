@@ -200,6 +200,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
+	 * Resolve the authoritative system prompt after newly queued prompt messages
+	 * and their awaited listeners have completed, before the next provider call.
+	 *
+	 * Agent-backed runs use this to project durable/session-derived state changed
+	 * by a persisted user message. Low-level callers can omit it to retain the
+	 * immutable `AgentContext.systemPrompt` snapshot.
+	 *
+	 * Contract: must not throw. If it does, the loop falls back to the snapshot.
+	 */
+	getSystemPrompt?: () => string;
+
+	/**
 	 * Resolves an API key dynamically for each LLM call.
 	 *
 	 * Useful for short-lived OAuth tokens (e.g., GitHub Copilot) that may expire

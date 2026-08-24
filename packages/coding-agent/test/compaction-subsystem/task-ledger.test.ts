@@ -60,6 +60,140 @@ describe("TaskLedger operations", () => {
 		expect(extended.version).toBe(3);
 	});
 
+	it("PATCH_TASK_CONTRACT atomically updates typed fields and preserves omitted permission/budget values", () => {
+		const { eventLog, ledger } = setup();
+		ledger.createTask({ goal: "write the taskbook" }, user, "ev-001");
+		expect(() =>
+			ledger.apply(
+				{
+					operation: "PATCH_TASK_CONTRACT",
+					taskId: "T1",
+					taskPatch: { addScope: [], addExclusions: [] },
+				},
+				user,
+				"ev-empty",
+			),
+		).toThrow(/no change/i);
+		expect(ledger.getTask("T1")?.version).toBe(1);
+		ledger.apply(
+			{
+				operation: "UPDATE_PERMISSIONS",
+				taskId: "T1",
+				permissions: { allow: ["network"], deny: ["shell"], approvalRequired: ["publish"] },
+			},
+			user,
+			"ev-002",
+		);
+		ledger.apply(
+			{
+				operation: "UPDATE_BUDGETS",
+				taskId: "T1",
+				budgets: { maxTokens: 100, maxToolCalls: 5, maxDurationMs: 1_000 },
+			},
+			user,
+			"ev-003",
+		);
+		const patched = ledger.apply(
+			{
+				operation: "PATCH_TASK_CONTRACT",
+				taskId: "T1",
+				taskPatch: {
+					addScope: ["packages/coding-agent"],
+					addExclusions: ["branch-scoped ledger"],
+					addAcceptanceCriteria: ["drift regression passes"],
+					permissions: { allow: ["read"] },
+					budgets: { maxTokens: 200, maxDurationMs: null },
+					outputContract: "validated task document",
+					addBlockers: ["await canary"],
+				},
+			},
+			user,
+			"ev-004",
+		);
+		expect(patched).toMatchObject({
+			version: 4,
+			goal: { scope: ["packages/coding-agent"], exclusions: ["branch-scoped ledger"] },
+			acceptanceCriteria: ["drift regression passes"],
+			permissions: { allow: ["read"], deny: ["shell"], approvalRequired: ["publish"] },
+			budgets: { maxTokens: 200, maxToolCalls: 5 },
+			outputContract: "validated task document",
+			blockers: ["await canary"],
+		});
+		expect(patched.budgets).not.toHaveProperty("maxDurationMs");
+		expect(ledger.getLedgerVersion()).toBe(4);
+
+		const cleared = ledger.apply(
+			{
+				operation: "PATCH_TASK_CONTRACT",
+				taskId: "T1",
+				taskPatch: {
+					removeScope: ["packages/coding-agent"],
+					removeExclusions: ["branch-scoped ledger"],
+					removeAcceptanceCriteria: ["drift regression passes"],
+					outputContract: null,
+					removeBlockers: ["await canary"],
+				},
+			},
+			user,
+			"ev-005",
+		);
+		expect(cleared).toMatchObject({
+			version: 5,
+			goal: { scope: [], exclusions: [] },
+			acceptanceCriteria: [],
+			blockers: [],
+		});
+		expect(cleared.outputContract).toBeUndefined();
+
+		const versionBefore = ledger.getLedgerVersion();
+		const eventsBefore = eventLog.all("s-1").length;
+		expect(() =>
+			ledger.apply(
+				{
+					operation: "PATCH_TASK_CONTRACT",
+					taskId: "T1",
+					taskPatch: { addScope: ["new"], removeBlockers: ["missing"] },
+				},
+				user,
+				"ev-006",
+			),
+		).toThrow(/blockers does not contain/i);
+		expect(() =>
+			ledger.apply(
+				{
+					operation: "PATCH_TASK_CONTRACT",
+					taskId: "T1",
+					taskPatch: { budgets: { maxTokens: 200 } },
+				},
+				user,
+				"ev-007",
+			),
+		).toThrow(/no change/i);
+		expect(ledger.getTask("T1")?.goal.scope).toEqual([]);
+		expect(ledger.getLedgerVersion()).toBe(versionBefore);
+		expect(eventLog.all("s-1")).toHaveLength(eventsBefore);
+	});
+
+	it("UPDATE_BUDGETS preserves omitted existing limits", () => {
+		const { ledger } = setup();
+		ledger.createTask({ goal: "task" }, user, "ev-001");
+		ledger.apply(
+			{
+				operation: "UPDATE_BUDGETS",
+				taskId: "T1",
+				budgets: { maxTokens: 100, maxToolCalls: 5, maxDurationMs: 1_000 },
+			},
+			user,
+			"ev-002",
+		);
+		const updated = ledger.apply(
+			{ operation: "UPDATE_BUDGETS", taskId: "T1", budgets: { maxTokens: 200 } },
+			user,
+			"ev-003",
+		);
+		expect(updated.budgets).toEqual({ maxTokens: 200, maxToolCalls: 5, maxDurationMs: 1_000 });
+	});
+
 	it("SUSPEND + subtask switches focus; RESUME restores it via the focus stack", () => {
 		const { ledger } = setup();
 		ledger.createTask({ goal: "main task" }, user, "ev-001");
@@ -107,6 +241,17 @@ describe("TaskLedger operations", () => {
 				},
 				agent,
 				"ev-003",
+			),
+		).toThrow(/user|authority/i);
+		expect(() =>
+			ledger.apply(
+				{
+					operation: "PATCH_TASK_CONTRACT",
+					taskId: "T1",
+					taskPatch: { addExclusions: ["hijacked"] },
+				},
+				agent,
+				"ev-004",
 			),
 		).toThrow(/user|authority/i);
 	});
@@ -388,6 +533,12 @@ describe("TaskLedger library closure regressions (T-401/T-402)", () => {
 			operations: [{ operation: "SET_FOCUS", ambiguous: true, candidateTaskIds: ["T1", "T2"], dependsOn: ["T2"] }],
 			ambiguous: true,
 		});
+		expect(pending).toMatchObject({
+			baseLedgerVersion: 2,
+			expectedLedgerVersion: 3,
+			baseTaskVersions: { T1: 1, T2: 1 },
+		});
+		expect(pending.operationsHash).toMatch(/^[a-f0-9]{64}$/);
 		expect(replayTaskLedger(eventLog.all("s-1")).getPendingGoalChanges()[0]).toEqual(pending);
 		expect(() => ledger.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-004")).toThrow(/candidate/i);
 		ledger.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-004", { candidateTaskId: "T1" });
@@ -396,6 +547,69 @@ describe("TaskLedger library closure regressions (T-401/T-402)", () => {
 		const rebuilt = replayTaskLedger(eventLog.all("s-1"));
 		expect(rebuilt.getFocusTaskId()).toBe("T1");
 		expect(rebuilt.getPendingGoalChanges()).toEqual([]);
+	});
+
+	it("rejects stale, tampered, and unverifiable legacy pending changes without mutation", () => {
+		const { eventLog, ledger } = setup();
+		ledger.createTask({ goal: "a" }, user, "ev-001");
+		const pending = ledger.recordPendingGoalChange({
+			candidateTaskIds: ["T1"],
+			reason: "refine after approval",
+			sourceEventId: "ev-002",
+			operations: [{ operation: "REFINE_TASK", taskId: "T1", goal: "approved goal" }],
+		});
+		ledger.apply({ operation: "REFINE_TASK", taskId: "T1", goal: "newer goal" }, user, "ev-003");
+		const staleVersion = ledger.getLedgerVersion();
+		expect(() => ledger.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-004")).toThrow(
+			/STALE_PENDING.*ledger moved/i,
+		);
+		expect(ledger.getTask("T1")?.goal.normalized).toBe("newer goal");
+		expect(ledger.getPendingGoalChanges()).toHaveLength(1);
+		expect(ledger.getLedgerVersion()).toBe(staleVersion);
+
+		const tamperedEvents = eventLog.all("s-1");
+		const tamperedPayload = tamperedEvents.find(
+			(event) =>
+				event.eventType === "task" &&
+				event.payload !== null &&
+				typeof event.payload === "object" &&
+				(event.payload as { kind?: string }).kind === "pending_goal_change",
+		)?.payload as { operations: Array<{ goal?: string }> } | undefined;
+		expect(tamperedPayload).toBeDefined();
+		tamperedPayload!.operations[0].goal = "forged goal";
+		const tampered = replayTaskLedger(tamperedEvents);
+		expect(() => tampered.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-005")).toThrow(
+			/STALE_PENDING.*hash/i,
+		);
+		expect(tampered.getTask("T1")?.goal.normalized).toBe("newer goal");
+
+		const legacyEvents = eventLog.all("s-1").slice(0, 2);
+		const legacyPayload = legacyEvents[1].payload as Record<string, unknown>;
+		delete legacyPayload.baseLedgerVersion;
+		delete legacyPayload.expectedLedgerVersion;
+		delete legacyPayload.baseTaskVersions;
+		delete legacyPayload.operationsHash;
+		const legacy = replayTaskLedger(legacyEvents);
+		expect(() => legacy.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-006")).toThrow(
+			/STALE_PENDING.*legacy/i,
+		);
+		expect(legacy.getTask("T1")?.goal.normalized).toBe("a");
+	});
+
+	it("accepts a fresh replayed pending change exactly once", () => {
+		const { eventLog, ledger } = setup();
+		ledger.createTask({ goal: "a" }, user, "ev-001");
+		const pending = ledger.recordPendingGoalChange({
+			candidateTaskIds: ["T1"],
+			reason: "refine",
+			sourceEventId: "ev-002",
+			operations: [{ operation: "REFINE_TASK", taskId: "T1", goal: "approved goal" }],
+		});
+		const rebuilt = replayTaskLedger(eventLog.all("s-1"));
+		rebuilt.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-003");
+		expect(rebuilt.getTask("T1")?.goal.normalized).toBe("approved goal");
+		expect(rebuilt.getPendingGoalChanges()).toEqual([]);
+		expect(() => rebuilt.acceptPendingGoalChange(pending.pendingChangeId, user, "ev-004")).toThrow(/unknown/i);
 	});
 
 	it("keeps failed accepted batches atomic and requires verified-user rejection", () => {

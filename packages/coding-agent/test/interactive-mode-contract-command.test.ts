@@ -1,5 +1,6 @@
 import { Container } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { ReconciliationReport } from "../src/core/compaction/subsystem/reconciliation.ts";
 import type { PendingGoalChange } from "../src/core/compaction/subsystem/task-ledger.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -12,6 +13,8 @@ interface ContractCommandPrototype {
 	resolvePendingGoalChangeSelector(this: unknown, selector: string): string;
 	formatPendingGoalChanges(this: unknown, pending: PendingGoalChange[]): string[];
 	showPendingGoalChanges(this: unknown): void;
+	formatReconciliationReport(this: unknown, report: ReconciliationReport): string[];
+	showReconciliationReport(this: unknown, report: ReconciliationReport): void;
 	showTaskContract(this: unknown): void;
 }
 
@@ -36,6 +39,8 @@ function commandContext(session: Record<string, unknown>) {
 		resolvePendingGoalChangeSelector: prototype.resolvePendingGoalChangeSelector,
 		formatPendingGoalChanges: prototype.formatPendingGoalChanges,
 		showPendingGoalChanges: prototype.showPendingGoalChanges,
+		formatReconciliationReport: prototype.formatReconciliationReport,
+		showReconciliationReport: prototype.showReconciliationReport,
 		showTaskContract: prototype.showTaskContract,
 	};
 }
@@ -47,7 +52,8 @@ describe("InteractiveMode /contract", () => {
 		expect(BUILTIN_SLASH_COMMANDS).toContainEqual({
 			name: "contract",
 			description: "Show or manage the task contract and task ledger",
-			argumentHint: "[set <goal>|confirm|pending|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
+			argumentHint:
+				"[set <goal>|confirm|pending|reconcile|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
 		});
 
 		const handleContractCommand = vi.fn();
@@ -76,6 +82,7 @@ describe("InteractiveMode /contract", () => {
 				outputContract: undefined,
 			}),
 			getTaskLedgerState: () => ({
+				branchId: "branch-1",
 				ledgerVersion: 8,
 				focusTaskId: "T1",
 				tasks: [
@@ -92,6 +99,10 @@ describe("InteractiveMode /contract", () => {
 					},
 				],
 			}),
+			getLatestTaskReconciliation: () => ({
+				reportId: "recon-1",
+				findings: [{ findingId: "rf-1" }],
+			}),
 		};
 		const context = commandContext(session);
 
@@ -105,6 +116,42 @@ describe("InteractiveMode /contract", () => {
 		expect(output).toContain("- T1 [active] Implement command");
 		expect(output).not.toContain("- T2 [completed] Write design");
 		expect(output).toContain("P4 [ambiguous]: May apply to either task");
+		expect(output).toContain("Branch: branch-1");
+		expect(output).toContain("recon-1: 1 finding(s)");
+	});
+
+	it("forces and renders a read-only reconciliation report", async () => {
+		const report: ReconciliationReport = {
+			reportId: "recon-1",
+			sessionId: "s-1",
+			branchId: "branch-1",
+			taskRef: "task://T1/v2",
+			taskVersion: 2,
+			ledgerVersion: 2,
+			fromEventSeq: 1,
+			toEventSeq: 8,
+			evaluatorPolicyVersion: "test",
+			findings: [
+				{
+					findingId: "rf-1",
+					kind: "missing_delta",
+					severity: "warning",
+					message: "README exclusion is missing",
+					sourceEventIds: ["ev-2"],
+					suggestedOperations: [{ operation: "PATCH_TASK_CONTRACT", taskId: "T1" }],
+				},
+			],
+			reportHash: "hash",
+			checkedAt: "2026-08-24T00:00:00.000Z",
+		};
+		const reconcileTaskContract = vi.fn(async () => report);
+		const context = commandContext({ isIdle: true, isCompacting: false, reconcileTaskContract });
+
+		prototype.handleContractCommand.call(context, "/contract reconcile");
+		await vi.waitFor(() => expect(reconcileTaskContract).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(rendered(context.chatContainer)).toContain("README exclusion is missing"));
+		expect(context.showStatus).toHaveBeenCalledWith("Reconciling task contract...");
+		expect(rendered(context.chatContainer)).toContain("Suggestions: PATCH_TASK_CONTRACT");
 	});
 
 	it("sets the authoritative focused-task goal", () => {

@@ -7,6 +7,23 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 describe("InteractiveMode compaction events", () => {
+	test("contains asynchronous event rendering failures at the UI subscription boundary", async () => {
+		const sourceEvent = { type: "agent_settled" } as const;
+		const fakeThis = {
+			handleEvent: vi.fn().mockRejectedValue(new Error("render failed")),
+			showError: vi.fn(),
+		};
+		const handleEventSafely = Reflect.get(InteractiveMode.prototype, "handleEventSafely") as (
+			this: typeof fakeThis,
+			event: typeof sourceEvent,
+		) => void;
+
+		handleEventSafely.call(fakeThis, sourceEvent);
+		await vi.waitFor(() => expect(fakeThis.showError).toHaveBeenCalledOnce());
+
+		expect(fakeThis.showError).toHaveBeenCalledWith("Unable to render agent_settled: render failed");
+	});
+
 	test("uses the cache miss notice setting for compaction and branch summary costs", () => {
 		const usage: Usage = {
 			input: 10,
@@ -194,6 +211,63 @@ describe("InteractiveMode compaction events", () => {
 			kind: "compaction",
 			usage,
 		});
+		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+	});
+
+	test("keeps the transcript when HF compaction completes without a legacy compaction entry", async () => {
+		const rawEntry: SessionEntry = {
+			type: "custom",
+			id: "raw-history",
+			parentId: null,
+			timestamp: "2025-01-01T00:00:00Z",
+			customType: "hf-history",
+		};
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			autoCompactionEscapeHandler: undefined as (() => void) | undefined,
+			autoCompactionLoader: undefined,
+			defaultEditor: {},
+			statusContainer: { clear: vi.fn() },
+			chatContainer: { clear: vi.fn() },
+			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([rawEntry]) },
+			renderSessionEntries: vi.fn(),
+			addMessageToChat: vi.fn(),
+			addCompactionCostNotice: vi.fn(),
+			showError: vi.fn(),
+			showStatus: vi.fn(),
+			clearStatusIndicator: vi.fn(),
+			flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
+			settingsManager: { getShowTerminalProgress: () => false },
+			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+		};
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event: {
+				type: "compaction_end";
+				reason: "manual" | "threshold" | "overflow";
+				result: { tokensBefore: number; summary: string; usage?: Usage } | undefined;
+				aborted: boolean;
+				willRetry: boolean;
+				errorMessage?: string;
+			},
+		) => Promise<void>;
+
+		await expect(
+			handleEvent.call(fakeThis, {
+				type: "compaction_end",
+				reason: "threshold",
+				result: { tokensBefore: 1_000, summary: "HF snapshot activated" },
+				aborted: false,
+				willRetry: false,
+			}),
+		).resolves.toBeUndefined();
+
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
+		expect(fakeThis.renderSessionEntries).not.toHaveBeenCalled();
+		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
+			expect.objectContaining({ role: "compactionSummary", summary: "HF snapshot activated" }),
+		);
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 	});
 

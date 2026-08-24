@@ -11,7 +11,7 @@
 
 import type { ArtifactStore } from "./artifact-store.ts";
 import { hashPayload } from "./hashing.ts";
-import type { EventEnvelope } from "./types.ts";
+import type { EventEnvelope, RecallEntry } from "./types.ts";
 
 export type PayloadClass = "must_keep_verbatim" | "structured" | "summarizable" | "offloadable";
 
@@ -28,6 +28,9 @@ export interface OffloadPolicy {
 
 export interface OffloadRecord {
 	eventId: string;
+	/** Event-range archives can cover many events without projecting any one tail event. */
+	eventIds?: string[];
+	recallKind?: RecallEntry["kind"];
 	toolCallId?: string;
 	artifactRef: string;
 	preview: string;

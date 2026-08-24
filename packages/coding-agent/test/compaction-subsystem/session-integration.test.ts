@@ -109,7 +109,17 @@ describe("HfCompaction integration (structured_compaction)", () => {
 		// Session continues to work after subsystem compaction.
 		await h.session.prompt("continue");
 		await h.session.waitForIdle();
-		expect(h.session.messages[h.session.messages.length - 1].role).toBe("assistant");
+		expect(h.faux.contexts.at(-1)?.messages.some((message) => message.role === "user")).toBe(true);
+		expect(
+			h.sessionManager
+				.getBranch()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						JSON.stringify(entry.message.content).includes("next answer"),
+				),
+		).toBe(true);
 	});
 
 	it("subsystem failure fails closed: no snapshot, no legacy entry, session intact", async () => {
@@ -161,13 +171,16 @@ describe("HfCompaction integration (structured_compaction)", () => {
 
 		const result = await h.session.compact();
 		expect(result.summary).toContain("snapshot");
+		expect(result.summary).toContain("action: soft_compact");
+		expect(result.summary).toMatch(/tokens: [\d,]+ → [\d,]+ \([\d.]+% reduction\)/);
 		const host = h.session.hfCompactionHost!;
 		const active = host.snapshotStore.getActive(h.session.sessionId);
 		expect(active).toBeDefined();
 		expect(active!.narrative).toBe("Progress narrative.");
 
 		// The big tool result was offloaded and is exactly recallable by stable ID.
-		const entries = host.recallCatalog.entries();
+		const activeRefs = new Set(active!.recallCatalogRefs);
+		const entries = host.recallCatalog.entries().filter((entry) => activeRefs.has(entry.refId));
 		expect(entries.length).toBeGreaterThan(0);
 		const recalled = host.recallExact(entries[0].refId);
 		expect(recalled).toContain("BUILD LOG");
@@ -204,6 +217,11 @@ describe("HfCompaction integration (offload_only)", () => {
 		// Offload happened; no extraction/narrative LLM call was made.
 		expect(host.recallCatalog.entries().length).toBeGreaterThan(0);
 		expect(llmCalls).toBe(0);
+		const compaction = h.eventsOfType("compaction_end").find((event) => event.result);
+		expect(compaction?.result?.summary).toMatch(/\[high-fidelity snapshot v\d+ activated\]/);
+		expect(compaction?.result?.summary).toContain("action: offload_only");
+		expect(compaction?.result?.summary).toMatch(/tokens: [\d,]+ → [\d,]+ \([\d.]+% reduction\)/);
+		expect(compaction?.result?.summary).toMatch(/offloaded [1-9]\d* bytes/);
 		// Raw events are all still in the event log.
 		expect(host.eventLog.all(h.session.sessionId).length).toBeGreaterThanOrEqual(4);
 	});

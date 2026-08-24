@@ -149,6 +149,8 @@ export interface EventEnvelope {
 	eventType: EventType;
 	/** ISO timestamp. */
 	timestamp: string;
+	/** Session tree head visible when this event was appended (additive v1 metadata). */
+	branchHeadId?: string;
 	causalParentIds: string[];
 	toolCallId?: string;
 	transactionId?: string;
@@ -274,6 +276,29 @@ export interface TokenStats {
 	total: number;
 }
 
+/** Hard budgets for the mutable active-context zones. The fixed contract is never truncated. */
+export interface PromptZoneBudgets {
+	/** Warm structured state. */
+	snapshot: number;
+	/** Lossy bridge; safe to truncate. */
+	narrative: number;
+	/** Search instructions and compact catalog hints. */
+	recallGuide: number;
+	/** Hot verbatim events, retained as complete atomic groups. */
+	recentTail: number;
+	/** Explicitly recalled cold blocks. These fail closed instead of truncating. */
+	exactRecall: number;
+}
+
+export interface ZoneProjectionStats {
+	zone: "snapshot" | "narrative" | "recallGuide" | "recentTail" | "exactRecall";
+	budgetTokens: number;
+	usedTokens: number;
+	droppedItems: number;
+	/** Protected items are never silently removed; an overflow throws before request assembly. */
+	protectedItems: number;
+}
+
 export interface ValidatorFailure {
 	code: string;
 	severity: "P0" | "P1";
@@ -304,6 +329,8 @@ export interface StructuredSnapshot {
 	 * the ledger state; it never duplicates the goal's authoritative text.
 	 */
 	taskLedgerRef?: {
+		/** Session tree head at the frozen boundary; membership is ancestry-derived. */
+		branchId?: string;
 		ledgerVersion: number;
 		focusTaskId?: string;
 		focusContractVersion?: number;

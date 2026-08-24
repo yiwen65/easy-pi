@@ -62,7 +62,11 @@ import {
 	generateBranchSummary,
 	prepareCompaction,
 } from "./compaction/index.ts";
-import { createRecallExactToolDefinition } from "./compaction/subsystem/recall-tool.ts";
+import { selectPendingContractApproval } from "./compaction/subsystem/goal-interpreter.ts";
+import {
+	createRecallExactToolDefinition,
+	createRecallSearchToolDefinition,
+} from "./compaction/subsystem/recall-tool.ts";
 import {
 	createPiAiCompleteFn,
 	getHfCompactionModeFromEnv,
@@ -316,9 +320,6 @@ function estimateActiveToolsTokens(
 	return total;
 }
 
-const GOAL_CHANGE_PATTERN =
-	/\b(?:add|allow|also|budget|cancel|change|complete|constraint|deny|document|finish|focus|goal|improve|instead|new task|permission|rather|refine|replace|require|resume|stop|suspend|task|too|update)\b|do that|that one|另外|再做|改成|修改|取消|停止|暂停|恢复|完成|预算|权限|先做|继续完善|要求|必须|目标|任务|验收|约束/i;
-
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -419,7 +420,6 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
-		this._installAgentContextTransform();
 
 		// Default-on (EPIC-CCTX-001): the subsystem is pi's default compaction.
 		// Explicit config or PI_HF_COMPACTION overrides; "off" disables compaction.
@@ -515,6 +515,30 @@ export class AgentSession {
 		return rejected;
 	}
 
+	getLatestTaskReconciliation() {
+		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
+		return this._hfHost.getLatestReconciliationReport();
+	}
+
+	async reconcileTaskContract() {
+		const host = this._hfHost;
+		if (!host) throw new Error("Compaction subsystem is disabled (mode off)");
+		let complete = host.reconcileComplete;
+		const model = this.model;
+		if (!complete && model) {
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
+			complete = createPiAiCompleteFn({
+				model: requestModel,
+				apiKey,
+				headers,
+				env,
+				streamFn: this.agent.streamFunction,
+				retry: this.settingsManager.getRetrySettings(),
+			});
+		}
+		return host.runReconciliation({ branchEntries: this.sessionManager.getBranch(), complete });
+	}
+
 	/** Unverified update attempts only ever become proposals. */
 	proposeTaskContractUpdate(
 		patch: Parameters<HfCompactionHost["proposeContractUpdate"]>[0],
@@ -591,25 +615,30 @@ export class AgentSession {
 		}
 	}
 
+	private _acceptPendingContractApprovalBeforePrompt(userMessage: string): void {
+		const host = this._hfHost;
+		if (!host) return;
+		const selection = selectPendingContractApproval(userMessage, host.getTaskLedgerState().pending);
+		if (selection?.kind === "accept") {
+			host.acceptPendingGoalChange(selection.pendingChangeId);
+		}
+	}
+
 	private async _processTaskGoalMessage(entryId: string, message: AgentMessage): Promise<void> {
 		const host = this._hfHost;
 		const model = this.model;
 		if (!host || !model || message.role !== "user") return;
+		const interpretTask = host.taskInterpretationEnabled;
+		const reconcileTask = host.reconciliationEnabled;
+		if (!interpretTask && !reconcileTask) return;
 		const userMessage = contentText(message.content, "").trim();
 		if (!userMessage) return;
 		const branchEntries = this.sessionManager.getBranch();
-		if (host.getTaskLedgerState().tasks.length > 0 && !GOAL_CHANGE_PATTERN.test(userMessage)) {
-			host.syncFromEntries(branchEntries);
-			host.audit.record("goal_interpretation", this.sessionId, { outcome: "noop", deterministic: true });
-			this._refreshPinnedSystemPrompt();
-			return;
-		}
 		try {
 			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
-			const complete =
-				host.goalComplete ??
-				host.configComplete ??
-				createPiAiCompleteFn({
+			let providerComplete: ReturnType<typeof createPiAiCompleteFn> | undefined;
+			const getProviderComplete = () => {
+				providerComplete ??= createPiAiCompleteFn({
 					model: requestModel,
 					apiKey,
 					headers,
@@ -617,12 +646,23 @@ export class AgentSession {
 					streamFn: this.agent.streamFunction,
 					retry: this.settingsManager.getRetrySettings(),
 				});
-			await host.processUserMessage({
-				branchEntries,
-				sourceEventId: entryId,
-				userMessage,
-				complete,
-			});
+				return providerComplete;
+			};
+			if (interpretTask) {
+				const goalComplete = host.goalComplete ?? host.configComplete ?? getProviderComplete();
+				await host.processUserMessage({
+					branchEntries,
+					sourceEventId: entryId,
+					userMessage,
+					complete: goalComplete,
+				});
+			}
+			if (reconcileTask) {
+				await host.maybeRunReconciliation({
+					branchEntries,
+					complete: host.reconcileComplete ?? getProviderComplete(),
+				});
+			}
 			this._refreshPinnedSystemPrompt();
 		} catch (error) {
 			// Goal interpretation is advisory toward the main agent turn. A failed
@@ -644,25 +684,38 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
-			this._hfHost?.recordToolStarted(toolCall.id, toolCall.name, args);
 			const runner = this._extensionRunner;
-			if (!runner.hasHandlers("tool_call")) {
-				return undefined;
+			if (runner.hasHandlers("tool_call")) {
+				try {
+					const hookResult = await runner.emitToolCall({
+						type: "tool_call",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: args as Record<string, unknown>,
+					});
+					if (hookResult?.block) {
+						return hookResult;
+					}
+				} catch (err) {
+					if (err instanceof Error) {
+						throw err;
+					}
+					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+				}
 			}
 
+			// Ledger gate after the hook, with the final (possibly mutated) args:
+			// dispatch proceeds only when the durable ledger accepted the start.
+			// The core loop re-validates hook-mutated args after this hook returns.
 			try {
-				return await runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				});
+				this._hfHost?.recordToolStarted(toolCall.id, toolCall.name, args);
 			} catch (err) {
-				if (err instanceof Error) {
-					throw err;
-				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+				return {
+					block: true,
+					reason: `Tool ledger rejected dispatch: ${err instanceof Error ? err.message : String(err)}`,
+				};
 			}
+			return undefined;
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
@@ -697,24 +750,6 @@ export class AgentSession {
 				isError: hookResult?.isError ?? isError,
 				usage: hookResult?.usage,
 			};
-		};
-	}
-
-	private _installAgentContextTransform(): void {
-		const previousTransform = this.agent.transformContext;
-		this.agent.transformContext = async (messages, signal) => {
-			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
-			const host = this._hfHost;
-			if (!host || host.getTaskLedgerState().pending.length === 0) return transformed;
-			// Same-turn safety: the provider context snapshot predates user-message
-			// interpretation. Append the newly pending warning just before conversion;
-			// stable fixed state lives in the system prompt on subsequent turns.
-			const pendingMessage: AgentMessage = {
-				role: "user",
-				content: [{ type: "text", text: host.buildPinnedLedgerLayer() }],
-				timestamp: Date.now(),
-			};
-			return [...transformed, pendingMessage];
 		};
 	}
 
@@ -753,7 +788,7 @@ export class AgentSession {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
+	/** Emit an event to all listeners. */
 	private _emit(event: AgentSessionEvent): void {
 		for (const l of this._eventListeners) {
 			l(event);
@@ -861,19 +896,17 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
+		// Emit to extensions first (message_end handlers may transform the message)
 		await this._emitExtensionEvent(event);
 
-		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
-
-		// Handle session persistence
+		// Canonical persistence BEFORE notifying subscribers: the durable session
+		// entry is the authority; a throwing or slow listener must not prevent it.
 		if (event.type === "message_end") {
 			let appendedEntryId: string | undefined;
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
+				appendedEntryId = this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
 					event.message.display,
@@ -889,10 +922,16 @@ export class AgentSession {
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
+			if (appendedEntryId) this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
 			if (event.message.role === "user" && appendedEntryId) {
 				await this._processTaskGoalMessage(appendedEntryId, event.message);
 			}
+		}
 
+		// Notify all listeners
+		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+
+		if (event.type === "message_end") {
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
@@ -1492,9 +1531,12 @@ export class AgentSession {
 				this._systemPromptOverride = undefined;
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
-			// The current ledger state was established by prior turns or explicit
-			// /contract commands. Same-turn pending changes are appended later by
-			// transformContext after the user event is interpreted.
+			// Resolve an explicit verified-user permission approval before agent.prompt()
+			// snapshots the system prompt. The persisted user message is interpreted
+			// again later, but the deterministic selector returns noop once pending is gone.
+			this._acceptPendingContractApprovalBeforePrompt(expandedText);
+			// AgentLoop resolves this state again after the persisted user event has
+			// been interpreted, so the first provider call receives one current system layer.
 			this._refreshPinnedSystemPrompt();
 
 			const lastAssistant = this._findLastAssistantMessage();
@@ -2129,7 +2171,7 @@ export class AgentSession {
 				});
 				return compactionResult;
 			}
-			if (this._compactionAbortController.signal.aborted) {
+			if (!outcome.activated && this._compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 			if (!outcome.activated) {
@@ -2156,7 +2198,10 @@ export class AgentSession {
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+			const aborted =
+				this._compactionAbortController?.signal.aborted === true ||
+				message === "Compaction cancelled" ||
+				(error instanceof Error && error.name === "AbortError");
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
 			this._compactionAbortController = undefined;
 			this._emit({
@@ -2248,6 +2293,10 @@ export class AgentSession {
 		);
 		const assistantIsFromBeforeCompaction =
 			latestCompactionTimestamp > 0 && assistantMessage.timestamp <= latestCompactionTimestamp;
+		const recentProviderContextTokens =
+			!assistantIsFromBeforeCompaction && sameModel && assistantMessage.usage
+				? calculateContextTokens(assistantMessage.usage)
+				: undefined;
 		if (assistantIsFromBeforeCompaction && currentInput.length === 0 && currentInputExtraTokens === 0) {
 			return false;
 		}
@@ -2273,6 +2322,7 @@ export class AgentSession {
 					outputReserveTokens: settings.reserveTokens,
 					currentInput,
 					currentInputExtraTokens,
+					recentProviderContextTokens,
 					previousCallOverflowed: true,
 				});
 				if (!evaluation || evaluation.decision.action === "none") return false;
@@ -2315,6 +2365,7 @@ export class AgentSession {
 				outputReserveTokens: settings.reserveTokens,
 				currentInput,
 				currentInputExtraTokens,
+				recentProviderContextTokens,
 				previousCallOverflowed: true,
 			});
 			if (!evaluation || evaluation.decision.action === "none") return false;
@@ -2358,6 +2409,7 @@ export class AgentSession {
 			outputReserveTokens: settings.reserveTokens,
 			currentInput,
 			currentInputExtraTokens,
+			recentProviderContextTokens,
 		});
 		if (!evaluation || evaluation.decision.action === "none") return false;
 		return await this._runAutoCompaction(
@@ -2415,6 +2467,11 @@ export class AgentSession {
 		if (outcome.shadow) {
 			// Shadow never changes live context, so retrying an overflow would repeat
 			// the identical failing request and incorrectly consume recovery state.
+			return false;
+		}
+		if (!outcome.activated && this._autoCompactionAbortController?.signal.aborted) {
+			this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+			await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
 			return false;
 		}
 		if (!outcome.activated) {
@@ -2522,6 +2579,14 @@ export class AgentSession {
 			);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const aborted =
+				this._autoCompactionAbortController?.signal.aborted === true ||
+				(error instanceof Error && error.name === "AbortError");
+			if (aborted) {
+				this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+				await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
+				return false;
+			}
 			const formattedErrorMessage =
 				reason === "overflow"
 					? `Context overflow recovery failed: ${errorMessage}`
@@ -2901,8 +2966,10 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
-		// recall_exact is available whenever the compaction subsystem is active (default-on).
+		// Recall discovery and exact restoration are available whenever the
+		// compaction subsystem is active (default-on).
 		if (this._hfHost) {
+			this._baseToolDefinitions.set("recall_search", createRecallSearchToolDefinition(this._hfHost));
 			this._baseToolDefinitions.set("recall_exact", createRecallExactToolDefinition(this._hfHost));
 		}
 
@@ -2928,7 +2995,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", ...(this._hfHost ? ["recall_exact"] : [])];
+			: ["read", "bash", "edit", "write", ...(this._hfHost ? ["recall_search", "recall_exact"] : [])];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -3402,9 +3469,13 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			// Update agent state
+			// Update branch-scoped ledger/snapshot state before exposing the new tree position.
+			const branchEntries = this.sessionManager.getBranch();
+			this._hfHost?.syncFromEntries(branchEntries);
+			const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
 			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
+			this.agent.state.messages = restoredProjection ?? sessionContext.messages;
+			this._refreshPinnedSystemPrompt();
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({

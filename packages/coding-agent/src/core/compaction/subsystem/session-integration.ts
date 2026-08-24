@@ -18,10 +18,18 @@ import { join } from "node:path";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { contentText, type RetryCallbacks, type RetryPolicy } from "@earendil-works/pi-ai";
 import type { Model } from "@earendil-works/pi-ai/compat";
+import { createCompactionSummaryMessage } from "../../messages.ts";
 import { type SessionEntry, sessionEntryToContextMessages } from "../../session-manager.ts";
 import { completeSummarization } from "../compaction.ts";
 import { type ArtifactStore, FileSystemArtifactStore, InMemoryArtifactStore } from "./artifact-store.ts";
-import { type EventLog, InMemoryEventLog, JsonlEventLog, sessionEntriesToEvents } from "./event-log.ts";
+import {
+	BranchScopedEventLog,
+	type ColdMessageRef,
+	type EventLog,
+	InMemoryEventLog,
+	JsonlEventLog,
+	sessionEntriesToEvents,
+} from "./event-log.ts";
 import { type GoalChangeOutcome, interpretGoalChange } from "./goal-interpreter.ts";
 import { canonicalJson, sha256Hex } from "./hashing.ts";
 import {
@@ -33,15 +41,33 @@ import {
 import { AuditTrail } from "./observability.ts";
 import { CompactionOrchestrator, type CompactResult, type OrchestratorDeps } from "./orchestrator.ts";
 import { estimateRecoverableToolTokens, type OffloadPolicy } from "./payload-offload.ts";
-import { buildPrompt, renderPinnedLedgerLayer } from "./prompt-builder.ts";
+import { buildPrompt, type PromptSection, renderPinnedLedgerLayer } from "./prompt-builder.ts";
 import { rawRebuild } from "./rebuild.ts";
-import { JsonlRecallPersister, RecallCatalog } from "./recall-catalog.ts";
+import {
+	JsonlRecallPersister,
+	RecallCatalog,
+	type RecallSearchHit,
+	type RecallSearchOptions,
+} from "./recall-catalog.ts";
+import {
+	reconcileTaskContract as buildReconciliationReport,
+	countSubstantiveUserEvents,
+	type ReconciliationReport,
+	verifyReconciliationReport,
+} from "./reconciliation.ts";
 import { InMemorySnapshotStore, JsonlSnapshotStore, type SnapshotStore } from "./snapshot-store.ts";
 import { InMemoryContractStore, JsonlContractStore } from "./task-contract.ts";
 import { type PendingGoalChange, replayTaskLedger, type TaskLedger } from "./task-ledger.ts";
-import { ToolLedger } from "./tool-ledger.ts";
+import { replayLedger, ToolLedger } from "./tool-ledger.ts";
 import { evaluateTriggers, type TriggerAction, type TriggerDecision } from "./trigger.ts";
-import type { Authority, CompleteFn } from "./types.ts";
+import type {
+	Authority,
+	CompleteFn,
+	RecallEntry,
+	StructuredSnapshot,
+	TokenStats,
+	ZoneProjectionStats,
+} from "./types.ts";
 
 export type HfCompactionMode = "off" | "shadow" | "offload_only" | "structured_compaction" | "full_pipeline";
 
@@ -65,9 +91,25 @@ export function getHfCompactionModeFromEnv(
 export interface HfTriggerEvaluation {
 	decision: TriggerDecision;
 	predictedNextRequestTokens: number;
+	tokenEstimateProvenance: "provider_projection" | "provider_projection_with_recent_usage_floor";
 	recoverableToolTokens: number;
 	compactionCooldownRemaining: number;
 	incrementalCompactionsSinceRebuild: number;
+}
+
+export interface ContextInspection {
+	mode: HfCompactionMode;
+	snapshotVersion: number;
+	projectionKind: NonNullable<StructuredSnapshot["compactor"]["kind"]>;
+	baseEventSeq: number;
+	triggerEventSeq?: number;
+	tailEventCount: number;
+	toolsTokenEstimate: number;
+	tokenStats: TokenStats;
+	projectionStats: ZoneProjectionStats[];
+	sections: PromptSection[];
+	recallEntries: Array<Pick<RecallEntry, "refId" | "kind" | "preview" | "eventIds">>;
+	systemPrompt?: { text: string; tokens: number };
 }
 
 export interface HfCompactionConfig {
@@ -76,6 +118,13 @@ export interface HfCompactionConfig {
 	complete?: CompleteFn;
 	/** Optional independent Goal Interpreter injection; production falls back to the compactor adapter. */
 	goalComplete?: CompleteFn;
+	/** Interpret post-initial user turns into task-ledger proposals. Disabled unless explicitly enabled. */
+	taskInterpretationEnabled?: boolean;
+	/** Independent semantic reconciler injection; tests use a deterministic empty report. */
+	reconcileComplete?: CompleteFn;
+	/** Periodic semantic reconciliation. Disabled unless explicitly enabled. */
+	reconciliationEnabled?: boolean;
+	reconciliationIntervalTurns?: number;
 	tenant?: string;
 	keepRecentTokens?: number;
 	outputReserveTokens?: number;
@@ -111,7 +160,39 @@ function truncateGoalText(text: string, max: number): string {
 }
 
 const RECALL_GUIDE_TEXT =
-	"Content moved out of the active context can be recalled exactly with recall_exact(refId). Stable refs are listed in the snapshot.";
+	"Use recall_search(query, kind?, limit?) to discover content published by the active branch snapshot, then recall_exact(refId) to restore it.";
+
+function formatActivatedSummary(input: {
+	action: Exclude<TriggerAction, "none">;
+	snapshotVersion: number | undefined;
+	tokensBefore: number | undefined;
+	tokensAfter: number | undefined;
+	offloadedBytes: number | undefined;
+	narrative?: string;
+}): string {
+	const lines = [
+		`[high-fidelity snapshot v${input.snapshotVersion ?? "unknown"} activated]`,
+		`action: ${input.action}`,
+	];
+	if (input.tokensBefore !== undefined && input.tokensAfter !== undefined) {
+		const changePercent =
+			input.tokensBefore > 0 ? ((input.tokensBefore - input.tokensAfter) / input.tokensBefore) * 100 : 0;
+		const changeLabel =
+			changePercent >= 0
+				? `${changePercent.toFixed(1)}% reduction`
+				: `${Math.abs(changePercent).toFixed(1)}% increase`;
+		lines.push(
+			`tokens: ${input.tokensBefore.toLocaleString()} → ${input.tokensAfter.toLocaleString()} (${changeLabel})`,
+		);
+	}
+	if (input.offloadedBytes !== undefined) {
+		lines.push(`offloaded ${input.offloadedBytes} bytes`);
+	}
+	if (input.narrative?.trim()) {
+		lines.push("", input.narrative.trim());
+	}
+	return lines.join("\n");
+}
 
 export class HfCompactionHost {
 	readonly snapshotStore: SnapshotStore;
@@ -119,18 +200,18 @@ export class HfCompactionHost {
 	readonly contractStore: InMemoryContractStore | JsonlContractStore;
 	readonly recallCatalog: RecallCatalog;
 	readonly audit = new AuditTrail();
-	/** Side-effect ledger (CCTX-013), event-sourced into the session event log. */
-	readonly ledger: ToolLedger;
-	/** Versioned task ledger (T-401), replayed from task events in the same log. */
+	/** Side-effect ledger (CCTX-013), replayed from the active branch view. */
+	ledger: ToolLedger;
+	/** Versioned task ledger (T-401), replayed from task events in the active branch view. */
 	taskLedger: TaskLedger;
-	/** Mutable: syncFromEntries may rebuild the log when the branch shape changes. */
-	eventLog: EventLog;
+	/** Stable branch view over one durable append-only event log. */
+	readonly eventLog: BranchScopedEventLog;
 
 	private readonly sessionId: string;
 	private readonly getSystemPrompt: () => string;
 	private readonly config: HfCompactionConfig;
 	private readonly tenant: string;
-	private seededCount = 0;
+	private branchPathSignature = "";
 	private contractReady = false;
 	private goalDistilled = false;
 	private readonly getToolsTokenEstimate: (() => number) | undefined;
@@ -147,11 +228,18 @@ export class HfCompactionHost {
 		this.config = options.config;
 		this.tenant = options.config.tenant ?? "local";
 		const stateDir = options.config.stateDir;
-		this.eventLog = options.config.eventLogDir
+		const durableEventLog: EventLog = options.config.eventLogDir
 			? new JsonlEventLog(options.config.eventLogDir)
 			: stateDir
 				? new JsonlEventLog(join(stateDir, "events"))
 				: new InMemoryEventLog();
+		this.eventLog = new BranchScopedEventLog(durableEventLog, this.sessionId, {
+			onOrphan: (event) =>
+				this.audit.record("branch_orphan_event", this.sessionId, {
+					eventId: event.eventId.slice(0, 120),
+					eventType: event.eventType,
+				}),
+		});
 		this.artifactStore = stateDir
 			? new FileSystemArtifactStore(join(stateDir, "artifacts"))
 			: new InMemoryArtifactStore();
@@ -163,14 +251,12 @@ export class HfCompactionHost {
 			persister: stateDir ? new JsonlRecallPersister(join(stateDir, "recall.jsonl")) : undefined,
 		});
 		this.getToolsTokenEstimate = options.getToolsTokenEstimate;
-		const persistedEvents = this.eventLog.all(this.sessionId);
-		this.taskLedger = replayTaskLedger(persistedEvents, {
+		this.taskLedger = replayTaskLedger([], {
 			eventLog: this.eventLog,
 			sessionId: this.sessionId,
 			strictEventSourceValidation: true,
 		});
 		this.ledger = new ToolLedger({ eventLog: this.eventLog, sessionId: this.sessionId, agentId: "agent-local" });
-		this.reconcileActiveSnapshotCommit();
 	}
 
 	private static readonly TOOL_RISK: Record<
@@ -185,6 +271,7 @@ export class HfCompactionHost {
 		find: { sideEffectClass: "none", riskLevel: "low" },
 		ls: { sideEffectClass: "none", riskLevel: "low" },
 		recall_exact: { sideEffectClass: "none", riskLevel: "low" },
+		recall_search: { sideEffectClass: "none", riskLevel: "low" },
 	};
 
 	/** Record a tool execution start in the ledger (planned + started). Never throws. */
@@ -201,7 +288,9 @@ export class HfCompactionHost {
 		this.ledger.recordPlanned({
 			operationId: `op-${toolCallId}`,
 			toolCallId,
-			idempotencyKey: `${toolName}:${argsHash.slice(0, 16)}`,
+			// A provider tool-call id identifies one logical operation. Identical
+			// arguments in a later call are a new operation, not a replay.
+			idempotencyKey: `${toolName}:${toolCallId}:${argsHash.slice(0, 16)}`,
 			sideEffectClass: classification.sideEffectClass,
 			riskLevel: classification.riskLevel,
 			authority: LOCAL_USER,
@@ -209,16 +298,12 @@ export class HfCompactionHost {
 		this.ledger.recordStarted(toolCallId);
 	}
 
-	/** Record a tool execution outcome. Never throws. */
+	/** Record a tool execution outcome durably; persistence failure is observable. */
 	recordToolFinished(toolCallId: string, isError: boolean): void {
-		try {
-			if (isError) {
-				this.ledger.recordFailed(toolCallId, {});
-			} else {
-				this.ledger.recordSucceeded(toolCallId, { exitCode: 0 });
-			}
-		} catch {
-			// ignore ledger mirror failures
+		if (isError) {
+			this.ledger.recordFailed(toolCallId, {});
+		} else {
+			this.ledger.recordSucceeded(toolCallId, { exitCode: 0 });
 		}
 	}
 
@@ -298,7 +383,7 @@ export class HfCompactionHost {
 	 * store it as an UNCONFIRMED derivedGoal (never the authority field).
 	 * Injection-flagged output is dropped entirely.
 	 */
-	private async maybeDistillGoal(entries: SessionEntry[], complete: CompleteFn): Promise<void> {
+	private async maybeDistillGoal(entries: SessionEntry[], complete: CompleteFn, signal?: AbortSignal): Promise<void> {
 		if (this.goalDistilled) return;
 		const active = this.contractStore.getActive(this.sessionId);
 		if (!active || active.derivedGoal || active.version !== 1) return;
@@ -311,6 +396,7 @@ export class HfCompactionHost {
 		if (substantive.length === 0) return;
 		const recent = substantive.slice(-3).join("\n");
 		try {
+			signal?.throwIfAborted();
 			const response = await complete({
 				systemPrompt: COMPACTOR_SYSTEM_POLICY,
 				messages: [
@@ -321,7 +407,9 @@ export class HfCompactionHost {
 				],
 				maxTokens: 200,
 				promptVersion: COMPACTOR_POLICY_VERSION,
+				signal,
 			});
+			signal?.throwIfAborted();
 			if (response.stopReason !== "stop") return;
 			const text = response.text.trim().replace(/\s+/g, " ").slice(0, 240);
 			if (text.length < 8) return;
@@ -339,7 +427,11 @@ export class HfCompactionHost {
 				"store unconfirmed distilled goal",
 			);
 			this.contractStore.approveProposal(this.sessionId, proposal.proposalId, LOCAL_USER);
-		} catch {
+		} catch (error) {
+			if (signal?.aborted) {
+				this.goalDistilled = false;
+				throw error;
+			}
 			// Distillation is best-effort; the raw derived goal remains as fallback.
 		}
 	}
@@ -395,13 +487,107 @@ export class HfCompactionHost {
 		return renderPinnedLedgerLayer(this.taskLedger, this.contractStore.getActive(this.sessionId));
 	}
 
+	getLatestReconciliationReport(): ReconciliationReport | undefined {
+		for (const event of this.eventLog.all(this.sessionId).reverse()) {
+			if (event.eventType !== "state_change" || !event.payload || typeof event.payload !== "object") continue;
+			const payload = event.payload as { kind?: unknown; report?: unknown };
+			if (payload.kind !== "task_reconciliation_report" || !payload.report || typeof payload.report !== "object") {
+				continue;
+			}
+			const report = structuredClone(payload.report) as ReconciliationReport;
+			if (verifyReconciliationReport(report)) return report;
+		}
+		return undefined;
+	}
+
+	async runReconciliation(input: {
+		branchEntries: SessionEntry[];
+		complete?: CompleteFn;
+	}): Promise<ReconciliationReport> {
+		this.syncFromEntries(input.branchEntries);
+		const previous = this.getLatestReconciliationReport();
+		const boundary = this.eventLog.freeze(this.sessionId);
+		const ledgerVersion = this.taskLedger.getLedgerVersion();
+		const contractVersion = this.contractStore.getActive(this.sessionId)?.version;
+		const branchId = this.eventLog.getProjectionState().branchHeadId;
+		const focus = this.taskLedger.getFocusTask();
+		const taskRef = focus ? `task://${focus.taskId}/v${focus.version}` : undefined;
+		const newUserEvents = countSubstantiveUserEvents(
+			this.eventLog.range(this.sessionId, previous ? previous.toEventSeq + 1 : 1, boundary.seq),
+		);
+		if (previous && newUserEvents === 0 && previous.ledgerVersion === ledgerVersion && previous.taskRef === taskRef) {
+			return previous;
+		}
+		try {
+			const report = await buildReconciliationReport({
+				sessionId: this.sessionId,
+				branchId,
+				ledger: this.taskLedger,
+				events: this.eventLog.range(this.sessionId, 1, boundary.seq),
+				fromEventSeq: previous ? previous.toEventSeq + 1 : 1,
+				toEventSeq: boundary.seq,
+				actor: LOCAL_USER,
+				complete: input.complete,
+			});
+			if (this.eventLog.getProjectionState().branchHeadId !== branchId) {
+				throw new Error("reconciliation branch changed before report commit");
+			}
+			if (this.taskLedger.getLedgerVersion() !== ledgerVersion) {
+				throw new Error("reconciliation attempted to mutate the task ledger");
+			}
+			if (this.contractStore.getActive(this.sessionId)?.version !== contractVersion) {
+				throw new Error("reconciliation attempted to mutate the global contract");
+			}
+			if (previous?.reportHash === report.reportHash) return previous;
+			this.eventLog.append({
+				sessionId: this.sessionId,
+				agentId: "task-reconciler",
+				eventType: "state_change",
+				payload: { kind: "task_reconciliation_report", report },
+				authority: { kind: "system", id: "task-reconciler", verified: true },
+			});
+			this.audit.record("reconciliation", this.sessionId, {
+				reportId: report.reportId,
+				findings: report.findings.length,
+				fromSeq: report.fromEventSeq,
+				toSeq: report.toEventSeq,
+			});
+			return report;
+		} catch (error) {
+			this.audit.record("reconciliation_failed", this.sessionId, {
+				error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+			});
+			throw error;
+		}
+	}
+
+	async maybeRunReconciliation(input: {
+		branchEntries: SessionEntry[];
+		complete?: CompleteFn;
+	}): Promise<ReconciliationReport | undefined> {
+		if (this.config.reconciliationEnabled !== true) return undefined;
+		this.syncFromEntries(input.branchEntries);
+		const previous = this.getLatestReconciliationReport();
+		const boundary = this.eventLog.freeze(this.sessionId);
+		const configuredInterval = this.config.reconciliationIntervalTurns ?? 8;
+		const interval =
+			Number.isFinite(configuredInterval) && configuredInterval >= 1 ? Math.floor(configuredInterval) : 8;
+		const userTurns = countSubstantiveUserEvents(
+			this.eventLog.range(this.sessionId, previous ? previous.toEventSeq + 1 : 1, boundary.seq),
+		);
+		if (userTurns < interval) return undefined;
+		return this.runReconciliation(input);
+	}
+
 	getTaskLedgerState(): {
+		branchId: string | undefined;
 		ledgerVersion: number;
 		focusTaskId: string | undefined;
 		tasks: ReturnType<TaskLedger["listTasks"]>;
 		pending: PendingGoalChange[];
 	} {
 		return {
+			branchId: this.eventLog.getProjectionState().branchHeadId,
 			ledgerVersion: this.taskLedger.getLedgerVersion(),
 			focusTaskId: this.taskLedger.getFocusTaskId(),
 			tasks: this.taskLedger.listTasks(),
@@ -477,29 +663,69 @@ export class HfCompactionHost {
 		return this.config.goalComplete;
 	}
 
+	get taskInterpretationEnabled(): boolean {
+		return this.config.taskInterpretationEnabled === true;
+	}
+
+	get reconciliationEnabled(): boolean {
+		return this.config.reconciliationEnabled === true;
+	}
+
+	get reconcileComplete(): CompleteFn | undefined {
+		return this.config.reconcileComplete;
+	}
+
 	get mode(): HfCompactionMode {
 		return this.config.mode;
 	}
 
+	private catalogColdMessage(event: { eventId: string; payload?: unknown }): void {
+		const payload = event.payload;
+		if (!payload || typeof payload !== "object" || !("coldMessage" in payload)) return;
+		const cold = payload.coldMessage;
+		if (
+			!cold ||
+			typeof cold !== "object" ||
+			!("schemaVersion" in cold) ||
+			cold.schemaVersion !== 1 ||
+			!("artifactRef" in cold) ||
+			typeof cold.artifactRef !== "string" ||
+			!("hash" in cold) ||
+			typeof cold.hash !== "string"
+		) {
+			return;
+		}
+		const coldMessage = cold as ColdMessageRef;
+		const text = "text" in payload && typeof payload.text === "string" ? payload.text : "";
+		const role = "role" in payload && typeof payload.role === "string" ? payload.role : "message";
+		this.recallCatalog.addFromColdMessage({
+			eventId: event.eventId,
+			artifactRef: coldMessage.artifactRef,
+			hash: coldMessage.hash,
+			preview: text.trim() || `[${role} content with no text preview]`,
+		});
+	}
+
 	/**
-	 * Sync the event log from the authoritative session entries. Grows by
-	 * delta; a shrinking branch (navigation/fork) triggers a full re-seed.
+	 * Project the authoritative SessionManager path onto one durable log. Any
+	 * path change (including equal-length siblings) replays both ledgers from
+	 * the branch-visible event closure; append identity never changes.
 	 */
 	syncFromEntries(entries: SessionEntry[]): void {
 		try {
-			// Force durable logs to load before duplicate checks on a restarted host.
-			this.eventLog.all(this.sessionId);
-			if (entries.length < this.seededCount) {
-				// Branch changed shape: rebuild the event log from scratch.
-				this.seededCount = 0;
-				const fresh = new InMemoryEventLog();
-				const events = sessionEntriesToEvents(entries, this.sessionId, "agent-local");
-				for (const event of events) {
-					fresh.append({
+			this.eventLog.setBranch(entries);
+			const events = sessionEntriesToEvents(entries, this.sessionId, "agent-local", {
+				artifactStore: this.artifactStore,
+				tenant: this.tenant,
+			});
+			for (const event of events) {
+				if (!this.eventLog.getBaseLog().get(event.eventId)) {
+					this.eventLog.append({
 						sessionId: this.sessionId,
 						agentId: event.agentId,
 						eventType: event.eventType,
 						eventId: event.eventId,
+						branchHeadId: event.branchHeadId,
 						toolCallId: event.toolCallId,
 						transactionId: event.transactionId,
 						causalParentIds: event.causalParentIds,
@@ -509,37 +735,46 @@ export class HfCompactionHost {
 						timestamp: event.timestamp,
 					});
 				}
-				this.eventLog = fresh;
-				this.taskLedger = replayTaskLedger(fresh.all(this.sessionId), {
-					eventLog: fresh,
-					sessionId: this.sessionId,
-					strictEventSourceValidation: true,
-				});
-				this.seededCount = entries.length;
-				return;
+				this.catalogColdMessage(event);
 			}
-			const delta = entries.slice(this.seededCount);
-			if (delta.length === 0) return;
-			const events = sessionEntriesToEvents(delta, this.sessionId, "agent-local");
-			for (const event of events) {
-				if (this.eventLog.get(event.eventId)) continue;
-				this.eventLog.append({
-					sessionId: this.sessionId,
-					agentId: event.agentId,
-					eventType: event.eventType,
-					eventId: event.eventId,
-					toolCallId: event.toolCallId,
-					transactionId: event.transactionId,
-					causalParentIds: event.causalParentIds,
-					payload: event.payload,
-					payloadRef: event.payloadRef,
-					authority: event.authority,
-					timestamp: event.timestamp,
-				});
-			}
-			this.seededCount = entries.length;
-		} catch {
-			// Never let event mirroring break the session.
+			const projection = this.eventLog.setBranch(entries);
+			const signature = projection.pathEntryIds.join("\u0000");
+			if (signature === this.branchPathSignature) return;
+			const visibleEvents = this.eventLog.all(this.sessionId);
+			this.taskLedger = replayTaskLedger(visibleEvents, {
+				eventLog: this.eventLog,
+				sessionId: this.sessionId,
+				strictEventSourceValidation: true,
+			});
+			this.ledger = replayLedger(visibleEvents, {
+				eventLog: this.eventLog,
+				sessionId: this.sessionId,
+				agentId: "agent-local",
+			});
+			this.snapshotStore.selectActiveForBranch(
+				this.sessionId,
+				projection.pathEntryIds,
+				new Set(projection.visibleEventIds),
+			);
+			this.branchPathSignature = signature;
+			this.reconcileActiveSnapshotCommit();
+		} catch (error) {
+			// Fail closed: never leave a sibling branch's in-memory ledgers active
+			// when the new projection could not be established durably.
+			this.taskLedger = replayTaskLedger([], {
+				eventLog: this.eventLog,
+				sessionId: this.sessionId,
+				strictEventSourceValidation: true,
+			});
+			this.ledger = new ToolLedger({
+				eventLog: this.eventLog,
+				sessionId: this.sessionId,
+				agentId: "agent-local",
+			});
+			this.branchPathSignature = "";
+			this.audit.record("branch_sync_failed", this.sessionId, {
+				error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+			});
 		}
 	}
 
@@ -643,12 +878,31 @@ export class HfCompactionHost {
 		};
 	}
 
+	/** Refs must be both published by the active snapshot and linked to a branch-visible event. */
+	private activeBranchRecallRefs(): Set<string> {
+		const active = this.snapshotStore.getActive(this.sessionId);
+		if (!active) return new Set();
+		const snapshotRefs = new Set(active.recallCatalogRefs);
+		const visibleEventIds = new Set(this.eventLog.getProjectionState().visibleEventIds);
+		return new Set(
+			this.recallCatalog
+				.entries()
+				.filter(
+					(entry) =>
+						snapshotRefs.has(entry.refId) && entry.eventIds.some((eventId) => visibleEventIds.has(eventId)),
+				)
+				.map((entry) => entry.refId),
+		);
+	}
+
 	evaluateCompactionTrigger(input: {
 		branchEntries: SessionEntry[];
 		modelContextLimit: number;
 		outputReserveTokens: number;
 		currentInput?: string;
 		currentInputExtraTokens?: number;
+		/** Last trusted provider usage for the immediately preceding request. */
+		recentProviderContextTokens?: number;
 		previousCallOverflowed?: boolean;
 	}): HfTriggerEvaluation {
 		this.syncFromEntries(input.branchEntries);
@@ -658,7 +912,7 @@ export class HfCompactionHost {
 		const active = this.snapshotStore.getActive(this.sessionId);
 		const allEvents = this.eventLog.all(this.sessionId);
 		const tailEvents = allEvents.filter((event) => event.seq > (active?.baseEventSeq ?? 0));
-		const activeRecallRefs = new Set(active?.recallCatalogRefs ?? []);
+		const activeRecallRefs = this.activeBranchRecallRefs();
 		const activeRecallEntries = this.recallCatalog.entries().filter((entry) => activeRecallRefs.has(entry.refId));
 		const offloadByEventId = new Map(
 			activeRecallEntries.flatMap((entry) => entry.eventIds.map((eventId) => [eventId, entry] as const)),
@@ -680,10 +934,20 @@ export class HfCompactionHost {
 			exactRecall: [],
 			toolsTokenEstimate: this.getToolsTokenEstimate?.(),
 			outputReserveTokens: input.outputReserveTokens,
+			enforceRecentTailBudget: false,
 		});
 		const alreadyOffloadedEventIds = new Set(activeRecallEntries.flatMap((entry) => entry.eventIds));
 		const policy = this.offloadPolicy();
-		const predictedNextRequestTokens = built.tokenStats.total + (input.currentInputExtraTokens ?? 0);
+		const projectionTokens = built.tokenStats.total + (input.currentInputExtraTokens ?? 0);
+		const recentUsageFloor = Math.max(
+			0,
+			(input.recentProviderContextTokens ?? 0) +
+				(input.currentInput ? Math.ceil(input.currentInput.length / 4) : 0) +
+				(input.currentInputExtraTokens ?? 0),
+		);
+		const predictedNextRequestTokens = Math.max(projectionTokens, recentUsageFloor);
+		const tokenEstimateProvenance =
+			recentUsageFloor > projectionTokens ? "provider_projection_with_recent_usage_floor" : "provider_projection";
 		const recoverableToolTokens = estimateRecoverableToolTokens({
 			events: tailEvents,
 			policy,
@@ -730,6 +994,7 @@ export class HfCompactionHost {
 		return {
 			decision,
 			predictedNextRequestTokens,
+			tokenEstimateProvenance,
 			recoverableToolTokens,
 			compactionCooldownRemaining,
 			incrementalCompactionsSinceRebuild,
@@ -746,6 +1011,62 @@ export class HfCompactionHost {
 		if (active.compactor.triggerHeadEventId && active.compactor.triggerHeadEventId !== event.eventId)
 			return undefined;
 		return { eventId: event.eventId, timestamp: event.timestamp };
+	}
+
+	/** Build a read-only view of the current compacted projection. */
+	inspectActiveContext(options: { includeSystemPrompt?: boolean } = {}): ContextInspection | undefined {
+		const active = this.snapshotStore.getActive(this.sessionId);
+		if (!active) return undefined;
+		const contract = this.contractStore.getActive(this.sessionId);
+		const allEvents = this.eventLog.all(this.sessionId);
+		const tailEvents = allEvents.filter(
+			(event) => event.seq > active.baseEventSeq && event.eventType !== "compaction",
+		);
+		const activeRecallRefs = this.activeBranchRecallRefs();
+		const recallEntries = this.recallCatalog.entries().filter((entry) => activeRecallRefs.has(entry.refId));
+		const offloadByEventId = new Map(
+			recallEntries.flatMap((entry) => entry.eventIds.map((eventId) => [eventId, entry] as const)),
+		);
+		const projectedTailEvents = tailEvents.map((event) => {
+			const offloaded = offloadByEventId.get(event.eventId);
+			return offloaded
+				? { ...event, payload: { text: `[offloaded ${offloaded.artifactRef}] ${offloaded.preview}` } }
+				: event;
+		});
+		const systemPrompt = this.getSystemPrompt();
+		const built = buildPrompt({
+			systemPrompt,
+			contract,
+			ledger: this.taskLedger,
+			snapshot: active,
+			recallGuide: recallEntries.length > 0 ? RECALL_GUIDE_TEXT : undefined,
+			tailEvents: projectedTailEvents,
+			currentInput: "",
+			exactRecall: [],
+			toolsTokenEstimate: this.getToolsTokenEstimate?.(),
+			outputReserveTokens: this.config.outputReserveTokens ?? 0,
+		});
+		return {
+			mode: this.config.mode,
+			snapshotVersion: active.snapshotVersion,
+			projectionKind: active.compactor.kind ?? "incremental",
+			baseEventSeq: active.baseEventSeq,
+			triggerEventSeq: active.compactor.triggerEventSeq,
+			tailEventCount: tailEvents.length,
+			toolsTokenEstimate: built.tokenStats.tools,
+			tokenStats: { ...built.tokenStats },
+			projectionStats: built.projectionStats.map((stats) => ({ ...stats })),
+			sections: built.sections.map((section) => ({ ...section })),
+			recallEntries: recallEntries.map(({ refId, kind, preview, eventIds }) => ({
+				refId,
+				kind,
+				preview,
+				eventIds: [...eventIds],
+			})),
+			...(options.includeSystemPrompt
+				? { systemPrompt: { text: systemPrompt, tokens: built.tokenStats.system } }
+				: {}),
+		};
 	}
 
 	private orchestratorDeps(
@@ -770,8 +1091,9 @@ export class HfCompactionHost {
 			minTokenGainFraction: this.config.minTokenGainFraction,
 			narrativeEnabled: this.config.mode === "full_pipeline",
 			ledger: this.taskLedger,
-			rebuildRunner: async (_sessionId, boundarySeq) => {
-				const active = this.snapshotStore.getActive(this.sessionId);
+			getLedger: () => this.taskLedger,
+			getBranchId: () => this.eventLog.getProjectionState().branchHeadId,
+			rebuildRunner: async (_sessionId, boundarySeq, targetCoverageSeq) => {
 				const rebuilt = await rawRebuild(
 					{
 						sessionId: this.sessionId,
@@ -782,7 +1104,7 @@ export class HfCompactionHost {
 						audit: this.audit,
 						recallCatalog: this.recallCatalog,
 					},
-					{ toSeq: boundarySeq, coverageSeq: active?.baseEventSeq ?? 0 },
+					{ toSeq: boundarySeq, coverageSeq: targetCoverageSeq },
 				);
 				if (rebuilt.gaps.length > 0) throw new Error(rebuilt.gaps.join("; "));
 				return rebuilt.snapshot;
@@ -821,7 +1143,7 @@ export class HfCompactionHost {
 		this.ensureTaskLedgerFromEntries(options.branchEntries);
 		this.ensureContractFromEntries(options.branchEntries);
 		if (options.action !== "offload_only") {
-			await this.maybeDistillGoal(options.branchEntries, options.complete);
+			await this.maybeDistillGoal(options.branchEntries, options.complete, options.signal);
 		}
 		const orchestrator = new CompactionOrchestrator(
 			this.orchestratorDeps(options.complete, {
@@ -849,31 +1171,46 @@ export class HfCompactionHost {
 			return { activated: false, summaryText: result.reason ?? "rejected", result };
 		}
 		const messages = this.buildActiveMessages(options.branchEntries);
+		const committed = this.audit.byType("compact_committed").at(-1);
+		const tokensBefore = committed?.details.tokensBefore as number | undefined;
+		const tokensAfter = committed?.details.tokensAfter as number | undefined;
+		const offloadedBytes = committed?.details.offloadedBytes as number | undefined;
 		if (options.action === "offload_only") {
-			const committed = this.audit.byType("compact_committed").at(-1);
 			if (!messages)
 				return { activated: false, summaryText: "no active offload projection after activation", result };
 			return {
 				activated: true,
 				messages,
-				summaryText: `offloaded ${committed?.details.offloadedBytes ?? 0} bytes`,
+				summaryText: formatActivatedSummary({
+					action: options.action,
+					snapshotVersion: result.snapshotVersion,
+					tokensBefore,
+					tokensAfter,
+					offloadedBytes,
+				}),
 				result,
-				tokensBefore: committed?.details.tokensBefore as number | undefined,
-				tokensAfter: committed?.details.tokensAfter as number | undefined,
+				tokensBefore,
+				tokensAfter,
 			};
 		}
 		if (!messages) {
 			return { activated: false, summaryText: "no active snapshot after activation", result };
 		}
-		const committed = this.audit.byType("compact_committed").at(-1);
 		const narrative = this.snapshotStore.getActive(this.sessionId)?.narrative;
 		return {
 			activated: true,
 			messages,
-			summaryText: `[high-fidelity snapshot v${result.snapshotVersion} activated]\n${narrative ?? ""}`.trim(),
+			summaryText: formatActivatedSummary({
+				action: options.action,
+				snapshotVersion: result.snapshotVersion,
+				tokensBefore,
+				tokensAfter,
+				offloadedBytes,
+				narrative,
+			}),
 			result,
-			tokensBefore: committed?.details.tokensBefore as number | undefined,
-			tokensAfter: committed?.details.tokensAfter as number | undefined,
+			tokensBefore,
+			tokensAfter,
 		};
 	}
 
@@ -888,13 +1225,14 @@ export class HfCompactionHost {
 		const contract = this.contractStore.getActive(this.sessionId);
 		const all = this.eventLog.all(this.sessionId);
 		const tailEvents = all.filter((e) => e.seq > active.baseEventSeq && e.eventType !== "compaction");
+		const activeRecallRefs = this.activeBranchRecallRefs();
 
 		const built = buildPrompt({
 			systemPrompt: this.getSystemPrompt(),
 			contract,
 			ledger: this.taskLedger,
 			snapshot: active,
-			recallGuide: this.recallCatalog.entries().length > 0 ? RECALL_GUIDE_TEXT : undefined,
+			recallGuide: activeRecallRefs.size > 0 ? RECALL_GUIDE_TEXT : undefined,
 			tailEvents: [],
 			currentInput: "",
 			exactRecall: [],
@@ -913,7 +1251,6 @@ export class HfCompactionHost {
 		// preview + recall ref. Falls back to event payloads when entries are
 		// unavailable (library use without a SessionManager).
 		const entryById = new Map((branchEntries ?? []).map((e) => [e.id, e] as const));
-		const activeRecallRefs = new Set(active.recallCatalogRefs);
 		const offloadByEntryId = new Map(
 			this.recallCatalog
 				.entries()
@@ -960,17 +1297,33 @@ export class HfCompactionHost {
 			}
 		}
 
-		const pinnedMessage: AgentMessage = {
-			role: "user",
-			content: pinnedText,
-			// Deterministic per snapshot: identical authoritative state → identical context.
-			timestamp: Date.parse(active.createdAt),
-		};
+		const pinnedMessage: AgentMessage = createCompactionSummaryMessage(
+			pinnedText,
+			active.tokenStats.total,
+			active.createdAt,
+		);
 		return [pinnedMessage, ...tailMessages];
 	}
 
-	/** Exact recall by stable ID; throws on unknown/mismatch (fail closed). */
+	/** Search only refs published by the active snapshot and linked to the current branch. */
+	recallSearch(input: { query: string; kind?: RecallSearchOptions["kind"]; limit?: number }): RecallSearchHit[] {
+		return this.recallCatalog.search(input.query, {
+			kind: input.kind,
+			limit: input.limit,
+			allowedRefIds: this.activeBranchRecallRefs(),
+		});
+	}
+
+	/** Exact recall by active branch ref; throws on inactive, unknown, or mismatch. */
 	recallExact(refId: string): string {
+		const known = this.recallCatalog.entries().some((entry) => entry.refId === refId);
+		if (!known) {
+			// Preserve the catalog's fail-closed unknown-ref error and metrics.
+			this.recallCatalog.recallExact(refId);
+		}
+		if (!this.activeBranchRecallRefs().has(refId)) {
+			throw new Error(`Recall ref ${refId} is not active on the current branch`);
+		}
 		const { data } = this.recallCatalog.recallExact(refId);
 		return new TextDecoder().decode(data);
 	}

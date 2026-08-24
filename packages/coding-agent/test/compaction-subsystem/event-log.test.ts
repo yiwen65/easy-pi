@@ -2,10 +2,11 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { InMemoryArtifactStore } from "../../src/core/compaction/subsystem/artifact-store.ts";
+import { getAgentMessageArtifact, InMemoryArtifactStore } from "../../src/core/compaction/subsystem/artifact-store.ts";
 import {
 	type AppendEventInput,
 	appendWithOffload,
+	type ColdMessageRef,
 	type EventLog,
 	InMemoryEventLog,
 	JsonlEventLog,
@@ -261,5 +262,66 @@ describe("sessionEntriesToEvents adapter", () => {
 		expect(events[2].toolCallId).toBe("tc-1");
 		expect(events[3].eventType).toBe("state_change");
 		expect(events[1].causalParentIds).toEqual(["m-1"]);
+	});
+
+	it("keeps image bytes out of events and exactly reconstructs the original message", () => {
+		const store = new InMemoryArtifactStore();
+		const largeImage = "a".repeat(100_000);
+		const entry: SessionEntry = {
+			type: "message",
+			id: "m-image",
+			parentId: null,
+			timestamp: "2026-08-24T00:00:00.000Z",
+			message: {
+				role: "user",
+				content: [
+					{ type: "text", text: "inspect this" },
+					{ type: "image", data: largeImage, mimeType: "image/png" },
+					{ type: "text", text: "preserve block order" },
+				],
+				timestamp: 1,
+			},
+		};
+		const [event] = sessionEntriesToEvents([entry], "s-1", "agent-1", {
+			artifactStore: store,
+			tenant: "t-1",
+		});
+		const cold = (event.payload as { coldMessage: ColdMessageRef }).coldMessage;
+
+		expect(cold.artifactRef).toBe(`artifact://sha256/${cold.hash}`);
+		expect(JSON.stringify(event)).not.toContain(largeImage);
+		expect(getAgentMessageArtifact(store, cold.artifactRef, "t-1")).toEqual(entry.message);
+	});
+
+	it("uses stable refs and fixed-size event projections independent of image size", () => {
+		const store = new InMemoryArtifactStore();
+		const makeEntry = (id: string, imageData: string): SessionEntry => ({
+			type: "message",
+			id,
+			parentId: null,
+			timestamp: "2026-08-24T00:00:00.000Z",
+			message: {
+				role: "user",
+				content: [
+					{ type: "text", text: "same projection" },
+					{ type: "image", data: imageData, mimeType: "image/png" },
+				],
+				timestamp: 1,
+			},
+		});
+		const sameMessage = makeEntry("m-same-1", "c2FtZQ==");
+		const duplicateMessage = makeEntry("m-same-2", "c2FtZQ==");
+		const hugeMessage = makeEntry("m-huge-1", "b".repeat(1_000_000));
+		const options = { artifactStore: store, tenant: "t-1" };
+		const [sameEvent] = sessionEntriesToEvents([sameMessage], "s-1", "agent-1", options);
+		const [duplicateEvent] = sessionEntriesToEvents([duplicateMessage], "s-1", "agent-1", options);
+		const [hugeEvent] = sessionEntriesToEvents([hugeMessage], "s-1", "agent-1", options);
+		const sameRef = (sameEvent.payload as { coldMessage: ColdMessageRef }).coldMessage.artifactRef;
+		const duplicateRef = (duplicateEvent.payload as { coldMessage: ColdMessageRef }).coldMessage.artifactRef;
+
+		expect(duplicateRef).toBe(sameRef);
+		// Entry IDs are equal-length and refs/hashes are fixed-length, so binary size
+		// cannot affect the serialized event size.
+		expect(JSON.stringify(hugeEvent).length).toBe(JSON.stringify(sameEvent).length);
 	});
 });

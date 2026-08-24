@@ -119,7 +119,8 @@ describe("recall_exact tool", () => {
 
 		const host = h.session.hfCompactionHost!;
 		await h.session.compact();
-		const entries = host.recallCatalog.entries();
+		const activeRefs = new Set(host.snapshotStore.getActive(h.session.sessionId)?.recallCatalogRefs ?? []);
+		const entries = host.recallCatalog.entries().filter((entry) => activeRefs.has(entry.refId));
 		expect(entries.length).toBeGreaterThan(0);
 
 		const tool = h.session.getToolDefinition("recall_exact");

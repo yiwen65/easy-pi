@@ -43,7 +43,9 @@ describe("renderPinnedLedgerLayer", () => {
 });
 
 describe("orchestrator + task ledger CAS", () => {
-	function setup(mutate?: (deps: OrchestratorDeps) => void): OrchestratorDeps & { ledger: TaskLedger } {
+	type TestDeps = OrchestratorDeps & { ledger: TaskLedger; setBranchId: (branchId: string) => void };
+
+	function setup(mutate?: (deps: TestDeps) => void): TestDeps {
 		const sessionId = "s-1";
 		const eventLog = new InMemoryEventLog();
 		eventLog.append({
@@ -94,7 +96,8 @@ describe("orchestrator + task ledger CAS", () => {
 		});
 		const artifactStore = new InMemoryArtifactStore();
 		const ledger = makeLedger();
-		const deps: OrchestratorDeps & { ledger: TaskLedger } = {
+		let branchId = "e-4";
+		const deps: TestDeps = {
 			sessionId,
 			eventLog,
 			artifactStore,
@@ -114,6 +117,10 @@ describe("orchestrator + task ledger CAS", () => {
 			outputReserveTokens: 100,
 			minTokenGainFraction: -1,
 			ledger,
+			getBranchId: () => branchId,
+			setBranchId: (nextBranchId) => {
+				branchId = nextBranchId;
+			},
 		};
 		mutate?.(deps);
 		return deps;
@@ -125,6 +132,7 @@ describe("orchestrator + task ledger CAS", () => {
 		expect(result.status).toBe("activated");
 		const active = deps.snapshotStore.getActive("s-1")!;
 		expect(active.taskLedgerRef).toBeDefined();
+		expect(active.taskLedgerRef!.branchId).toBe("e-4");
 		expect(active.taskLedgerRef!.focusTaskId).toBe("T1");
 		expect(active.taskLedgerRef!.ledgerVersion).toBe(deps.ledger.getLedgerVersion());
 		expect(active.taskLedgerRef!.focusContractVersion).toBe(2);
@@ -147,6 +155,42 @@ describe("orchestrator + task ledger CAS", () => {
 		const result = await new CompactionOrchestrator(deps).compact("soft_compact", { currentInput: "go" });
 		expect(result.status).toBe("rejected");
 		expect(result.report?.failures.some((f) => f.code === "task-ledger-ref")).toBe(true);
+		expect(deps.snapshotStore.getActive("s-1")).toBeUndefined();
+	});
+
+	it("rejects a branch-head change during compaction even when ledger version is unchanged", async () => {
+		const deps = setup((current) => {
+			const original = current.complete;
+			current.complete = async (request) => {
+				if (request.responseSchema) current.setBranchId("sibling-head");
+				return original(request);
+			};
+		});
+		const result = await new CompactionOrchestrator(deps).compact("soft_compact", { currentInput: "go" });
+		expect(result.status).toBe("rejected");
+		expect(result.report?.failures.some((failure) => failure.code === "task-ledger-ref")).toBe(true);
+		expect(deps.snapshotStore.getActive("s-1")).toBeUndefined();
+	});
+
+	it("rejects an ABA branch switch that rebinds the live ledger before returning to the same head", async () => {
+		const deps = setup();
+		let liveLedger = deps.ledger;
+		deps.getLedger = () => liveLedger;
+		const original = deps.complete;
+		deps.complete = async (request) => {
+			if (request.responseSchema && liveLedger.getLedgerVersion() === 4) {
+				deps.setBranchId("sibling-head");
+				liveLedger = makeLedger();
+				deps.setBranchId("e-4");
+				liveLedger.createTask({ goal: "new state on rebound branch" }, user, "ev-aba");
+			}
+			return original(request);
+		};
+
+		const result = await new CompactionOrchestrator(deps).compact("soft_compact", { currentInput: "go" });
+
+		expect(result.status).toBe("rejected");
+		expect(result.report?.failures.some((failure) => failure.code === "task-ledger-ref")).toBe(true);
 		expect(deps.snapshotStore.getActive("s-1")).toBeUndefined();
 	});
 
@@ -217,6 +261,7 @@ describe("orchestrator + task ledger CAS", () => {
 		const rebuilt = await new CompactionOrchestrator(rebuildDeps).compact("full_rebuild", { currentInput: "go" });
 		expect(rebuilt.status).toBe("rebuilt");
 		expect(rebuildDeps.snapshotStore.getActive("s-1")?.taskLedgerRef).toEqual({
+			branchId: "e-4",
 			ledgerVersion: rebuildDeps.ledger.getLedgerVersion(),
 			focusTaskId: "T1",
 			focusContractVersion: 2,

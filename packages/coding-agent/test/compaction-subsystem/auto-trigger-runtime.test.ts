@@ -152,6 +152,53 @@ describe("production HF trigger evaluation", () => {
 		expect(hard.decision.action).toBe("hard_compact");
 	});
 
+	it("does not count internal durability events as provider request tokens", () => {
+		const h = host();
+		const branchEntries = textBranch();
+		const baseline = h.evaluateCompactionTrigger({
+			branchEntries,
+			modelContextLimit: 1_000_000,
+			outputReserveTokens: 100,
+		});
+		for (let index = 0; index < 100; index++) {
+			h.eventLog.append({
+				sessionId: "s-trigger",
+				agentId: "internal-test",
+				eventType: "state_change",
+				payload: { kind: "internal_checkpoint", index },
+				authority: { kind: "system", id: "internal-test", verified: true },
+			});
+		}
+
+		const afterInternalEvents = h.evaluateCompactionTrigger({
+			branchEntries,
+			modelContextLimit: 1_000_000,
+			outputReserveTokens: 100,
+		});
+
+		expect(afterInternalEvents.predictedNextRequestTokens).toBe(baseline.predictedNextRequestTokens);
+	});
+
+	it("calibrates the final provider projection with a trusted recent usage floor", () => {
+		const h = host();
+		const branchEntries = textBranch("small request");
+		const projection = h.evaluateCompactionTrigger({
+			branchEntries,
+			modelContextLimit: 1_000_000,
+			outputReserveTokens: 100,
+		});
+		const calibrated = h.evaluateCompactionTrigger({
+			branchEntries,
+			modelContextLimit: 1_000_000,
+			outputReserveTokens: 100,
+			recentProviderContextTokens: projection.predictedNextRequestTokens + 500,
+		});
+
+		expect(projection.tokenEstimateProvenance).toBe("provider_projection");
+		expect(calibrated.tokenEstimateProvenance).toBe("provider_projection_with_recent_usage_floor");
+		expect(calibrated.predictedNextRequestTokens).toBe(projection.predictedNextRequestTokens + 500);
+	});
+
 	it("selects offload-only below the soft limit when tool payload recovery is large enough", () => {
 		const evaluation = host().evaluateCompactionTrigger({
 			branchEntries: toolBranch(),
@@ -229,6 +276,7 @@ describe("production HF trigger evaluation", () => {
 		});
 		expect(evaluation.incrementalCompactionsSinceRebuild).toBe(8);
 		expect(evaluation.decision.action).toBe("full_rebuild");
+		const coverageBeforeRebuild = h.snapshotStore.getActive("s-trigger")!.baseEventSeq;
 		const rebuilt = await h.attemptCompaction({
 			action: "full_rebuild",
 			complete,
@@ -240,8 +288,14 @@ describe("production HF trigger evaluation", () => {
 		expect(rebuilt.result?.status).toBe("rebuilt");
 		const active = h.snapshotStore.getActive("s-trigger");
 		expect(active?.compactor.kind).toBe("rebuild");
-		expect(active?.recallCatalogRefs).toHaveLength(1);
-		expect(h.recallCatalog.entries()).toHaveLength(1);
+		expect(active?.baseEventSeq).toBeGreaterThan(coverageBeforeRebuild);
+		const activeRecallEntries = active?.recallCatalogRefs.map((refId) =>
+			h.recallCatalog.entries().find((entry) => entry.refId === refId),
+		);
+		expect(activeRecallEntries?.every(Boolean)).toBe(true);
+		expect(activeRecallEntries?.filter((entry) => entry?.kind === "tool_result")).toHaveLength(1);
+		expect(activeRecallEntries?.some((entry) => entry?.kind === "event_range")).toBe(true);
+		expect(h.recallSearch({ query: "", kind: "tool_result", limit: 8 })).toHaveLength(1);
 	});
 
 	it("recovers the active-lineage incremental count after restart", async () => {
@@ -451,9 +505,39 @@ describe("production HF trigger evaluation", () => {
 		});
 		expect(offloaded.activated).toBe(true);
 		expect(h.snapshotStore.getActive("s-trigger")?.compactor.kind).toBe("offload_only");
-		expect(h.recallCatalog.entries()).toHaveLength(1);
+		expect(h.recallSearch({ query: "", kind: "tool_result", limit: 8 })).toHaveLength(1);
 		expect(JSON.stringify(offloaded.messages)).toContain("recall_exact");
 		expect(JSON.stringify(offloaded.messages)).not.toContain("y".repeat(1000));
+	});
+
+	it("accepts a beneficial offload-only candidate selected by the absolute recovery threshold", async () => {
+		const h = new HfCompactionHost({
+			sessionId: "s-offload-small-fraction",
+			getSystemPrompt: () => "S".repeat(1_000_000),
+			config: {
+				mode: "full_pipeline",
+				complete,
+				offloadThresholdBytes: 1000,
+				keepRecentToolResults: 0,
+			},
+		});
+		const branch = toolBranch();
+		const evaluation = h.evaluateCompactionTrigger({
+			branchEntries: branch,
+			modelContextLimit: 1_000_000,
+			outputReserveTokens: 100,
+		});
+		expect(evaluation.decision.action).toBe("offload_only");
+
+		const result = await h.attemptCompaction({
+			action: "offload_only",
+			complete,
+			branchEntries: branch,
+			outputReserveTokens: 100,
+		});
+		expect(result.result?.report?.failures).toEqual([]);
+		expect(result.activated).toBe(true);
+		expect(h.snapshotStore.getActive("s-offload-small-fraction")?.compactor.kind).toBe("offload_only");
 	});
 
 	it.each([
@@ -478,8 +562,11 @@ describe("production HF trigger evaluation", () => {
 			outputReserveTokens: 100,
 		});
 		expect(result.activated).toBe(false);
+		if (mode === "full_pipeline") {
+			expect(result.summaryText).toContain("token-gain: insufficient token gain");
+		}
 		expect(h.snapshotStore.getActive(`s-offload-${mode}`)).toBeUndefined();
-		expect(h.recallCatalog.entries()).toHaveLength(0);
+		expect(h.recallSearch({ query: "", kind: "tool_result", limit: 8 })).toHaveLength(0);
 	});
 
 	it("AgentSession independently offloads a large tool result below the soft threshold", async () => {
@@ -503,7 +590,7 @@ describe("production HF trigger evaluation", () => {
 		await h.session.prompt("inspect the huge log");
 		const host = h.session.hfCompactionHost!;
 		expect(host.audit.byType("trigger").some((event) => event.details.action === "offload_only")).toBe(true);
-		expect(host.recallCatalog.entries()).toHaveLength(1);
+		expect(host.recallSearch({ query: "", kind: "tool_result", limit: 8 })).toHaveLength(1);
 		const projected = h.session.messages.find((message) => message.role === "toolResult");
 		expect(JSON.stringify(projected?.content)).toContain("recall_exact");
 		expect(JSON.stringify(projected?.content)).not.toContain("x".repeat(1000));

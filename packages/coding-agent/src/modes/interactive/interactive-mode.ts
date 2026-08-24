@@ -101,6 +101,7 @@ import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
+import { stripAnsi } from "../../utils/ansi.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -108,7 +109,7 @@ import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
-import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { killTrackedDetachedChildren, sanitizeBinaryOutput } from "../../utils/shell.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { GrokAssistantMessageComponent } from "../interactive-grok/components/grok-assistant-message.ts";
@@ -3127,6 +3128,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/context" || text.startsWith("/context ")) {
+				this.handleContextCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/contract" || text.startsWith("/contract ")) {
 				this.handleContractCommand(text);
 				this.editor.setText("");
@@ -3271,13 +3277,24 @@ export class InteractiveMode {
 
 	private subscribeToAgent(): void {
 		if (this.sessionPort) {
-			this.unsubscribe = this.sessionPort.subscribe(async (_uiEvent, sourceEvent) => {
-				await this.handleEvent(sourceEvent);
+			this.unsubscribe = this.sessionPort.subscribe((_uiEvent, sourceEvent) => {
+				this.handleEventSafely(sourceEvent);
 			});
 			return;
 		}
-		this.unsubscribe = this.session.subscribe(async (event) => {
-			await this.handleEvent(event);
+		this.unsubscribe = this.session.subscribe((event) => {
+			this.handleEventSafely(event);
+		});
+	}
+
+	private handleEventSafely(event: AgentSessionEvent): void {
+		void this.handleEvent(event).catch((error: unknown) => {
+			const message = error instanceof Error ? error.message : String(error);
+			try {
+				this.showError(`Unable to render ${event.type}: ${message}`);
+			} catch (notificationError) {
+				console.error("Unable to report interactive event rendering failure", notificationError);
+			}
 		});
 	}
 
@@ -3507,12 +3524,15 @@ export class InteractiveMode {
 					}
 				} else if (event.result) {
 					const entries = this.sessionManager.buildContextEntries();
-					if (entries[0]?.type !== "compaction") {
-						throw new Error("Completed compaction is missing from the session context");
+					if (entries[0]?.type === "compaction") {
+						this.chatContainer.clear();
+						// Legacy compaction prepends its summary for model context; append it
+						// below at its chronological position instead.
+						this.renderSessionEntries(entries.slice(1));
 					}
-					this.chatContainer.clear();
-					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(entries.slice(1));
+					// HF compaction activates a snapshot without persisting a legacy
+					// CompactionEntry. Preserve the existing transcript in that case and
+					// append the successful summary instead of treating it as corruption.
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
 							event.result.summary,
@@ -6279,6 +6299,92 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private handleContextCommand(text: string): void {
+		const args = text.slice("/context".length).trim();
+		const inspect = args === "inspect" || args === "inspect --full";
+		const full = args === "inspect --full";
+		if (args && !inspect) {
+			this.showError("Usage: /context [inspect [--full]]");
+			return;
+		}
+
+		const host = this.session.hfCompactionHost;
+		if (!host) {
+			this.showWarning("Compaction subsystem is disabled");
+			return;
+		}
+		const inspection = host.inspectActiveContext({ includeSystemPrompt: full });
+		if (!inspection) {
+			this.showWarning("No active compacted context snapshot");
+			return;
+		}
+		const cleanInspectionText = (value: string) => sanitizeBinaryOutput(stripAnsi(value)).replace(/\r/g, "");
+
+		const lines = [
+			theme.bold("Compacted Context"),
+			`${theme.fg("dim", "Mode:")} ${inspection.mode}`,
+			`${theme.fg("dim", "Snapshot:")} v${inspection.snapshotVersion}`,
+			`${theme.fg("dim", "Projection kind:")} ${inspection.projectionKind}`,
+			`${theme.fg("dim", "Coverage:")} events 1-${inspection.baseEventSeq}`,
+			`${theme.fg("dim", "Trigger event:")} ${inspection.triggerEventSeq ?? "None"}`,
+			`${theme.fg("dim", "Tail events:")} ${inspection.tailEventCount}`,
+			`${theme.fg("dim", "Recall refs:")} ${inspection.recallEntries.length}`,
+			`${theme.fg("dim", "Current projected tokens:")} ${inspection.tokenStats.total.toLocaleString()}`,
+			"",
+			theme.bold("Zone tokens"),
+		];
+		for (const [zone, tokens] of [
+			["system", inspection.tokenStats.system],
+			["tools", inspection.tokenStats.tools],
+			["contract", inspection.tokenStats.contract],
+			["snapshot", inspection.tokenStats.snapshot],
+			["narrative", inspection.tokenStats.narrative],
+			["recall", inspection.tokenStats.recall],
+			["recentTail", inspection.tokenStats.recentTail],
+			["currentInput", inspection.tokenStats.currentInput],
+			["outputReserve", inspection.tokenStats.outputReserve],
+		] as const) {
+			lines.push(`  ${zone}: ${tokens.toLocaleString()}`);
+		}
+
+		if (inspect) {
+			lines.push("", theme.bold("Current compacted projection"));
+			lines.push(theme.fg("dim", "No pending user input; this is not a byte-exact provider request."));
+			if (full) {
+				lines.push(theme.fg("warning", "Sensitive diagnostic view: system prompt and active tool schemas follow."));
+				if (inspection.systemPrompt) {
+					lines.push("", theme.bold(`[system] ${inspection.systemPrompt.tokens.toLocaleString()} tokens`));
+					lines.push(cleanInspectionText(inspection.systemPrompt.text));
+				}
+				const activeToolNames = new Set(this.session.getActiveToolNames());
+				const tools = this.session
+					.getAllTools()
+					.filter((tool) => activeToolNames.has(tool.name))
+					.map(({ name, description, parameters }) => ({ name, description, parameters }));
+				lines.push("", theme.bold(`[tools] ${inspection.toolsTokenEstimate.toLocaleString()} tokens`));
+				lines.push(cleanInspectionText(JSON.stringify(tools, null, 2)));
+			}
+			for (const section of inspection.sections) {
+				lines.push("", theme.bold(`[${section.zone}] ${section.tokens.toLocaleString()} tokens`));
+				lines.push(cleanInspectionText(section.text));
+			}
+			lines.push("", theme.bold("Recall catalog"));
+			if (inspection.recallEntries.length === 0) {
+				lines.push(theme.fg("dim", "None"));
+			} else {
+				for (const entry of inspection.recallEntries) {
+					lines.push(`${entry.refId} [${entry.kind}]: ${cleanInspectionText(entry.preview).replace(/\n/g, " ")}`);
+				}
+			}
+		} else {
+			lines.push("", theme.fg("dim", "Run /context inspect to view projection zones."));
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		this.ui.requestRender();
+	}
+
 	private handleContractCommand(text: string): void {
 		const args = text.slice("/contract".length).trim();
 		if (!args) {
@@ -6292,6 +6398,16 @@ export class InteractiveMode {
 
 		if (action === "pending" && !remainder) {
 			this.showPendingGoalChanges();
+			return;
+		}
+
+		if (action === "reconcile" && !remainder) {
+			if (!this.canMutateTaskContract()) return;
+			this.showStatus("Reconciling task contract...");
+			void this.session
+				.reconcileTaskContract()
+				.then((report) => this.showReconciliationReport(report))
+				.catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
 			return;
 		}
 
@@ -6362,7 +6478,7 @@ export class InteractiveMode {
 		}
 
 		this.showError(
-			"Usage: /contract [set <goal>|confirm|pending|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
+			"Usage: /contract [set <goal>|confirm|pending|reconcile|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
 		);
 	}
 
@@ -6426,10 +6542,48 @@ export class InteractiveMode {
 		}
 	}
 
+	private formatReconciliationReport(
+		report: NonNullable<ReturnType<AgentSession["getLatestTaskReconciliation"]>>,
+	): string[] {
+		const lines = [
+			theme.bold("Task Contract Reconciliation"),
+			`${theme.fg("dim", "Report:")} ${report.reportId}`,
+			`${theme.fg("dim", "Branch:")} ${report.branchId ?? "None"}`,
+			`${theme.fg("dim", "Task:")} ${report.taskRef ?? "None"}`,
+			`${theme.fg("dim", "Event range:")} ${report.fromEventSeq}-${report.toEventSeq}`,
+			`${theme.fg("dim", "Findings:")} ${report.findings.length}`,
+		];
+		if (report.findings.length === 0) lines.push("  Clean");
+		for (const finding of report.findings) {
+			lines.push(`  - ${finding.findingId} [${finding.severity}] ${finding.kind}: ${finding.message}`);
+			if (finding.sourceEventIds.length > 0) {
+				lines.push(theme.fg("dim", `    Sources: ${finding.sourceEventIds.join(", ")}`));
+			}
+			if (finding.suggestedOperations.length > 0) {
+				lines.push(
+					theme.fg(
+						"dim",
+						`    Suggestions: ${finding.suggestedOperations.map((operation) => operation.operation).join(", ")}`,
+					),
+				);
+			}
+		}
+		return lines;
+	}
+
+	private showReconciliationReport(
+		report: NonNullable<ReturnType<AgentSession["getLatestTaskReconciliation"]>>,
+	): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(this.formatReconciliationReport(report).join("\n"), 1, 0));
+		this.ui.requestRender();
+	}
+
 	private showTaskContract(): void {
 		try {
 			const contract = this.session.getTaskContract();
 			const ledger = this.session.getTaskLedgerState();
+			const reconciliation = this.session.getLatestTaskReconciliation();
 			const lines = [theme.bold("Task Contract")];
 
 			if (!contract) {
@@ -6480,6 +6634,14 @@ export class InteractiveMode {
 			}
 			lines.push(theme.fg("dim", "Pending goal changes:"));
 			lines.push(...this.formatPendingGoalChanges(ledger.pending).map((line) => `  ${line}`));
+			lines.push("");
+			lines.push(theme.bold("Reconciliation"));
+			lines.push(`${theme.fg("dim", "Branch: ")}${ledger.branchId ?? "None"}`);
+			lines.push(
+				reconciliation
+					? `${reconciliation.reportId}: ${reconciliation.findings.length} finding(s)`
+					: theme.fg("dim", "Not run on this branch"),
+			);
 
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));

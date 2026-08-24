@@ -129,6 +129,53 @@ describe("InMemorySnapshotStore", () => {
 		expect(store.getCandidate("s-1", candidate.snapshotVersion)).toBeDefined();
 	});
 
+	it("selects only activated ancestor-visible snapshots and excludes sibling candidates", () => {
+		store = new InMemorySnapshotStore();
+		const root = store.putCandidate(makeSnapshot("s-1", { taskLedgerRef: { branchId: "root", ledgerVersion: 1 } }));
+		store.activate("s-1", { expectedActiveVersion: 0, candidateVersion: root.snapshotVersion });
+		const branchA = store.putCandidate(
+			makeSnapshot("s-1", {
+				parentVersion: root.snapshotVersion,
+				taskLedgerRef: { branchId: "a", ledgerVersion: 2 },
+			}),
+		);
+		store.activate("s-1", { expectedActiveVersion: root.snapshotVersion, candidateVersion: branchA.snapshotVersion });
+		const unactivatedB = store.putCandidate(
+			makeSnapshot("s-1", {
+				parentVersion: root.snapshotVersion,
+				taskLedgerRef: { branchId: "b", ledgerVersion: 2 },
+			}),
+		);
+		const newerRoot = store.putCandidate(
+			makeSnapshot("s-1", {
+				parentVersion: root.snapshotVersion,
+				taskLedgerRef: { branchId: "root", ledgerVersion: 2 },
+			}),
+		);
+		store.activate("s-1", {
+			expectedActiveVersion: branchA.snapshotVersion,
+			candidateVersion: newerRoot.snapshotVersion,
+		});
+
+		expect(store.selectActiveForBranch("s-1", ["root", "a"], new Set(["root", "a"]))?.snapshotVersion).toBe(
+			branchA.snapshotVersion,
+		);
+		expect(store.selectActiveForBranch("s-1", ["root", "b"], new Set(["root", "b"]))?.snapshotVersion).toBe(
+			newerRoot.snapshotVersion,
+		);
+		expect(store.getCandidate("s-1", unactivatedB.snapshotVersion)).toBeDefined();
+		expect(store.selectActiveForBranch("s-1", ["detached"], new Set(["detached"]))).toBeUndefined();
+		expect(store.getActive("s-1")).toBeUndefined();
+	});
+
+	it("fails closed for activated legacy snapshots without an explicit branch binding", () => {
+		store = new InMemorySnapshotStore();
+		const legacy = store.putCandidate(makeSnapshot("s-1", { compactor: { promptVersion: "1", schemaVersion: 1 } }));
+		store.activate("s-1", { expectedActiveVersion: 0, candidateVersion: legacy.snapshotVersion });
+		expect(store.selectActiveForBranch("s-1", ["root"], new Set(["root"]))).toBeUndefined();
+		expect(store.getCandidate("s-1", legacy.snapshotVersion)).toBeDefined();
+	});
+
 	it("events appended after a candidate's boundary are never overwritten by that candidate", () => {
 		store = new InMemorySnapshotStore();
 		const c1 = store.putCandidate(makeSnapshot("s-1", { baseEventSeq: 10 }));
@@ -195,6 +242,31 @@ describe("InMemorySnapshotStore", () => {
 });
 
 describe("JsonlSnapshotStore failure semantics", () => {
+	it("persists activation history used for branch selection across restart", () => {
+		const dir = mkdtempSync(join(tmpdir(), "snapshot-branches-"));
+		tempDirs.push(dir);
+		const store = new JsonlSnapshotStore(dir);
+		const root = store.putCandidate(makeSnapshot("s-1", { taskLedgerRef: { branchId: "root", ledgerVersion: 1 } }));
+		store.activate("s-1", { expectedActiveVersion: 0, candidateVersion: root.snapshotVersion });
+		const branchA = store.putCandidate(
+			makeSnapshot("s-1", {
+				parentVersion: root.snapshotVersion,
+				taskLedgerRef: { branchId: "a", ledgerVersion: 2 },
+			}),
+		);
+		store.activate("s-1", { expectedActiveVersion: root.snapshotVersion, candidateVersion: branchA.snapshotVersion });
+		store.selectActiveForBranch("s-1", ["detached"], new Set(["detached"]));
+
+		const reopened = new JsonlSnapshotStore(dir);
+		expect(reopened.getActive("s-1")).toBeUndefined();
+		expect(reopened.selectActiveForBranch("s-1", ["root", "a"], new Set(["root", "a"]))?.snapshotVersion).toBe(
+			branchA.snapshotVersion,
+		);
+		expect(reopened.selectActiveForBranch("s-1", ["root", "b"], new Set(["root", "b"]))?.snapshotVersion).toBe(
+			root.snapshotVersion,
+		);
+	});
+
 	it("rolls memory back when candidate or active-pointer persistence fails", () => {
 		const dir = mkdtempSync(join(tmpdir(), "snapshot-store-"));
 		tempDirs.push(dir);
@@ -208,6 +280,7 @@ describe("JsonlSnapshotStore failure semantics", () => {
 			store.activate("s-1", { expectedActiveVersion: 0, candidateVersion: first.snapshotVersion }),
 		).toThrow();
 		expect(store.getActive("s-1")).toBeUndefined();
+		expect(store.selectActiveForBranch("s-1", ["root"], new Set(["root"]))).toBeUndefined();
 		chmodSync(file, 0o600);
 	});
 

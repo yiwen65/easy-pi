@@ -316,6 +316,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		vi.spyOn(session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
 			decision,
 			predictedNextRequestTokens: thresholdTokens,
+			tokenEstimateProvenance: "provider_projection",
 			recoverableToolTokens: 0,
 			compactionCooldownRemaining: 0,
 			incrementalCompactionsSinceRebuild: 0,

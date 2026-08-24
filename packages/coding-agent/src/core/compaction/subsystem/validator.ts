@@ -28,7 +28,11 @@ export interface ValidationContext {
 	contract: TaskContract;
 	/** Current task ledger used to verify the candidate's frozen ledger binding. */
 	ledger?: VersionedTaskLedgerLike;
+	/** Current SessionManager head used to bind the candidate to one branch state. */
+	branchId?: string;
 	candidate: StructuredSnapshot;
+	/** Already-validated active snapshot whose byte-identical state may be inherited by offload-only candidates. */
+	priorSnapshot?: StructuredSnapshot;
 	events: EventEnvelope[];
 	groups: AtomicGroup[];
 	manifest: CoverageManifest;
@@ -90,6 +94,17 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 		failures.push({ code, severity: "P0", message, refs });
 	const p1 = (code: string, message: string, refs?: string[]) =>
 		failures.push({ code, severity: "P1", message, refs });
+	const isInheritedById = <T extends { id: string }>(item: T, prior: T[] | undefined): boolean => {
+		const previous = prior?.find((candidate) => candidate.id === item.id);
+		return previous !== undefined && JSON.stringify(previous) === JSON.stringify(item);
+	};
+	const isInheritedTool = (
+		item: StructuredSnapshot["tools"][number],
+		prior: StructuredSnapshot["tools"] | undefined,
+	): boolean => {
+		const previous = prior?.find((candidate) => candidate.toolCallId === item.toolCallId);
+		return previous !== undefined && JSON.stringify(previous) === JSON.stringify(item);
+	};
 
 	// --- schema ---
 	for (const field of REQUIRED_SNAPSHOT_FIELDS) {
@@ -105,6 +120,7 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 	if (ctx.ledger) {
 		const focus = ctx.ledger.getFocusTask();
 		const expected = {
+			branchId: ctx.branchId,
 			ledgerVersion: ctx.ledger.getLedgerVersion(),
 			focusTaskId: focus?.taskId,
 			focusContractVersion: focus?.version,
@@ -114,7 +130,7 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 		if (!actual) {
 			p0("task-ledger-ref", "candidate is missing the required frozen task-ledger reference");
 		} else {
-			for (const field of ["ledgerVersion", "focusTaskId", "focusContractVersion", "taskRef"] as const) {
+			for (const field of ["branchId", "ledgerVersion", "focusTaskId", "focusContractVersion", "taskRef"] as const) {
 				if (actual[field] !== expected[field]) {
 					p0(
 						"task-ledger-ref",
@@ -154,14 +170,23 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 			}
 		}
 	};
-	for (const f of ctx.candidate.facts) checkProvenance(`fact ${f.id}`, f.provenance.sourceEventIds);
-	for (const d of ctx.candidate.decisions) checkProvenance(`decision ${d.id}`, d.provenance.sourceEventIds);
-	for (const t of ctx.candidate.tasks) checkProvenance(`task ${t.id}`, t.provenance.sourceEventIds);
-	for (const e of ctx.candidate.errors) checkProvenance(`error ${e.id}`, e.provenance.sourceEventIds);
+	for (const f of ctx.candidate.facts) {
+		if (!isInheritedById(f, ctx.priorSnapshot?.facts)) checkProvenance(`fact ${f.id}`, f.provenance.sourceEventIds);
+	}
+	for (const d of ctx.candidate.decisions) {
+		if (!isInheritedById(d, ctx.priorSnapshot?.decisions))
+			checkProvenance(`decision ${d.id}`, d.provenance.sourceEventIds);
+	}
+	for (const t of ctx.candidate.tasks) {
+		if (!isInheritedById(t, ctx.priorSnapshot?.tasks)) checkProvenance(`task ${t.id}`, t.provenance.sourceEventIds);
+	}
+	for (const e of ctx.candidate.errors) {
+		if (!isInheritedById(e, ctx.priorSnapshot?.errors)) checkProvenance(`error ${e.id}`, e.provenance.sourceEventIds);
+	}
 
 	// --- exact fields: verified facts must ground their exact values in events ---
 	for (const fact of ctx.candidate.facts) {
-		if (!fact.verified) continue;
+		if (!fact.verified || isInheritedById(fact, ctx.priorSnapshot?.facts)) continue;
 		const groundTruth = ctx.events.map(eventText).join("\n");
 		const seen = new Set<string>();
 		for (const match of fact.text.matchAll(EXACT_VALUE_PATTERN)) {
@@ -178,6 +203,7 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 	for (const task of ctx.candidate.tasks) {
 		const deterministic = ctx.deterministicState.tasks.find((t) => t.id === task.id);
 		if (!deterministic) {
+			if (isInheritedById(task, ctx.priorSnapshot?.tasks)) continue;
 			p0("task-state", `phantom task ${task.id} not derivable from events`, [task.id]);
 			continue;
 		}
@@ -199,6 +225,7 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 	for (const tool of ctx.candidate.tools) {
 		const deterministic = ctx.deterministicState.tools.find((t) => t.toolCallId === tool.toolCallId);
 		if (!deterministic) {
+			if (isInheritedTool(tool, ctx.priorSnapshot?.tools)) continue;
 			p0("tool-pairing", `candidate tool entry ${tool.toolCallId} has no matching event evidence`, [
 				tool.toolCallId,
 			]);
@@ -280,7 +307,11 @@ export function validateCandidate(ctx: ValidationContext): ValidatorReport {
 	}
 
 	// --- token gain: full next request must drop by at least the threshold ---
-	const minGain = ctx.minTokenGainFraction ?? 0.05;
+	// Deterministic offload-only runs are selected by an absolute recoverable-token
+	// threshold, so their default gate is any strict net reduction. Explicit caller
+	// overrides still win; summarizing compactions retain the default 5% gate.
+	const defaultMinGain = ctx.candidate.compactor.kind === "offload_only" ? Number.EPSILON : 0.05;
+	const minGain = ctx.minTokenGainFraction ?? defaultMinGain;
 	if (ctx.tokenStatsBefore > 0) {
 		const gain = (ctx.tokenStatsBefore - ctx.tokenStatsAfter) / ctx.tokenStatsBefore;
 		if (gain < minGain) {

@@ -434,6 +434,11 @@ async function createHarnessWithResourceLoader(
 		goalComplete:
 			options.hfCompaction?.goalComplete ??
 			(async () => ({ text: JSON.stringify({ operations: [] }), stopReason: "stop" })),
+		// Periodic reconciliation is a second independent internal call. General
+		// harnesses return a clean report unless a target test opts into findings.
+		reconcileComplete:
+			options.hfCompaction?.reconcileComplete ??
+			(async () => ({ text: JSON.stringify({ findings: [] }), stopReason: "stop" })),
 	};
 	const session = new AgentSession({
 		agent,
