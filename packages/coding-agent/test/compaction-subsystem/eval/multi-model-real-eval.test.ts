@@ -23,7 +23,7 @@ import { ModelRuntime } from "../../../src/core/model-runtime.ts";
 import { migrateSessionEntries, parseSessionEntries, type SessionEntry } from "../../../src/core/session-manager.ts";
 import type { EvalReport } from "./atoms.ts";
 import { withCache } from "./batch-runner.ts";
-import { convertSessionToFixture } from "./corpus-converter.ts";
+import { convertSessionToFixture, takeClosedSessionPrefix } from "./corpus-converter.ts";
 import { runEval } from "./runner.ts";
 
 const RUN = process.env.PI_MULTI_MODEL_EVAL === "1";
@@ -75,18 +75,18 @@ function largeSessionFixture(modelLabel: string) {
 	const raw = readFileSync(join(__dirname, "../../fixtures/large-session.jsonl"), "utf-8");
 	const parsed = parseSessionEntries(raw);
 	migrateSessionEntries(parsed);
-	const entries = parsed
-		.filter((entry): entry is SessionEntry => entry.type !== "session")
-		.slice(0, 100)
-		.map((entry, index) => {
-			const number = String(index + 1).padStart(3, "0");
-			const previous = String(index).padStart(3, "0");
-			return {
-				...entry,
-				id: `t304-entry-${number}`,
-				parentId: index === 0 ? null : `t304-entry-${previous}`,
-			};
-		});
+	const entries = takeClosedSessionPrefix(
+		parsed.filter((entry): entry is SessionEntry => entry.type !== "session"),
+		100,
+	).map((entry, index) => {
+		const number = String(index + 1).padStart(3, "0");
+		const previous = String(index).padStart(3, "0");
+		return {
+			...entry,
+			id: `t304-entry-${number}`,
+			parentId: index === 0 ? null : `t304-entry-${previous}`,
+		};
+	});
 	return convertSessionToFixture(entries, {
 		name: `pi-mono-large-100-${modelLabel.replaceAll("/", "-")}`,
 		constraints: ["Never lose user requirements", "Preserve exact file paths and error messages"],
@@ -103,6 +103,8 @@ function printReport(spec: string, report: EvalReport): number {
 	console.log(`tokens: ${report.tokensBeforeFirst} -> ${report.tokensAfterLast} (${tokenGain.toFixed(1)}% reduction)`);
 	console.log(`rounds activated/rejected: ${report.roundsActivated}/${report.roundsRejected}`);
 	if (report.rejectReasons.length > 0) console.log(`reject reasons: ${report.rejectReasons.join("; ")}`);
+	const failedAtoms = report.atoms.filter((atom) => !atom.passed);
+	if (failedAtoms.length > 0) console.log(`failed atoms: ${JSON.stringify(failedAtoms)}`);
 	return tokenGain;
 }
 

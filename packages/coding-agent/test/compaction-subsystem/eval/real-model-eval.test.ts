@@ -23,7 +23,7 @@ import { ModelRuntime } from "../../../src/core/model-runtime.ts";
 import { migrateSessionEntries, parseSessionEntries, type SessionEntry } from "../../../src/core/session-manager.ts";
 import type { EvalReport } from "./atoms.ts";
 import { withCache } from "./batch-runner.ts";
-import { convertSessionToFixture } from "./corpus-converter.ts";
+import { convertSessionToFixture, takeClosedSessionPrefix } from "./corpus-converter.ts";
 import { codingFixture, toolHeavyFixture } from "./fixtures.ts";
 import { runEval } from "./runner.ts";
 
@@ -70,7 +70,10 @@ function largeSessionFixture(entries: number, name: string) {
 	const raw = readFileSync(join(__dirname, "../../fixtures/large-session.jsonl"), "utf-8");
 	const parsed = parseSessionEntries(raw);
 	migrateSessionEntries(parsed);
-	const sliced = parsed.filter((e): e is SessionEntry => e.type !== "session").slice(0, entries);
+	const sliced = takeClosedSessionPrefix(
+		parsed.filter((e): e is SessionEntry => e.type !== "session"),
+		entries,
+	);
 	return convertSessionToFixture(sliced, {
 		name,
 		constraints: ["Never lose user requirements", "Preserve exact file paths and error messages"],

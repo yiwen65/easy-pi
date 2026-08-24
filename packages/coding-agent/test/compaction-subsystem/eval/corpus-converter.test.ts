@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { migrateSessionEntries, parseSessionEntries, type SessionEntry } from "../../../src/core/session-manager.ts";
-import { convertSessionToFixture } from "./corpus-converter.ts";
+import { convertSessionToFixture, takeClosedSessionPrefix } from "./corpus-converter.ts";
 
 const user = { role: "user" as const, timestamp: 1 };
 
@@ -13,7 +13,7 @@ function syntheticEntries(): SessionEntry[] {
 			id: "m-1",
 			parentId: null,
 			timestamp: "t",
-			message: { ...user, content: "fix the parser at /src/parser.ts please" },
+			message: { ...user, content: "fix the parser at /src/parser.ts and run /*.test.ts please" },
 		},
 		{
 			type: "message",
@@ -79,6 +79,29 @@ function syntheticEntries(): SessionEntry[] {
 }
 
 describe("convertSessionToFixture", () => {
+	it("extends a requested prefix through the matching result of an open tool call", () => {
+		const prefix = takeClosedSessionPrefix(syntheticEntries(), 2);
+		expect(prefix).toHaveLength(3);
+		expect(prefix.at(-1)).toMatchObject({
+			type: "message",
+			message: { role: "toolResult", toolCallId: "tc-1" },
+		});
+	});
+
+	it("treats a new user turn as the boundary of an abandoned tool call", () => {
+		const interrupted = [
+			...syntheticEntries().slice(0, 2),
+			{
+				type: "message" as const,
+				id: "m-interrupt",
+				parentId: "m-2",
+				timestamp: "t",
+				message: { ...user, content: "stop that and continue" },
+			},
+		];
+		expect(takeClosedSessionPrefix(interrupted, 2)).toHaveLength(3);
+	});
+
 	it("converts synthetic entries: contract, events, deterministic atoms", () => {
 		const fixture = convertSessionToFixture(syntheticEntries(), {
 			name: "synthetic",
@@ -92,6 +115,7 @@ describe("convertSessionToFixture", () => {
 		expect(tAtom?.expectToolState).toBe("succeeded");
 		// F atom mined the exact path and version.
 		expect(fixture.atoms.some((a) => a.kind === "F" && a.exact?.includes("/src/parser.ts"))).toBe(true);
+		expect(fixture.atoms.some((a) => a.kind === "F" && a.exact?.includes("/*.test.ts"))).toBe(false);
 		expect(fixture.atoms.some((a) => a.kind === "F" && a.exact?.includes("v3.4.1"))).toBe(true);
 		// P atom always present.
 		expect(fixture.atoms.some((a) => a.kind === "P")).toBe(true);
