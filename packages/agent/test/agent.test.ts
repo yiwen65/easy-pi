@@ -189,6 +189,30 @@ describe("Agent", () => {
 		});
 	});
 
+	it("resolves the latest system prompt after awaited user-message listeners", async () => {
+		let providerSystemPrompt = "";
+		const agent = new Agent({
+			initialState: { systemPrompt: "contract v1" },
+			streamFn: (_model, context) => {
+				providerSystemPrompt = context.systemPrompt ?? "";
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "user") {
+				agent.state.systemPrompt = "contract v2";
+			}
+		});
+
+		await agent.prompt("update the contract");
+
+		expect(providerSystemPrompt).toBe("contract v2");
+	});
+
 	it("should subscribe to events", () => {
 		const agent = new Agent({ streamFn: unusedStreamFunction });
 

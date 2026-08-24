@@ -9,7 +9,8 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { sha256Hex } from "./hashing.ts";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { canonicalJson, sha256Hex } from "./hashing.ts";
 
 export interface ArtifactMetadata {
 	ref: string;
@@ -48,6 +49,34 @@ export interface ArtifactStore {
 
 const REF_PREFIX = "artifact://sha256/";
 const PREVIEW_CHARS = 200;
+const AGENT_MESSAGE_MANIFEST_TYPE = "application/vnd.pi.agent-message-manifest+json;version=1";
+const IMAGE_BLOCK_TYPE = "application/vnd.pi.image-content-base64;version=1";
+
+interface StoredImageBlockV1 {
+	type: "artifact_image";
+	artifactRef: string;
+	hash: string;
+	mimeType: string;
+}
+
+interface AgentMessageManifestV1 {
+	schema: "pi.agent-message.v1";
+	message: Record<string, unknown> & { content?: unknown };
+}
+
+export interface AgentMessageArtifact {
+	ref: string;
+	hash: string;
+	size: number;
+	contentType: typeof AGENT_MESSAGE_MANIFEST_TYPE;
+	/** Content-addressed image-block artifacts referenced by the manifest. */
+	imageRefs: string[];
+}
+
+export interface AgentMessageArtifactOptions {
+	source: string;
+	tenant: string;
+}
 
 export function makeArtifactRef(hash: string): string {
 	return `${REF_PREFIX}${hash}`;
@@ -87,6 +116,123 @@ function makeMeta(hash: string, bytes: Uint8Array, options: PutOptions, createdA
 		tenant: options.tenant,
 		createdAt,
 	};
+}
+
+function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType: string } {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"type" in value &&
+		value.type === "image" &&
+		"data" in value &&
+		typeof value.data === "string" &&
+		"mimeType" in value &&
+		typeof value.mimeType === "string"
+	);
+}
+
+function isStoredImageBlock(value: unknown): value is StoredImageBlockV1 {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"type" in value &&
+		value.type === "artifact_image" &&
+		"artifactRef" in value &&
+		typeof value.artifactRef === "string" &&
+		"hash" in value &&
+		typeof value.hash === "string" &&
+		"mimeType" in value &&
+		typeof value.mimeType === "string"
+	);
+}
+
+/**
+ * Store one AgentMessage without duplicating image bytes in the message manifest.
+ * Both image blocks and the manifest are content-addressed and pinned as cold truth.
+ */
+export function putAgentMessageArtifact(
+	store: ArtifactStore,
+	message: AgentMessage,
+	options: AgentMessageArtifactOptions,
+): AgentMessageArtifact {
+	const messageRecord = structuredClone(message) as unknown as Record<string, unknown> & { content?: unknown };
+	const imageRefs: string[] = [];
+	if (Array.isArray(messageRecord.content)) {
+		messageRecord.content = messageRecord.content.map((block, index) => {
+			if (!isImageBlock(block)) return block;
+			const imageMeta = store.put(block.data, {
+				contentType: IMAGE_BLOCK_TYPE,
+				source: `${options.source}:image:${index}:${block.mimeType}`,
+				tenant: options.tenant,
+			});
+			store.pin(imageMeta.ref);
+			imageRefs.push(imageMeta.ref);
+			return {
+				type: "artifact_image",
+				artifactRef: imageMeta.ref,
+				hash: imageMeta.hash,
+				mimeType: block.mimeType,
+			} satisfies StoredImageBlockV1;
+		});
+	}
+
+	const manifest: AgentMessageManifestV1 = { schema: "pi.agent-message.v1", message: messageRecord };
+	const manifestMeta = store.put(canonicalJson(manifest), {
+		contentType: AGENT_MESSAGE_MANIFEST_TYPE,
+		source: options.source,
+		tenant: options.tenant,
+	});
+	store.pin(manifestMeta.ref);
+	return {
+		ref: manifestMeta.ref,
+		hash: manifestMeta.hash,
+		size: manifestMeta.size,
+		contentType: AGENT_MESSAGE_MANIFEST_TYPE,
+		imageRefs: [...new Set(imageRefs)],
+	};
+}
+
+/** Resolve and verify an AgentMessage manifest and every referenced image block. */
+export function getAgentMessageArtifact(store: ArtifactStore, ref: string, tenant: string): AgentMessage {
+	const stored = store.get(ref, tenant);
+	if (!stored) throw new Error(`Agent message artifact missing for ${ref}`);
+	if (stored.meta.contentType !== AGENT_MESSAGE_MANIFEST_TYPE) {
+		throw new Error(`Artifact ${ref} is not an AgentMessage manifest`);
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(new TextDecoder().decode(stored.data));
+	} catch {
+		throw new Error(`Agent message manifest is invalid JSON for ${ref}`);
+	}
+	if (
+		parsed === null ||
+		typeof parsed !== "object" ||
+		!("schema" in parsed) ||
+		parsed.schema !== "pi.agent-message.v1" ||
+		!("message" in parsed) ||
+		parsed.message === null ||
+		typeof parsed.message !== "object"
+	) {
+		throw new Error(`Agent message manifest schema mismatch for ${ref}`);
+	}
+	const message = structuredClone(parsed.message) as Record<string, unknown> & { content?: unknown };
+	if (Array.isArray(message.content)) {
+		message.content = message.content.map((block) => {
+			if (!isStoredImageBlock(block)) return block;
+			const image = store.get(block.artifactRef, tenant);
+			if (!image) throw new Error(`Image artifact missing for ${block.artifactRef}`);
+			if (image.meta.hash !== block.hash) {
+				throw new Error(`Image artifact hash mismatch for ${block.artifactRef}`);
+			}
+			return {
+				type: "image",
+				data: new TextDecoder().decode(image.data),
+				mimeType: block.mimeType,
+			};
+		});
+	}
+	return message as unknown as AgentMessage;
 }
 
 export class InMemoryArtifactStore implements ArtifactStore {

@@ -10,6 +10,7 @@
 export type AuditEventType =
 	| "trigger"
 	| "boundary_frozen"
+	| "active_snapshot_detached"
 	| "reduce"
 	| "cut"
 	| "offload"
@@ -26,6 +27,10 @@ export type AuditEventType =
 	| "rollback"
 	| "recall"
 	| "goal_interpretation"
+	| "branch_orphan_event"
+	| "branch_sync_failed"
+	| "reconciliation"
+	| "reconciliation_failed"
 	| "compact_committed"
 	| "commit_log_failed";
 

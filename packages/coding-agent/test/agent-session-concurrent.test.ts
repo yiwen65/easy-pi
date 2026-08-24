@@ -122,6 +122,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 		});
 
 		return session;
@@ -257,6 +258,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			hfCompaction: { mode: "off" },
 		});
 		session.subscribe((event) => {
 			if (event.type === "queue_update") {
@@ -324,6 +326,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 		});
 
 		// First prompt completes
@@ -430,6 +433,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 			baseToolsOverride: { dummy: tool },
 		});
 
@@ -577,6 +581,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 			baseToolsOverride: { dummy: tool },
 		});
 

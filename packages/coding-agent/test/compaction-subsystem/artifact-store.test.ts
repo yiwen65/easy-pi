@@ -1,13 +1,16 @@
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type ArtifactStore,
 	FileSystemArtifactStore,
+	getAgentMessageArtifact,
 	InMemoryArtifactStore,
 	makeArtifactRef,
 	parseArtifactRef,
+	putAgentMessageArtifact,
 } from "../../src/core/compaction/subsystem/artifact-store.ts";
 
 function storeSuite(name: string, makeStore: () => ArtifactStore) {
@@ -107,5 +110,71 @@ describe("FileSystemArtifactStore specifics", () => {
 		const meta = store.put("roundtrip", { contentType: "text/plain", source: "s", tenant: "t-1" });
 		const { hash } = parseArtifactRef(meta.ref);
 		expect(makeArtifactRef(hash)).toBe(meta.ref);
+	});
+});
+
+describe("AgentMessage cold artifacts", () => {
+	it("round-trips multi-block messages and deduplicates image bytes", () => {
+		const store = new InMemoryArtifactStore();
+		const imageData = "aW1hZ2UtYnl0ZXM=";
+		const first: AgentMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "before" },
+				{ type: "image", data: imageData, mimeType: "image/png" },
+				{ type: "text", text: "after" },
+			],
+			timestamp: 1,
+		};
+		const second: AgentMessage = {
+			...first,
+			content: [{ type: "image", data: imageData, mimeType: "image/png" }],
+			timestamp: 2,
+		};
+		const storedFirst = putAgentMessageArtifact(store, first, { source: "entry:m-1", tenant: "t-1" });
+		const storedAgain = putAgentMessageArtifact(store, first, { source: "entry:m-2", tenant: "t-1" });
+		const storedSecond = putAgentMessageArtifact(store, second, { source: "entry:m-3", tenant: "t-1" });
+
+		expect(storedAgain.ref).toBe(storedFirst.ref);
+		expect(storedAgain.hash).toBe(storedFirst.hash);
+		expect(storedSecond.imageRefs).toEqual(storedFirst.imageRefs);
+		expect(storedFirst.imageRefs).toHaveLength(1);
+		expect(getAgentMessageArtifact(store, storedFirst.ref, "t-1")).toEqual(first);
+		expect(getAgentMessageArtifact(store, storedSecond.ref, "t-1")).toEqual(second);
+	});
+
+	it("fails closed when a referenced image artifact is corrupted", () => {
+		const store = new InMemoryArtifactStore();
+		const message: AgentMessage = {
+			role: "user",
+			content: [{ type: "image", data: "b3JpZ2luYWw=", mimeType: "image/jpeg" }],
+			timestamp: 1,
+		};
+		const stored = putAgentMessageArtifact(store, message, { source: "entry:m-1", tenant: "t-1" });
+		store.corruptForTest(stored.imageRefs[0], "tampered");
+		expect(() => getAgentMessageArtifact(store, stored.ref, "t-1")).toThrow(/hash/i);
+	});
+
+	it("survives a filesystem-store restart with manifest and image pins intact", () => {
+		const dir = mkdtempSync(join(tmpdir(), "message-artifact-reopen-"));
+		dirs.push(dir);
+		const first = new FileSystemArtifactStore(dir);
+		const message: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "tc-1",
+			toolName: "view_image",
+			content: [
+				{ type: "text", text: "captured" },
+				{ type: "image", data: "cGl4ZWxz", mimeType: "image/webp" },
+			],
+			isError: false,
+			timestamp: 3,
+		};
+		const stored = putAgentMessageArtifact(first, message, { source: "entry:tr-1", tenant: "t-1" });
+		const reopened = new FileSystemArtifactStore(dir);
+
+		expect(reopened.isPinned(stored.ref)).toBe(true);
+		expect(stored.imageRefs.every((ref) => reopened.isPinned(ref))).toBe(true);
+		expect(getAgentMessageArtifact(reopened, stored.ref, "t-1")).toEqual(message);
 	});
 });

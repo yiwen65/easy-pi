@@ -117,6 +117,7 @@ describe("AgentSession retry", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 		});
 
 		if (delayAssistantMessageEndMs > 0) {
@@ -218,6 +219,7 @@ describe("AgentSession retry", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 		});
 
 		const events: string[] = [];
@@ -304,6 +306,7 @@ describe("AgentSession retry", () => {
 			cwd: tempDir,
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
+			hfCompaction: { mode: "off" },
 			baseToolsOverride: { echo: echoTool },
 		});
 

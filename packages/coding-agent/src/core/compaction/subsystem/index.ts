@@ -30,6 +30,7 @@ export * from "./payload-offload.ts";
 export * from "./prompt-builder.ts";
 export * from "./rebuild.ts";
 export * from "./recall-catalog.ts";
+export * from "./reconciliation.ts";
 export * from "./reducer.ts";
 export * from "./session-integration.ts";
 export * from "./snapshot-store.ts";

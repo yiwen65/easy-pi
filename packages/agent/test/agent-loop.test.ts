@@ -441,7 +441,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(messages[messages.length - 1].role).toBe("assistant");
 	});
 
-	it("should execute mutated beforeToolCall args without revalidation", async () => {
+	it("re-validates mutated beforeToolCall args before execution", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: Array<string | number> = [];
 		const tool: AgentTool<typeof toolSchema, { value: string | number }> = {
@@ -500,7 +500,8 @@ describe("agentLoop with AgentMessage", () => {
 			// consume
 		}
 
-		expect(executed).toEqual([123]);
+		// The mutation is re-validated and coerced to the schema type (string).
+		expect(executed).toEqual(["123"]);
 	});
 
 	it("should prepare tool arguments for validation", async () => {

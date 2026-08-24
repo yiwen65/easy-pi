@@ -11,7 +11,16 @@
  * buildPassthroughPrompt returns the original history path untouched.
  */
 
-import type { EventEnvelope, StructuredSnapshot, TaskContract, TokenStats } from "./types.ts";
+import { PromptBudgetExceededError, selectBudgetedItems, truncateTextToBudget } from "./active-projection.ts";
+import { buildAtomicGroups } from "./atomic-groups.ts";
+import type {
+	EventEnvelope,
+	PromptZoneBudgets,
+	StructuredSnapshot,
+	TaskContract,
+	TokenStats,
+	ZoneProjectionStats,
+} from "./types.ts";
 
 /** Structural view of the task ledger used by the pinned layer renderer. */
 export interface TaskLedgerLike {
@@ -48,6 +57,7 @@ export interface BuiltPrompt {
 	systemPrompt: string;
 	sections: PromptSection[];
 	tokenStats: TokenStats;
+	projectionStats: ZoneProjectionStats[];
 }
 
 export interface PromptBuilderInput {
@@ -65,7 +75,19 @@ export interface PromptBuilderInput {
 	toolsTokenEstimate?: number;
 	outputReserveTokens?: number;
 	estimateTextTokens?: (text: string) => number;
+	/** Hard budgets for mutable Hot/Warm/Recall zones. */
+	zoneBudgets?: Partial<PromptZoneBudgets>;
+	/** Measurement-only mode for the live pre-compaction provider tail. */
+	enforceRecentTailBudget?: boolean;
 }
+
+export const DEFAULT_PROMPT_ZONE_BUDGETS: PromptZoneBudgets = {
+	snapshot: 16_000,
+	narrative: 4_000,
+	recallGuide: 2_000,
+	recentTail: 24_000,
+	exactRecall: 8_000,
+};
 
 function defaultEstimate(text: string): number {
 	return Math.ceil(text.length / 4);
@@ -109,6 +131,13 @@ function eventText(event: EventEnvelope): string {
 	}
 	if (event.payloadRef) return `[offloaded content: ${event.payloadRef}]`;
 	return "";
+}
+
+function projectsToProviderContext(event: EventEnvelope): boolean {
+	if (event.eventType !== "message" && event.eventType !== "tool_call" && event.eventType !== "tool_result") {
+		return false;
+	}
+	return !(isRecord(event.payload) && event.payload.control === true);
 }
 
 /**
@@ -282,7 +311,186 @@ function renderSnapshot(snapshot: StructuredSnapshot): string {
 			),
 		);
 	}
+	if (snapshot.artifacts.length > 0) {
+		parts.push(
+			"",
+			"## Artifacts",
+			...snapshot.artifacts.map(
+				(artifact) =>
+					`- ${artifact.kind}: ${artifact.preview} (${artifact.ref}, ${artifact.size} bytes${artifact.pinned ? ", pinned" : ""})`,
+			),
+		);
+	}
 	return parts.join("\n");
+}
+
+type SnapshotItemKind = "fact" | "decision" | "task" | "tool" | "artifact" | "error" | "next" | "recall";
+
+interface SnapshotItemRef {
+	key: string;
+	kind: SnapshotItemKind;
+}
+
+function sourceOrder(snapshot: StructuredSnapshot, sourceEventIds: string[], fallback: number): number {
+	const eventOrder = new Map<string, number>();
+	let order = 0;
+	for (const range of snapshot.sourceEventRanges) {
+		for (let seq = range.fromSeq; seq <= range.toSeq; seq++) eventOrder.set(`seq:${seq}`, order++);
+	}
+	const explicit = sourceEventIds
+		.map((id) => eventOrder.get(id))
+		.filter((value): value is number => value !== undefined);
+	return explicit.length > 0 ? Math.max(...explicit) : fallback;
+}
+
+function projectSnapshot(
+	snapshot: StructuredSnapshot,
+	budgetTokens: number,
+	estimate: (text: string) => number,
+): { text: string; stats: ZoneProjectionStats } {
+	const emptySnapshot: StructuredSnapshot = {
+		...snapshot,
+		facts: [],
+		decisions: [],
+		tasks: [],
+		tools: [],
+		artifacts: [],
+		errors: [],
+		nextActions: [],
+		recallCatalogRefs: [],
+	};
+	const baseTokens = estimate(renderSnapshot(emptySnapshot));
+	if (baseTokens > budgetTokens) throw new PromptBudgetExceededError("snapshot", budgetTokens, baseTokens);
+
+	let order = 0;
+	const item = (
+		kind: SnapshotItemKind,
+		id: string,
+		text: string,
+		priority: number,
+		protectedItem: boolean,
+		sourceEventIds: string[] = [],
+	) => ({
+		id: `${kind}:${id}`,
+		value: { key: id, kind } satisfies SnapshotItemRef,
+		tokens: Math.max(1, estimate(text)),
+		priority,
+		protected: protectedItem,
+		order: sourceOrder(snapshot, sourceEventIds, order++),
+	});
+	const candidates = [
+		...snapshot.facts.map((fact) =>
+			item(
+				"fact",
+				fact.id,
+				`- ${fact.verified ? "" : "[unverified] "}${fact.text} (${fact.id})`,
+				fact.verified ? 60 : 30,
+				false,
+				fact.provenance.sourceEventIds,
+			),
+		),
+		...snapshot.decisions.map((decision) =>
+			item(
+				"decision",
+				decision.id,
+				`- ${decision.text}${decision.rationale ? ` — ${decision.rationale}` : ""} (${decision.id})`,
+				70,
+				false,
+				decision.provenance.sourceEventIds,
+			),
+		),
+		...snapshot.tasks.map((task) =>
+			item(
+				"task",
+				task.id,
+				`${task.title} ${task.state} ${task.blockers.join(" ")}`,
+				task.state === "in_progress" ? 100 : task.state === "blocked" ? 95 : task.state === "pending" ? 75 : 10,
+				task.state === "in_progress" || task.state === "blocked",
+				task.provenance.sourceEventIds,
+			),
+		),
+		...snapshot.tools.map((tool) => {
+			const open = tool.state !== "succeeded";
+			return item(
+				"tool",
+				tool.toolCallId,
+				`${tool.name} ${tool.state} ${tool.resultRef ?? ""}`,
+				open ? 100 : 35,
+				open,
+				tool.provenance.sourceEventIds,
+			);
+		}),
+		...snapshot.artifacts.map((artifact) =>
+			item(
+				"artifact",
+				artifact.ref,
+				`${artifact.kind} ${artifact.preview} ${artifact.ref}`,
+				artifact.pinned ? 100 : 40,
+				artifact.pinned,
+				artifact.provenance.sourceEventIds,
+			),
+		),
+		...snapshot.errors.map((error) =>
+			item(
+				"error",
+				error.id,
+				error.message,
+				error.resolved ? 10 : 100,
+				!error.resolved,
+				error.provenance.sourceEventIds,
+			),
+		),
+		...snapshot.nextActions.map((next) =>
+			item("next", next.id, next.text, 85, false, next.provenance.sourceEventIds),
+		),
+		...snapshot.recallCatalogRefs.map((ref) => item("recall", ref, ref, 50, false)),
+	];
+	let selection = selectBudgetedItems("snapshot", candidates, Math.max(0, budgetTokens - baseTokens));
+	const selected = new Set(selection.selected.map((selectedItem) => `${selectedItem.kind}:${selectedItem.key}`));
+	const materialize = (): StructuredSnapshot => ({
+		...snapshot,
+		facts: snapshot.facts.filter((value) => selected.has(`fact:${value.id}`)),
+		decisions: snapshot.decisions.filter((value) => selected.has(`decision:${value.id}`)),
+		tasks: snapshot.tasks.filter((value) => selected.has(`task:${value.id}`)),
+		tools: snapshot.tools.filter((value) => selected.has(`tool:${value.toolCallId}`)),
+		artifacts: snapshot.artifacts.filter((value) => selected.has(`artifact:${value.ref}`)),
+		errors: snapshot.errors.filter((value) => selected.has(`error:${value.id}`)),
+		nextActions: snapshot.nextActions.filter((value) => selected.has(`next:${value.id}`)),
+		recallCatalogRefs: snapshot.recallCatalogRefs.filter((value) => selected.has(`recall:${value}`)),
+	});
+
+	let text = renderSnapshot(materialize());
+	let tokens = estimate(text);
+	if (tokens > budgetTokens) {
+		const optionalSelected = candidates
+			.filter((candidate) => selected.has(candidate.id) && !candidate.protected)
+			.sort(
+				(left, right) =>
+					left.priority - right.priority || left.order - right.order || right.id.localeCompare(left.id),
+			);
+		for (const candidate of optionalSelected) {
+			selected.delete(candidate.id);
+			text = renderSnapshot(materialize());
+			tokens = estimate(text);
+			if (tokens <= budgetTokens) break;
+		}
+	}
+	if (tokens > budgetTokens) throw new PromptBudgetExceededError("snapshot", budgetTokens, tokens);
+	selection = {
+		...selection,
+		droppedItems: candidates.length - selected.size,
+		usedTokens: tokens,
+	};
+	return {
+		text,
+		stats: {
+			zone: "snapshot",
+			budgetTokens,
+			usedTokens: tokens,
+			droppedItems: selection.droppedItems,
+			protectedItems: selection.protectedItems,
+		},
+	};
 }
 
 function renderTail(events: EventEnvelope[]): string {
@@ -294,9 +502,92 @@ function renderTail(events: EventEnvelope[]): string {
 		.join("\n\n");
 }
 
+function tailImageTokens(events: EventEnvelope[]): number {
+	return events.reduce((sum, event) => {
+		const payload = event.payload;
+		if (!isRecord(payload)) return sum;
+		const imageCount =
+			typeof payload.imageCount === "number" ? payload.imageCount : payload.hasImages === true ? 1 : 0;
+		return sum + imageCount * 1200;
+	}, 0);
+}
+
+function projectTail(
+	events: EventEnvelope[],
+	budgetTokens: number,
+	estimate: (text: string) => number,
+): { events: EventEnvelope[]; stats: ZoneProjectionStats } {
+	const groups = buildAtomicGroups(events);
+	const byEventId = new Map(events.map((event) => [event.eventId, event]));
+	const candidates = groups.map((group, order) => {
+		const members = group.eventIds.map((eventId) => byEventId.get(eventId)).filter((event) => event !== undefined);
+		return {
+			id: group.groupId,
+			value: members,
+			tokens: estimate(renderTail(members)) + tailImageTokens(members),
+			priority: 100,
+			protected: !group.closed,
+			order,
+		};
+	});
+	const selection = selectBudgetedItems("recentTail", candidates, budgetTokens);
+	const selectedGroups = new Set(selection.selected);
+	const materialize = () => {
+		const selectedIds = new Set([...selectedGroups].flat().map((event) => event.eventId));
+		return events.filter((event) => selectedIds.has(event.eventId));
+	};
+	let selectedEvents = materialize();
+	let usedTokens =
+		selectedEvents.length > 0 ? estimate(renderTail(selectedEvents)) + tailImageTokens(selectedEvents) : 0;
+	if (usedTokens > budgetTokens) {
+		for (const candidate of candidates
+			.filter((candidate) => selectedGroups.has(candidate.value) && !candidate.protected)
+			.sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))) {
+			selectedGroups.delete(candidate.value);
+			selectedEvents = materialize();
+			usedTokens =
+				selectedEvents.length > 0 ? estimate(renderTail(selectedEvents)) + tailImageTokens(selectedEvents) : 0;
+			if (usedTokens <= budgetTokens) break;
+		}
+	}
+	if (usedTokens > budgetTokens) throw new PromptBudgetExceededError("recentTail", budgetTokens, usedTokens);
+	return {
+		events: selectedEvents,
+		stats: {
+			zone: "recentTail",
+			budgetTokens,
+			usedTokens,
+			droppedItems: candidates.length - selectedGroups.size,
+			protectedItems: selection.protectedItems,
+		},
+	};
+}
+
+function projectLossyText(
+	zone: "narrative" | "recallGuide",
+	text: string,
+	budgetTokens: number,
+	estimate: (text: string) => number,
+): { text: string; stats: ZoneProjectionStats } {
+	const projected = truncateTextToBudget(text, budgetTokens, estimate);
+	return {
+		text: projected.text,
+		stats: {
+			zone,
+			budgetTokens,
+			usedTokens: projected.tokens,
+			droppedItems: projected.truncated ? 1 : 0,
+			protectedItems: 0,
+		},
+	};
+}
+
 export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 	const estimate = input.estimateTextTokens ?? defaultEstimate;
+	const budgets: PromptZoneBudgets = { ...DEFAULT_PROMPT_ZONE_BUDGETS, ...input.zoneBudgets };
+	const providerTailEvents = input.tailEvents.filter(projectsToProviderContext);
 	const sections: PromptSection[] = [];
+	const projectionStats: ZoneProjectionStats[] = [];
 	const push = (zone: ZoneKind, text: string) => {
 		if (text.length === 0) return;
 		sections.push({ zone, text, tokens: estimate(text) });
@@ -307,22 +598,65 @@ export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 	// full token cost participates in both runtime projection and accounting.
 	if (input.ledger) push("contract", renderPinnedLedgerLayer(input.ledger, input.contract));
 	else if (input.contract) push("contract", renderContract(input.contract));
-	if (input.snapshot) push("snapshot", renderSnapshot(input.snapshot));
+	if (input.snapshot) {
+		const projected = projectSnapshot(input.snapshot, budgets.snapshot, estimate);
+		push("snapshot", projected.text);
+		projectionStats.push(projected.stats);
+	} else {
+		projectionStats.push({
+			zone: "snapshot",
+			budgetTokens: budgets.snapshot,
+			usedTokens: 0,
+			droppedItems: 0,
+			protectedItems: 0,
+		});
+	}
 	const narrative = input.narrative ?? input.snapshot?.narrative;
-	if (narrative) push("narrative", `# Progress so far\n${narrative}`);
-	if (input.recallGuide) push("recallGuide", input.recallGuide);
-	if (input.tailEvents.length > 0) push("recentTail", renderTail(input.tailEvents));
+	const projectedNarrative = projectLossyText(
+		"narrative",
+		narrative ? `# Progress so far\n${narrative}` : "",
+		budgets.narrative,
+		estimate,
+	);
+	push("narrative", projectedNarrative.text);
+	projectionStats.push(projectedNarrative.stats);
+	const projectedRecallGuide = projectLossyText("recallGuide", input.recallGuide ?? "", budgets.recallGuide, estimate);
+	push("recallGuide", projectedRecallGuide.text);
+	projectionStats.push(projectedRecallGuide.stats);
+	const projectedTail =
+		input.enforceRecentTailBudget === false
+			? {
+					events: providerTailEvents,
+					stats: {
+						zone: "recentTail" as const,
+						budgetTokens: budgets.recentTail,
+						usedTokens:
+							providerTailEvents.length > 0
+								? estimate(renderTail(providerTailEvents)) + tailImageTokens(providerTailEvents)
+								: 0,
+						droppedItems: 0,
+						protectedItems: buildAtomicGroups(providerTailEvents).filter((group) => !group.closed).length,
+					},
+				}
+			: projectTail(providerTailEvents, budgets.recentTail, estimate);
+	if (projectedTail.events.length > 0) push("recentTail", renderTail(projectedTail.events));
+	projectionStats.push(projectedTail.stats);
 	push("currentInput", input.currentInput);
-	if (input.exactRecall.length > 0) push("exactRecall", input.exactRecall.join("\n\n"));
+	const exactRecallText = input.exactRecall.join("\n\n");
+	const exactRecallTokens = estimate(exactRecallText);
+	if (exactRecallTokens > budgets.exactRecall) {
+		throw new PromptBudgetExceededError("exactRecall", budgets.exactRecall, exactRecallTokens);
+	}
+	push("exactRecall", exactRecallText);
+	projectionStats.push({
+		zone: "exactRecall",
+		budgetTokens: budgets.exactRecall,
+		usedTokens: exactRecallTokens,
+		droppedItems: 0,
+		protectedItems: input.exactRecall.length,
+	});
 
 	const zoneTokens = (zone: ZoneKind) => sections.filter((s) => s.zone === zone).reduce((sum, s) => sum + s.tokens, 0);
-	const tailImageTokens = input.tailEvents.reduce((sum, event) => {
-		const payload = event.payload;
-		if (!isRecord(payload)) return sum;
-		const imageCount =
-			typeof payload.imageCount === "number" ? payload.imageCount : payload.hasImages === true ? 1 : 0;
-		return sum + imageCount * 1200;
-	}, 0);
 	const tokenStats: TokenStats = {
 		system: estimate(input.systemPrompt),
 		tools: input.toolsTokenEstimate ?? 0,
@@ -330,7 +664,7 @@ export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 		snapshot: zoneTokens("snapshot"),
 		narrative: zoneTokens("narrative"),
 		recall: zoneTokens("recallGuide") + zoneTokens("exactRecall"),
-		recentTail: zoneTokens("recentTail") + tailImageTokens,
+		recentTail: zoneTokens("recentTail") + tailImageTokens(projectedTail.events),
 		currentInput: zoneTokens("currentInput"),
 		outputReserve: input.outputReserveTokens ?? 0,
 		total: 0,
@@ -346,7 +680,7 @@ export function buildPrompt(input: PromptBuilderInput): BuiltPrompt {
 		tokenStats.currentInput +
 		tokenStats.outputReserve;
 
-	return { systemPrompt: input.systemPrompt, sections, tokenStats };
+	return { systemPrompt: input.systemPrompt, sections, tokenStats, projectionStats };
 }
 
 /**

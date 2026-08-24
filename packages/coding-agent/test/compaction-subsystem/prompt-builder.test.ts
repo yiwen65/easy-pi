@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PromptBudgetExceededError } from "../../src/core/compaction/subsystem/active-projection.ts";
 import { InMemoryEventLog } from "../../src/core/compaction/subsystem/event-log.ts";
 import {
 	buildFocusView,
@@ -260,6 +261,20 @@ describe("buildPrompt", () => {
 		expect(secondIdx).toBeGreaterThan(firstIdx);
 	});
 
+	it("can measure the unbounded live provider tail before compaction", () => {
+		const built = buildPrompt({
+			systemPrompt: "S",
+			tailEvents: tailEvents(),
+			currentInput: "",
+			exactRecall: [],
+			estimateTextTokens: (text) => text.length,
+			zoneBudgets: { recentTail: 1 },
+			enforceRecentTailBudget: false,
+		});
+		expect(built.tokenStats.recentTail).toBeGreaterThan(1);
+		expect(built.projectionStats.find((stats) => stats.zone === "recentTail")?.droppedItems).toBe(0);
+	});
+
 	it("includes image token cost from tail tool results", () => {
 		const event = tailEvents()[0];
 		const built = buildPrompt({
@@ -318,6 +333,55 @@ describe("buildPrompt", () => {
 			expect(known.has(id)).toBe(true);
 		}
 		expect(focus).toContain("t-2");
+	});
+
+	it("bounds warm state by lifecycle while protecting open work", () => {
+		const bloated: StructuredSnapshot = {
+			...snapshot,
+			facts: Array.from({ length: 40 }, (_, index) => ({
+				id: `f-${index}`,
+				text: `historical fact ${index} ${"x".repeat(30)}`,
+				kind: "fact" as const,
+				verified: true,
+				provenance: { sourceEventIds: [`e-${index}`], source: "reducer" as const },
+			})),
+			errors: [
+				{
+					id: "e-open",
+					message: "must remain visible",
+					resolved: false,
+					provenance: { sourceEventIds: ["e-40"], source: "reducer" },
+				},
+			],
+		};
+		const built = buildPrompt({
+			systemPrompt: "S",
+			contract,
+			snapshot: bloated,
+			tailEvents: [],
+			currentInput: "go",
+			exactRecall: [],
+			estimateTextTokens: (text) => text.length,
+			zoneBudgets: { snapshot: 650 },
+		});
+		const section = built.sections.find((candidate) => candidate.zone === "snapshot")!;
+		const stats = built.projectionStats.find((candidate) => candidate.zone === "snapshot")!;
+		expect(section.tokens).toBeLessThanOrEqual(650);
+		expect(section.text).toContain("must remain visible");
+		expect(stats.droppedItems).toBeGreaterThan(0);
+	});
+
+	it("fails closed instead of truncating explicit exact recall", () => {
+		expect(() =>
+			buildPrompt({
+				systemPrompt: "S",
+				tailEvents: [],
+				currentInput: "go",
+				exactRecall: ["recover me exactly"],
+				estimateTextTokens: (text) => text.length,
+				zoneBudgets: { exactRecall: 5 },
+			}),
+		).toThrow(PromptBudgetExceededError);
 	});
 });
 

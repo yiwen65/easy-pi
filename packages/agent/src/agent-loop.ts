@@ -112,6 +112,7 @@ export async function runAgentLoop(
 		await emit({ type: "message_start", message: prompt });
 		await emit({ type: "message_end", message: prompt });
 	}
+	currentContext.systemPrompt = resolveSystemPrompt(currentContext.systemPrompt, config);
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
@@ -187,6 +188,7 @@ async function runLoop(
 					newMessages.push(message);
 				}
 				pendingMessages = [];
+				currentContext.systemPrompt = resolveSystemPrompt(currentContext.systemPrompt, config);
 			}
 
 			// Stream assistant response
@@ -275,6 +277,14 @@ async function runLoop(
 }
 
 /** Build the provider context using the same transform and conversion pipeline as an agent request. */
+function resolveSystemPrompt(snapshot: string, config: Pick<AgentLoopConfig, "getSystemPrompt">): string {
+	try {
+		return config.getSystemPrompt?.() ?? snapshot;
+	} catch {
+		return snapshot;
+	}
+}
+
 export async function buildProviderContext(
 	context: AgentContext,
 	config: Pick<AgentLoopConfig, "convertToLlm" | "transformContext">,
@@ -653,6 +663,22 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
+			// Hooks may mutate args in place; re-validate so only schema-conforming
+			// arguments reach execution.
+			const revalidatedArgs = validateToolArguments(tool, { ...toolCall, arguments: validatedArgs });
+			if (signal?.aborted) {
+				return {
+					kind: "immediate",
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				};
+			}
+			return {
+				kind: "prepared",
+				toolCall,
+				tool,
+				args: revalidatedArgs,
+			};
 		}
 		if (signal?.aborted) {
 			return {
