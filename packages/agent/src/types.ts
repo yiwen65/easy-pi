@@ -211,6 +211,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getSystemPrompt?: () => string;
 
+	/** Observe the exact logical context after transforms and immediately before the provider call. */
+	onProviderContext?: (model: Model<any>, context: Context) => void;
+
 	/**
 	 * Resolves an API key dynamically for each LLM call.
 	 *

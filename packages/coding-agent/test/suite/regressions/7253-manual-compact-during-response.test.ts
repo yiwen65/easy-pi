@@ -23,7 +23,7 @@ describe("issue #7253: manual compaction during an active response", () => {
 		}
 	});
 
-	it("runs only the requested manual compaction when the previous turn crossed the threshold", async () => {
+	it("lets requested manual compaction supersede an automatic provider-boundary attempt", async () => {
 		let markSecondResponseStarted = () => {};
 		const secondResponseStarted = new Promise<void>((resolve) => {
 			markSecondResponseStarted = resolve;
@@ -45,7 +45,7 @@ describe("issue #7253: manual compaction during an active response", () => {
 					}));
 				},
 			],
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 		});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -55,8 +55,7 @@ describe("issue #7253: manual compaction during an active response", () => {
 				await secondResponseReleased;
 				return fauxAssistantMessage("second response");
 			},
-			// Subsystem compactor calls during the manual compaction (distill + extract + narrative).
-			fauxAssistantMessage("Distilled goal sentence."),
+			// The subsystem makes one local compaction-item call during manual compaction.
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("manual narrative"),
 		]);
@@ -66,14 +65,18 @@ describe("issue #7253: manual compaction during an active response", () => {
 
 		const compactPromise = harness.session.compact();
 		const compactExpectation = expect(compactPromise).resolves.toMatchObject({
-			summary: expect.stringContaining("[high-fidelity snapshot"),
+			summary: expect.stringContaining("[compaction checkpoint created]"),
 		});
 		releaseSecondResponse();
 		await Promise.all([promptPromise, compactExpectation]);
 
-		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toEqual(["manual"]);
-		expect(harness.eventsOfType("compaction_end").map((event) => event.reason)).toEqual(["manual"]);
-		// No legacy compaction entry is written anymore.
-		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		const starts = harness.eventsOfType("compaction_start");
+		const ends = harness.eventsOfType("compaction_end");
+		expect(starts.filter((event) => event.reason === "manual")).toHaveLength(1);
+		expect(starts.at(-1)?.reason).toBe("manual");
+		expect(starts.slice(0, -1).every((event) => event.reason === "threshold")).toBe(true);
+		expect(ends.some((event) => event.reason === "threshold" && event.aborted)).toBe(true);
+		expect(ends.at(-1)).toMatchObject({ reason: "manual", aborted: false });
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	});
 });

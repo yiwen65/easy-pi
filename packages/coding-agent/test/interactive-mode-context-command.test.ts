@@ -15,31 +15,34 @@ const prototype = InteractiveMode.prototype as unknown as ContextCommandPrototyp
 function inspection(includeSystemPrompt = false): ContextInspection {
 	return {
 		mode: "full_pipeline",
-		snapshotVersion: 2,
-		projectionKind: "incremental",
-		baseEventSeq: 17,
-		triggerEventSeq: 23,
-		tailEventCount: 4,
+		checkpointEntryId: "checkpoint-23",
+		replacementMessageCount: 2,
+		tailMessageCount: 4,
 		toolsTokenEstimate: 30,
 		tokenStats: {
 			system: 20,
 			tools: 30,
-			contract: 10,
-			snapshot: 15,
-			narrative: 5,
-			recall: 5,
-			recentTail: 15,
+			compactionItem: 20,
+			recentUsers: 30,
+			postCheckpointHistory: 0,
 			currentInput: 0,
 			outputReserve: 0,
 			total: 100,
 		},
-		projectionStats: [],
-		sections: [
-			{ zone: "contract", text: "CONTRACT PROJECTION", tokens: 10 },
-			{ zone: "snapshot", text: "SNAPSHOT PROJECTION", tokens: 15 },
-			{ zone: "recentTail", text: "RECENT TAIL PROJECTION", tokens: 15 },
+		checkpointMessages: [
+			{ role: "user", content: "RECENT USER MESSAGE", timestamp: 1 },
+			{ role: "compactionSummary", summary: "HANDOFF CHECKPOINT", tokensBefore: 100, timestamp: 2 },
 		],
-		recallEntries: [{ refId: "rc-123", kind: "tool_result", preview: "build log preview", eventIds: ["e-1"] }],
+		providerContext: {
+			fullHash: "0123456789abcdef0123456789abcdef",
+			historicalPrefixHash: "fedcba9876543210fedcba9876543210",
+			messageCount: 8,
+			historicalMessageCount: 8,
+			reason: "compaction_activate",
+			prefixPreserved: false,
+			previousFullHash: "previous",
+			firstDifference: "$.messages[0]",
+		},
 		...(includeSystemPrompt ? { systemPrompt: { text: "PRIVATE SYSTEM PROMPT", tokens: 20 } } : {}),
 	};
 }
@@ -77,9 +80,10 @@ describe("InteractiveMode /context", () => {
 	it("publishes autocomplete metadata and dispatches without compacting", async () => {
 		expect(BUILTIN_SLASH_COMMANDS).toContainEqual({
 			name: "context",
-			description: "Inspect the active compacted context projection",
+			description: "Inspect the active compaction checkpoint",
 			argumentHint: "[inspect [--full]]",
 		});
+		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "contract")).toBe(false);
 
 		const handleContextCommand = vi.fn();
 		const handleCompactCommand = vi.fn();
@@ -100,22 +104,25 @@ describe("InteractiveMode /context", () => {
 
 		const output = rendered(context.chatContainer);
 		expect(output).toContain("Compacted Context");
-		expect(output).toContain("Snapshot: v2");
+		expect(output).toContain("Checkpoint entry: checkpoint-23");
 		expect(output).toContain("Current projected tokens: 100");
-		expect(output).toContain("snapshot: 15");
-		expect(output).not.toContain("SNAPSHOT PROJECTION");
+		expect(output).toContain("Last provider context: 0123456789abcdef");
+		expect(output).toContain("Context change reason: compaction_activate");
+		expect(output).toContain("Historical prefix preserved: no");
+		expect(output).toContain("First logical difference: $.messages[0]");
+		expect(output).toContain("recentUsers: 30");
+		expect(output).not.toContain("HANDOFF CHECKPOINT");
 		expect(output).not.toContain("PRIVATE SYSTEM PROMPT");
 	});
 
-	it("renders redacted projection zones and recall metadata", () => {
+	it("renders the replacement history checkpoint", () => {
 		const context = commandContext();
 		prototype.handleContextCommand.call(context, "/context inspect");
 
 		const output = rendered(context.chatContainer);
-		expect(output).toContain("Current compacted projection");
-		expect(output).toContain("[snapshot] 15 tokens");
-		expect(output).toContain("SNAPSHOT PROJECTION");
-		expect(output).toContain("rc-123 [tool_result]: build log preview");
+		expect(output).toContain("Replacement history checkpoint");
+		expect(output).toContain("HANDOFF CHECKPOINT");
+		expect(output).toContain("RECENT USER MESSAGE");
 		expect(output).not.toContain("PRIVATE SYSTEM PROMPT");
 		expect(output).not.toContain("PRIVATE TOOL DESCRIPTION");
 	});
@@ -132,11 +139,11 @@ describe("InteractiveMode /context", () => {
 		expect(output).not.toContain('"name": "write"');
 	});
 
-	it("reports missing snapshots and rejects unknown arguments", () => {
+	it("reports missing checkpoints and rejects unknown arguments", () => {
 		const missing = commandContext();
 		missing.session.hfCompactionHost.inspectActiveContext.mockReturnValue(undefined);
 		prototype.handleContextCommand.call(missing, "/context");
-		expect(missing.showWarning).toHaveBeenCalledWith("No active compacted context snapshot");
+		expect(missing.showWarning).toHaveBeenCalledWith("No active compaction checkpoint");
 
 		const invalid = commandContext();
 		prototype.handleContextCommand.call(invalid, "/context inspect --secret");

@@ -45,17 +45,6 @@ export type RpcCommand =
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
-	// Task contract (fixed layer of the compaction subsystem)
-	| {
-			id?: string;
-			type: "set_task_contract";
-			goal: string;
-			constraints: { id: string; kind: "positive" | "negative"; text: string }[];
-			permissions?: { allow: string[]; deny: string[]; approvalRequired: string[] };
-			budgets?: { maxTokens?: number; maxToolCalls?: number; maxDurationMs?: number };
-			outputContract?: string;
-	  }
-	| { id?: string; type: "get_task_contract" }
 
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
@@ -181,8 +170,6 @@ export type RpcResponse =
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
-	| { id?: string; type: "response"; command: "set_task_contract"; success: true; data: { version: number } }
-	| { id?: string; type: "response"; command: "get_task_contract"; success: true; data: unknown }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }

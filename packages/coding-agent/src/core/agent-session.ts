@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -58,16 +58,18 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	estimateContextTokens,
-	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
 } from "./compaction/index.ts";
-import { selectPendingContractApproval } from "./compaction/subsystem/goal-interpreter.ts";
 import {
-	createRecallExactToolDefinition,
-	createRecallSearchToolDefinition,
-} from "./compaction/subsystem/recall-tool.ts";
+	type ContextChangeReason,
+	firstProviderContextDifference,
+	identifyProviderContext,
+	type ProviderContextIdentityInput,
+	preservesProviderContextPrefix,
+} from "./compaction/subsystem/context-identity.ts";
 import {
+	type CheckpointCandidate,
 	createPiAiCompleteFn,
 	getHfCompactionModeFromEnv,
 	type HfCompactionConfig,
@@ -111,7 +113,12 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
-import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
+import {
+	buildSessionContext,
+	CURRENT_SESSION_VERSION,
+	getLatestCompactionEntry,
+	type SessionHeader,
+} from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -237,9 +244,8 @@ export interface AgentSessionConfig {
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 	/**
-	 * High-fidelity compaction subsystem (CCTX-080). When set (or PI_HF_COMPACTION env),
-	 * compaction goes through the transactional subsystem; failures fall back to the
-	 * legacy summary path. Default: off.
+	 * Session-native compaction checkpoint configuration. The `hfCompaction` name is
+	 * retained as a source-compatible option for callers. Default: off.
 	 */
 	hfCompaction?: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] };
 }
@@ -351,7 +357,13 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _autoCompactionCompletion?: Promise<void>;
+	private _resolveAutoCompactionCompletion?: () => void;
 	private _overflowRecoveryAttempted = false;
+	private _providerCompactionPreflightActive = false;
+	private _lastProviderContextInput?: ProviderContextIdentityInput;
+	private _lastObservedCheckpointId?: string;
+	private _nextProviderContextChangeReason?: ContextChangeReason;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -425,15 +437,12 @@ export class AgentSession {
 		// Explicit config or PI_HF_COMPACTION overrides; "off" disables compaction.
 		const hfMode = config.hfCompaction?.mode ?? getHfCompactionModeFromEnv() ?? "full_pipeline";
 		if (hfMode !== "off") {
-			// Durable subsystem state lives next to the session file; in-memory
-			// sessions (--no-session) keep in-memory stores.
-			const sessionFile = this.sessionManager.getSessionFile();
-			const stateDir = sessionFile ? join(dirname(sessionFile), "hf", this.sessionId) : undefined;
 			this._hfHost = new HfCompactionHost({
 				sessionId: this.sessionId,
 				getSystemPrompt: () => this._systemPromptOverride ?? this._baseSystemPrompt,
-				config: { ...config.hfCompaction, stateDir: config.hfCompaction?.stateDir ?? stateDir, mode: hfMode },
+				config: { ...config.hfCompaction, mode: hfMode },
 				getToolsTokenEstimate: () => estimateActiveToolsTokens(this.agent.state.tools),
+				getTools: () => this.agent.state.tools,
 			});
 		}
 
@@ -441,112 +450,22 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
-		const restoredProjection = this._hfHost?.buildActiveMessages(this.sessionManager.getBranch());
-		if (restoredProjection) this.agent.state.messages = restoredProjection;
+		const branchEntries = this.sessionManager.getBranch();
+		this._hfHost?.syncFromEntries(branchEntries);
+		const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
+		this.agent.state.messages = restoredProjection ?? buildSessionContext(branchEntries).messages;
 	}
 
-	/** The high-fidelity compaction host, when enabled (CCTX-080). */
+	private _restoreSessionMessages(): void {
+		const branchEntries = this.sessionManager.getBranch();
+		this._hfHost?.syncFromEntries(branchEntries);
+		this.agent.state.messages =
+			this._hfHost?.buildActiveMessages(branchEntries) ?? buildSessionContext(branchEntries).messages;
+	}
+
+	/** The session-native compaction checkpoint host, when enabled. */
 	get hfCompactionHost(): HfCompactionHost | undefined {
 		return this._hfHost;
-	}
-
-	/** Current verified task contract, if any. */
-	getTaskContract() {
-		return this._hfHost?.getContract();
-	}
-
-	/**
-	 * Create the session task contract (fixed layer). Once created, use
-	 * updateTaskContract; the contract never participates in compaction.
-	 */
-	setTaskContract(input: {
-		goal: string;
-		constraints: { id: string; kind: "positive" | "negative"; text: string }[];
-		permissions?: { allow: string[]; deny: string[]; approvalRequired: string[] };
-		budgets?: { maxTokens?: number; maxToolCalls?: number; maxDurationMs?: number };
-		outputContract?: string;
-	}) {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		const contract = this._hfHost.setContract(input);
-		this._refreshPinnedSystemPrompt();
-		return contract;
-	}
-
-	/** Authorized contract update (local user): new version + audit. */
-	updateTaskContract(patch: Parameters<HfCompactionHost["updateContract"]>[0], reason?: string) {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		const contract = this._hfHost.updateContract(patch, reason);
-		this._refreshPinnedSystemPrompt();
-		return contract;
-	}
-
-	/** Promote the pending distilled goal proposal to the authoritative goal (new audited version). */
-	confirmDerivedGoal() {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		const contract = this._hfHost.confirmDerivedGoal();
-		this._refreshPinnedSystemPrompt();
-		return contract;
-	}
-
-	setCurrentTaskGoal(goal: string) {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		const task = this._hfHost.setCurrentTaskGoal(goal);
-		this._refreshPinnedSystemPrompt();
-		return task;
-	}
-
-	getTaskLedgerState() {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		return this._hfHost.getTaskLedgerState();
-	}
-
-	acceptPendingGoalChange(pendingChangeId: string, candidateTaskId?: string) {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		const tasks = this._hfHost.acceptPendingGoalChange(pendingChangeId, candidateTaskId);
-		this._refreshPinnedSystemPrompt();
-		return tasks;
-	}
-
-	rejectPendingGoalChange(pendingChangeId: string) {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		const rejected = this._hfHost.rejectPendingGoalChange(pendingChangeId);
-		this._refreshPinnedSystemPrompt();
-		return rejected;
-	}
-
-	getLatestTaskReconciliation() {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		return this._hfHost.getLatestReconciliationReport();
-	}
-
-	async reconcileTaskContract() {
-		const host = this._hfHost;
-		if (!host) throw new Error("Compaction subsystem is disabled (mode off)");
-		let complete = host.reconcileComplete;
-		const model = this.model;
-		if (!complete && model) {
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
-			complete = createPiAiCompleteFn({
-				model: requestModel,
-				apiKey,
-				headers,
-				env,
-				streamFn: this.agent.streamFunction,
-				retry: this.settingsManager.getRetrySettings(),
-			});
-		}
-		return host.runReconciliation({ branchEntries: this.sessionManager.getBranch(), complete });
-	}
-
-	/** Unverified update attempts only ever become proposals. */
-	proposeTaskContractUpdate(
-		patch: Parameters<HfCompactionHost["proposeContractUpdate"]>[0],
-		proposedBy: Parameters<HfCompactionHost["proposeContractUpdate"]>[1],
-		reason?: string,
-	) {
-		if (!this._hfHost) throw new Error("Compaction subsystem is disabled (mode off)");
-		return this._hfHost.proposeContractUpdate(patch, proposedBy, reason);
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -615,65 +534,6 @@ export class AgentSession {
 		}
 	}
 
-	private _acceptPendingContractApprovalBeforePrompt(userMessage: string): void {
-		const host = this._hfHost;
-		if (!host) return;
-		const selection = selectPendingContractApproval(userMessage, host.getTaskLedgerState().pending);
-		if (selection?.kind === "accept") {
-			host.acceptPendingGoalChange(selection.pendingChangeId);
-		}
-	}
-
-	private async _processTaskGoalMessage(entryId: string, message: AgentMessage): Promise<void> {
-		const host = this._hfHost;
-		const model = this.model;
-		if (!host || !model || message.role !== "user") return;
-		const interpretTask = host.taskInterpretationEnabled;
-		const reconcileTask = host.reconciliationEnabled;
-		if (!interpretTask && !reconcileTask) return;
-		const userMessage = contentText(message.content, "").trim();
-		if (!userMessage) return;
-		const branchEntries = this.sessionManager.getBranch();
-		try {
-			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
-			let providerComplete: ReturnType<typeof createPiAiCompleteFn> | undefined;
-			const getProviderComplete = () => {
-				providerComplete ??= createPiAiCompleteFn({
-					model: requestModel,
-					apiKey,
-					headers,
-					env,
-					streamFn: this.agent.streamFunction,
-					retry: this.settingsManager.getRetrySettings(),
-				});
-				return providerComplete;
-			};
-			if (interpretTask) {
-				const goalComplete = host.goalComplete ?? host.configComplete ?? getProviderComplete();
-				await host.processUserMessage({
-					branchEntries,
-					sourceEventId: entryId,
-					userMessage,
-					complete: goalComplete,
-				});
-			}
-			if (reconcileTask) {
-				await host.maybeRunReconciliation({
-					branchEntries,
-					complete: host.reconcileComplete ?? getProviderComplete(),
-				});
-			}
-			this._refreshPinnedSystemPrompt();
-		} catch (error) {
-			// Goal interpretation is advisory toward the main agent turn. A failed
-			// compactor call must not prevent the raw user message from being sent.
-			host.audit.record("goal_interpretation", this.sessionId, {
-				outcome: "rejected",
-				reason: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
-			});
-		}
-	}
-
 	/**
 	 * Install tool hooks once on the Agent instance.
 	 *
@@ -704,22 +564,10 @@ export class AgentSession {
 				}
 			}
 
-			// Ledger gate after the hook, with the final (possibly mutated) args:
-			// dispatch proceeds only when the durable ledger accepted the start.
-			// The core loop re-validates hook-mutated args after this hook returns.
-			try {
-				this._hfHost?.recordToolStarted(toolCall.id, toolCall.name, args);
-			} catch (err) {
-				return {
-					block: true,
-					reason: `Tool ledger rejected dispatch: ${err instanceof Error ? err.message : String(err)}`,
-				};
-			}
 			return undefined;
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
-			this._hfHost?.recordToolFinished(toolCall.id, isError);
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
 				? await runner.emitToolResult({
@@ -753,13 +601,103 @@ export class AgentSession {
 		};
 	}
 
-	private _refreshPinnedSystemPrompt(): void {
-		const base = this._systemPromptOverride ?? this._baseSystemPrompt;
-		const pinned = this._hfHost?.buildPinnedLedgerLayer();
-		this.agent.state.systemPrompt = pinned ? `${base}\n\n${pinned}` : base;
-	}
-
 	private _installAgentNextTurnRefresh(): void {
+		const previousTransformContext = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
+			const host = this._hfHost;
+			if (!host || this._providerCompactionPreflightActive) return transformed;
+
+			let lastAssistant: AssistantMessage | undefined;
+			for (let index = transformed.length - 1; index >= 0; index--) {
+				const message = transformed[index];
+				if (message.role === "assistant") {
+					lastAssistant = message as AssistantMessage;
+					break;
+				}
+			}
+			if (!lastAssistant) return transformed;
+
+			const compactionSettings = this.settingsManager.getCompactionSettings();
+			const modelContextLimit = this.model?.contextWindow ?? 0;
+			const sameModel =
+				this.model !== undefined &&
+				lastAssistant.provider === this.model.provider &&
+				lastAssistant.model === this.model.id;
+			const preflightEvaluation =
+				compactionSettings.enabled && modelContextLimit > 0
+					? host.evaluateCompactionTrigger({
+							branchEntries: this.sessionManager.getBranch(),
+							modelContextLimit,
+							outputReserveTokens: compactionSettings.reserveTokens,
+							recentProviderContextTokens:
+								sameModel && lastAssistant.usage ? calculateContextTokens(lastAssistant.usage) : undefined,
+						})
+					: undefined;
+			const checkpointBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+			this._providerCompactionPreflightActive = true;
+			try {
+				await this._checkCompaction(lastAssistant, false, "", 0, true);
+			} finally {
+				this._providerCompactionPreflightActive = false;
+			}
+			const checkpointAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+			if (
+				preflightEvaluation &&
+				preflightEvaluation.predictedNextRequestTokens > modelContextLimit &&
+				checkpointAfter === checkpointBefore
+			) {
+				throw new Error(
+					"Provider request blocked: required compaction did not activate. Reduce context, retry /compact, or switch to a larger-context model.",
+				);
+			}
+			return checkpointAfter !== checkpointBefore ? this.agent.state.messages.slice() : transformed;
+		};
+
+		const previousOnProviderContext = this.agent.onProviderContext;
+		this.agent.onProviderContext = (model, context) => {
+			try {
+				previousOnProviderContext?.(model, context);
+			} catch {
+				// A diagnostic observer must never block this observer or the request.
+			}
+			const host = this._hfHost;
+			if (!host) return;
+
+			const input: ProviderContextIdentityInput = {
+				model: { provider: model.provider, model: model.id, api: model.api },
+				systemPrompt: context.systemPrompt,
+				messages: context.messages,
+				tools: context.tools,
+			};
+			const previous = this._lastProviderContextInput;
+			const identity = identifyProviderContext(input);
+			const prefixPreserved = previous ? preservesProviderContextPrefix(previous, input) : true;
+			const checkpointId = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+			const reason: ContextChangeReason =
+				this._nextProviderContextChangeReason ??
+				(previous && checkpointId !== this._lastObservedCheckpointId
+					? "compaction_activate"
+					: prefixPreserved
+						? "no_trigger"
+						: "explicit_config_change");
+
+			host.recordProviderContextObservation({
+				...identity,
+				reason,
+				prefixPreserved,
+				...(previous
+					? {
+							previousFullHash: identifyProviderContext(previous).fullHash,
+							...(!prefixPreserved ? { firstDifference: firstProviderContextDifference(previous, input) } : {}),
+						}
+					: {}),
+			});
+			this._lastProviderContextInput = input;
+			this._lastObservedCheckpointId = checkpointId;
+			this._nextProviderContextChangeReason = undefined;
+		};
+
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
 			(this.agent.prepareNextTurn
@@ -770,12 +708,11 @@ export class AgentSession {
 			const previousContext = previousSnapshot?.context ?? turn.context;
 
 			const baseSystemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
-			const pinnedLedgerLayer = this._hfHost?.buildPinnedLedgerLayer();
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					systemPrompt: pinnedLedgerLayer ? `${baseSystemPrompt}\n\n${pinnedLedgerLayer}` : baseSystemPrompt,
+					systemPrompt: baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
 				model: this.agent.state.model,
@@ -803,31 +740,32 @@ export class AgentSession {
 		});
 	}
 
-	/**
-	 * Notify extensions that a subsystem compaction committed. The entry is
-	 * synthetic (never persisted): the subsystem does not write legacy
-	 * CompactionEntry items, but the extension notification contract remains.
-	 */
+	/** Persist the replacement checkpoint before changing the live context. */
+	private _publishCompactionCheckpoint(candidate: CheckpointCandidate): CompactionEntry {
+		const entryId = this.sessionManager.appendCompactionCheckpoint(
+			candidate.replacementHistory,
+			candidate.tokensBefore,
+		);
+		const entry = this.sessionManager.getEntry(entryId);
+		if (!entry || entry.type !== "compaction") {
+			throw new Error(`Compaction checkpoint ${entryId} was not persisted`);
+		}
+		const branchEntries = this.sessionManager.getBranch();
+		this._hfHost?.syncFromEntries(branchEntries);
+		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		return entry;
+	}
+
+	/** Notify extensions after the durable checkpoint has committed. */
 	private async _emitHfSessionCompact(
-		result: CompactionResult,
+		compactionEntry: CompactionEntry,
 		reason: "manual" | "threshold" | "overflow",
 		willRetry: boolean,
-		snapshotVersion: number | undefined,
 	): Promise<void> {
 		if (!this._extensionRunner.hasHandlers("session_compact")) return;
-		const syntheticEntry: CompactionEntry = {
-			type: "compaction",
-			id: `hf-compaction-${Date.now()}`,
-			parentId: null,
-			timestamp: new Date().toISOString(),
-			summary: result.summary,
-			firstKeptEntryId: "",
-			tokensBefore: result.tokensBefore,
-			details: { hf: true, snapshotVersion },
-		};
 		await this._extensionRunner.emit({
 			type: "session_compact",
-			compactionEntry: syntheticEntry,
+			compactionEntry,
 			fromExtension: false,
 			reason,
 			willRetry,
@@ -923,9 +861,6 @@ export class AgentSession {
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			if (appendedEntryId) this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
-			if (event.message.role === "user" && appendedEntryId) {
-				await this._processTaskGoalMessage(appendedEntryId, event.message);
-			}
 		}
 
 		// Notify all listeners
@@ -968,18 +903,6 @@ export class AgentSession {
 			}
 		}
 		return false;
-	}
-
-	/** Find the last assistant message in agent state (including aborted ones) */
-	private _findLastAssistantMessage(): AssistantMessage | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role === "assistant") {
-				return msg as AssistantMessage;
-			}
-		}
-		return undefined;
 	}
 
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
@@ -1370,8 +1293,13 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(msg)) {
-			return true;
+		// Overflow recovery must compact before the immediate retry can start. Normal
+		// threshold maintenance is deferred to the next real provider request by the
+		// transformContext preflight; an idle agent_end never rewrites context.
+		if (msg.stopReason === "error" || msg.stopReason === "length") {
+			if (await this._checkCompaction(msg)) {
+				return true;
+			}
 		}
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
@@ -1530,25 +1458,6 @@ export class AgentSession {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this._systemPromptOverride = undefined;
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
-			}
-			// Resolve an explicit verified-user permission approval before agent.prompt()
-			// snapshots the system prompt. The persisted user message is interpreted
-			// again later, but the deterministic selector returns noop once pending is gone.
-			this._acceptPendingContractApprovalBeforePrompt(expandedText);
-			// AgentLoop resolves this state again after the persisted user event has
-			// been interpreted, so the first provider call receives one current system layer.
-			this._refreshPinnedSystemPrompt();
-
-			const lastAssistant = this._findLastAssistantMessage();
-			if (lastAssistant) {
-				const plainTextInput: AgentMessage = {
-					role: "user",
-					content: [{ type: "text", text: expandedText }],
-					timestamp: Date.now(),
-				};
-				const pendingTurnTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
-				const currentInputExtraTokens = Math.max(0, pendingTurnTokens - estimateTokens(plainTextInput));
-				await this._checkCompaction(lastAssistant, false, expandedText, currentInputExtraTokens);
 			}
 		} catch (error) {
 			preflightResult?.(false);
@@ -1841,8 +1750,6 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this.abortRetry();
 		this.agent.abort();
-		// Interrupted tool executions are marked unknown, never blindly replayed.
-		this._hfHost?.recordInflightUnknown("session aborted");
 		await this.waitForIdle();
 	}
 
@@ -1885,6 +1792,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = model;
 		this.sessionManager.appendModelChange(model.provider, model.id);
+		this._restoreSessionMessages();
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
 		// Re-clamp thinking level for new model's capabilities
@@ -1927,6 +1835,7 @@ export class AgentSession {
 		// Apply model
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this._restoreSessionMessages();
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
 		// Apply thinking level.
@@ -1955,6 +1864,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+		this._restoreSessionMessages();
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
 		// Re-clamp thinking level for new model's capabilities
@@ -2091,6 +2001,16 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		// An explicit user request supersedes an in-flight automatic attempt. Wait
+		// for its abort cleanup so both attempts never enter the host concurrently.
+		while (this._autoCompactionAbortController) {
+			const completion = this._autoCompactionCompletion;
+			this._autoCompactionAbortController.abort();
+			await completion;
+		}
+		if (this._compactionAbortController || this._branchSummaryAbortController) {
+			throw new Error("Compaction or branch summarization is already in progress");
+		}
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -2142,44 +2062,26 @@ export class AgentSession {
 					streamFn: this.agent.streamFunction,
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
+					sessionId: this.sessionId,
 				});
 			const outcome = await this._hfHost.attemptCompaction({
-				action: this._hfHost.mode === "offload_only" ? "offload_only" : "soft_compact",
 				manual: true,
 				complete: hfComplete,
 				branchEntries: pathEntries,
 				signal: this._compactionAbortController.signal,
-				keepRecentTokens: settings.keepRecentTokens,
 				outputReserveTokens: settings.reserveTokens,
+				recentUserTokens: settings.keepRecentTokens,
+				customInstructions,
+				modelContextLimit: requestModel.contextWindow,
 			});
-			this._refreshPinnedSystemPrompt();
-			if (outcome.shadow) {
-				// Shadow: candidate audited, live context unchanged.
-				const compactionResult: CompactionResult = {
-					summary: outcome.summaryText,
-					firstKeptEntryId: "",
-					tokensBefore: outcome.tokensBefore ?? 0,
-					estimatedTokensAfter: outcome.tokensAfter,
-				};
-				this._compactionAbortController = undefined;
-				this._emit({
-					type: "compaction_end",
-					reason: "manual",
-					result: compactionResult,
-					aborted: false,
-					willRetry: false,
-				});
-				return compactionResult;
-			}
 			if (!outcome.activated && this._compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 			if (!outcome.activated) {
 				throw new Error(`Compaction rejected: ${outcome.summaryText}`);
 			}
-			if (outcome.messages) {
-				this.agent.state.messages = outcome.messages;
-			}
+			if (!outcome.checkpoint) throw new Error("Compaction activated without a checkpoint");
+			const compactionEntry = this._publishCompactionCheckpoint(outcome.checkpoint);
 			const compactionResult: CompactionResult = {
 				summary: outcome.summaryText,
 				firstKeptEntryId: "",
@@ -2187,7 +2089,7 @@ export class AgentSession {
 				estimatedTokensAfter: outcome.tokensAfter,
 			};
 			this._compactionAbortController = undefined;
-			await this._emitHfSessionCompact(compactionResult, "manual", false, outcome.result?.snapshotVersion);
+			await this._emitHfSessionCompact(compactionEntry, "manual", false);
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -2254,8 +2156,7 @@ export class AgentSession {
 	 *
 	 * Each case obtains one TriggerDecision from HfCompactionHost and calls
 	 * `_runAutoCompaction()`. After the `session_before_compact` hook, the host
-	 * executes that exact action through CompactionOrchestrator; there is no
-	 * legacy summary fallback.
+	 * generates and persists one replacement-history checkpoint.
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -2266,6 +2167,7 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		currentInput = "",
 		currentInputExtraTokens = 0,
+		providerRequestPending = false,
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
@@ -2297,7 +2199,12 @@ export class AgentSession {
 			!assistantIsFromBeforeCompaction && sameModel && assistantMessage.usage
 				? calculateContextTokens(assistantMessage.usage)
 				: undefined;
-		if (assistantIsFromBeforeCompaction && currentInput.length === 0 && currentInputExtraTokens === 0) {
+		if (
+			assistantIsFromBeforeCompaction &&
+			!providerRequestPending &&
+			currentInput.length === 0 &&
+			currentInputExtraTokens === 0
+		) {
 			return false;
 		}
 
@@ -2358,7 +2265,7 @@ export class AgentSession {
 			}
 
 			// Mutate retry state only after a live compaction activates. Rejection,
-			// cancellation, CAS loss, and shadow mode must leave context untouched.
+			// cancellation and publication failure must leave context untouched.
 			const evaluation = this._hfHost?.evaluateCompactionTrigger({
 				branchEntries: this.sessionManager.getBranch(),
 				modelContextLimit: contextWindow,
@@ -2430,7 +2337,7 @@ export class AgentSession {
 	private async _tryHfAutoCompaction(
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
-		settings: { reserveTokens: number; keepRecentTokens: number },
+		settings: { reserveTokens: number },
 		decision: TriggerDecision,
 		currentInput: string,
 		currentInputExtraTokens: number,
@@ -2449,26 +2356,20 @@ export class AgentSession {
 				streamFn: this.agent.streamFunction,
 				retry: this.settingsManager.getRetrySettings(),
 				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
+				sessionId: this.sessionId,
 			});
 		if (decision.action === "none") return false;
-		const action = host.mode === "offload_only" ? "offload_only" : decision.action;
 		const outcome = await host.attemptCompaction({
-			action,
 			triggerReasons: decision.reasons,
 			currentInput,
 			currentInputExtraTokens,
 			complete,
 			branchEntries: this.sessionManager.getBranch(),
 			signal: this._autoCompactionAbortController?.signal,
-			keepRecentTokens: settings.keepRecentTokens,
 			outputReserveTokens: settings.reserveTokens,
+			recentUserTokens: this.settingsManager.getCompactionSettings().keepRecentTokens,
+			modelContextLimit: requestModel.contextWindow,
 		});
-		this._refreshPinnedSystemPrompt();
-		if (outcome.shadow) {
-			// Shadow never changes live context, so retrying an overflow would repeat
-			// the identical failing request and incorrectly consume recovery state.
-			return false;
-		}
 		if (!outcome.activated && this._autoCompactionAbortController?.signal.aborted) {
 			this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
 			await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
@@ -2492,16 +2393,15 @@ export class AgentSession {
 			});
 			return false;
 		}
-		if (outcome.messages) {
-			this.agent.state.messages = outcome.messages;
-		}
+		if (!outcome.checkpoint) throw new Error("Compaction activated without a checkpoint");
+		const compactionEntry = this._publishCompactionCheckpoint(outcome.checkpoint);
 		const result: CompactionResult = {
 			summary: outcome.summaryText,
 			firstKeptEntryId: "",
 			tokensBefore: outcome.tokensBefore ?? 0,
 			estimatedTokensAfter: outcome.tokensAfter,
 		};
-		await this._emitHfSessionCompact(result, reason, willRetry, outcome.result?.snapshotVersion);
+		await this._emitHfSessionCompact(compactionEntry, reason, willRetry);
 		this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 		if (willRetry) {
 			this._overflowRecoveryAttempted = true;
@@ -2517,8 +2417,8 @@ export class AgentSession {
 
 	/**
 	 * Execute threshold or overflow compaction. Manual compaction uses
-	 * `AgentSession.compact()` instead. Both paths enter the HF host after
-	 * preparation and extension interception; legacy summary compaction is absent.
+	 * `AgentSession.compact()` instead. Both paths enter the checkpoint host after
+	 * preparation and extension interception.
 	 *
 	 * @param reason Automatic trigger selected by `_checkCompaction()`
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
@@ -2531,7 +2431,7 @@ export class AgentSession {
 		currentInput = "",
 		currentInputExtraTokens = 0,
 	): Promise<boolean> {
-		// Subsystem-only automatic compaction (legacy summary path removed, EPIC-CCTX-001).
+		// Automatic and manual compaction share the same checkpoint pipeline.
 		if (!this.model) {
 			return false;
 		}
@@ -2547,6 +2447,9 @@ export class AgentSession {
 
 		this._emit({ type: "compaction_start", reason });
 		this._autoCompactionAbortController = new AbortController();
+		this._autoCompactionCompletion = new Promise<void>((resolve) => {
+			this._resolveAutoCompactionCompletion = resolve;
+		});
 
 		try {
 			if (this._extensionRunner.hasHandlers("session_before_compact") && preparation) {
@@ -2609,6 +2512,9 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
+			this._resolveAutoCompactionCompletion?.();
+			this._resolveAutoCompactionCompletion = undefined;
+			this._autoCompactionCompletion = undefined;
 		}
 	}
 
@@ -2802,8 +2708,8 @@ export class AgentSession {
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
 			},
 			{
-				getModel: () => this.model,
 				getScopedModels: () => this._scopedModels,
+				getModel: () => this.model,
 				isIdle: () => this.isIdle,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,
@@ -2966,13 +2872,6 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
-		// Recall discovery and exact restoration are available whenever the
-		// compaction subsystem is active (default-on).
-		if (this._hfHost) {
-			this._baseToolDefinitions.set("recall_search", createRecallSearchToolDefinition(this._hfHost));
-			this._baseToolDefinitions.set("recall_exact", createRecallExactToolDefinition(this._hfHost));
-		}
-
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
 			for (const [name, value] of options.flagValues) {
@@ -2995,7 +2894,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", ...(this._hfHost ? ["recall_search", "recall_exact"] : [])];
+			: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -3305,6 +3204,9 @@ export class AgentSession {
 		if (this.isStreaming) {
 			throw new Error("Wait for the current response to finish before navigating the session tree.");
 		}
+		if (this.isCompacting) {
+			throw new Error("Wait for compaction or branch summarization to finish before navigating the session tree.");
+		}
 
 		const oldLeafId = this.sessionManager.getLeafId();
 
@@ -3469,14 +3371,13 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			// Update branch-scoped ledger/snapshot state before exposing the new tree position.
+			// Rebuild from the newest checkpoint visible on the selected branch.
+			this._nextProviderContextChangeReason = "navigation";
 			const branchEntries = this.sessionManager.getBranch();
 			this._hfHost?.syncFromEntries(branchEntries);
 			const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = restoredProjection ?? sessionContext.messages;
-			this._refreshPinnedSystemPrompt();
-
 			// Emit session_tree event
 			await this._extensionRunner.emit({
 				type: "session_tree",

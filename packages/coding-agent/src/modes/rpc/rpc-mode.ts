@@ -538,21 +538,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "set_auto_compaction");
 			}
 
-			case "set_task_contract": {
-				const contract = session.setTaskContract({
-					goal: command.goal,
-					constraints: command.constraints,
-					permissions: command.permissions,
-					budgets: command.budgets,
-					outputContract: command.outputContract,
-				});
-				return success(id, "set_task_contract", { version: contract.version });
-			}
-
-			case "get_task_contract": {
-				return success(id, "get_task_contract", session.getTaskContract() ?? null);
-			}
-
 			// =================================================================
 			// Retry
 			// =================================================================

@@ -39,19 +39,24 @@ Files involved:
 ## Task
 [Clear description of what to do next based on user's goal]`;
 
-function entryToMessage(entry: SessionEntry): AgentMessage | undefined {
+function entryToMessages(entry: SessionEntry): AgentMessage[] {
 	if (entry.type === "message") {
-		return entry.message;
+		return [entry.message];
 	}
 	if (entry.type === "compaction") {
-		return {
-			role: "compactionSummary",
-			summary: entry.summary,
-			tokensBefore: entry.tokensBefore,
-			timestamp: new Date(entry.timestamp).getTime(),
-		};
+		if (entry.replacementHistory) return structuredClone(entry.replacementHistory);
+		if (entry.summary) {
+			return [
+				{
+					role: "compactionSummary",
+					summary: entry.summary,
+					tokensBefore: entry.tokensBefore,
+					timestamp: new Date(entry.timestamp).getTime(),
+				},
+			];
+		}
 	}
-	return undefined;
+	return [];
 }
 
 function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
@@ -63,10 +68,16 @@ function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
 		}
 	}
 	if (compactionIndex < 0) {
-		return branch.map(entryToMessage).filter((message) => message !== undefined);
+		return branch.flatMap(entryToMessages);
 	}
 
 	const compaction = branch[compactionIndex];
+	if (compaction.type === "compaction" && compaction.replacementHistory) {
+		return [
+			...structuredClone(compaction.replacementHistory),
+			...branch.slice(compactionIndex + 1).flatMap(entryToMessages),
+		];
+	}
 	const firstKeptIndex =
 		compaction.type === "compaction" ? branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId) : -1;
 	const compactedBranch = [
@@ -74,7 +85,7 @@ function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
 		...(firstKeptIndex >= 0 ? branch.slice(firstKeptIndex, compactionIndex) : []),
 		...branch.slice(compactionIndex + 1),
 	];
-	return compactedBranch.map(entryToMessage).filter((message) => message !== undefined);
+	return compactedBranch.flatMap(entryToMessages);
 }
 
 export default function (pi: ExtensionAPI) {

@@ -72,32 +72,4 @@ describe("AgentSession tool gateway wiring (T-012)", () => {
 		await harness.session.prompt("go");
 		expect(runs).toEqual([{ text: "mutated" }]);
 	});
-
-	it("a tool-ledger rejection blocks dispatch (no silent mirror)", async () => {
-		const runs: unknown[] = [];
-		const harness = await createHarness({ tools: [echoTool(runs)] });
-		harnesses.push(harness);
-		const host = harness.session.hfCompactionHost;
-		expect(host).toBeDefined();
-		// Pre-seed the ledger so the real dispatch collides on the same toolCallId.
-		host!.ledger.recordPlanned({
-			operationId: "op-preexisting",
-			toolCallId: "call-collide",
-			sideEffectClass: "none",
-			riskLevel: "low",
-			authority: { kind: "user", id: "local-user", verified: true },
-		});
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("echo", { text: "hello" }, { id: "call-collide" }), {
-				stopReason: "toolUse",
-			}),
-			fauxAssistantMessage("done"),
-		]);
-
-		await harness.session.prompt("go");
-		expect(runs).toHaveLength(0);
-		const toolResult = harness.session.messages.find((m) => m.role === "toolResult");
-		expect(toolResult?.isError).toBe(true);
-		expect(JSON.stringify(toolResult)).toMatch(/ledger/i);
-	});
 });

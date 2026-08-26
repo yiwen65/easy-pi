@@ -46,7 +46,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
 			// Tiny sessions cannot beat the production token-gain gate; disable it here.
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 		});
 	});
 
@@ -132,14 +132,24 @@ describe("AgentSession auto-compaction queue resume", () => {
 				_runAutoCompaction: (
 					reason: "overflow" | "threshold",
 					willRetry: boolean,
-					decision: { action: "soft_compact"; reasons: string[] },
+					decision: {
+						action: "compact";
+						reasons: string[];
+						triggerTokens: number;
+						overflowRecovery: boolean;
+					},
 				) => Promise<boolean>;
 			}
 		)._runAutoCompaction.bind(session);
 
-		await expect(runAutoCompaction("threshold", false, { action: "soft_compact", reasons: ["test"] })).resolves.toBe(
-			true,
-		);
+		await expect(
+			runAutoCompaction("threshold", false, {
+				action: "compact",
+				reasons: ["test"],
+				triggerTokens: 950,
+				overflowRecovery: false,
+			}),
+		).resolves.toBe(true);
 
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
@@ -312,14 +322,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 			errorAssistant,
 		];
 
-		const decision = { action: "soft_compact" as const, reasons: ["predicted request above soft limit"] };
+		const reasons = ["predicted request above soft limit"];
+		const decision = {
+			action: "compact" as const,
+			reasons,
+			triggerTokens: 950,
+			overflowRecovery: false,
+		};
 		vi.spyOn(session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
 			decision,
 			predictedNextRequestTokens: thresholdTokens,
 			tokenEstimateProvenance: "provider_projection",
-			recoverableToolTokens: 0,
-			compactionCooldownRemaining: 0,
-			incrementalCompactionsSinceRebuild: 0,
+			sameProviderContextAsLastCompaction: false,
 		});
 		const runAutoCompactionSpy = vi
 			.spyOn(

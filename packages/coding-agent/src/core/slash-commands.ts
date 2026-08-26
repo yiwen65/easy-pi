@@ -28,13 +28,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "session", description: "Show session info and stats" },
 	{
 		name: "context",
-		description: "Inspect the active compacted context projection",
+		description: "Inspect the active compaction checkpoint",
 		argumentHint: "[inspect [--full]]",
-	},
-	{
-		name: "contract",
-		description: "Show or manage the task contract and task ledger",
-		argumentHint: "[set <goal>|confirm|pending|reconcile|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
 	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },

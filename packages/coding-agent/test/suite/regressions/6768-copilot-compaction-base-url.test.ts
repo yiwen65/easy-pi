@@ -48,7 +48,7 @@ describe("issue #6768 Copilot compaction base URL", () => {
 
 	it("uses the auth-resolved base URL through the SDK-style stream wrapper", async () => {
 		harness = await createHarness({
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 		});
 		seedCompactableSession(harness);
 		const catalogModel = { ...harness.getModel(), baseUrl: INDIVIDUAL_BASE_URL };

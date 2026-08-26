@@ -154,8 +154,9 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 		const compaction = compactionEntries[0];
 		expect(compaction.type).toBe("compaction");
 		if (compaction.type === "compaction") {
-			expect(compaction.summary.length).toBeGreaterThan(0);
-			expect(typeof compaction.firstKeptEntryId).toBe("string");
+			expect(compaction.summary).toBeUndefined();
+			expect(compaction.firstKeptEntryId).toBeUndefined();
+			expect(compaction.replacementHistory?.length).toBeGreaterThan(0);
 			expect(compaction.tokensBefore).toBeGreaterThan(0);
 		}
 	}, 120000);
