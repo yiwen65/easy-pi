@@ -33,7 +33,7 @@ describe("pre-prompt compaction regression", () => {
 					pi.on("session_before_compact", async () => undefined);
 				},
 			],
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 		});
 		harnesses.push(harness);
 
@@ -54,8 +54,6 @@ describe("pre-prompt compaction regression", () => {
 		harness.sessionManager.appendMessage(lengthStopAssistant);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 		harness.setResponses([
-			fauxAssistantMessage("Distilled goal sentence."),
-			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("pre-prompt narrative"),
 			fauxAssistantMessage("answered next prompt"),
 		]);
@@ -70,8 +68,7 @@ describe("pre-prompt compaction regression", () => {
 		expect(ends.some((e) => e.reason === "overflow" && e.willRetry === true && !e.aborted)).toBe(true);
 		// The new prompt was sent and answered; its text may live in the compacted zone.
 		expect(harness.session.getLastAssistantText()).toBe("answered next prompt");
-		// Distillation + extraction + narrative, then the new prompt turn. The
-		// post-answer request is below the policy threshold after projection.
-		expect(harness.faux.state.callCount).toBe(4);
+		// One local compaction-item call, then the new prompt turn.
+		expect(harness.faux.state.callCount).toBe(2);
 	});
 });

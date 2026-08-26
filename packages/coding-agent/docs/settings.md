@@ -115,14 +115,14 @@ Set `PI_SKIP_VERSION_CHECK=1` to disable the Pi version update check. Use `--off
 |---------|------|---------|-------------|
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
-| `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.keepRecentTokens` | number | `8192` | Maximum tokens for retaining the latest complete user message beside the compaction item; also capped by the 5% compacted-history budget |
 
 ```json
 {
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "keepRecentTokens": 8192
   }
 }
 ```
@@ -315,7 +315,7 @@ See [packages.md](packages.md) for package management details.
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "keepRecentTokens": 8192
   },
   "retry": {
     "enabled": true,

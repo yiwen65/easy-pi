@@ -83,7 +83,7 @@ describe("#6647 compaction retries transient summarization failures", () => {
 	it("retries a transient `terminated` summarization error and compacts successfully", async () => {
 		const harness = await createHarness({
 			withConfiguredAuth: false,
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 		});
 		harnesses.push(harness);
 		seedCompactableSession(harness);
@@ -95,26 +95,17 @@ describe("#6647 compaction retries transient summarization failures", () => {
 			usage: createUsage(10),
 		});
 
-		const successJson: AssistantMessage = {
-			...fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
-			usage: createUsage(10),
-		};
-		const narrative: AssistantMessage = {
+		const recovered: AssistantMessage = {
 			...fauxAssistantMessage("recovered summary"),
 			usage: createUsage(10),
 		};
-		const getCallCount = useScriptedStreamFn(harness, [
-			error("terminated"),
-			error("terminated"),
-			successJson,
-			narrative,
-		]);
+		const getCallCount = useScriptedStreamFn(harness, [error("terminated"), error("terminated"), recovered]);
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toContain("[high-fidelity snapshot");
+		expect(result.summary).toContain("[compaction checkpoint created]");
 		expect(result.summary).toContain("recovered summary");
-		expect(getCallCount()).toBe(4); // 1 initial + 2 retries (extraction) + narrative
+		expect(getCallCount()).toBe(3); // 1 initial + 2 retries of the single compaction-item call
 		const starts = harness.eventsOfType("summarization_retry_scheduled");
 		const ends = harness.eventsOfType("summarization_retry_finished");
 		expect(starts).toHaveLength(2);

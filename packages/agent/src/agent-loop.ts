@@ -319,6 +319,15 @@ async function streamAssistantResponse(
 	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
 	const llmContext = await buildProviderContext(context, config, signal);
+	// transformContext may atomically activate a new compaction projection. Resolve
+	// the authoritative system layer afterwards so messages and directives switch
+	// at the same provider-request boundary.
+	llmContext.systemPrompt = resolveSystemPrompt(llmContext.systemPrompt ?? "", config);
+	try {
+		config.onProviderContext?.(config.model, llmContext);
+	} catch {
+		// Observability must never block or mutate a provider request.
+	}
 
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =

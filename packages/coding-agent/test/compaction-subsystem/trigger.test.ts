@@ -5,67 +5,62 @@ function base(partial: Partial<TriggerInput> = {}): TriggerInput {
 	return {
 		predictedNextRequestTokens: 1000,
 		modelContextLimit: 100000,
-		recoverableToolTokens: 0,
-		incrementalCompactionsSinceRebuild: 0,
 		...partial,
 	};
 }
 
 describe("evaluateTriggers", () => {
-	it("short sessions never trigger wasteful compaction", () => {
-		const r = evaluateTriggers(base());
-		expect(r.action).toBe("none");
-		expect(r.reasons).toEqual([]);
+	it("does not compact a short session", () => {
+		expect(evaluateTriggers(base())).toEqual({
+			action: "none",
+			reasons: [],
+			triggerTokens: 95000,
+			overflowRecovery: false,
+		});
 	});
 
-	it("soft compaction above 70% predicted next request", () => {
-		const r = evaluateTriggers(base({ predictedNextRequestTokens: 71000 }));
-		expect(r.action).toBe("soft_compact");
-		expect(r.reasons.some((x) => x.includes("70%"))).toBe(true);
+	it("selects the single compact action exactly at the 95% complete-request boundary", () => {
+		const decision = evaluateTriggers(base({ predictedNextRequestTokens: 95000 }));
+		expect(decision.action).toBe("compact");
+		expect(decision.triggerTokens).toBe(95000);
+		expect(decision.reasons[0]).toContain("95% limit");
+		expect(evaluateTriggers(base({ predictedNextRequestTokens: 94999 })).action).toBe("none");
 	});
 
-	it("hard compaction above 85% or after a call overflow", () => {
-		expect(evaluateTriggers(base({ predictedNextRequestTokens: 86000 })).action).toBe("hard_compact");
-		expect(evaluateTriggers(base({ predictedNextRequestTokens: 1000, previousCallOverflowed: true })).action).toBe(
-			"hard_compact",
-		);
+	it("supports one configurable trigger fraction without changing execution mode", () => {
+		const decision = evaluateTriggers(base({ predictedNextRequestTokens: 76000, triggerFraction: 0.75 }));
+		expect(decision).toMatchObject({ action: "compact", triggerTokens: 75000 });
+		expect(decision.reasons[0]).toContain("75% limit");
 	});
 
-	it("a single huge tool output triggers offload only", () => {
-		const r = evaluateTriggers(base({ recoverableToolTokens: 30000 }));
-		expect(r.action).toBe("offload_only");
-		expect(r.reasons.some((x) => x.includes("recoverable"))).toBe(true);
+	it("manual compaction uses the same action without defining a post-compaction target", () => {
+		expect(evaluateTriggers(base({ manual: true }))).toMatchObject({
+			action: "compact",
+			triggerTokens: 95000,
+			overflowRecovery: false,
+		});
 	});
 
-	it("offload_only is preferred when offloading alone clears the 70% threshold", () => {
-		const r = evaluateTriggers(base({ predictedNextRequestTokens: 75000, recoverableToolTokens: 10000 }));
-		expect(r.action).toBe("offload_only");
+	it("deduplicates the exact provider context already compacted", () => {
+		expect(
+			evaluateTriggers(base({ predictedNextRequestTokens: 100000, sameProviderContextAsLastCompaction: true })),
+		).toMatchObject({ action: "none", reasons: ["same provider context already compacted"] });
 	});
 
-	it("phase change and manual milestones trigger soft compaction", () => {
-		expect(evaluateTriggers(base({ phaseChanged: true })).action).toBe("soft_compact");
-		expect(evaluateTriggers(base({ manualMilestone: true })).action).toBe("soft_compact");
+	it("a changed provider context beyond the window uses the same compact action", () => {
+		expect(evaluateTriggers(base({ predictedNextRequestTokens: 110000 }))).toMatchObject({
+			action: "compact",
+			overflowRecovery: false,
+		});
 	});
 
-	it("full rebuild on incremental cap, drift, contradiction, or before high-risk irreversible actions", () => {
-		expect(evaluateTriggers(base({ incrementalCompactionsSinceRebuild: 8 })).action).toBe("full_rebuild");
-		expect(evaluateTriggers(base({ driftScore: 0.2 })).action).toBe("full_rebuild");
-		expect(evaluateTriggers(base({ hasCriticalContradiction: true })).action).toBe("full_rebuild");
-		expect(evaluateTriggers(base({ highRiskIrreversibleActionPending: true })).action).toBe("full_rebuild");
-	});
-
-	it("hysteresis: cooldown suppresses soft/offload churn near thresholds, but never hard/rebuild", () => {
-		const near = base({ predictedNextRequestTokens: 70500, compactionCooldownRemaining: 2 });
-		expect(evaluateTriggers(near).action).toBe("none");
-		const hard = base({ predictedNextRequestTokens: 90000, compactionCooldownRemaining: 2 });
-		expect(evaluateTriggers(hard).action).toBe("hard_compact");
-		const rebuild = base({ incrementalCompactionsSinceRebuild: 8, compactionCooldownRemaining: 2 });
-		expect(evaluateTriggers(rebuild).action).toBe("full_rebuild");
-	});
-
-	it("manual compact cannot bypass anything: it is just a soft trigger", () => {
-		const r = evaluateTriggers(base({ manualMilestone: true }));
-		expect(r.action).toBe("soft_compact");
-		// The validator still gates the candidate; the trigger only selects the mode.
+	it("overflow bypasses same-context deduplication and is marked as recovery", () => {
+		expect(
+			evaluateTriggers(base({ previousCallOverflowed: true, sameProviderContextAsLastCompaction: true })),
+		).toMatchObject({
+			action: "compact",
+			overflowRecovery: true,
+			reasons: ["previous call overflowed the context window"],
+		});
 	});
 });

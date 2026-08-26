@@ -271,6 +271,80 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedMessages.length).toBe(2);
 	});
 
+	it("observes the exact post-transform logical provider context", async () => {
+		const context: AgentContext = {
+			systemPrompt: "stale system prompt",
+			messages: [createUserMessage("old")],
+			tools: [],
+		};
+		const observed: Array<{
+			model: Model<any>;
+			context: Parameters<NonNullable<AgentLoopConfig["onProviderContext"]>>[1];
+		}> = [];
+		let streamedContext: Parameters<NonNullable<Parameters<typeof agentLoop>[4]>>[1] | undefined;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			transformContext: async (messages) => messages.slice(-1),
+			convertToLlm: identityConverter,
+			getSystemPrompt: () => "authoritative system prompt",
+			onProviderContext: (model, providerContext) => observed.push({ model, context: providerContext }),
+		};
+		const streamFn: NonNullable<Parameters<typeof agentLoop>[4]> = (_model, providerContext) => {
+			streamedContext = providerContext;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "Response" }]),
+				});
+			});
+			return stream;
+		};
+
+		await agentLoop([createUserMessage("new")], context, config, undefined, streamFn).result();
+
+		expect(observed).toHaveLength(1);
+		expect(observed[0]?.model).toBe(config.model);
+		expect(observed[0]?.context).toBe(streamedContext);
+		expect(observed[0]?.context.systemPrompt).toBe("authoritative system prompt");
+		expect(observed[0]?.context.messages).toHaveLength(1);
+		expect(observed[0]?.context.messages[0]).toMatchObject({ role: "user", content: "new" });
+	});
+
+	it("does not block the provider request when context observation fails", async () => {
+		let providerCalls = 0;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onProviderContext: () => {
+				throw new Error("diagnostic failure");
+			},
+		};
+		const streamFn: NonNullable<Parameters<typeof agentLoop>[4]> = () => {
+			providerCalls++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "Response" }]),
+				});
+			});
+			return stream;
+		};
+
+		await agentLoop(
+			[createUserMessage("new")],
+			{ systemPrompt: "", messages: [], tools: [] },
+			config,
+			undefined,
+			streamFn,
+		).result();
+
+		expect(providerCalls).toBe(1);
+	});
+
 	it("should handle tool calls and results", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];

@@ -83,7 +83,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { createCompactionSummaryMessage } from "../../core/messages.ts";
+import { type CompactionSummaryMessage, createCompactionSummaryMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -229,6 +229,17 @@ function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionE
 function isCompactionCostNotice(item: RenderSessionItem): item is CompactionCostNotice {
 	return "type" in item && item.type === "compaction_cost";
 }
+
+function findCheckpointHandoff(
+	entry: Extract<SessionEntry, { type: "compaction" }>,
+): CompactionSummaryMessage | undefined {
+	for (let index = (entry.replacementHistory?.length ?? 0) - 1; index >= 0; index--) {
+		const message = entry.replacementHistory?.[index];
+		if (message?.role === "compactionSummary") return message;
+	}
+	return undefined;
+}
+
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
@@ -3133,11 +3144,6 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/contract" || text.startsWith("/contract ")) {
-				this.handleContractCommand(text);
-				this.editor.setText("");
-				return;
-			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
 				this.editor.setText("");
@@ -3524,15 +3530,14 @@ export class InteractiveMode {
 					}
 				} else if (event.result) {
 					const entries = this.sessionManager.buildContextEntries();
-					if (entries[0]?.type === "compaction") {
+					if (entries[0]?.type === "compaction" && !Array.isArray(entries[0].replacementHistory)) {
 						this.chatContainer.clear();
 						// Legacy compaction prepends its summary for model context; append it
 						// below at its chronological position instead.
 						this.renderSessionEntries(entries.slice(1));
 					}
-					// HF compaction activates a snapshot without persisting a legacy
-					// CompactionEntry. Preserve the existing transcript in that case and
-					// append the successful summary instead of treating it as corruption.
+					// A modern replacement checkpoint changes provider context only. Keep
+					// the user-visible transcript and append its successful summary.
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
 							event.result.summary,
@@ -3870,7 +3875,8 @@ export class InteractiveMode {
 			if (entry.type === "custom") {
 				return [entry];
 			}
-			const messages = sessionEntryToContextMessages(entry);
+			const checkpointHandoff = entry.type === "compaction" ? findCheckpointHandoff(entry) : undefined;
+			const messages = checkpointHandoff ? [checkpointHandoff] : sessionEntryToContextMessages(entry);
 			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
 				return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
 			}
@@ -3926,7 +3932,7 @@ export class InteractiveMode {
 	}
 
 	renderInitialMessages(): void {
-		const entries = this.sessionManager.buildContextEntries();
+		const entries = this.sessionManager.buildTranscriptEntries();
 		this.renderSessionEntries(entries, {
 			updateFooter: true,
 			populateHistory: true,
@@ -3978,7 +3984,7 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.renderSessionEntries(this.sessionManager.buildTranscriptEntries());
 	}
 
 	// =========================================================================
@@ -6315,7 +6321,7 @@ export class InteractiveMode {
 		}
 		const inspection = host.inspectActiveContext({ includeSystemPrompt: full });
 		if (!inspection) {
-			this.showWarning("No active compacted context snapshot");
+			this.showWarning("No active compaction checkpoint");
 			return;
 		}
 		const cleanInspectionText = (value: string) => sanitizeBinaryOutput(stripAnsi(value)).replace(/\r/g, "");
@@ -6323,24 +6329,28 @@ export class InteractiveMode {
 		const lines = [
 			theme.bold("Compacted Context"),
 			`${theme.fg("dim", "Mode:")} ${inspection.mode}`,
-			`${theme.fg("dim", "Snapshot:")} v${inspection.snapshotVersion}`,
-			`${theme.fg("dim", "Projection kind:")} ${inspection.projectionKind}`,
-			`${theme.fg("dim", "Coverage:")} events 1-${inspection.baseEventSeq}`,
-			`${theme.fg("dim", "Trigger event:")} ${inspection.triggerEventSeq ?? "None"}`,
-			`${theme.fg("dim", "Tail events:")} ${inspection.tailEventCount}`,
-			`${theme.fg("dim", "Recall refs:")} ${inspection.recallEntries.length}`,
+			`${theme.fg("dim", "Checkpoint entry:")} ${inspection.checkpointEntryId}`,
+			`${theme.fg("dim", "Replacement messages:")} ${inspection.replacementMessageCount}`,
+			`${theme.fg("dim", "Messages after checkpoint:")} ${inspection.tailMessageCount}`,
 			`${theme.fg("dim", "Current projected tokens:")} ${inspection.tokenStats.total.toLocaleString()}`,
-			"",
-			theme.bold("Zone tokens"),
 		];
+		if (inspection.providerContext) {
+			lines.push(
+				`${theme.fg("dim", "Last provider context:")} ${inspection.providerContext.fullHash.slice(0, 16)}`,
+				`${theme.fg("dim", "Context change reason:")} ${inspection.providerContext.reason}`,
+				`${theme.fg("dim", "Historical prefix preserved:")} ${inspection.providerContext.prefixPreserved ? "yes" : "no"}`,
+			);
+			if (inspection.providerContext.firstDifference) {
+				lines.push(`${theme.fg("dim", "First logical difference:")} ${inspection.providerContext.firstDifference}`);
+			}
+		}
+		lines.push("", theme.bold("Zone tokens"));
 		for (const [zone, tokens] of [
 			["system", inspection.tokenStats.system],
 			["tools", inspection.tokenStats.tools],
-			["contract", inspection.tokenStats.contract],
-			["snapshot", inspection.tokenStats.snapshot],
-			["narrative", inspection.tokenStats.narrative],
-			["recall", inspection.tokenStats.recall],
-			["recentTail", inspection.tokenStats.recentTail],
+			["compaction item", inspection.tokenStats.compactionItem],
+			["recentUsers", inspection.tokenStats.recentUsers],
+			["postCheckpointHistory", inspection.tokenStats.postCheckpointHistory],
 			["currentInput", inspection.tokenStats.currentInput],
 			["outputReserve", inspection.tokenStats.outputReserve],
 		] as const) {
@@ -6348,8 +6358,9 @@ export class InteractiveMode {
 		}
 
 		if (inspect) {
-			lines.push("", theme.bold("Current compacted projection"));
+			lines.push("", theme.bold("Replacement history checkpoint"));
 			lines.push(theme.fg("dim", "No pending user input; this is not a byte-exact provider request."));
+			lines.push(cleanInspectionText(JSON.stringify(inspection.checkpointMessages, null, 2)));
 			if (full) {
 				lines.push(theme.fg("warning", "Sensitive diagnostic view: system prompt and active tool schemas follow."));
 				if (inspection.systemPrompt) {
@@ -6364,291 +6375,13 @@ export class InteractiveMode {
 				lines.push("", theme.bold(`[tools] ${inspection.toolsTokenEstimate.toLocaleString()} tokens`));
 				lines.push(cleanInspectionText(JSON.stringify(tools, null, 2)));
 			}
-			for (const section of inspection.sections) {
-				lines.push("", theme.bold(`[${section.zone}] ${section.tokens.toLocaleString()} tokens`));
-				lines.push(cleanInspectionText(section.text));
-			}
-			lines.push("", theme.bold("Recall catalog"));
-			if (inspection.recallEntries.length === 0) {
-				lines.push(theme.fg("dim", "None"));
-			} else {
-				for (const entry of inspection.recallEntries) {
-					lines.push(`${entry.refId} [${entry.kind}]: ${cleanInspectionText(entry.preview).replace(/\n/g, " ")}`);
-				}
-			}
 		} else {
-			lines.push("", theme.fg("dim", "Run /context inspect to view projection zones."));
+			lines.push("", theme.fg("dim", "Run /context inspect to view replacement history."));
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
 		this.ui.requestRender();
-	}
-
-	private handleContractCommand(text: string): void {
-		const args = text.slice("/contract".length).trim();
-		if (!args) {
-			this.showTaskContract();
-			return;
-		}
-
-		const separator = args.search(/\s/);
-		const action = separator === -1 ? args : args.slice(0, separator);
-		const remainder = separator === -1 ? "" : args.slice(separator).trim();
-
-		if (action === "pending" && !remainder) {
-			this.showPendingGoalChanges();
-			return;
-		}
-
-		if (action === "reconcile" && !remainder) {
-			if (!this.canMutateTaskContract()) return;
-			this.showStatus("Reconciling task contract...");
-			void this.session
-				.reconcileTaskContract()
-				.then((report) => this.showReconciliationReport(report))
-				.catch((error) => this.showError(error instanceof Error ? error.message : String(error)));
-			return;
-		}
-
-		if (action === "set") {
-			if (!remainder) {
-				this.showError("Usage: /contract set <goal>");
-				return;
-			}
-			if (!this.canMutateTaskContract()) return;
-			try {
-				const task = this.session.setCurrentTaskGoal(remainder);
-				this.showStatus(`Focus task ${task.taskId} updated to v${task.version}`);
-			} catch (error) {
-				this.showError(error instanceof Error ? error.message : String(error));
-			}
-			return;
-		}
-
-		if (action === "confirm" && !remainder) {
-			if (!this.canMutateTaskContract()) return;
-			try {
-				this.session.confirmDerivedGoal();
-				this.showStatus("Derived goal confirmed");
-			} catch (error) {
-				this.showError(error instanceof Error ? error.message : String(error));
-			}
-			return;
-		}
-
-		if (action === "accept") {
-			const commandArgs = remainder ? remainder.split(/\s+/) : [];
-			if (commandArgs.length < 1 || commandArgs.length > 2) {
-				this.showError("Usage: /contract accept <number-or-P-id> [task-id]");
-				return;
-			}
-			if (!this.canMutateTaskContract()) return;
-			try {
-				const pendingChangeId = this.resolvePendingGoalChangeSelector(commandArgs[0]!);
-				const candidateTaskId = commandArgs[1];
-				if (candidateTaskId) {
-					this.session.acceptPendingGoalChange(pendingChangeId, candidateTaskId);
-				} else {
-					this.session.acceptPendingGoalChange(pendingChangeId);
-				}
-				this.showStatus(`Accepted pending goal change ${pendingChangeId}`);
-			} catch (error) {
-				// In particular, preserve the ledger's ambiguity error when no candidate was supplied.
-				this.showError(error instanceof Error ? error.message : String(error));
-			}
-			return;
-		}
-
-		if (action === "reject") {
-			const commandArgs = remainder ? remainder.split(/\s+/) : [];
-			if (commandArgs.length !== 1) {
-				this.showError("Usage: /contract reject <number-or-P-id>");
-				return;
-			}
-			if (!this.canMutateTaskContract()) return;
-			try {
-				const pendingChangeId = this.resolvePendingGoalChangeSelector(commandArgs[0]!);
-				this.session.rejectPendingGoalChange(pendingChangeId);
-				this.showStatus(`Rejected pending goal change ${pendingChangeId}`);
-			} catch (error) {
-				this.showError(error instanceof Error ? error.message : String(error));
-			}
-			return;
-		}
-
-		this.showError(
-			"Usage: /contract [set <goal>|confirm|pending|reconcile|accept <number-or-P-id> [task-id]|reject <number-or-P-id>]",
-		);
-	}
-
-	private canMutateTaskContract(): boolean {
-		if (this.session.isCompacting) {
-			this.showWarning("Wait for compaction to finish before changing the task contract.");
-			return false;
-		}
-		if (!this.session.isIdle) {
-			this.showWarning("Wait for the current response to finish before changing the task contract.");
-			return false;
-		}
-		return true;
-	}
-
-	private resolvePendingGoalChangeSelector(selector: string): string {
-		if (/^P\d+$/.test(selector)) return selector;
-		if (!/^\d+$/.test(selector)) {
-			throw new Error(`Invalid pending goal change selector ${selector}`);
-		}
-
-		const position = Number(selector);
-		const pending = this.session.getTaskLedgerState().pending[position - 1];
-		if (!Number.isSafeInteger(position) || position < 1 || !pending) {
-			throw new Error(`No pending goal change at position ${selector}`);
-		}
-		return pending.pendingChangeId;
-	}
-
-	private formatPendingGoalChanges(pending: ReturnType<AgentSession["getTaskLedgerState"]>["pending"]): string[] {
-		if (pending.length === 0) return [theme.fg("dim", "None")];
-		return pending.flatMap((change, index) => {
-			const ambiguity = change.ambiguous ? " [ambiguous]" : "";
-			const candidates = change.candidateTaskIds.length > 0 ? change.candidateTaskIds.join(", ") : "None";
-			const operations =
-				change.operations.length > 0
-					? change.operations
-							.map((operation) => {
-								const taskId = operation.taskId ?? operation.parentTaskId;
-								return taskId ? `${operation.operation} ${taskId}` : operation.operation;
-							})
-							.join(", ")
-					: "None";
-			return [
-				`${index + 1}. ${change.pendingChangeId}${ambiguity}: ${change.reason}`,
-				theme.fg("dim", `   Candidates: ${candidates}`),
-				theme.fg("dim", `   Operations: ${operations}`),
-			];
-		});
-	}
-
-	private showPendingGoalChanges(): void {
-		try {
-			const { pending } = this.session.getTaskLedgerState();
-			const lines = [theme.bold("Pending Goal Changes"), ...this.formatPendingGoalChanges(pending)];
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
-			this.ui.requestRender();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
-	}
-
-	private formatReconciliationReport(
-		report: NonNullable<ReturnType<AgentSession["getLatestTaskReconciliation"]>>,
-	): string[] {
-		const lines = [
-			theme.bold("Task Contract Reconciliation"),
-			`${theme.fg("dim", "Report:")} ${report.reportId}`,
-			`${theme.fg("dim", "Branch:")} ${report.branchId ?? "None"}`,
-			`${theme.fg("dim", "Task:")} ${report.taskRef ?? "None"}`,
-			`${theme.fg("dim", "Event range:")} ${report.fromEventSeq}-${report.toEventSeq}`,
-			`${theme.fg("dim", "Findings:")} ${report.findings.length}`,
-		];
-		if (report.findings.length === 0) lines.push("  Clean");
-		for (const finding of report.findings) {
-			lines.push(`  - ${finding.findingId} [${finding.severity}] ${finding.kind}: ${finding.message}`);
-			if (finding.sourceEventIds.length > 0) {
-				lines.push(theme.fg("dim", `    Sources: ${finding.sourceEventIds.join(", ")}`));
-			}
-			if (finding.suggestedOperations.length > 0) {
-				lines.push(
-					theme.fg(
-						"dim",
-						`    Suggestions: ${finding.suggestedOperations.map((operation) => operation.operation).join(", ")}`,
-					),
-				);
-			}
-		}
-		return lines;
-	}
-
-	private showReconciliationReport(
-		report: NonNullable<ReturnType<AgentSession["getLatestTaskReconciliation"]>>,
-	): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(this.formatReconciliationReport(report).join("\n"), 1, 0));
-		this.ui.requestRender();
-	}
-
-	private showTaskContract(): void {
-		try {
-			const contract = this.session.getTaskContract();
-			const ledger = this.session.getTaskLedgerState();
-			const reconciliation = this.session.getLatestTaskReconciliation();
-			const lines = [theme.bold("Task Contract")];
-
-			if (!contract) {
-				lines.push(`${theme.fg("dim", "Authoritative contract:")} None`);
-				lines.push(`${theme.fg("dim", "Derived goal:")} None`);
-			} else {
-				lines.push(`${theme.fg("dim", "ID:")} ${contract.contractId}`);
-				lines.push(`${theme.fg("dim", "Contract version:")} ${contract.version}`);
-				lines.push(`${theme.fg("dim", "Global contract goal (legacy, non-authoritative):")} ${contract.goal}`);
-				lines.push(`${theme.fg("dim", "Derived goal:")} ${contract.derivedGoal?.text ?? "None"}`);
-				lines.push(`${theme.fg("dim", "Acceptance criteria:")} ${contract.acceptanceCriteria.length}`);
-				for (const criterion of contract.acceptanceCriteria) lines.push(`  - ${criterion}`);
-				lines.push(`${theme.fg("dim", "Constraints:")} ${contract.constraints.length}`);
-				for (const constraint of contract.constraints) {
-					lines.push(`  - [${constraint.kind}] ${constraint.text}`);
-				}
-				lines.push(
-					`${theme.fg("dim", "Permissions:")} allow=${contract.permissions.allow.join(", ") || "None"}; deny=${contract.permissions.deny.join(", ") || "None"}; approval=${contract.permissions.approvalRequired.join(", ") || "None"}`,
-				);
-				const budgets = Object.entries(contract.budgets)
-					.map(([name, value]) => `${name}=${value}`)
-					.join(", ");
-				lines.push(`${theme.fg("dim", "Budgets:")} ${budgets || "None"}`);
-				lines.push(`${theme.fg("dim", "Output contract:")} ${contract.outputContract ?? "None"}`);
-			}
-
-			const openTasks = ledger.tasks.filter(
-				(task) => !["completed", "cancelled", "superseded"].includes(task.status),
-			);
-			const focusTask = ledger.tasks.find((task) => task.taskId === ledger.focusTaskId);
-			lines.push("");
-			lines.push(theme.bold("Task Ledger"));
-			lines.push(`${theme.fg("dim", "Ledger version:")} ${ledger.ledgerVersion}`);
-			lines.push(
-				`${theme.fg("dim", "Focus task:")} ${
-					focusTask
-						? `${focusTask.taskId} [${focusTask.status}] ${focusTask.goal.normalized}`
-						: (ledger.focusTaskId ?? "None")
-				}`,
-			);
-			lines.push(theme.fg("dim", "Open tasks:"));
-			if (openTasks.length === 0) {
-				lines.push("  None");
-			} else {
-				for (const task of openTasks) {
-					lines.push(`  - ${task.taskId} [${task.status}] ${task.goal.normalized}`);
-				}
-			}
-			lines.push(theme.fg("dim", "Pending goal changes:"));
-			lines.push(...this.formatPendingGoalChanges(ledger.pending).map((line) => `  ${line}`));
-			lines.push("");
-			lines.push(theme.bold("Reconciliation"));
-			lines.push(`${theme.fg("dim", "Branch: ")}${ledger.branchId ?? "None"}`);
-			lines.push(
-				reconciliation
-					? `${reconciliation.reportId}: ${reconciliation.findings.length} finding(s)`
-					: theme.fg("dim", "Not run on this branch"),
-			);
-
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
-			this.ui.requestRender();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
 	}
 
 	private handleChangelogCommand(): void {

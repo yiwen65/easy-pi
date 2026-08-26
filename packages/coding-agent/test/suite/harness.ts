@@ -189,9 +189,6 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const hfCompaction: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] } = {
 		...options.hfCompaction,
 		mode: hfMode,
-		goalComplete:
-			options.hfCompaction?.goalComplete ??
-			(async () => ({ text: JSON.stringify({ operations: [] }), stopReason: "stop" })),
 	};
 	const session = new AgentSession({
 		agent,

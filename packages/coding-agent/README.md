@@ -271,13 +271,13 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 
 ### Compaction
 
-Long sessions can exhaust context windows. Compaction bounds the active context through a high-fidelity subsystem: raw history stays append-only, large tool results offload to content-addressed storage with exact recall, and validated typed snapshots replace verified state — never free-text summaries.
+Long sessions can exhaust context windows. Pi uses one local Codex-style handoff path for every provider: it appends a compaction trigger to the current canonical provider prefix, generates one textual item, retains bounded recent user messages, and stores the replacement history in the main append-only session JSONL. Custom `/compact` instructions are added to the local trigger.
 
 **Manual:** `/compact` or `/compact <custom instructions>`
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-The full history remains append-only in the JSONL file; use `/tree` to revisit, and `recall_exact(ref)` restores offloaded content byte-exact. Task/tool ledgers and activated snapshots follow the current tree branch by ancestry, so sibling branches restore independently. `/contract` shows the focused task ledger and latest reconciliation status; `/contract reconcile` runs a read-only semantic check of recent verified-user requirements and displays evidence/suggestions without applying them. Extensions can observe or cancel compaction via `session_before_compact`; free-text custom summaries are deprecated. See [docs/compaction.md](docs/compaction.md) for internals.
+The original entries remain in the same JSONL file for `/tree`, export, audit, and recovery, but they are not available through a recall tool. Resume and branch navigation rebuild the active context from the newest branch-visible checkpoint plus entries appended after it. The current system prompt and tool schemas are regenerated on every provider turn rather than frozen into the checkpoint. `/context inspect` shows the replacement history; add `--full` only for current system/tool diagnostics. Extensions can observe or cancel compaction via `session_before_compact`; extension-provided free-text summaries remain deprecated. See [docs/compaction.md](docs/compaction.md) for internals.
 
 ---
 

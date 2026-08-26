@@ -33,6 +33,7 @@ import {
 	getHfCompactionModeFromEnv,
 	type HfCompactionConfig,
 } from "../src/core/compaction/subsystem/session-integration.ts";
+import { convertToLlm } from "../src/core/messages.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -388,6 +389,7 @@ async function createHarnessWithResourceLoader(
 
 	const agent = new Agent({
 		getApiKey: () => "faux-key",
+		convertToLlm,
 		initialState: {
 			model,
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
@@ -429,16 +431,6 @@ async function createHarnessWithResourceLoader(
 	const hfCompaction: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] } = {
 		...options.hfCompaction,
 		mode: hfMode,
-		// Goal interpretation is a separate compactor call. Keep general harness
-		// response queues stable unless a test explicitly opts into that flow.
-		goalComplete:
-			options.hfCompaction?.goalComplete ??
-			(async () => ({ text: JSON.stringify({ operations: [] }), stopReason: "stop" })),
-		// Periodic reconciliation is a second independent internal call. General
-		// harnesses return a clean report unless a target test opts into findings.
-		reconcileComplete:
-			options.hfCompaction?.reconcileComplete ??
-			(async () => ({ text: JSON.stringify({ findings: [] }), stopReason: "stop" })),
 	};
 	const session = new AgentSession({
 		agent,

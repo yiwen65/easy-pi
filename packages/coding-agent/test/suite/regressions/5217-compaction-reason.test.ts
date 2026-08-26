@@ -3,7 +3,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
-const DECISION = { action: "soft_compact" as const, reasons: ["test"] };
+const DECISION = {
+	action: "compact" as const,
+	reasons: ["test"],
+	triggerTokens: 950,
+	overflowRecovery: false,
+};
 
 type SessionWithCompactionInternals = {
 	_runAutoCompaction: (
@@ -44,14 +49,13 @@ async function createCompactionHarness(recorded: RecordedCompactionEvent[]): Pro
 		extensionFactories: [recordingExtension(recorded)],
 		// Tiny wiring sessions can never beat the token-gain gate (snapshot zone
 		// overhead exceeds savings at this scale); disable it explicitly here.
-		hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+		hfCompaction: { mode: "full_pipeline" },
 	});
 	harness.setResponses([
-		fauxAssistantMessage("one"),
-		fauxAssistantMessage("two"),
-		// Subsystem compactor calls (extraction JSON, then narrative text).
+		fauxAssistantMessage("one ".repeat(200)),
+		fauxAssistantMessage("two ".repeat(200)),
+		// Single-pass compaction item.
 		fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
-		fauxAssistantMessage("narrative"),
 	]);
 	await harness.session.prompt("first");
 	await harness.session.prompt("second");

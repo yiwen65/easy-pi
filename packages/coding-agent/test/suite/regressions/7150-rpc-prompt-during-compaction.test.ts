@@ -32,7 +32,7 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 					});
 				},
 			],
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 		});
 		harnesses.push(harness);
 
@@ -43,11 +43,10 @@ describe("issue #7150: RPC prompt during manual compaction", () => {
 			timestamp: timestamp - 1000,
 		});
 		harness.sessionManager.appendMessage(
-			fauxAssistantMessage("old assistant response", { timestamp: timestamp - 500 }),
+			fauxAssistantMessage("old assistant response ".repeat(200), { timestamp: timestamp - 500 }),
 		);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 		harness.setResponses([
-			fauxAssistantMessage("Distilled goal sentence."),
 			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("manual narrative"),
 			fauxAssistantMessage("probe response"), // unused: the probe prompt must be rejected

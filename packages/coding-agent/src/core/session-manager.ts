@@ -68,9 +68,20 @@ export interface ModelChangeEntry extends SessionEntryBase {
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
-	summary: string;
-	firstKeptEntryId: string;
+	/** Legacy summary-only checkpoint field. Modern checkpoints store replacementHistory. */
+	summary?: string;
+	/** Legacy retained-tail boundary. Modern checkpoints store replacementHistory. */
+	firstKeptEntryId?: string;
 	tokensBefore: number;
+	/**
+	 * Complete active message checkpoint produced by modern compaction.
+	 *
+	 * When present, this replaces every context-visible entry through this
+	 * compaction entry. Entries appended after the checkpoint are replayed on
+	 * top. Older entries remain in the append-only session log for navigation,
+	 * audit, and legacy readers, but are not sent to the model.
+	 */
+	replacementHistory?: AgentMessage[];
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** Usage from the LLM call(s) that generated this summary, if available */
@@ -401,7 +412,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
 	}
-	if (entry.type === "compaction") {
+	if (entry.type === "compaction" && entry.summary) {
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
 	return [];
@@ -442,7 +453,7 @@ export function buildContextEntries(
 	let foundFirstKept = false;
 	for (let i = 0; i < compactionIdx; i++) {
 		const entry = path[i];
-		if (entry.id === compaction.firstKeptEntryId) {
+		if (compaction.firstKeptEntryId && entry.id === compaction.firstKeptEntryId) {
 			foundFirstKept = true;
 		}
 		if (foundFirstKept) {
@@ -451,6 +462,46 @@ export function buildContextEntries(
 	}
 	contextEntries.push(...path.slice(compactionIdx + 1));
 	return contextEntries;
+}
+
+/**
+ * Build the branch entries shown in the interactive transcript.
+ *
+ * Modern replacement-history checkpoints only change provider context. They
+ * remain transparent to the transcript so compaction cannot erase visible
+ * session history. Legacy summary checkpoints retain their historical display
+ * behavior and replace the older transcript prefix with their summary + tail.
+ */
+export function buildTranscriptEntries(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	byId?: Map<string, SessionEntry>,
+): SessionEntry[] {
+	const path = buildSessionPath(entries, leafId, byId);
+	let legacyCompaction: CompactionEntry | undefined;
+
+	for (const entry of path) {
+		if (entry.type === "compaction" && !Array.isArray(entry.replacementHistory)) {
+			legacyCompaction = entry;
+		}
+	}
+
+	if (!legacyCompaction) return path;
+
+	const compactionIdx = path.findIndex((entry) => entry.id === legacyCompaction.id);
+	if (compactionIdx < 0) return path;
+
+	const transcriptEntries: SessionEntry[] = [legacyCompaction];
+	let foundFirstKept = false;
+	for (let index = 0; index < compactionIdx; index++) {
+		const entry = path[index];
+		if (legacyCompaction.firstKeptEntryId && entry.id === legacyCompaction.firstKeptEntryId) {
+			foundFirstKept = true;
+		}
+		if (foundFirstKept) transcriptEntries.push(entry);
+	}
+	transcriptEntries.push(...path.slice(compactionIdx + 1));
+	return transcriptEntries;
 }
 
 /**
@@ -465,6 +516,23 @@ export function buildSessionContext(
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
+	let checkpointIndex = -1;
+	let replacementHistory: AgentMessage[] | undefined;
+	for (let index = path.length - 1; index >= 0; index--) {
+		const entry = path[index];
+		if (entry.type === "compaction" && Array.isArray(entry.replacementHistory)) {
+			checkpointIndex = index;
+			replacementHistory = entry.replacementHistory;
+			break;
+		}
+	}
+	if (replacementHistory) {
+		return {
+			messages: [...replacementHistory, ...path.slice(checkpointIndex + 1).flatMap(sessionEntryToContextMessages)],
+			thinkingLevel,
+			model,
+		};
+	}
 	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
 	return { messages, thinkingLevel, model };
 }
@@ -655,11 +723,13 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 	}
 }
 
-function isMessageWithContent(message: AgentMessage): message is Message {
-	return typeof (message as Message).role === "string" && "content" in message;
+type MessageWithContent = Exclude<Message, { role: "compaction" }>;
+
+function isMessageWithContent(message: AgentMessage): message is MessageWithContent {
+	return "content" in message;
 }
 
-function extractTextContent(message: Message): string {
+function extractTextContent(message: MessageWithContent): string {
 	const content = message.content;
 	if (typeof content === "string") {
 		return content;
@@ -1101,6 +1171,7 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		usage?: Usage,
+		replacementHistory?: AgentMessage[],
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1113,6 +1184,22 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
+			replacementHistory,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a modern replacement checkpoint without legacy summary/tail fields. */
+	appendCompactionCheckpoint(replacementHistory: AgentMessage[], tokensBefore: number, usage?: Usage): string {
+		const entry: CompactionEntry = {
+			type: "compaction",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			tokensBefore,
+			replacementHistory: structuredClone(replacementHistory),
+			usage,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1270,11 +1357,17 @@ export class SessionManager {
 	}
 
 	/**
-	 * Build the active, compaction-aware entry list for context/rendering.
+	 * Build the active, compaction-aware entry list for provider context.
+	 * Use buildTranscriptEntries() for user-visible history.
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
 		return buildContextEntries(this.getEntries(), this.leafId, this.byId);
+	}
+
+	/** Build the current branch for user-visible transcript rendering. */
+	buildTranscriptEntries(): SessionEntry[] {
+		return buildTranscriptEntries(this.getEntries(), this.leafId, this.byId);
 	}
 
 	/**

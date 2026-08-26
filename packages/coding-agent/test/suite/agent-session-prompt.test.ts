@@ -452,7 +452,7 @@ describe("AgentSession prompt characterization", () => {
 		});
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 100 } },
-			hfCompaction: { mode: "full_pipeline", minTokenGainFraction: -1 },
+			hfCompaction: { mode: "full_pipeline" },
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async () => {
@@ -467,7 +467,6 @@ describe("AgentSession prompt characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage("one"),
 			fauxAssistantMessage("two"),
-			fauxAssistantMessage(JSON.stringify({ facts: [], decisions: [], nextActions: [] })),
 			fauxAssistantMessage("manual narrative"),
 		]);
 		await harness.session.prompt("first");

@@ -152,7 +152,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const afterEvent = compactEvents[0];
 		expect(afterEvent.compactionEntry).toBeDefined();
-		expect(afterEvent.compactionEntry.summary.length).toBeGreaterThan(0);
+		expect(afterEvent.compactionEntry.summary).toBeUndefined();
+		expect(afterEvent.compactionEntry.replacementHistory?.length).toBeGreaterThan(0);
 		expect(afterEvent.compactionEntry.tokensBefore).toBeGreaterThanOrEqual(0);
 		expect(afterEvent.fromExtension).toBe(false);
 	}, 120000);

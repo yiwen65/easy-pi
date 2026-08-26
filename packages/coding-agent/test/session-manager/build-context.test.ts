@@ -3,6 +3,7 @@ import {
 	type BranchSummaryEntry,
 	buildContextEntries,
 	buildSessionContext,
+	buildTranscriptEntries,
 	type CompactionEntry,
 	type CustomEntry,
 	type ModelChangeEntry,
@@ -124,6 +125,117 @@ describe("buildSessionContext", () => {
 	});
 
 	describe("with compaction", () => {
+		it("reconstructs a replacement-history checkpoint before later entries", () => {
+			const checkpoint: CompactionEntry = {
+				...compaction("5", "4", "Checkpoint handoff", ""),
+				replacementHistory: [
+					{ role: "user", content: "most recent durable instruction", timestamp: 10 },
+					{
+						role: "compactionSummary",
+						summary: "Checkpoint handoff",
+						tokensBefore: 1_000,
+						timestamp: 11,
+					},
+				],
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "discarded user"),
+				msg("2", "1", "assistant", "discarded assistant"),
+				msg("3", "2", "user", "most recent durable instruction"),
+				msg("4", "3", "assistant", "discarded tool-era response"),
+				checkpoint,
+				msg("6", "5", "user", "new goal after checkpoint"),
+			];
+
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.messages.map((message) => message.role)).toEqual(["user", "compactionSummary", "user"]);
+			expect(ctx.messages[0]).toMatchObject({ content: "most recent durable instruction" });
+			expect(ctx.messages[2]).toMatchObject({ content: "new goal after checkpoint" });
+		});
+
+		it("keeps modern replacement checkpoints transparent to transcript history", () => {
+			const checkpoint: CompactionEntry = {
+				...compaction("5", "4", "", ""),
+				summary: undefined,
+				firstKeptEntryId: undefined,
+				replacementHistory: [
+					{ role: "compactionSummary", summary: "Checkpoint handoff", tokensBefore: 1_000, timestamp: 10 },
+				],
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "visible user"),
+				msg("2", "1", "assistant", "visible assistant"),
+				msg("3", "2", "user", "latest goal"),
+				msg("4", "3", "assistant", "latest answer"),
+				checkpoint,
+				msg("6", "5", "user", "after checkpoint"),
+			];
+
+			expect(buildTranscriptEntries(entries).map((entry) => entry.id)).toEqual(["1", "2", "3", "4", "5", "6"]);
+			expect(buildSessionContext(entries).messages.map((message) => message.role)).toEqual([
+				"compactionSummary",
+				"user",
+			]);
+		});
+
+		it("preserves legacy transcript truncation before a modern checkpoint", () => {
+			const checkpoint: CompactionEntry = {
+				type: "compaction",
+				id: "7",
+				parentId: "6",
+				timestamp: "2025-01-01T00:00:00Z",
+				tokensBefore: 800,
+				replacementHistory: [
+					{ role: "compactionSummary", summary: "Modern handoff", tokensBefore: 800, timestamp: 10 },
+				],
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "legacy discarded"),
+				msg("2", "1", "assistant", "legacy discarded answer"),
+				msg("3", "2", "user", "legacy retained"),
+				msg("4", "3", "assistant", "legacy retained answer"),
+				compaction("5", "4", "Legacy summary", "3"),
+				msg("6", "5", "user", "after legacy"),
+				checkpoint,
+				msg("8", "7", "user", "after modern"),
+			];
+
+			expect(buildTranscriptEntries(entries).map((entry) => entry.id)).toEqual(["5", "3", "4", "6", "7", "8"]);
+		});
+
+		it("uses the newest replacement checkpoint and replays only its suffix", () => {
+			const first: CompactionEntry = {
+				...compaction("3", "2", "First handoff", ""),
+				replacementHistory: [
+					{ role: "user", content: "goal one", timestamp: 1 },
+					{ role: "compactionSummary", summary: "First handoff", tokensBefore: 100, timestamp: 2 },
+				],
+			};
+			const second: CompactionEntry = {
+				...compaction("6", "5", "Second handoff", ""),
+				replacementHistory: [
+					{ role: "user", content: "goal two", timestamp: 3 },
+					{ role: "compactionSummary", summary: "Second handoff", tokensBefore: 80, timestamp: 4 },
+				],
+			};
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "discarded"),
+				msg("2", "1", "assistant", "discarded"),
+				first,
+				msg("4", "3", "user", "between checkpoints"),
+				msg("5", "4", "assistant", "between checkpoints"),
+				second,
+				msg("7", "6", "user", "after second checkpoint"),
+			];
+
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.messages.map((message) => message.role)).toEqual(["user", "compactionSummary", "user"]);
+			expect(ctx.messages).not.toEqual(expect.arrayContaining([expect.objectContaining({ content: "goal one" })]));
+			expect(ctx.messages[2]).toMatchObject({ content: "after second checkpoint" });
+		});
+
 		it("includes summary before kept messages", () => {
 			const entries: SessionEntry[] = [
 				msg("1", null, "user", "first"),

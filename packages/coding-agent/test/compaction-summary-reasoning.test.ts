@@ -106,14 +106,19 @@ describe("completeSummarization (surviving shared choke point)", () => {
 describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 	it("maps provider responses to CompactionLLMResponse with usage", async () => {
 		completeSimpleMock.mockResolvedValue(assistantOk("extracted text"));
-		const complete = createPiAiCompleteFn({ model: createModel(), apiKey: "k" });
+		const complete = createPiAiCompleteFn({ model: createModel(), apiKey: "k", sessionId: "compact-session" });
 		const res = await complete({
 			systemPrompt: "policy",
-			messages: [{ role: "user", content: "data" }],
+			messages: [{ role: "user", content: "data", timestamp: 1 }],
 			maxTokens: 100,
 			promptVersion: "1.0.0",
 		});
 		expect(res).toEqual({ text: "extracted text", stopReason: "stop", usage: { input: 10, output: 5 } });
+		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
+			cacheRetention: "short",
+			sessionId: "compact-session",
+			toolChoice: "none",
+		});
 	});
 
 	it("maps provider errors to stopReason error (fail closed at the caller)", async () => {
@@ -121,7 +126,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		const complete = createPiAiCompleteFn({ model: createModel() });
 		const res = await complete({
 			systemPrompt: "p",
-			messages: [{ role: "user", content: "d" }],
+			messages: [{ role: "user", content: "d", timestamp: 1 }],
 			maxTokens: 10,
 			promptVersion: "1.0.0",
 		});
