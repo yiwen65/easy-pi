@@ -652,7 +652,7 @@ describe("AgentSession compaction characterization", () => {
 
 		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
 		expect(compactionEnd).toMatchObject({
-			reason: "threshold",
+			reason: "overflow",
 			aborted: false,
 			willRetry: false,
 		});

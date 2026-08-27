@@ -110,7 +110,6 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		const res = await complete({
 			systemPrompt: "policy",
 			messages: [{ role: "user", content: "data", timestamp: 1 }],
-			maxTokens: 100,
 			promptVersion: "1.0.0",
 		});
 		expect(res).toEqual({ text: "extracted text", stopReason: "stop", usage: { input: 10, output: 5 } });
@@ -119,6 +118,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 			sessionId: "compact-session",
 			toolChoice: "none",
 		});
+		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("maxTokens");
 	});
 
 	it("maps provider errors to stopReason error (fail closed at the caller)", async () => {
@@ -127,7 +127,6 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		const res = await complete({
 			systemPrompt: "p",
 			messages: [{ role: "user", content: "d", timestamp: 1 }],
-			maxTokens: 10,
 			promptVersion: "1.0.0",
 		});
 		expect(res.stopReason).toBe("error");

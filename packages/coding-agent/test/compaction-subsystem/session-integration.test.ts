@@ -105,40 +105,46 @@ describe("HfCompactionHost checkpoint pipeline", () => {
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("earlier content omitted");
 	});
 
-	it("caps the summary and retained user message to five percent of the model context", async () => {
+	it("accepts a handoff larger than the former five-percent budget without setting an output ceiling", async () => {
 		const manager = fixture();
-		let requestedMaxTokens: number | undefined;
+		let requestHadMaxTokens = true;
+		const detailedHandoff = "Detailed handoff content. ".repeat(200);
 		const outcome = await new HfCompactionHost({
-			sessionId: "bounded-session",
+			sessionId: "unbounded-handoff-session",
 			getSystemPrompt: () => "CURRENT SYSTEM",
 			config: { mode: "full_pipeline", recentUserTokens: 64_000 },
 		}).attemptCompaction({
 			branchEntries: manager.getBranch(),
 			modelContextLimit: 10_000,
 			complete: async (request) => {
-				requestedMaxTokens = request.maxTokens;
-				return { text: "Compact handoff", stopReason: "stop" };
+				requestHadMaxTokens = "maxTokens" in request;
+				return { text: detailedHandoff, stopReason: "stop" };
 			},
 		});
 
 		expect(outcome.activated).toBe(true);
-		expect(requestedMaxTokens).toBe(500);
+		expect(requestHadMaxTokens).toBe(false);
+		expect(outcome.checkpoint?.replacementHistory[0]).toMatchObject({
+			role: "compactionSummary",
+			summary: detailedHandoff.trim(),
+		});
 		expect(outcome.checkpoint?.replacementHistory.map((message) => message.role)).toEqual([
 			"compactionSummary",
 			"user",
 		]);
 	});
 
-	it("rejects a provider response that exceeds the compacted-history budget", async () => {
+	it("rejects a handoff only when the complete projected context cannot fit the model window", async () => {
 		const manager = fixture();
 		const outcome = await host().attemptCompaction({
 			branchEntries: manager.getBranch(),
-			modelContextLimit: 1_000,
-			complete: async () => ({ text: "oversized ".repeat(100), stopReason: "stop" }),
+			modelContextLimit: 5_000,
+			outputReserveTokens: 100,
+			complete: async () => ({ text: "oversized ".repeat(2_400), stopReason: "stop" }),
 		});
 
 		expect(outcome).toMatchObject({ activated: false });
-		expect(outcome.summaryText).toContain("exceeding the 50-token history budget");
+		expect(outcome.summaryText).toContain("input would exceed the model context limit");
 		expect(outcome.checkpoint).toBeUndefined();
 	});
 

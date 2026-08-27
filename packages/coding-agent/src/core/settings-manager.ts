@@ -12,7 +12,7 @@ import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dis
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
-	keepRecentTokens?: number; // default: 8192; latest complete user message only, also capped to 5% of context
+	keepRecentTokens?: number; // default: 8192; latest complete user message only
 }
 
 export interface BranchSummarySettings {

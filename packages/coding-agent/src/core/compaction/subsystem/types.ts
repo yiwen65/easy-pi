@@ -17,7 +17,6 @@ export interface CompactionLLMRequest {
 	systemPrompt: string;
 	messages: Message[];
 	tools?: Tool[];
-	maxTokens: number;
 	signal?: AbortSignal;
 	promptVersion: string;
 }

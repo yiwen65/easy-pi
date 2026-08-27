@@ -10,11 +10,7 @@ import {
 } from "../../session-manager.ts";
 import { completeSummarization, estimateTokens } from "../compaction.ts";
 import type { ProviderContextObservation } from "./context-identity.ts";
-import {
-	estimateLocalCompactionTriggerTokens,
-	generateCompactionItem,
-	MAX_COMPACTION_ITEM_OUTPUT_TOKENS,
-} from "./narrative.ts";
+import { estimateLocalCompactionTriggerTokens, generateCompactionItem } from "./narrative.ts";
 import { AuditTrail } from "./observability.ts";
 import { evaluateTriggers, type TriggerDecision } from "./trigger.ts";
 import type { CompleteFn, TokenStats } from "./types.ts";
@@ -22,7 +18,6 @@ import type { CompleteFn, TokenStats } from "./types.ts";
 export type HfCompactionMode = "off" | "full_pipeline";
 const DEFAULT_OUTPUT_RESERVE_TOKENS = 4_096;
 const DEFAULT_RECENT_USER_TOKENS = 8_192;
-const COMPACTED_HISTORY_RATIO = 0.05;
 
 export function getHfCompactionModeFromEnv(
 	env: Record<string, string | undefined> = process.env,
@@ -301,14 +296,10 @@ export class HfCompactionHost {
 			}
 			const systemPrompt = this.getSystemPrompt();
 			const toolsTokenEstimate = this.getToolsTokenEstimate?.() ?? 0;
-			const compactedHistoryBudget =
-				options.modelContextLimit === undefined
-					? undefined
-					: Math.max(1, Math.floor(options.modelContextLimit * COMPACTED_HISTORY_RATIO));
-			const maxOutputTokens = Math.min(
-				MAX_COMPACTION_ITEM_OUTPUT_TOKENS,
-				compactedHistoryBudget ?? MAX_COMPACTION_ITEM_OUTPUT_TOKENS,
-			);
+			const currentInput = options.currentInput ?? "";
+			const currentInputExtraTokens = options.currentInputExtraTokens ?? 0;
+			const outputReserve =
+				options.outputReserveTokens ?? this.config.outputReserveTokens ?? DEFAULT_OUTPUT_RESERVE_TOKENS;
 			const messageTokenBudget =
 				options.modelContextLimit === undefined
 					? undefined
@@ -317,13 +308,9 @@ export class HfCompactionHost {
 							options.modelContextLimit -
 								estimateText(systemPrompt) -
 								toolsTokenEstimate -
-								maxOutputTokens -
+								outputReserve -
 								estimateLocalCompactionTriggerTokens(options.customInstructions),
 						);
-			const currentInput = options.currentInput ?? "";
-			const currentInputExtraTokens = options.currentInputExtraTokens ?? 0;
-			const outputReserve =
-				options.outputReserveTokens ?? this.config.outputReserveTokens ?? DEFAULT_OUTPUT_RESERVE_TOKENS;
 			const tools = toolsTokenEstimate;
 			const before = tokenStats({
 				systemPrompt: this.getSystemPrompt(),
@@ -345,7 +332,6 @@ export class HfCompactionHost {
 				signal: options.signal,
 				customInstructions: options.customInstructions,
 				messageTokenBudget,
-				maxOutputTokens,
 			});
 			if (generated.rejected) {
 				return {
@@ -356,20 +342,9 @@ export class HfCompactionHost {
 			}
 			const modelUsage = generated.modelUsage;
 			const summaryMessage = createCompactionSummaryMessage(generated.text, before.total, new Date().toISOString());
-			const summaryTokens = estimateTokens(summaryMessage);
-			if (compactedHistoryBudget !== undefined && summaryTokens > compactedHistoryBudget) {
-				const reason = `Compaction item uses ${summaryTokens} tokens, exceeding the ${compactedHistoryBudget}-token history budget`;
-				return {
-					activated: false,
-					summaryText: reason,
-					result: { status: "rejected", reason },
-					tokensBefore: before.total,
-				};
-			}
 			const recentUserBudget = Math.min(
 				options.recentUserTokens ?? this.config.recentUserTokens ?? DEFAULT_RECENT_USER_TOKENS,
 				DEFAULT_RECENT_USER_TOKENS,
-				Math.max(0, (compactedHistoryBudget ?? Number.POSITIVE_INFINITY) - summaryTokens),
 			);
 			const recentUsers = selectLatestUserMessage(activeMessages, recentUserBudget);
 			const replacementHistory = [summaryMessage, ...recentUsers];
@@ -384,6 +359,22 @@ export class HfCompactionHost {
 				currentInputExtraTokens,
 				outputReserve,
 			});
+			const compactedInputTokens = after.total - outputReserve;
+			const fixedInputTokens = after.system + after.tools + after.currentInput;
+			if (
+				options.modelContextLimit !== undefined &&
+				fixedInputTokens < options.modelContextLimit &&
+				compactedInputTokens >= options.modelContextLimit
+			) {
+				const reason = `Compacted context input would exceed the model context limit (${compactedInputTokens} >= ${options.modelContextLimit} tokens)`;
+				return {
+					activated: false,
+					summaryText: reason,
+					result: { status: "rejected", reason },
+					tokensBefore: before.total,
+					tokensAfter: after.total,
+				};
+			}
 			if (after.total >= before.total) {
 				const reason = `Compaction would not reduce context (${before.total} -> ${after.total} tokens)`;
 				return {
@@ -444,7 +435,6 @@ export function createPiAiCompleteFn(options: {
 				tools: request.tools,
 			},
 			{
-				maxTokens: request.maxTokens,
 				signal: request.signal,
 				cacheRetention: "short",
 				sessionId: options.sessionId,

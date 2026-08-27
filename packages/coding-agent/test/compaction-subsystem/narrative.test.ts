@@ -38,25 +38,34 @@ describe("local Remote V2-style compaction item", () => {
 		expect(capturedRequest?.messages.slice(0, -1).map((message) => message.role)).toEqual(["user", "toolResult"]);
 		expect(capturedRequest?.messages.at(-1)).toMatchObject({ role: "user" });
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("local_compaction_trigger");
-		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("latest explicitly stated user goal");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("active goal hierarchy");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("primary objectives");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("process objectives");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("user-led causal episodes");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("source order");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("user request -> assistant and tool work");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("previous compaction summary");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("file paths, symbols, identifiers");
-		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Later user messages override earlier goals");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("conflicts with it at the same scope");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("fixed handoff length");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Current continuation point");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("machine-readable contract, ledger, JSON");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Do not reproduce the system prompt");
 		expect(JSON.stringify(capturedRequest?.messages)).not.toContain("<untrusted-history>");
+		expect(capturedRequest?.promptVersion).toBe("remote-v2-local-4");
 	});
 
-	it("uses an adaptive output ceiling supplied by the checkpoint host", async () => {
+	it("does not impose a fixed output ceiling on the handoff", async () => {
 		let capturedRequest: CompactionLLMRequest | undefined;
 		await generateCompactionItem({
 			messages,
 			systemPrompt: "CURRENT SYSTEM",
-			maxOutputTokens: 512,
 			complete: async (request) => {
 				capturedRequest = request;
 				return { text: "Compacted state", stopReason: "stop" };
 			},
 		});
-		expect(capturedRequest?.maxTokens).toBe(512);
+		expect(capturedRequest).not.toHaveProperty("maxTokens");
 	});
 
 	it("keeps the original provider message structure instead of serializing or clipping it", async () => {
