@@ -7,11 +7,17 @@ Pi uses a Codex-style replacement checkpoint for long sessions. Compaction is in
 Pi uses one local handoff path for every provider. It makes one tool-free model request that mirrors the external boundary of Codex Remote Compaction V2. The request keeps the current canonical system prompt, converts the active Session messages through the normal provider-message converter, includes the current tool schemas, then appends a dedicated `local_compaction_trigger` user item. `toolChoice` is forced to `none`; short cache retention and the active Session routing ID allow the unchanged prefix to reuse provider cache. Only when overflow makes that request impossible are tool-result bodies rewritten to a fixed truncation notice in the compactor request; durable history is not changed. The resulting local replacement history contains:
 
 1. the new compaction item as a historical `compactionSummary` message;
-2. the latest real user message, only when it fits intact within `keepRecentTokens` (default 8,192 tokens) and the remaining compacted-history budget.
+2. the latest real user message, only when it fits intact within `keepRecentTokens` (default 8,192 tokens).
 
 Assistant messages, reasoning, tool calls, and tool results participate in the compactor request but are not retained as a recent tail. Important outcomes must be represented in the compaction item or be re-read/re-run through normal tools.
 
-The compaction item plus retained user message is capped to 5% of the model context window. Pi never retains a clipped suffix of an oversized user message: the compaction item must carry its relevant goal, constraints, and exact anchors. A checkpoint is rejected if it exceeds that history budget or would not reduce the complete projected context.
+The compaction handoff has no product-level fixed output-token or percentage cap. The compaction provider may use the output space physically available under the model's own limits. Pi never retains a clipped suffix of an oversized user message: the compaction item must carry its relevant goal, constraints, and exact anchors. A checkpoint is rejected when the fixed system/tool/current-input layer fits but adding the compacted history would exceed the model window, or when it would not reduce the previous projected context. If the fixed layer alone already exceeds an artificial or misconfigured model window, Pi still accepts a history-reducing checkpoint because compaction cannot shrink that fixed layer. Output space is clamped by the provider adapter from the room that remains; a configured response reserve does not impose a handoff-size cap.
+
+The handoff recovers an active goal hierarchy instead of treating every later request as a replacement for all earlier goals. It distinguishes durable primary objectives from active, paused, resumed, completed, abandoned, or superseded process objectives. A later message overrides an earlier goal only when it explicitly replaces it or conflicts at the same scope; interleaved process objectives do not silently erase their parent or unresolved siblings.
+
+Historical content is organized in source order as user-led causal episodes: each material user request is followed by the relevant assistant and tool work and the resulting outcome or state. Tool traffic is summarized with the assistant work it supported rather than emitted as a separate ledger. Exact evidence anchors are retained when material. Trivial continuation requests may be folded into the preceding episode without losing whether the requested action occurred. A previous compaction summary is historical prologue, not a synthetic user episode.
+
+The handoff ends with `Current continuation point`, which reconciles the timeline into the active primary and process objectives, their parent chain, paused or open work, applicable constraints, verified current state, and next action. This is a natural-language continuation index, not a machine-readable contract or a second runtime state store. Conversation appended after the checkpoint supersedes conflicting statements from it at the same scope.
 
 `/compact <custom instructions>` adds the instructions to the local compaction trigger.
 
@@ -31,8 +37,8 @@ The checkpoint contains conversation messages only. The current system prompt, t
 
 Compaction publication is ordered:
 
-1. generate one non-empty local handoff and construct its bounded replacement history;
-2. validate that the local handoff is non-empty, fits the compacted-history budget, and reduces context;
+1. generate one non-empty local handoff and construct its replacement history;
+2. validate that the local handoff is non-empty, its projected provider input fits the model context window, and compaction reduces context;
 3. append the complete checkpoint to the main Session JSONL;
 4. rebuild `agent.state.messages` from `SessionManager`;
 5. notify extensions and continue the turn when overflow recovery or queued work requires it.
