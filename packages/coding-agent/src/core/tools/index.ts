@@ -17,6 +17,7 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
+export { FffSearchProvider } from "./fff-search-provider.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
@@ -34,6 +35,7 @@ export {
 	type GrepToolInput,
 	type GrepToolOptions,
 } from "./grep.ts";
+export { LocalSearchProviderV2 } from "./local-search-provider-v2.ts";
 export {
 	createLsTool,
 	createLsToolDefinition,

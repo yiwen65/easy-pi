@@ -1,13 +1,15 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
-import { createAgentSession, type InlineExtension } from "../src/core/sdk.ts";
+import { type CreateAgentSessionOptions, createAgentSession, type InlineExtension } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { FffSearchProvider } from "../src/core/tools/fff-search-provider.ts";
 
 const V2_NAMES = ["search", "read", "edit", "run"];
 
@@ -31,6 +33,7 @@ describe("v2 tool profile", () => {
 			extensions?: InlineExtension[];
 			sessionManager?: SessionManager;
 			settingsManager?: SettingsManager;
+			toolsV2?: CreateAgentSessionOptions["toolsV2"];
 		} = {},
 	) {
 		const settingsManager = options.settingsManager ?? SettingsManager.inMemory();
@@ -52,6 +55,7 @@ describe("v2 tool profile", () => {
 				toolProfile: options.toolProfile,
 				tools: options.tools,
 				excludeTools: options.excludeTools,
+				toolsV2: options.toolsV2,
 			})
 		).session;
 	}
@@ -80,6 +84,29 @@ describe("v2 tool profile", () => {
 		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
 		expect(v2.systemPrompt).toContain("use one edit batch with move first");
 		v2.dispose();
+	});
+
+	it("accepts a host-owned opt-in FFF provider without changing the default profile", async () => {
+		writeFileSync(join(cwd, "AuthenticationService.ts"), "export const auth = true;\n");
+		const provider = new FffSearchProvider(new NodeExecutionEnv({ cwd }));
+		let session: Awaited<ReturnType<typeof createSession>> | undefined;
+		try {
+			session = await createSession({ toolProfile: "v2", toolsV2: { search: { provider } } });
+			const search = session.getToolDefinition("search");
+			if (!search) throw new Error("v2 search definition is missing");
+			const result = await search.execute(
+				"fff-search",
+				{ query: "authentcationservice", kind: "files" },
+				undefined,
+				undefined,
+				{} as Parameters<typeof search.execute>[4],
+			);
+			expect(result.details).toMatchObject({ kind: "files", returnedCount: 1 });
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("AuthenticationService.ts") });
+		} finally {
+			session?.dispose();
+			await provider.close();
+		}
 	});
 
 	it("executes v2 bounded reads against the workspace source Node environment", async () => {

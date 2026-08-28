@@ -155,6 +155,70 @@ describe("ToolExecutionComponent parity", () => {
 		await promise;
 	});
 
+	test("v2 search renderer consumes structured hits with grouping, ranges, status, and continuation", () => {
+		const tool = createV2ToolDefinitions(process.cwd()).search;
+		const component = new ToolExecutionComponent(
+			"search",
+			"tool-search-render",
+			{
+				query: "Auth",
+				kind: "text",
+				path: "src",
+				fileGlob: "*.ts",
+				context: 1,
+			},
+			{},
+			tool,
+			createFakeTui(),
+			process.cwd(),
+		);
+		const hits = Array.from({ length: 10 }, (_, index) => ({
+			kind: "text" as const,
+			path: index < 5 ? "src/auth.ts" : "src/service.ts",
+			line: index + 1,
+			column: 1,
+			text: `Auth marker ${index}`,
+			ranges: [[0, 4]] as Array<[number, number]>,
+			before: index === 0 ? [{ line: 0, text: "context before" }] : undefined,
+		}));
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "CONTENT_SENTINEL_MUST_NOT_BE_PARSED" }],
+				details: {
+					kind: "text",
+					query: "Auth",
+					path: "src",
+					hits,
+					returnedCount: hits.length,
+					complete: false,
+					approximate: true,
+					partial: true,
+					nextCursor: "s2-next",
+				},
+				isError: false,
+			},
+			false,
+		);
+
+		const rawCollapsed = component.render(40).join("\n");
+		const collapsed = stripAnsi(rawCollapsed);
+		expect(collapsed).toContain('search "Auth" · text · literal · smart');
+		expect(collapsed).toContain("[approximate · partial]");
+		expect(collapsed).toContain("src/auth.ts");
+		expect(collapsed).toContain("context before");
+		expect(collapsed).toContain("Auth marker 7");
+		expect(collapsed).not.toContain("Auth marker 8");
+		expect(collapsed).toContain("2 more hits");
+		expect(collapsed).toContain("Continue with cursor s2-next");
+		expect(collapsed).not.toContain("CONTENT_SENTINEL_MUST_NOT_BE_PARSED");
+		expect(rawCollapsed).toContain(theme.fg("accent", theme.bold("Auth")));
+		for (const line of component.render(40)) expect(stripAnsi(line).length).toBeLessThanOrEqual(40);
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(80).join("\n"));
+		expect(expanded).toContain("Auth marker 9");
+	});
+
 	test("v2 run renderer shows call metadata and the latest collapsed output", () => {
 		const tool = createV2ToolDefinitions(process.cwd()).run;
 		const component = new ToolExecutionComponent(
