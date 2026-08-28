@@ -7,6 +7,7 @@ import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 import type { TuiMode } from "../core/settings-manager.ts";
+import type { JsonEventProfile } from "../modes/json-event.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -22,6 +23,7 @@ export interface Args {
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
+	jsonProfile?: JsonEventProfile;
 	name?: string;
 	noSession?: boolean;
 	session?: string;
@@ -88,6 +90,20 @@ export function parseArgs(args: string[]): Args {
 			const mode = args[++i];
 			if (mode === "text" || mode === "json" || mode === "rpc") {
 				result.mode = mode;
+			}
+		} else if (arg === "--json-profile") {
+			const profile = args[i + 1];
+			if (profile === "full" || profile === "compact") {
+				result.jsonProfile = profile;
+				i++;
+			} else if (profile === undefined || profile.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--json-profile requires full or compact" });
+			} else {
+				i++;
+				result.diagnostics.push({
+					type: "error",
+					message: `Invalid JSON profile "${profile}". Valid values: full, compact`,
+				});
 			}
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
@@ -251,6 +267,9 @@ export function parseArgs(args: string[]): Args {
 		}
 	}
 
+	if (result.jsonProfile !== undefined && result.mode !== "json") {
+		result.diagnostics.push({ type: "error", message: "--json-profile requires --mode json" });
+	}
 	return result;
 }
 
@@ -287,6 +306,7 @@ ${chalk.bold("Options:")}
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --mode <mode>                  Output mode: text (default), json, or rpc
+  --json-profile <profile>       JSON events: full (default) or compact process-observer fields
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
@@ -319,7 +339,7 @@ ${chalk.bold("Options:")}
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --tui-mode <mode>              TUI mode: regular (default) or fullscreen
-  --tui-engine <engine>          TUI renderer: legacy (default) or grok
+  --tui-engine <engine>          TUI renderer: grok (default) or legacy
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
@@ -435,6 +455,7 @@ ${chalk.bold("Environment Variables:")}
   PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
   PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
   PI_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
+  EASY_PI_UPDATE_URL               - Easy Pi latest-version API URL (automatic checks are off when unset)
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
