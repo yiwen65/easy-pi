@@ -27,4 +27,12 @@ PI_REAL_TOOL_PROFILE_DIAGNOSTIC=1 node "$(git rev-parse --show-toplevel)/node_mo
   --run test/tool-profile-eval/real-benchmark.test.ts --silent=false
 ```
 
-The two real modes are mutually exclusive. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.
+The isolated prompt ablation pairs only the candidate move+update batching guidance against the pre-change v2 guidance on both manifest tasks × five seeds. It uses an 18-turn/session cap to accommodate observed control variance without changing the normal benchmark cap:
+
+```bash
+cd packages/coding-agent
+PI_REAL_TOOL_PROFILE_ABLATION=1 node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" \
+  --run test/tool-profile-eval/real-benchmark.test.ts --silent=false
+```
+
+All real modes are mutually exclusive. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.
