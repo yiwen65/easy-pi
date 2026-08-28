@@ -1,9 +1,12 @@
 /**
- * Manual real-provider benchmark for legacy versus v2 tool profiles.
+ * Explicitly gated 15-session A/B/C tool-profile evaluation.
  *
- * No provider call occurs unless one explicit benchmark, diagnostic, or
- * prompt-ablation opt-in is set. The benchmark persists neither sessions nor
- * model responses and prints only content-free metrics.
+ * A: complete native compatibility tool set
+ * B: current four-tool v2 profile
+ * C: full opt-in candidate with journaled mutation and minimal hooks
+ *
+ * No provider call occurs unless PI_REAL_TOOL_PROFILE_ABC=1. The executor writes no
+ * sessions or model/tool content and prints only sanitized metrics and hashes.
  */
 
 import { execFileSync } from "node:child_process";
@@ -19,83 +22,22 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import { createV2ToolDefinitions } from "../../src/core/tools/tool-profile.ts";
-import { type PromptVariant, runPromptAblation } from "./prompt-ablation.ts";
+import { NodeJournaledMutationBackend } from "../../src/core/tools/node-journaled-mutation-backend.ts";
 import { type EvalExecutionInput, runToolProfileEvaluation, type ToolProfileEvalManifest } from "./runner.ts";
 import { createSanitizedToolTraceCollector } from "./trace.ts";
 
-const RUN = process.env.PI_REAL_TOOL_PROFILE_BENCHMARK === "1";
-const RUN_DIAGNOSTIC = process.env.PI_REAL_TOOL_PROFILE_DIAGNOSTIC === "1";
-const RUN_ABLATION = process.env.PI_REAL_TOOL_PROFILE_ABLATION === "1";
-if ([RUN, RUN_DIAGNOSTIC, RUN_ABLATION].filter(Boolean).length > 1) {
-	throw new Error("Select only one real tool-profile mode");
-}
-if (RUN || RUN_DIAGNOSTIC || RUN_ABLATION) configureHttpDispatcher();
+const RUN = process.env.PI_REAL_TOOL_PROFILE_ABC === "1";
+if (RUN) configureHttpDispatcher();
 
-const PROVIDER = process.env.PI_REAL_TOOL_PROFILE_PROVIDER ?? "openai-codex";
-const MODEL_ID = process.env.PI_REAL_TOOL_PROFILE_MODEL ?? "gpt-5.6-luna";
-const MAX_SESSIONS = 20;
+const PROVIDER = "openai-codex";
+const MODEL_ID = "gpt-5.6-luna";
+const MAX_SESSIONS = 15;
 const MAX_REPORTED_COST_USD = Number(process.env.PI_REAL_TOOL_PROFILE_MAX_COST_USD ?? "20");
 
 function manifest(): ToolProfileEvalManifest {
 	return JSON.parse(
 		readFileSync(join(dirname(fileURLToPath(import.meta.url)), "manifest.json"), "utf8"),
 	) as ToolProfileEvalManifest;
-}
-
-function writeCommonFixture(cwd: string): void {
-	mkdirSync(join(cwd, "src"), { recursive: true });
-	writeFileSync(join(cwd, "package.json"), '{"type":"module"}\n');
-	writeFileSync(join(cwd, "src", "noise-a.js"), "export const alpha = 7;\n");
-	writeFileSync(join(cwd, "src", "noise-b.js"), "export const beta = 11;\n");
-}
-
-function resetFixture(cwd: string, taskId: string, seed: number): { prompt: string; grade: () => boolean } {
-	rmSync(cwd, { recursive: true, force: true });
-	writeCommonFixture(cwd);
-	if (taskId === "locate-edit-test") {
-		const target = seed + 1000;
-		writeFileSync(join(cwd, "src", "value.js"), `export const answer = ${seed}; // TARGET_PROFILE_VALUE\n`);
-		writeFileSync(
-			join(cwd, "test.js"),
-			`import { answer } from "./src/value.js";\nif (answer !== ${target}) process.exit(1);\nconsole.log("PASS");\n`,
-		);
-		return {
-			prompt: `Locate the file containing TARGET_PROFILE_VALUE, change the exported answer to ${target}, and run node test.js. Do not merely explain; finish only after the test passes.`,
-			grade: () =>
-				readFileSync(join(cwd, "src", "value.js"), "utf8").includes(`answer = ${target}`) && testPasses(cwd),
-		};
-	}
-	if (taskId === "move-edit-test") {
-		const target = seed * 2;
-		mkdirSync(join(cwd, "src", "staging"), { recursive: true });
-		writeFileSync(
-			join(cwd, "src", "staging", "worker.js"),
-			`export const worker = () => ${seed}; // TARGET_PROFILE_MOVE\n`,
-		);
-		writeFileSync(
-			join(cwd, "test.js"),
-			`import { worker } from "./src/final/worker.js";\nif (worker() !== ${target}) process.exit(1);\nconsole.log("PASS");\n`,
-		);
-		return {
-			prompt: `Locate the file containing TARGET_PROFILE_MOVE, move it to src/final/worker.js, change worker() to return ${target}, and run node test.js. Do not merely explain; finish only after the test passes.`,
-			grade: () =>
-				!existsSync(join(cwd, "src", "staging", "worker.js")) &&
-				readFileSync(join(cwd, "src", "final", "worker.js"), "utf8").includes(`=> ${target}`) &&
-				testPasses(cwd),
-		};
-	}
-	throw new Error(`Unknown benchmark task: ${taskId}`);
-}
-
-function promptVariantTools(cwd: string, variant: PromptVariant) {
-	const definitions = createV2ToolDefinitions(cwd);
-	if (variant === "control") {
-		definitions.edit.promptGuidelines = [
-			"Use edit for file mutations; make exact updates from freshly read content.",
-		];
-	}
-	return Object.values(definitions);
 }
 
 function testPasses(cwd: string): boolean {
@@ -107,7 +49,35 @@ function testPasses(cwd: string): boolean {
 	}
 }
 
-describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile five-seed benchmark", () => {
+function resetFixture(cwd: string, seed: number): { prompt: string; targetPath: string; grade: () => boolean } {
+	rmSync(cwd, { recursive: true, force: true });
+	mkdirSync(join(cwd, "src", "staging"), { recursive: true });
+	mkdirSync(join(cwd, "src", "noise"), { recursive: true });
+	writeFileSync(join(cwd, "package.json"), '{"type":"module"}\n');
+	for (let index = 0; index < 30; index++) {
+		writeFileSync(join(cwd, "src", "noise", `item-${index}.js`), `export const value${index} = ${index};\n`);
+	}
+	const target = seed * 3 + 7;
+	const targetPath = "src/staging/worker.js";
+	writeFileSync(join(cwd, targetPath), `export const worker = () => ${seed}; // TARGET_PROFILE_ABC\n`);
+	writeFileSync(join(cwd, "src", "config.js"), 'export const label = "old";\n');
+	writeFileSync(
+		join(cwd, "test.js"),
+		`import { worker } from "./src/final/worker.js";\nimport { label } from "./src/config.js";\nif (worker() !== ${target} || label !== "ready-${seed}") process.exit(1);\n`,
+	);
+	return {
+		targetPath,
+		prompt: `Locate TARGET_PROFILE_ABC and inspect its file. Move it to src/final/worker.js, change worker() to return ${target}, set src/config.js label to ready-${seed}, and run node test.js. Do not merely explain; finish only after the test passes.`,
+		grade: () =>
+			!existsSync(join(cwd, "src", "staging", "worker.js")) &&
+			existsSync(join(cwd, "src", "final", "worker.js")) &&
+			readFileSync(join(cwd, "src", "final", "worker.js"), "utf8").includes(`=> ${target}`) &&
+			readFileSync(join(cwd, "src", "config.js"), "utf8").includes(`ready-${seed}`) &&
+			testPasses(cwd),
+	};
+}
+
+describe.skipIf(!RUN)("real tool-profile A/B/C benchmark", () => {
 	let benchmarkRoot: string;
 	let runtime: ModelRuntime;
 	let totalSessions = 0;
@@ -115,7 +85,7 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 	let totalReportedCostUsd = 0;
 
 	beforeAll(async () => {
-		benchmarkRoot = join(tmpdir(), `pi-real-tool-profile-benchmark-${Date.now()}`);
+		benchmarkRoot = join(tmpdir(), `pi-real-tool-profile-abc-${Date.now()}`);
 		mkdirSync(benchmarkRoot, { recursive: true });
 		runtime = await ModelRuntime.create({ credentials: AuthStorage.create(), allowModelNetwork: false });
 		const model = runtime.getModel(PROVIDER, MODEL_ID);
@@ -127,26 +97,21 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 		if (benchmarkRoot) rmSync(benchmarkRoot, { recursive: true, force: true });
 	});
 
-	it("runs the bounded benchmark or v2 move diagnostic", { timeout: 1_800_000 }, async () => {
+	it("runs exactly five fixed seeds for each A/B/C variant", { timeout: 1_800_000 }, async () => {
 		const config = manifest();
-		expect(config.tasks.map((task) => task.id)).toEqual(["locate-edit-test", "move-edit-test"]);
-		expect(config.seeds).toHaveLength(5);
+		expect(config.version).toBe(2);
+		expect(config.profiles).toEqual(["A", "B", "C"]);
+		expect(config.tasks).toHaveLength(1);
+		expect(config.seeds).toEqual([17, 41, 73, 101, 137]);
 		expect(config.tasks.length * config.seeds.length * config.profiles.length).toBe(MAX_SESSIONS);
-		const sessionLimit = RUN_DIAGNOSTIC ? config.seeds.length : MAX_SESSIONS;
-		const budgets = RUN_ABLATION
-			? { ...config.budgets, maxTurns: 18 }
-			: RUN_DIAGNOSTIC
-				? { ...config.budgets, maxTurns: 12 }
-				: config.budgets;
-		const maxModelTurns = sessionLimit * budgets.maxTurns;
 		const cwd = join(benchmarkRoot, "fixture");
 		const model = runtime.getModel(PROVIDER, MODEL_ID);
 		if (!model) throw new Error(`${PROVIDER}/${MODEL_ID} disappeared from the local model catalog`);
 
-		const execute = async (input: EvalExecutionInput, promptVariant?: PromptVariant) => {
-			if (totalSessions >= sessionLimit) throw new Error(`Session budget exceeded: ${totalSessions}`);
+		const execute = async (input: EvalExecutionInput) => {
+			if (totalSessions >= MAX_SESSIONS) throw new Error(`Session budget exceeded: ${totalSessions}`);
 			totalSessions += 1;
-			const fixture = resetFixture(cwd, input.task.id, input.seed);
+			const fixture = resetFixture(cwd, input.seed);
 			const settingsManager = SettingsManager.inMemory();
 			const resourceLoader = new DefaultResourceLoader({
 				cwd,
@@ -159,19 +124,37 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 				noContextFiles: true,
 			});
 			await resourceLoader.reload();
+			const candidateBackend =
+				input.variant === "C"
+					? new NodeJournaledMutationBackend({
+							workspaceRoot: cwd,
+							journalRoot: join(benchmarkRoot, "journals", `${input.seed}-${totalSessions}`),
+							maxTransactions: 4,
+							maxJournalBytes: 4 * 1024 * 1024,
+						})
+					: undefined;
 			const { session } = await createAgentSession({
 				cwd,
 				agentDir: benchmarkRoot,
 				modelRuntime: runtime,
 				model,
 				thinkingLevel: "max",
-				toolProfile: input.profile,
-				customTools: promptVariant ? promptVariantTools(cwd, promptVariant) : undefined,
+				toolProfile: input.variant === "A" ? "legacy" : "v2",
+				tools: input.variant === "A" ? ["read", "bash", "edit", "write", "grep", "find", "ls"] : undefined,
+				toolsV2:
+					input.variant === "C"
+						? {
+								edit: {
+									backend: candidateBackend,
+									hooks: { afterCommit: () => {}, afterRollback: () => {} },
+								},
+							}
+						: undefined,
 				settingsManager,
 				resourceLoader,
 				sessionManager: SessionManager.inMemory(cwd),
 			});
-			const traceCollector = createSanitizedToolTraceCollector();
+			const traceCollector = createSanitizedToolTraceCollector(Date.now, { targetPath: fixture.targetPath });
 			const unsubscribe = session.subscribe(traceCollector.handle);
 			const startedAt = Date.now();
 			const timeout = setTimeout(() => void session.abort(), input.budgets.timeoutMs);
@@ -179,28 +162,28 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 				expect(session.thinkingLevel).toBe("max");
 				await session.prompt(fixture.prompt);
 				const stats = session.getSessionStats();
+				if (stats.assistantMessages === 0) throw new Error("Systemic evaluation failure: no assistant turn");
 				const elapsedMs = Date.now() - startedAt;
 				const trace = traceCollector.snapshot();
-				const modelElapsedMs = Math.max(0, elapsedMs - trace.toolElapsedMs);
 				totalModelTurns += stats.assistantMessages;
 				totalReportedCostUsd += stats.cost;
 				if (stats.assistantMessages > input.budgets.maxTurns) {
 					throw new Error(
-						`${input.task.id}/${input.seed}/${input.profile} used ${stats.assistantMessages} model turns, exceeding ${input.budgets.maxTurns}`,
+						`${input.task.id}/${input.seed}/${input.variant} exceeded ${input.budgets.maxTurns} turns`,
 					);
 				}
-				if (totalModelTurns > maxModelTurns) throw new Error(`Model-turn budget exceeded: ${totalModelTurns}`);
+				if (totalModelTurns > MAX_SESSIONS * input.budgets.maxTurns) {
+					throw new Error(`Model-turn budget exceeded: ${totalModelTurns}`);
+				}
 				if (totalReportedCostUsd > MAX_REPORTED_COST_USD) {
 					throw new Error(`Reported cost budget exceeded: ${totalReportedCostUsd.toFixed(6)} USD`);
 				}
 				const success = fixture.grade();
 				console.log(
 					JSON.stringify({
-						eval: "real-tool-profile-call",
-						taskId: input.task.id,
-						...(promptVariant ? { promptVariant } : {}),
+						eval: "real-tool-profile-abc-call",
+						variant: input.variant,
 						seed: input.seed,
-						profile: input.profile,
 						success,
 						turns: stats.assistantMessages,
 						inputTokens: stats.tokens.input,
@@ -209,7 +192,7 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 						cacheWriteTokens: stats.tokens.cacheWrite,
 						costUsd: Number(stats.cost.toFixed(6)),
 						elapsedMs,
-						modelElapsedMs,
+						modelElapsedMs: Math.max(0, elapsedMs - trace.toolElapsedMs),
 						trace,
 					}),
 				);
@@ -223,7 +206,7 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 					cacheWriteTokens: stats.tokens.cacheWrite,
 					costUsd: stats.cost,
 					elapsedMs,
-					modelElapsedMs,
+					modelElapsedMs: Math.max(0, elapsedMs - trace.toolElapsedMs),
 					trace,
 					systemPrompt: session.systemPrompt,
 					tools: session.getAllTools().map(({ name, description, parameters }) => ({
@@ -236,44 +219,25 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile fiv
 				clearTimeout(timeout);
 				unsubscribe();
 				session.dispose();
+				await candidateBackend?.close();
 			}
 		};
-
-		if (RUN_ABLATION) {
-			const summary = await runPromptAblation({ ...config, budgets }, (input) =>
-				execute({ task: input.task, seed: input.seed, profile: "v2", budgets: input.budgets }, input.variant),
-			);
-			expect(summary.records).toHaveLength(MAX_SESSIONS);
-			expect(totalSessions).toBe(MAX_SESSIONS);
-			console.log(
-				JSON.stringify({ eval: "real-tool-profile-prompt-ablation", provider: PROVIDER, model: MODEL_ID, summary }),
-			);
-			return;
-		}
-
-		if (RUN_DIAGNOSTIC) {
-			const task = config.tasks.find((candidate) => candidate.id === "move-edit-test");
-			if (!task) throw new Error("move-edit-test is missing from the manifest");
-			const records: Awaited<ReturnType<typeof execute>>[] = [];
-			for (const seed of config.seeds) {
-				records.push(await execute({ task, seed, profile: "v2", budgets }));
-			}
-			expect(records).toHaveLength(config.seeds.length);
-			expect(totalSessions).toBe(sessionLimit);
-			console.log(
-				JSON.stringify({
-					eval: "real-tool-profile-v2-move-diagnostic",
-					provider: PROVIDER,
-					model: MODEL_ID,
-					records: records.map(({ systemPrompt: _systemPrompt, tools: _tools, ...record }) => record),
-				}),
-			);
-			return;
-		}
 
 		const summary = await runToolProfileEvaluation(config, execute);
 		expect(summary.records).toHaveLength(MAX_SESSIONS);
 		expect(totalSessions).toBe(MAX_SESSIONS);
-		console.log(JSON.stringify({ eval: "real-tool-profile-summary", provider: PROVIDER, model: MODEL_ID, summary }));
+		for (const variant of ["A", "B", "C"] as const) expect(summary.variants[variant].runs).toBe(5);
+		expect(
+			new Set(summary.records.filter((record) => record.variant === "A").map((record) => record.schemaHash)),
+		).toHaveLength(1);
+		expect(
+			new Set(summary.records.filter((record) => record.variant === "B").map((record) => record.schemaHash)),
+		).toHaveLength(1);
+		expect(
+			new Set(summary.records.filter((record) => record.variant === "C").map((record) => record.schemaHash)),
+		).toHaveLength(1);
+		console.log(
+			JSON.stringify({ eval: "real-tool-profile-abc-summary", provider: PROVIDER, model: MODEL_ID, summary }),
+		);
 	});
 });

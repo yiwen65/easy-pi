@@ -3,8 +3,8 @@ import { runPromptAblation } from "./prompt-ablation.ts";
 import type { ToolProfileEvalManifest } from "./runner.ts";
 
 const manifest: ToolProfileEvalManifest = {
-	version: 1,
-	profiles: ["legacy", "v2"],
+	version: 2,
+	profiles: ["A", "B", "C"],
 	seeds: [1, 2],
 	budgets: { maxTurns: 10, timeoutMs: 1_000 },
 	tasks: [
@@ -41,6 +41,12 @@ describe("prompt ablation runner", () => {
 					truncationCount: 0,
 					toolElapsedMs: 5,
 					peakContextTokens: candidate ? 80 : 100,
+					schemaErrorCount: 0,
+					runMisuseCount: 0,
+					targetFirstRead: true,
+					firstSearchTargetRank: 1,
+					approximateSearchCount: 0,
+					approximateEditWithoutTargetReadCount: 0,
 				},
 			};
 		};

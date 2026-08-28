@@ -17,6 +17,17 @@ const V2_ERROR_CODES = new Set([
 	"EDIT_CONFLICT",
 	"EDIT_MOVE_NOT_SUPPORTED",
 	"EDIT_PARTIAL_COMMIT",
+	"EDIT_PLAN_TOO_LARGE",
+	"EDIT_ROLLED_BACK",
+	"EDIT_INDETERMINATE",
+	"RANGE_READ_UNSUPPORTED",
+	"DIRECTORY_TOO_LARGE",
+	"STALE_CURSOR",
+	"STALE_FILE",
+	"STALE_DIRECTORY",
+	"PATCH_PARSE_ERROR",
+	"PATCH_CONTEXT_NOT_FOUND",
+	"PATCH_AMBIGUOUS",
 	"SPAWN_FAILED",
 	"SHELL_UNAVAILABLE",
 	"ABORTED",
@@ -45,6 +56,12 @@ export interface SanitizedToolTrace {
 	truncationCount: number;
 	toolElapsedMs: number;
 	peakContextTokens: number;
+	schemaErrorCount: number;
+	runMisuseCount: number;
+	targetFirstRead: boolean | null;
+	firstSearchTargetRank: number | null;
+	approximateSearchCount: number;
+	approximateEditWithoutTargetReadCount: number;
 }
 
 interface PendingToolCall {
@@ -116,6 +133,47 @@ function resultWasTruncated(result: unknown): boolean {
 	return "truncation" in details && details.truncation !== undefined;
 }
 
+function normalizedPath(value: string): string {
+	return value.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function runMisusesStructuredTools(args: unknown): boolean {
+	if (!args || typeof args !== "object" || !("command" in args) || typeof args.command !== "string") return false;
+	return /(^|[;&|\s])(rg|grep|find|fd|cat|sed|awk|perl|mv|cp|rm)([;&|\s]|$)|(^|[;&|\s])(echo|printf|tee)([;&|\s]|$)[^\n]*>{1,2}/i.test(
+		args.command,
+	);
+}
+
+function targetRead(args: unknown, targetPath: string | undefined): boolean | undefined {
+	if (!targetPath || !args || typeof args !== "object" || !("path" in args) || typeof args.path !== "string") {
+		return undefined;
+	}
+	return normalizedPath(args.path) === normalizedPath(targetPath);
+}
+
+function resultDetails(result: unknown): Record<string, unknown> | undefined {
+	if (!result || typeof result !== "object" || !("details" in result)) return undefined;
+	return result.details && typeof result.details === "object"
+		? (result.details as Record<string, unknown>)
+		: undefined;
+}
+
+function searchTargetRank(result: unknown, targetPath: string | undefined): number | undefined {
+	if (!targetPath) return undefined;
+	const hits = resultDetails(result)?.hits;
+	if (!Array.isArray(hits)) return undefined;
+	const target = normalizedPath(targetPath);
+	const index = hits.findIndex(
+		(hit) =>
+			!!hit &&
+			typeof hit === "object" &&
+			"path" in hit &&
+			typeof hit.path === "string" &&
+			normalizedPath(hit.path) === target,
+	);
+	return index < 0 ? 0 : index + 1;
+}
+
 function contextTokens(event: AgentSessionEvent): number | undefined {
 	if (event.type !== "message_end" || event.message.role !== "assistant") return undefined;
 	const usage = event.message.usage;
@@ -124,7 +182,10 @@ function contextTokens(event: AgentSessionEvent): number | undefined {
 }
 
 /** Collects behavior-only event metrics without retaining arguments, paths, commands, content, or responses. */
-export function createSanitizedToolTraceCollector(now: () => number = Date.now): {
+export function createSanitizedToolTraceCollector(
+	now: () => number = Date.now,
+	options: { targetPath?: string } = {},
+): {
 	handle: (event: AgentSessionEvent) => void;
 	snapshot: () => SanitizedToolTrace;
 } {
@@ -142,6 +203,13 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 	let activeTools = 0;
 	let activeIntervalStartedAt = 0;
 	let toolElapsedMs = 0;
+	let schemaErrorCount = 0;
+	let runMisuseCount = 0;
+	let targetFirstRead: boolean | null = null;
+	let firstSearchTargetRank: number | null = null;
+	let approximateSearchCount = 0;
+	let approximateSearchAwaitingTargetRead = false;
+	let approximateEditWithoutTargetReadCount = 0;
 
 	return {
 		handle(event) {
@@ -150,6 +218,17 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 
 			if (event.type === "tool_execution_start") {
 				const startedAt = now();
+				if ((event.toolName === "run" || event.toolName === "bash") && runMisusesStructuredTools(event.args)) {
+					runMisuseCount += 1;
+				}
+				if (event.toolName === "read") {
+					const isTarget = targetRead(event.args, options.targetPath);
+					if (targetFirstRead === null && isTarget !== undefined) targetFirstRead = isTarget;
+					if (isTarget) approximateSearchAwaitingTargetRead = false;
+				}
+				if (event.toolName === "edit" && approximateSearchAwaitingTargetRead) {
+					approximateEditWithoutTargetReadCount += 1;
+				}
 				if (activeTools === 0) activeIntervalStartedAt = startedAt;
 				activeTools += 1;
 				const recovery = awaitingRecovery;
@@ -188,6 +267,17 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 			const truncated = resultWasTruncated(event.result);
 			if (truncated) truncationCount += 1;
 			const error = event.isError ? classifyError(event.result) : {};
+			if (error.errorCode === "INVALID_INPUT") schemaErrorCount += 1;
+			if (started.toolName === "search" && !event.isError) {
+				const details = resultDetails(event.result);
+				if (firstSearchTargetRank === null) {
+					firstSearchTargetRank = searchTargetRank(event.result, options.targetPath) ?? null;
+				}
+				if (details?.approximate === true) {
+					approximateSearchCount += 1;
+					approximateSearchAwaitingTargetRead = true;
+				}
+			}
 			calls.push({
 				sequence: started.sequence,
 				toolName: started.toolName,
@@ -211,6 +301,12 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 				truncationCount,
 				toolElapsedMs,
 				peakContextTokens,
+				schemaErrorCount,
+				runMisuseCount,
+				targetFirstRead,
+				firstSearchTargetRank,
+				approximateSearchCount,
+				approximateEditWithoutTargetReadCount,
 			};
 		},
 	};

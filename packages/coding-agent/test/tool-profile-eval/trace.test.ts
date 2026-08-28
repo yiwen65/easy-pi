@@ -119,6 +119,95 @@ describe("sanitized tool trace collector", () => {
 		expect(serialized).not.toMatch(/8472|secret|positive safe integer/);
 	});
 
+	it("derives target rank, selection, and run-misuse metrics without retaining paths or commands", () => {
+		let time = 0;
+		const collector = createSanitizedToolTraceCollector(() => time++, { targetPath: "src/target.ts" });
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "search",
+				toolName: "search",
+				args: { query: "secret-marker" },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "search",
+				toolName: "search",
+				isError: false,
+				result: {
+					content: [{ type: "text", text: "secret content" }],
+					details: {
+						approximate: true,
+						hits: [{ path: "src/noise.ts" }, { path: "src/target.ts" }],
+					},
+				},
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "run",
+				toolName: "run",
+				args: { command: "cat src/target.ts" },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "run",
+				toolName: "run",
+				isError: false,
+				result: { content: [] },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "edit",
+				toolName: "edit",
+				args: { operations: [{ kind: "update", path: "src/target.ts" }] },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "edit",
+				toolName: "edit",
+				isError: false,
+				result: { content: [] },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "read",
+				toolName: "read",
+				args: { path: "src/target.ts" },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "read",
+				toolName: "read",
+				isError: false,
+				result: { content: [] },
+			}),
+		);
+
+		const trace = collector.snapshot();
+		expect(trace).toMatchObject({
+			runMisuseCount: 1,
+			targetFirstRead: true,
+			firstSearchTargetRank: 2,
+			approximateSearchCount: 1,
+			approximateEditWithoutTargetReadCount: 1,
+		});
+		expect(JSON.stringify(trace)).not.toMatch(/secret|target\.ts|noise\.ts|cat src/);
+	});
+
 	it("counts successful edit confirmation reads and peak context without retaining message content", () => {
 		let time = 0;
 		const collector = createSanitizedToolTraceCollector(() => time);

@@ -26,8 +26,8 @@ const MAX_SESSIONS = 20;
 const MAX_REPORTED_COST_USD = Number(process.env.PI_REAL_TOOL_PROFILE_MAX_COST_USD ?? "20");
 
 const manifest: ToolProfileEvalManifest = {
-	version: 1,
-	profiles: ["legacy", "v2"],
+	version: 2,
+	profiles: ["A", "B", "C"],
 	seeds: [211, 307],
 	budgets: { maxTurns: 18, timeoutMs: 180_000 },
 	tasks: [
