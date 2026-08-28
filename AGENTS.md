@@ -41,7 +41,7 @@
   - never print or persist credentials.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
 - For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
-- Never commit unless the user asks.
+- After completing and validating a bug fix or feature, commit the changes without waiting for the user to ask.
 
 ## Dependency and Install Security
 
