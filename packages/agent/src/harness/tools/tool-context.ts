@@ -1,4 +1,5 @@
 import type { ExecutionEnv } from "../types.ts";
+import type { MutationBackend } from "./mutation-core.ts";
 import type { ReadProvider, ResourceReader } from "./read-provider.ts";
 import type { SearchProvider } from "./search-provider.ts";
 import type { WorkspacePolicy } from "./workspace-policy.ts";
@@ -15,6 +16,7 @@ export interface ExecutionToolContext {
 	read?: {
 		scopeId?: string;
 	};
+	mutationBackend?: MutationBackend;
 	workspacePolicy?: WorkspacePolicy;
 	run?: {
 		commandPrefix?: string;

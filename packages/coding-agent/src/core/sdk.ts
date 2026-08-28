@@ -2,6 +2,9 @@ import { join } from "node:path";
 import {
 	Agent,
 	type AgentMessage,
+	type EditV2Dialect,
+	type MutationBackend,
+	type MutationLimits,
 	type ReadProvider,
 	type ResourceReader,
 	type SearchProvider,
@@ -60,6 +63,11 @@ export interface CreateAgentSessionOptions {
 		read?: {
 			provider?: ReadProvider;
 			resourceReaders?: ResourceReader[];
+		};
+		edit?: {
+			backend?: MutationBackend;
+			dialect?: EditV2Dialect;
+			limits?: Partial<MutationLimits>;
 		};
 	};
 	/** Global config directory. Default: ~/.pi/agent */
@@ -415,6 +423,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					searchProvider: options.toolsV2?.search?.provider,
 					readProvider: options.toolsV2?.read?.provider,
 					resourceReaders: options.toolsV2?.read?.resourceReaders,
+					mutationBackend: options.toolsV2?.edit?.backend,
+					editDialect: options.toolsV2?.edit?.dialect,
+					editLimits: options.toolsV2?.edit?.limits,
 				})
 			: undefined;
 	const session = new AgentSession({
