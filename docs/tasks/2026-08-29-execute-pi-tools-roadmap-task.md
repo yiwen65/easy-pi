@@ -277,10 +277,10 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-009 — Implement opt-in Overlay backend
+### [x] T-009 — Implement opt-in Overlay backend
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Provide isolated mutation execution and explicit accept/discard semantics without changing the model schema.
 - Inputs and prerequisites: T-008 backend contract and recovery semantics.
 - Scope or files: Overlay backend, host acceptance API, focused tests and docs.
@@ -295,9 +295,9 @@ Non-goals:
   - Accept/discard states are deterministic and opt-in.
 - Verification method:
   - Targeted overlay/integration tests, root check.
-- Validation evidence: Not run.
-- Blocker: T-008 not done.
-- Unblock condition: Journal backend is stable.
+- Validation evidence: `node-overlay-mutation-backend.test.ts` passed 6/6 and combined Overlay/Edit-renderer tests passed 37/37; Agent Edit tests passed 11/11. Coverage proves the base workspace remains byte-unchanged before host acceptance, explicit accept applies the observed plan, discard removes the private copy, validation failure/cancel/file-byte/pending-count quotas cleanly discard, base changes cause STALE_FILE while retaining the pending overlay, expired/interrupted preparation is cleaned, interrupted/partial acceptance becomes indeterminate and blocks automatic discard/new overlays, and 0700 private-root permissions are enforced. The TUI and model-visible result explicitly say that host accept/discard is pending. Root `npm run check` and `git diff --check` passed.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-010 — Stabilize Host ABI, adapters, hooks, and reference providers
 
@@ -394,7 +394,7 @@ Non-goals:
 - Real evaluation can spend paid tokens or leak sensitive content. Mitigation: explicit flag, exact model/budget, fixed fixtures, sanitized aggregates, stop at 15 sessions.
 - Darwin/Unix-only guarantee can be misread as cross-platform. Mitigation: runtime platform guards, docs, and explicit Windows rejection for durable mode.
 - Root check auto-fixes can touch shared-worktree files. Mitigation: inspect status/diff immediately after every root check and preserve the unrelated untracked user file.
-- Current blocker: None; T-009 through T-012 remain dependency-ordered.
+- Current blocker: None; T-010 through T-012 remain dependency-ordered.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -417,10 +417,12 @@ Non-goals:
 - 2026-08-29: T-007 completed with a details-only multi-file Edit renderer, bounded highlighted diffs, structured stale/split/partial error states, and control-sequence-safe inline paths. Agent focused tests passed 23/23, coding-agent focused tests passed 39/39, and root `npm run check` passed after formatting with no remaining warnings.
 - 2026-08-29: V2.3 committed as `44b10bd1e`; operations remains the v2 edit default and the overall default profile remains legacy. T-008 started by coordinator. A read-only journal analyst again received an empty delegated snapshot, so its inconclusive report was discarded and implementation investigation remains coordinator-owned in the real worktree.
 - 2026-08-29: T-008 completed with an opt-in private Darwin/Unix journal, durable state transitions, same-directory staged installs, verified rollback payloads, recovery locking/scanning, quotas/expiry, external-state fail-closed handling, and explicit no-cross-file-atomicity scope. An independent child-process crash after one installed file recovered to both originals; focused tests passed 16/16, related agent tests 11/11, combined coding-agent tests 55/55, and root checks passed.
+- 2026-08-29: V2.4 journal stage committed as `5e74f3999`; T-009 started by coordinator with a bounded private workspace-copy reference backend and explicit host accept/discard API.
+- 2026-08-29: T-009 completed with a private quota-bounded workspace copy, validation callback, unchanged model schema, pending-acceptance result state, explicit host accept/discard/list APIs, stale-base protection, expiry cleanup, and fail-closed interrupted acceptance. Overlay tests passed 6/6, combined coding-agent tests 37/37, Agent Edit tests 11/11, and root checks passed.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: not_run
 - Evidence: Not run.
-- Limitations: T-009 through T-012 remain pending; the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
+- Limitations: T-010 through T-012 remain pending; Overlay is an opt-in bounded workspace copy rather than an OS sandbox, the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.

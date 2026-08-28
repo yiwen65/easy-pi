@@ -67,6 +67,7 @@ export interface EditV2Details {
 	changedPaths: string[];
 	files: EditV2FileChange[];
 	patch: string;
+	pendingAcceptance?: { id: string; workspacePath: string };
 }
 
 export interface EditV2PartialCommitDetails {
@@ -468,14 +469,18 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 				const summary = operations
 					.map((operation) => `${operation.kind}: ${operation.path}${operation.to ? ` -> ${operation.to}` : ""}`)
 					.join("\n");
+				const status = result.pendingAcceptance
+					? `Prepared ${operations.length} file operation(s) in overlay ${result.pendingAcceptance.id}; the base workspace is unchanged until host acceptance.`
+					: `Applied ${operations.length} file operation(s).`;
 				return {
-					content: [{ type: "text", text: `Applied ${operations.length} file operation(s).\n\n${summary}` }],
+					content: [{ type: "text", text: `${status}\n\n${summary}` }],
 					details: {
 						dialect,
 						operations,
 						changedPaths: result.changedPaths,
 						files: changes,
 						patch: changes.map((change) => change.patch).join("\n"),
+						pendingAcceptance: result.pendingAcceptance,
 					},
 				};
 			});
