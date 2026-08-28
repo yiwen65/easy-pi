@@ -3,7 +3,7 @@
 - Created: 2026-08-28
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: `docs/harness_tools/Pi Agent Tools MVP v1.1.md`; long-term context from `docs/harness_tools/Pi Agent Tools v2.md`
 
 <!-- task-doc-section:background-goal -->
@@ -360,9 +360,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-011 — Execute and report the five-seed real statistical A/B benchmark
+### [x] T-011 — Execute and report the five-seed real statistical A/B benchmark
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Run the authorized T-010 matrix with `openai-codex/gpt-5.6-luna` at `max`, verify the aggregate, and report completion-rate uncertainty plus descriptive efficiency metrics.
 - Inputs and prerequisites: T-010 done; configured openai-codex credentials; real-provider authorization.
@@ -381,7 +381,7 @@ Non-goals:
   - Repository contains no credentials, response transcripts, or unintended fixture changes.
 - Verification method:
   - Targeted real Vitest output, aggregate consistency checks, task-document validator, and git status.
-- Validation evidence: First authorized targeted run stopped after 19.94 seconds at `locate-edit-test/17/v2` because the real tool workflow produced 5 assistant/model turns while the initial breaker allowed only 4. The second run completed all ten locate/edit sessions and `move-edit-test/17/legacy`, then stopped at `move-edit-test/17/v2` because that multi-operation workflow exceeded the calibrated 6-turn limit. Eleven successful records were emitted before the breaker; no aggregate result was claimed. T-013 subsequently satisfied the unblock condition, so the final rerun is in progress.
+- Validation evidence: After two breaker-calibration attempts (recorded below), the final targeted real Vitest completed all 20 sessions in 439.56 seconds. Both profiles succeeded on 10/10 runs: paired completion-score delta v2−legacy was 0 with deterministic clustered-bootstrap 95% interval `[0, 0]`. Legacy means/totals: 5.5 turns, 17,324.1 ms, 65,369 input tokens, 3,304 output tokens, $0.01728436 reported cost. V2: 7.2 turns, 26,359.7 ms, 76,371 input tokens, 7,086 output tokens, $0.02429964. Relative to legacy, v2 used 30.9% more turns, took 52.2% longer, used 16.8% more input and 114.5% more output tokens, and reported 40.6% higher cost on these fixtures. Total reported final-run cost was $0.041584. Distinct stable prompt/schema hashes were recorded per profile; pair ordering varied deterministically across the ten task×seed clusters. Repository status after cleanup contained only the untouched untracked vision document.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -453,7 +453,7 @@ Non-goals:
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
 - R-006: Real model runs require credentials, money, and network. Mitigation: T-010/T-011 are explicitly authorized, fixed at 20 sessions with timeout/turn/cost breakers, use ephemeral fixtures/sessions, and do not persist responses or credentials.
-- Current blocker: None. T-013 is done and T-011 final rerun is in progress.
+- Current blocker: None. All planned and authorized benchmark tasks are complete.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -481,10 +481,11 @@ Non-goals:
 - 2026-08-28: T-012 completed after calibrating the session breaker to 6 turns and deriving the global 120-turn cap; targeted skipped-path validation, root typecheck, and full `npm run check` passed. T-011 returned to in_progress.
 - 2026-08-28: T-011 second attempt emitted eleven successful records over 267.44 seconds, then stopped at `move-edit-test/17/v2` because the move workflow exceeded 6 turns. T-011 moved to blocked, T-013 was added and moved to in_progress, and no incomplete aggregate was reported.
 - 2026-08-28: T-013 completed after setting a 10-turn/session and derived 200-turn global cap plus observed-turn diagnostics; targeted skipped-path validation, root typecheck, and full `npm run check` passed. T-011 returned to in_progress for the final rerun.
+- 2026-08-28: T-011 final run completed all 20 authorized sessions over 439.56 seconds. Both profiles passed 10/10; paired completion delta was 0 with bootstrap 95% `[0,0]`. V2 was descriptively heavier on these fixtures: +30.9% turns, +52.2% elapsed time, +16.8% input tokens, +114.5% output tokens, and +40.6% reported cost. T-011 and the overall task moved to done.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: not_run
-- Evidence: T-001 through T-009 retain their recorded evidence; T-010/T-011 five-seed benchmark work is in progress.
-- Limitations: Statistical A/B results must not be reported until the gated executor validates and all planned real sessions complete or a breaker truthfully stops the run.
+- Result: passed
+- Evidence: T-001 through T-010, T-012, and T-013 retain their recorded implementation/static evidence. T-011 completed the authorized 2-task × 5-seed × 2-profile real benchmark with `openai-codex/gpt-5.6-luna` at `max`: 20/20 sessions completed, both profiles scored 10/10, paired delta was 0, clustered-bootstrap 95% interval was `[0,0]`, and bounded usage/latency/cost metrics were recorded. The authority-document validator passed after recording results; repository status showed no benchmark fixture/session residue.
+- Limitations: With all ten paired clusters succeeding, completion-rate data cannot distinguish the profiles; `[0,0]` is a degenerate interval caused by identical binary scores, not proof of general equivalence. Efficiency differences are descriptive for two small synthetic tasks and may not generalize. Two earlier authorized attempts consumed additional provider usage before their safety breakers stopped them; their partial records were not mixed into the final statistical aggregate.
