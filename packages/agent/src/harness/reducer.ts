@@ -84,6 +84,7 @@ export interface LaneState {
 		kind: "run" | "compaction" | "navigation";
 		intent: OperationStartedRecord["intent"];
 		aborting: boolean;
+		pausing: boolean;
 		step: null | {
 			kind: "assistant" | "compaction" | "branch_summary";
 			attempts: number;
@@ -540,6 +541,13 @@ export function reduceLaneState(input: LaneReductionInput): LaneReductionResult 
 		record.type === "operation_started" ? record.id === started.id : "runId" in record && record.runId === started.id,
 	);
 	const aborting = operationRecords.some((record) => record.type === "abort_requested");
+	let lastPauseSeq = -1;
+	let lastPauseClearSeq = -1;
+	for (const record of operationRecords) {
+		if (record.type === "pause_requested") lastPauseSeq = Math.max(lastPauseSeq, record.seq);
+		else if (record.type === "pause_cleared") lastPauseClearSeq = Math.max(lastPauseClearSeq, record.seq);
+	}
+	const pausing = lastPauseSeq > lastPauseClearSeq;
 	const pendingSteer = aborting
 		? []
 		: pendingQueueRecords
@@ -648,6 +656,7 @@ export function reduceLaneState(input: LaneReductionInput): LaneReductionResult 
 				kind: started.intent.kind,
 				intent: clone(started.intent),
 				aborting,
+				pausing,
 				step,
 				toolBatch: deriveToolBatch(started.id, operationRecords, ownEntries, entriesById, deferredWriteIds),
 				missingInitialMessages,

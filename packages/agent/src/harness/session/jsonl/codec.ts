@@ -16,6 +16,8 @@ const ENTRY_TYPES = new Set<Entry["type"]>([
 const RECORD_TYPES = new Set<LaneRecord["type"]>([
 	"operation_started",
 	"abort_requested",
+	"pause_requested",
+	"pause_cleared",
 	"operation_finished",
 	"step_attempt",
 	"tool_started",
