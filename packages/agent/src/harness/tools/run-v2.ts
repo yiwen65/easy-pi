@@ -61,6 +61,7 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 			"Run a command in an initial working directory. Use it for builds, tests, Git, and programs—not for searching, reading, or editing files. cwd is not a sandbox.",
 		parameters: runV2Schema,
 		executionMode: "sequential",
+		replay: "never",
 		async execute(_toolCallId, input, signal, _onUpdate, context) {
 			validateInput(input);
 			const cwd = await resolveWorkspacePath(

@@ -10,11 +10,7 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import {
-	type EvalExecutionInput,
-	runToolProfileEvaluation,
-	type ToolProfileEvalManifest,
-} from "./runner.ts";
+import { type EvalExecutionInput, runToolProfileEvaluation, type ToolProfileEvalManifest } from "./runner.ts";
 
 function assistantText(messages: unknown[]): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
@@ -117,8 +113,12 @@ describe("tool profile A/B evaluation scaffold", () => {
 		expect(second).toEqual(first);
 		expect(first.records).toHaveLength(manifest.tasks.length * manifest.seeds.length * 2);
 		expect(first.profiles.legacy.runs).toBe(first.profiles.v2.runs);
-		expect(new Set(first.records.filter((record) => record.profile === "legacy").map((record) => record.schemaHash)).size).toBe(1);
-		expect(new Set(first.records.filter((record) => record.profile === "v2").map((record) => record.schemaHash)).size).toBe(1);
+		expect(
+			new Set(first.records.filter((record) => record.profile === "legacy").map((record) => record.schemaHash)).size,
+		).toBe(1);
+		expect(
+			new Set(first.records.filter((record) => record.profile === "v2").map((record) => record.schemaHash)).size,
+		).toBe(1);
 		expect(first.records.find((record) => record.profile === "legacy")?.schemaHash).not.toBe(
 			first.records.find((record) => record.profile === "v2")?.schemaHash,
 		);

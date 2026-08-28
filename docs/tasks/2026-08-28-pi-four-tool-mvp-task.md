@@ -3,7 +3,7 @@
 - Created: 2026-08-28
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: `docs/harness_tools/Pi Agent Tools MVP v1.1.md`; long-term context from `docs/harness_tools/Pi Agent Tools v2.md`
 
 <!-- task-doc-section:background-goal -->
@@ -190,7 +190,7 @@ Non-goals:
   - No rollback, transaction, stale or fuzzy behavior is introduced.
 - Verification method:
   - Targeted new agent edit-v2 test file.
-- Validation evidence: Focused `edit-v2.test.ts` passed 4/4, including zero-mutation prevalidation and partial failure; combined Batch 2 run passed 16/16; root `npm run check` passed.
+- Validation evidence: Final focused `edit-v2.test.ts` passed 5/5, including zero-mutation prevalidation with missing parents, implicit parent creation for create/move, and partial-failure `createdDirectories`; the final five-file agent run passed 26/26 and root `npm run check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -217,7 +217,7 @@ Non-goals:
   - cwd is explicit but never described as sandbox containment.
 - Verification method:
   - Targeted new agent run-v2 test file.
-- Validation evidence: Focused `run-v2.test.ts` passed 4/4, including real local nonzero and timeout fixtures; combined Batch 2 run passed 16/16; root `npm run check` passed.
+- Validation evidence: Final focused `run-v2.test.ts` passed 6/6, including real local nonzero, timeout-output, replay metadata, and Unix managed-process-group termination fixtures; the final five-file agent run passed 26/26 and root `npm run check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -275,9 +275,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-008 — Complete cross-package validation and delivery
+### [x] T-008 — Complete cross-package validation and delivery
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Reconcile all outputs, run required checks, update durable evidence, and deliver only after all acceptance criteria pass.
 - Inputs and prerequisites: T-001 through T-007 implementation reports and diffs.
@@ -298,7 +298,7 @@ Non-goals:
   - Git status contains no unintended staged or modified paths.
 - Verification method:
   - Targeted tests listed below, `npm run check`, task-document validator, and git diff/status inspection.
-- Validation evidence: Not run.
+- Validation evidence: Final agent targeted command passed 26/26 across foundations and all four v2 tools; final coding-agent targeted command passed 98/98 across CLI args, legacy default tools, v2 profile/provider integration, and deterministic evaluation. Final root `npm run check` completed with no fixes or diagnostics, covering Biome, pinned dependencies, import policy, shrinkwrap/install lock, full typecheck, and browser smoke. `git diff --check` passed. Contract-gap review added exact replay metadata, implicit create/move parent creation with truthful partial-commit directory reporting, five evaluation seeds, and a Unix managed-process termination fixture. Git status contains only task-owned final changes plus the untouched untracked `docs/harness_tools/Pi Agent Tools v2.md`.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -322,7 +322,7 @@ Non-goals:
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
 - R-006: Real A/B model runs require credentials, money, network and explicit approval. Mitigation: deliver only the deterministic scaffold and faux-provider verification in this task.
-- Current blocker: None for T-001; downstream tasks are dependency-blocked by design.
+- Current blocker: None. All planned tasks are complete.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -341,10 +341,11 @@ Non-goals:
 - 2026-08-28: A read-only T-006/T-007 analyst DAG could not access the delegated repository snapshot and returned no usable changes; coordinator continued from direct repository evidence.
 - 2026-08-28: T-006 completed after 97/97 focused coding-agent tests, root typecheck, and full `npm run check` passed. The opt-in SDK/CLI profile, shared v2 definitions, prompts, renderers, local search adapter, filtering, override, and non-persistence behavior are integrated. T-007 moved to in_progress.
 - 2026-08-28: T-007 completed after its faux-provider test passed twice-run deterministic records, profile-specific hashes, paired ordering, and clustered bootstrap checks; root typecheck passed. T-008 moved to in_progress for contract-gap review and final cross-package validation.
+- 2026-08-28: T-008 contract-gap review added replay metadata, create/move parent-directory creation and partial reporting, five evaluation seeds, and managed-process termination coverage. Final agent tests passed 26/26, coding-agent tests passed 98/98, `npm run check` passed with no fixes, and `git diff --check` passed. T-008 and the overall task moved to done.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: not_run
-- Evidence: Implementation and validation have not started.
-- Limitations: Downstream tasks remain pending until shared foundations are implemented and verified.
+- Result: passed
+- Evidence: All T-001 through T-008 tasks are done with recorded targeted tests; final agent tests passed 26/26, coding-agent tests passed 98/98, root `npm run check` passed, `git diff --check` passed, and the authority-document validator passed before final commit.
+- Limitations: No paid or real-model A/B run was authorized or performed; the delivered evaluation evidence is deterministic faux-provider scaffold coverage. Workspace policy remains best-effort path enforcement rather than a sandbox, as required by the MVP contract.

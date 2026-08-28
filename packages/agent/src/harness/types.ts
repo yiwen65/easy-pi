@@ -83,6 +83,8 @@ export type AgentHarnessTool<
 	TParameters extends TSchema = TSchema,
 	TDetails = unknown,
 > = Omit<AgentTool<TParameters, TDetails>, "execute"> & {
+	/** Durable harness replay policy after an interrupted dispatch. */
+	replay?: "never" | "safe";
 	/** Execute the tool call with the context resolved for the current turn snapshot. */
 	execute(
 		toolCallId: string,

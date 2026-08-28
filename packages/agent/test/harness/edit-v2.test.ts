@@ -16,6 +16,10 @@ class TrackingEnv extends NodeExecutionEnv {
 		if (content === this.failContent) return err(new FileError("unknown", "injected write failure", path));
 		return super.writeFile(path, content, signal);
 	}
+	override async createDir(path: string, options?: { recursive?: boolean; abortSignal?: AbortSignal }) {
+		this.mutations++;
+		return super.createDir(path, options);
+	}
 	override async renameFile(source: string, destination: string, signal?: AbortSignal) {
 		this.mutations++;
 		return super.renameFile(source, destination, signal);
@@ -49,6 +53,26 @@ describe("v2 edit", () => {
 		expect(result.details.operations).toHaveLength(4);
 	});
 
+	it("creates missing destination parents for create and move", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("source.txt", "source"));
+		env.mutations = 0;
+		await createEditV2Tool().execute(
+			"id",
+			{
+				operations: [
+					{ kind: "create", path: "created/nested/file.txt", content: "created" },
+					{ kind: "move", path: "source.txt", to: "moved/nested/source.txt" },
+				],
+			},
+			undefined,
+			undefined,
+			{ env },
+		);
+		expect(getOrThrow(await env.readTextFile("created/nested/file.txt"))).toBe("created");
+		expect(getOrThrow(await env.readTextFile("moved/nested/source.txt"))).toBe("source");
+	});
+
 	it("performs zero mutations when prevalidation fails", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("a.txt", "same same"));
@@ -56,7 +80,12 @@ describe("v2 edit", () => {
 		await expect(
 			createEditV2Tool().execute(
 				"id",
-				{ operations: [{ kind: "update", path: "a.txt", oldText: "same", newText: "x" }] },
+				{
+					operations: [
+						{ kind: "create", path: "new/parent/file.txt", content: "new" },
+						{ kind: "update", path: "a.txt", oldText: "same", newText: "x" },
+					],
+				},
 				undefined,
 				undefined,
 				{ env },
@@ -90,7 +119,7 @@ describe("v2 edit", () => {
 				{
 					operations: [
 						{ kind: "create", path: "ok.txt", content: "ok" },
-						{ kind: "create", path: "fail.txt", content: "fail" },
+						{ kind: "create", path: "partial/parent/fail.txt", content: "fail" },
 						{ kind: "create", path: "later.txt", content: "later" },
 					],
 				},
@@ -106,6 +135,10 @@ describe("v2 edit", () => {
 					completedOperationIndexes: [0],
 					failedOperationIndex: 1,
 					pendingOperationIndexes: [2],
+					createdDirectories: expect.arrayContaining([
+						expect.stringMatching(/partial$/),
+						expect.stringMatching(/parent$/),
+					]),
 				},
 			});
 		}

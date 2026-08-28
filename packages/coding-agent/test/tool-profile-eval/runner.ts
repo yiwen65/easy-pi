@@ -60,7 +60,9 @@ function stableValue(value: unknown): unknown {
 }
 
 function hash(value: unknown): string {
-	return createHash("sha256").update(JSON.stringify(stableValue(value))).digest("hex");
+	return createHash("sha256")
+		.update(JSON.stringify(stableValue(value)))
+		.digest("hex");
 }
 
 function random(seed: number): () => number {
@@ -102,9 +104,8 @@ export async function runToolProfileEvaluation(
 	const records: ToolProfileEvalRecord[] = [];
 	for (const task of manifest.tasks) {
 		for (const seed of manifest.seeds) {
-			const pairProfiles: ToolProfile[] = random(seed ^ Number.parseInt(hash(task.id).slice(0, 8), 16))() < 0.5
-				? ["legacy", "v2"]
-				: ["v2", "legacy"];
+			const pairProfiles: ToolProfile[] =
+				random(seed ^ Number.parseInt(hash(task.id).slice(0, 8), 16))() < 0.5 ? ["legacy", "v2"] : ["v2", "legacy"];
 			for (let pairOrder = 0; pairOrder < pairProfiles.length; pairOrder++) {
 				const profile = pairProfiles[pairOrder];
 				const output = await execute({ task, profile, seed, budgets: manifest.budgets });
