@@ -3,7 +3,7 @@
 - Created: 2026-08-29
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: Confirmed conversation contract to implement the full corrected roadmap as opt-in staged deliveries, including authorized bounded real-model evaluation.
 
 <!-- task-doc-section:background-goal -->
@@ -347,9 +347,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-012 — Complete full-roadmap validation and delivery
+### [x] T-012 — Complete full-roadmap validation and delivery
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: Verify every phase, document external blockers/limits, run final checks, and deliver a clean opt-in implementation.
 - Inputs and prerequisites: T-011 results and all stage commits.
@@ -366,7 +366,7 @@ Non-goals:
   - Final repository and task validations pass.
 - Verification method:
   - Cross-stage targeted tests, root check, task validator, git log/status/diff.
-- Validation evidence: Not run.
+- Validation evidence: Final cross-stage agent Search/Read/Edit tests passed 25/25. Coding-agent local/FFF Search, Node Read, Journal, Overlay, Host adapters/lifecycle, profile/TUI, and faux evaluation tests passed 86/86. Root `npm run check` passed with no auto-fixes; `git diff --check` passed. Static contract checks confirmed `toolProfile` still defaults to `legacy` and the v2 edit dialect still defaults to `operations`. The task validator passed, the staged roadmap commits are present, and the only remaining untracked file is the untouched user-owned `docs/harness_tools/Pi Agent Tools v2.md`.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -423,10 +423,12 @@ Non-goals:
 - 2026-08-29: T-010 completed with a reloadable owned runtime, factory-vs-instance lifecycle and error isolation, minimal approval/notification hooks, capability-narrow native Operations adapters, Memory/SSH execution environments, unchanged four-tool schemas, and SDK migration guidance. Focused tests passed 13/13 agent and 20/20 coding-agent; root checks passed.
 - 2026-08-29: V2.5 Host ABI stage committed as `d4ba3372f`; T-011 started with the fixed faux manifest/grader and explicit opt-in 15-session A/B/C real-model budget.
 - 2026-08-29: T-011 completed. Faux evaluation tests passed 6/6; the gated real A/B/C run consumed exactly the authorized 15 sessions, completed 15/15, emitted no tool/schema errors, and persisted only aggregate sanitized results. C retained the same four schemas as B, used fewer mean turns/tool calls in this bounded sample, and remains opt-in.
+- 2026-08-29: Evaluation stage committed as `e52af32a4`; T-012 started with cross-stage regression checks, default/profile contract verification, final task validation, and delivery review.
+- 2026-08-29: T-012 completed. Cross-stage focused tests passed 25/25 agent and 86/86 coding-agent; root checks, task validation, default-profile/default-dialect checks, commit-chain review, and protected-file status review all passed.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: not_run
-- Evidence: Not run.
-- Limitations: T-012 remains pending; Overlay is an opt-in bounded workspace copy rather than an OS sandbox, the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
+- Result: passed
+- Evidence: T-001 through T-012 are all done with per-stage commits and recorded focused checks. Final evidence: 25/25 agent cross-stage tests, 86/86 coding-agent cross-stage tests, 6/6 faux evaluation tests within that coding-agent set, 15/15 authorized real A/B/C sessions, root `npm run check`, `git diff --check`, task-document validation, default/profile contract scans, and explicit Git status/log review.
+- Limitations: Overlay is an opt-in bounded workspace copy rather than an OS sandbox; the durable journal is Darwin/Unix-only and opt-in; cross-file changes are not atomically visible; the real evaluation had only five sessions per variant and did not exercise recovery, approximate, or truncation paths; the operations edit dialect remains the v2 default; and the overall default profile remains legacy.
