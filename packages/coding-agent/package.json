@@ -50,6 +50,7 @@
 		"@earendil-works/pi-protocol": "^0.84.2",
 		"@earendil-works/pi-server": "^0.84.2",
 		"@earendil-works/pi-tui": "^0.84.2",
+		"@ff-labs/fff-node": "0.10.5",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",

@@ -18,6 +18,7 @@ export {
 	type EditV2Operation,
 	type EditV2PartialCommitDetails,
 } from "./edit-v2.ts";
+export { ExecutionEnvSearchProvider } from "./execution-env-search-provider.ts";
 export {
 	createReadTool,
 	type ReadImageProcessor,
@@ -28,14 +29,23 @@ export {
 } from "./read.ts";
 export { createReadV2Tool, type ReadV2Details, type ReadV2Input } from "./read-v2.ts";
 export { createRunV2Tool, type RunV2Details, type RunV2Input } from "./run-v2.ts";
-export type {
-	SearchCandidate,
-	SearchProvider,
-	SearchProviderResult,
-	SearchRequest,
+export {
+	compareSearchPaths,
+	type SearchCapabilities,
+	type SearchCaseMode,
+	type SearchContextLine,
+	type SearchExecutionContext,
+	type SearchHit,
+	type SearchKind,
+	type SearchPage,
+	type SearchProvider,
+	SearchProviderError,
+	type SearchProviderErrorCode,
+	type SearchRanking,
+	type SearchRequest,
+	scoreSearchPath,
 } from "./search-provider.ts";
 export {
-	compareFileSearchCandidates,
 	createSearchV2Tool,
 	type SearchV2Details,
 	type SearchV2Input,

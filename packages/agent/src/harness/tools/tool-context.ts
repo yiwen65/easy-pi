@@ -6,6 +6,9 @@ import type { WorkspacePolicy } from "./workspace-policy.ts";
 export interface ExecutionToolContext {
 	env: ExecutionEnv;
 	searchProvider?: SearchProvider;
+	search?: {
+		scopeId?: string;
+	};
 	workspacePolicy?: WorkspacePolicy;
 	run?: {
 		commandPrefix?: string;

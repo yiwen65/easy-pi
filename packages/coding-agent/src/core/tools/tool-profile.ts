@@ -6,6 +6,8 @@ import {
 	createSearchV2Tool,
 	type ExecutionToolContext,
 	type RunV2Details,
+	type SearchProvider,
+	type SearchV2Details,
 	type WorkspacePolicy,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
@@ -35,6 +37,8 @@ export interface CreateV2ToolDefinitionsOptions {
 	getShellCommandPrefix?: () => string | undefined;
 	autoResizeImages?: boolean;
 	workspacePolicy?: WorkspacePolicy;
+	/** Directly injected providers are host-owned and must be closed by their caller. */
+	searchProvider?: SearchProvider;
 }
 
 const promptContributions = {
@@ -82,6 +86,136 @@ function renderResult(
 	const remaining = lines.length - visible.length;
 	const suffix = remaining > 0 ? `\n... (${remaining} more lines)` : "";
 	return new Text(theme.fg("toolOutput", `${visible.join("\n")}${suffix}`), 0, 0);
+}
+
+const SEARCH_PREVIEW_HITS = 8;
+
+function renderSearchCall(
+	args: {
+		query?: unknown;
+		kind?: unknown;
+		path?: unknown;
+		fileGlob?: unknown;
+		case?: unknown;
+		regex?: unknown;
+		context?: unknown;
+		ranking?: unknown;
+	},
+	theme: Theme,
+	context: ToolRenderContext,
+): Text {
+	const query = typeof args.query === "string" ? args.query : "...";
+	const kind = args.kind === "files" || args.kind === "glob" ? args.kind : "text";
+	const mode =
+		kind === "text"
+			? args.regex === true
+				? "regex"
+				: "literal"
+			: kind === "files"
+				? (args.ranking ?? "fast")
+				: "exact";
+	const metadata = [kind, String(mode)];
+	if (kind === "text") metadata.push(typeof args.case === "string" ? args.case : "smart");
+	if (typeof args.context === "number" && args.context > 0) metadata.push(`context ${args.context}`);
+	if (typeof args.path === "string" && args.path.length > 0) metadata.push(args.path);
+	if (typeof args.fileGlob === "string" && args.fileGlob.length > 0) metadata.push(args.fileGlob);
+	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+	component.setText(
+		theme.fg("toolTitle", theme.bold("search")) +
+			theme.fg("accent", ` ${JSON.stringify(query)}`) +
+			theme.fg("muted", ` · ${metadata.join(" · ")}`),
+	);
+	return component;
+}
+
+function highlightSearchRanges(text: string, ranges: Array<[number, number]>, theme: Theme): string {
+	const normalized = ranges
+		.map(
+			([start, end]) =>
+				[Math.max(0, Math.min(text.length, start)), Math.max(0, Math.min(text.length, end))] as const,
+		)
+		.filter(([start, end]) => end > start)
+		.sort(([left], [right]) => left - right);
+	let cursor = 0;
+	let output = "";
+	for (const [start, end] of normalized) {
+		if (start < cursor) continue;
+		output += theme.fg("toolOutput", text.slice(cursor, start));
+		output += theme.fg("accent", theme.bold(text.slice(start, end)));
+		cursor = end;
+	}
+	output += theme.fg("toolOutput", text.slice(cursor));
+	return output;
+}
+
+class SearchResultRenderComponent extends Container {
+	private details: SearchV2Details | undefined;
+	private options: ToolRenderResultOptions = { expanded: false, isPartial: false };
+	private renderTheme: Theme | undefined;
+
+	setResult(details: SearchV2Details, options: ToolRenderResultOptions, theme: Theme): void {
+		this.details = details;
+		this.options = options;
+		this.renderTheme = theme;
+		this.invalidate();
+	}
+
+	override render(width: number): string[] {
+		const details = this.details;
+		const theme = this.renderTheme;
+		if (!details || !theme) return [];
+		const visibleHits = this.options.expanded ? details.hits : details.hits.slice(0, SEARCH_PREVIEW_HITS);
+		const lines: string[] = [""];
+		const status = [details.approximate ? "approximate" : "exact", details.partial ? "partial" : "complete"];
+		lines.push(theme.fg(details.partial ? "warning" : "muted", `[${status.join(" · ")}]`));
+		let currentPath: string | undefined;
+		for (const hit of visibleHits) {
+			if (hit.kind === "file") {
+				const marker = hit.exact ? "=" : details.approximate ? "~" : "•";
+				const kind = hit.pathKind === "directory" ? "/" : "";
+				lines.push(`${theme.fg("muted", `${marker} `)}${theme.fg("accent", `${hit.path}${kind}`)}`);
+				continue;
+			}
+			if (hit.path !== currentPath) {
+				currentPath = hit.path;
+				lines.push(theme.fg("accent", hit.path));
+			}
+			for (const contextLine of hit.before ?? []) {
+				lines.push(`${theme.fg("muted", `  ${contextLine.line}- `)}${theme.fg("muted", contextLine.text)}`);
+			}
+			lines.push(
+				`${theme.fg("muted", `  ${hit.line}:${hit.column} `)}${highlightSearchRanges(hit.text, hit.ranges, theme)}`,
+			);
+			for (const contextLine of hit.after ?? []) {
+				lines.push(`${theme.fg("muted", `  ${contextLine.line}- `)}${theme.fg("muted", contextLine.text)}`);
+			}
+		}
+		const remaining = details.hits.length - visibleHits.length;
+		if (remaining > 0) {
+			lines.push(
+				theme.fg("muted", `... (${remaining} more hits,`) +
+					` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+			);
+		}
+		if (details.nextCursor) lines.push(theme.fg("muted", `Continue with cursor ${details.nextCursor}`));
+		if (details.hits.length === 0) lines.push(theme.fg("muted", "No matches found."));
+		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "..."));
+	}
+}
+
+function renderSearchResult(
+	result: { content: Array<{ type: string; text?: string }>; details: SearchV2Details },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	context: ToolRenderContext,
+): SearchResultRenderComponent | Text {
+	if (!result.details || !Array.isArray(result.details.hits)) return renderResult(result, options, theme);
+	const component =
+		context.lastComponent instanceof SearchResultRenderComponent
+			? context.lastComponent
+			: new SearchResultRenderComponent();
+	component.setResult(result.details, options, theme);
+	return component;
 }
 
 const RUN_PREVIEW_LINES = 5;
@@ -271,17 +405,30 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 					: context;
 			return tool.execute(toolCallId, params, signal, onUpdate, executionContext);
 		},
-		renderCall: (args, theme, renderContext) =>
-			tool.name === "run" ? renderRunCall(args, theme, renderContext) : renderCall(tool.name, args, theme),
-		renderResult: (result, options, theme, renderContext) =>
-			tool.name === "run"
-				? renderRunResult(
-						result as unknown as { content: Array<{ type: string; text?: string }>; details: RunV2Details },
-						options,
-						theme,
-						renderContext,
-					)
-				: renderResult(result, options, theme),
+		renderCall: (args, theme, renderContext) => {
+			if (tool.name === "run") return renderRunCall(args, theme, renderContext);
+			if (tool.name === "search") return renderSearchCall(args, theme, renderContext);
+			return renderCall(tool.name, args, theme);
+		},
+		renderResult: (result, options, theme, renderContext) => {
+			if (tool.name === "run") {
+				return renderRunResult(
+					result as unknown as { content: Array<{ type: string; text?: string }>; details: RunV2Details },
+					options,
+					theme,
+					renderContext,
+				);
+			}
+			if (tool.name === "search") {
+				return renderSearchResult(
+					result as unknown as { content: Array<{ type: string; text?: string }>; details: SearchV2Details },
+					options,
+					theme,
+					renderContext,
+				);
+			}
+			return renderResult(result, options, theme);
+		},
 	};
 }
 
@@ -291,7 +438,7 @@ export function createV2ToolDefinitions(
 	options: CreateV2ToolDefinitionsOptions = {},
 ): Record<(typeof V2_TOOL_NAMES)[number], ToolDefinition<any, any>> {
 	const env = new NodeExecutionEnv({ cwd, shellPath: options.shellPath });
-	const searchProvider = new LocalSearchProviderV2();
+	const searchProvider: SearchProvider = options.searchProvider ?? new LocalSearchProviderV2(env);
 	const context: ExecutionToolContext = {
 		env,
 		searchProvider,

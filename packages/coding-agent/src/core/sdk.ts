@@ -2,6 +2,7 @@ import { join } from "node:path";
 import {
 	Agent,
 	type AgentMessage,
+	type SearchProvider,
 	setDefaultStreamFn,
 	type ThinkingLevel,
 	type WorkspacePolicy,
@@ -49,6 +50,12 @@ export interface CreateAgentSessionOptions {
 	toolProfile?: ToolProfile;
 	/** Optional path policy applied by v2 tools. Compatibility mode is used when omitted. */
 	workspacePolicy?: WorkspacePolicy;
+	/** Optional host-owned v2 services. The caller must close directly injected providers. */
+	toolsV2?: {
+		search?: {
+			provider?: SearchProvider;
+		};
+	};
 	/** Global config directory. Default: ~/.pi/agent */
 	agentDir?: string;
 
@@ -399,6 +406,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					shellPath: settingsManager.getShellPath(),
 					getShellCommandPrefix: () => settingsManager.getShellCommandPrefix(),
 					workspacePolicy: options.workspacePolicy,
+					searchProvider: options.toolsV2?.search?.provider,
 				})
 			: undefined;
 	const session = new AgentSession({
