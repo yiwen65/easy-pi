@@ -1,9 +1,9 @@
 /**
  * Manual real-provider benchmark for legacy versus v2 tool profiles.
  *
- * No provider call occurs unless PI_REAL_TOOL_PROFILE_BENCHMARK=1 is explicit.
- * The benchmark persists neither sessions nor model responses and prints only
- * aggregate/task metrics.
+ * No provider call occurs unless PI_REAL_TOOL_PROFILE_BENCHMARK=1 or the
+ * narrower PI_REAL_TOOL_PROFILE_DIAGNOSTIC=1 is explicit. The benchmark
+ * persists neither sessions nor model responses and prints only content-free metrics.
  */
 
 import { execFileSync } from "node:child_process";
@@ -20,9 +20,12 @@ import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { type EvalExecutionInput, runToolProfileEvaluation, type ToolProfileEvalManifest } from "./runner.ts";
+import { createSanitizedToolTraceCollector } from "./trace.ts";
 
 const RUN = process.env.PI_REAL_TOOL_PROFILE_BENCHMARK === "1";
-if (RUN) configureHttpDispatcher();
+const RUN_DIAGNOSTIC = process.env.PI_REAL_TOOL_PROFILE_DIAGNOSTIC === "1";
+if (RUN && RUN_DIAGNOSTIC) throw new Error("Select either benchmark or diagnostic mode, not both");
+if (RUN || RUN_DIAGNOSTIC) configureHttpDispatcher();
 
 const PROVIDER = process.env.PI_REAL_TOOL_PROFILE_PROVIDER ?? "openai-codex";
 const MODEL_ID = process.env.PI_REAL_TOOL_PROFILE_MODEL ?? "gpt-5.6-luna";
@@ -89,7 +92,7 @@ function testPasses(cwd: string): boolean {
 	}
 }
 
-describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
+describe.skipIf(!RUN && !RUN_DIAGNOSTIC)("real tool-profile five-seed benchmark", () => {
 	let benchmarkRoot: string;
 	let runtime: ModelRuntime;
 	let totalSessions = 0;
@@ -109,18 +112,20 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 		if (benchmarkRoot) rmSync(benchmarkRoot, { recursive: true, force: true });
 	});
 
-	it("runs two tasks across five paired seeds", { timeout: 1_800_000 }, async () => {
+	it("runs the bounded benchmark or v2 move diagnostic", { timeout: 1_800_000 }, async () => {
 		const config = manifest();
 		expect(config.tasks.map((task) => task.id)).toEqual(["locate-edit-test", "move-edit-test"]);
 		expect(config.seeds).toHaveLength(5);
 		expect(config.tasks.length * config.seeds.length * config.profiles.length).toBe(MAX_SESSIONS);
-		const maxModelTurns = MAX_SESSIONS * config.budgets.maxTurns;
+		const sessionLimit = RUN_DIAGNOSTIC ? config.seeds.length : MAX_SESSIONS;
+		const budgets = RUN_DIAGNOSTIC ? { ...config.budgets, maxTurns: 12 } : config.budgets;
+		const maxModelTurns = sessionLimit * budgets.maxTurns;
 		const cwd = join(benchmarkRoot, "fixture");
 		const model = runtime.getModel(PROVIDER, MODEL_ID);
 		if (!model) throw new Error(`${PROVIDER}/${MODEL_ID} disappeared from the local model catalog`);
 
 		const execute = async (input: EvalExecutionInput) => {
-			if (totalSessions >= MAX_SESSIONS) throw new Error(`Session budget exceeded: ${totalSessions}`);
+			if (totalSessions >= sessionLimit) throw new Error(`Session budget exceeded: ${totalSessions}`);
 			totalSessions += 1;
 			const fixture = resetFixture(cwd, input.task.id, input.seed);
 			const settingsManager = SettingsManager.inMemory();
@@ -146,6 +151,8 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 				resourceLoader,
 				sessionManager: SessionManager.inMemory(cwd),
 			});
+			const traceCollector = createSanitizedToolTraceCollector();
+			const unsubscribe = session.subscribe(traceCollector.handle);
 			const startedAt = Date.now();
 			const timeout = setTimeout(() => void session.abort(), input.budgets.timeoutMs);
 			try {
@@ -153,6 +160,8 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 				await session.prompt(fixture.prompt);
 				const stats = session.getSessionStats();
 				const elapsedMs = Date.now() - startedAt;
+				const trace = traceCollector.snapshot();
+				const modelElapsedMs = Math.max(0, elapsedMs - trace.toolElapsedMs);
 				totalModelTurns += stats.assistantMessages;
 				totalReportedCostUsd += stats.cost;
 				if (stats.assistantMessages > input.budgets.maxTurns) {
@@ -175,8 +184,12 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 						turns: stats.assistantMessages,
 						inputTokens: stats.tokens.input,
 						outputTokens: stats.tokens.output,
+						cacheReadTokens: stats.tokens.cacheRead,
+						cacheWriteTokens: stats.tokens.cacheWrite,
 						costUsd: Number(stats.cost.toFixed(6)),
 						elapsedMs,
+						modelElapsedMs,
+						trace,
 					}),
 				);
 				return {
@@ -185,8 +198,12 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 					turns: stats.assistantMessages,
 					inputTokens: stats.tokens.input,
 					outputTokens: stats.tokens.output,
+					cacheReadTokens: stats.tokens.cacheRead,
+					cacheWriteTokens: stats.tokens.cacheWrite,
 					costUsd: stats.cost,
 					elapsedMs,
+					modelElapsedMs,
+					trace,
 					systemPrompt: session.systemPrompt,
 					tools: session.getAllTools().map(({ name, description, parameters }) => ({
 						name,
@@ -196,9 +213,30 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 				};
 			} finally {
 				clearTimeout(timeout);
+				unsubscribe();
 				session.dispose();
 			}
 		};
+
+		if (RUN_DIAGNOSTIC) {
+			const task = config.tasks.find((candidate) => candidate.id === "move-edit-test");
+			if (!task) throw new Error("move-edit-test is missing from the manifest");
+			const records: Awaited<ReturnType<typeof execute>>[] = [];
+			for (const seed of config.seeds) {
+				records.push(await execute({ task, seed, profile: "v2", budgets }));
+			}
+			expect(records).toHaveLength(config.seeds.length);
+			expect(totalSessions).toBe(sessionLimit);
+			console.log(
+				JSON.stringify({
+					eval: "real-tool-profile-v2-move-diagnostic",
+					provider: PROVIDER,
+					model: MODEL_ID,
+					records: records.map(({ systemPrompt: _systemPrompt, tools: _tools, ...record }) => record),
+				}),
+			);
+			return;
+		}
 
 		const summary = await runToolProfileEvaluation(config, execute);
 		expect(summary.records).toHaveLength(MAX_SESSIONS);

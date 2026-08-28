@@ -1,6 +1,6 @@
 # Tool profile A/B scaffold
 
-`manifest.json` defines paired `legacy` (A) and `v2` (C) runs with fixed tasks, seeds, and budgets. `runner.ts` records profile-specific system-prompt and tool-schema SHA-256 hashes, randomizes pair order deterministically, and reports a deterministic task×seed clustered bootstrap interval.
+`manifest.json` defines paired `legacy` (A) and `v2` (C) runs with fixed tasks, seeds, and budgets. `runner.ts` records profile-specific system-prompt and tool-schema SHA-256 hashes, usage/cache and elapsed metrics, randomizes pair order deterministically, and reports a deterministic task×seed clustered bootstrap interval. `trace.ts` records only tool names, status, stable error codes, edit operation kinds, timing, and derived behavior counts; it never retains tool arguments, paths, commands, file content, or response text.
 
 The focused test uses Pi's in-process faux provider and requires no network, credentials, or paid tokens:
 
@@ -17,4 +17,14 @@ PI_REAL_TOOL_PROFILE_BENCHMARK=1 node "$(git rev-parse --show-toplevel)/node_mod
   --run test/tool-profile-eval/real-benchmark.test.ts --silent=false
 ```
 
-It runs 2 tasks × 5 seeds × 2 profiles against reset ephemeral fixtures, grades filesystem state and local tests, records only bounded metrics, and enforces session, turn, timeout, and reported-cost breakers. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.
+It runs 2 tasks × 5 seeds × 2 profiles against reset ephemeral fixtures, grades filesystem state and local tests, records only bounded metrics, and enforces session, turn, timeout, and reported-cost breakers. `modelElapsedMs` is residual wall time after subtracting the union of tool-active intervals; `peakContextTokens` is the maximum provider-reported assistant usage total.
+
+The narrower diagnostic mode runs only the five v2 `move-edit-test` seeds with a 12-turn/session cap (the paired benchmark remains at its manifest-defined 10-turn cap):
+
+```bash
+cd packages/coding-agent
+PI_REAL_TOOL_PROFILE_DIAGNOSTIC=1 node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" \
+  --run test/tool-profile-eval/real-benchmark.test.ts --silent=false
+```
+
+The two real modes are mutually exclusive. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.

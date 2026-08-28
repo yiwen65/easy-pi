@@ -3,7 +3,7 @@
 - Created: 2026-08-28
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: done
+- Overall status: in_progress
 - Source: `docs/harness_tools/Pi Agent Tools MVP v1.1.md`; long-term context from `docs/harness_tools/Pi Agent Tools v2.md`
 
 <!-- task-doc-section:background-goal -->
@@ -76,7 +76,7 @@ Non-goals:
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-012 -> T-013 -> T-011`.
+- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-012 -> T-013 -> T-011 -> T-014 -> T-015 -> T-016 -> T-017`.
 - Parallel batches:
   - Batch 1: T-001 only, because it defines shared contracts used by all tools.
   - Batch 2: T-002, T-003, T-004, and T-005 in parallel after T-001; their owned implementation/test files must be disjoint and shared export integration is deferred.
@@ -88,6 +88,10 @@ Non-goals:
   - Batch 8: T-012 only to correct the empirically undersized turn breaker exposed by the first authorized run.
   - Batch 9: T-013 only to calibrate the multi-operation move workflow breaker exposed by the second run.
   - Batch 10: T-011 only to execute the authorized five-seed matrix and record results.
+  - Batch 11: T-014 only for behavior-neutral trace instrumentation and causal diagnosis.
+  - Batch 12: T-015 only for evidence-selected single-variable intervention and factorial/ablation validation.
+  - Batch 13: T-016 only for held-out context-stress tasks and go/no-go evaluation.
+  - Batch 14: T-017 only for final integration checks and delivery.
 - Serialization constraints: `packages/agent/src/harness/tools/index.ts`, coding-agent tool registries, SDK/CLI files, system prompt files, task document, changelogs, and package exports are coordinator/integration-owned. Subagents must not edit this task document.
 
 <!-- task-doc-section:task-list -->
@@ -433,6 +437,100 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-014 — Instrument and diagnose extra v2 turns
+
+- Status: done
+- Owner: coordinator
+- Objective: Add behavior-neutral, content-free benchmark traces and rerun the five v2 move seeds to identify which tool transitions, errors, confirmations, or recoveries cause extra turns.
+- Inputs and prerequisites: T-011 benchmark and reviewer consensus that current aggregate data is correlational.
+- Scope or files: `packages/coding-agent/test/tool-profile-eval/` trace collector, runner metrics, real diagnostic path, focused tests, and this authority document.
+- Expected output: Per-run sanitized tool sequence/status/error code/operation kinds, first-edit success, post-edit read, recovery, cache usage, and tool-vs-model elapsed metrics without paths, arguments, file content, or responses.
+- Dependencies: T-011.
+- Execution steps:
+  1. Implement and unit-test a content-free AgentSession event trace collector.
+  2. Add cacheRead/cacheWrite/peak-context and trace fields to benchmark records.
+  3. Add a gated diagnostic mode fixed to current v2 move tasks and five seeds.
+  4. Run the authorized diagnostic and classify every extra turn before selecting a product intervention.
+- Acceptance criteria:
+  - Default tests make no provider calls.
+  - Trace output contains no arguments, paths, command text, file content, or response text.
+  - Five v2 move runs produce enough sequence/error evidence to accept or reject the prompt/receipt hypotheses.
+- Verification method:
+  - Focused unit/default-skipped tests, root check, targeted authorized real diagnostic, and output inspection.
+- Validation evidence: Added a content-free event collector with focused tests proving that paths, arguments, command/file/response text, and tool-call IDs are not retained. Default targeted Vitest passed 3/3 with the real test skipped and no provider calls; root `npm run check` passed. The first diagnostic attempt stopped correctly when seed 41 exceeded the original 10-turn cap; the diagnostic-only cap was bounded at 12 while the paired benchmark stayed at 10. The final authorized five-seed v2 move diagnostic passed 5/5 in 152.50 seconds with 6–10 turns. All five runs had successful first edits and zero post-edit reads, rejecting post-edit read as the cause. Every run had 1–5 `read INVALID_INPUT` errors (13 total), accounting for repeated recovery. Four runs split move from update; three of those searched after move, and two then hit `EDIT_CONTEXT_NOT_FOUND`; no run used the supported `[move, update]` batch. One run used a combined `[create, delete]` workaround. Tool execution occupied only 50–60 ms/run versus 21.6–39.8 seconds residual model time, so model rounds—not tool runtime—dominated. This supports a prompt-only intervention that teaches valid initial read ranges and single-batch move+update; it does not support receipt/schema expansion or disabling confirmation reads.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-015 — Implement and ablate the evidence-selected intervention
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: Apply only the smallest intervention supported by T-014, then compare current, prompt-only, receipt-only if justified, and combined variants without changing unrelated tool semantics.
+- Inputs and prerequisites: T-014 causal classification.
+- Scope or files: Minimal v2 prompt or receipt code, focused product tests, gated ablation evaluator, and this authority document.
+- Expected output: One-variable and interaction evidence with hidden filesystem grading, first-edit success, post-edit-read/recovery, turns, full usage/cache, time, and cost.
+- Dependencies: T-014.
+- Execution steps:
+  1. Select intervention(s) only when T-014 evidence supports the corresponding hypothesis.
+  2. Preserve current v2 as control and isolate each changed factor.
+  3. Run paired five-seed ablation on move/edit/test plus an unmodified control task.
+  4. Reject changes that trade correctness/recovery for superficial turn reduction.
+- Acceptance criteria:
+  - No unsupported schema expansion or default full diff is introduced.
+  - Each evaluated factor has an isolated control comparison.
+  - Any product change has focused prompt/result regression tests.
+- Verification method:
+  - Targeted unit/integration tests, root check, and authorized gated ablation output.
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-016 — Validate on held-out context-stress tasks
+
+- Status: pending
+- Owner: coordinator
+- Objective: Test the selected candidate on held-out tasks that activate the intended bounded-context advantages rather than only tiny-fixture orchestration overhead.
+- Inputs and prerequisites: T-015 candidate or explicit no-change outcome.
+- Scope or files: Held-out benchmark fixtures/manifest, hidden verifiers, gated evaluator, and this authority document.
+- Expected output: Layered results for large directory discovery, large-file bounded read, long output truncation, ambiguous edit/recovery, and multi-file operations under fixed context budgets.
+- Dependencies: T-015.
+- Execution steps:
+  1. Add independent fixtures not used to tune T-015.
+  2. Record correctness, first semantic success, recovery, turns, peak context, cache, truncation, latency, tokens, and cost.
+  3. Apply pre-recorded go/no-go gates, reporting per-task paired effects rather than only macro averages.
+- Acceptance criteria:
+  - Hidden verifiers grade observable state, not model claims.
+  - Accuracy and recovery do not regress on any safety-critical layer.
+  - Efficiency gains must reproduce outside the original move fixture to justify rollout.
+- Verification method:
+  - Targeted default-skipped tests, authorized held-out run if a candidate exists, and aggregate consistency checks.
+- Validation evidence: Not run.
+- Blocker: T-015 not done.
+- Unblock condition: Candidate and gates are recorded.
+
+### [ ] T-017 — Complete instrumentation/intervention delivery
+
+- Status: pending
+- Owner: coordinator
+- Objective: Reconcile evidence, retain only validated product changes, run final checks, record go/no-go, and commit task-owned files.
+- Inputs and prerequisites: T-014 through T-016.
+- Scope or files: Integration fixes, documentation, this authority document, and explicit task-owned commits.
+- Expected output: Reproducible diagnostics and benchmarks plus either a validated minimal optimization or a documented no-go with no speculative product change.
+- Dependencies: T-014, T-015, T-016.
+- Execution steps:
+  1. Remove rejected experimental behavior while preserving evaluation evidence.
+  2. Run modified targeted tests and full `npm run check`.
+  3. Validate the authority document and inspect final git state.
+- Acceptance criteria:
+  - Every retained behavior change is supported by causal and held-out evidence.
+  - Default tests remain credential-free and real paths remain explicit opt-in.
+  - Original untracked v2 vision document remains untouched.
+- Verification method:
+  - Targeted tests, root check, task validator, and git status/diff inspection.
+- Validation evidence: Not run.
+- Blocker: T-014 through T-016 not done.
+- Unblock condition: Dependencies complete.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -453,7 +551,7 @@ Non-goals:
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
 - R-006: Real model runs require credentials, money, and network. Mitigation: T-010/T-011 are explicitly authorized, fixed at 20 sessions with timeout/turn/cost breakers, use ephemeral fixtures/sessions, and do not persist responses or credentials.
-- Current blocker: None. All planned and authorized benchmark tasks are complete.
+- Current blocker: None for T-014; downstream intervention and held-out tasks are dependency-blocked by design.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -482,10 +580,13 @@ Non-goals:
 - 2026-08-28: T-011 second attempt emitted eleven successful records over 267.44 seconds, then stopped at `move-edit-test/17/v2` because the move workflow exceeded 6 turns. T-011 moved to blocked, T-013 was added and moved to in_progress, and no incomplete aggregate was reported.
 - 2026-08-28: T-013 completed after setting a 10-turn/session and derived 200-turn global cap plus observed-turn diagnostics; targeted skipped-path validation, root typecheck, and full `npm run check` passed. T-011 returned to in_progress for the final rerun.
 - 2026-08-28: T-011 final run completed all 20 authorized sessions over 439.56 seconds. Both profiles passed 10/10; paired completion delta was 0 with bootstrap 95% `[0,0]`. V2 was descriptively heavier on these fixtures: +30.9% turns, +52.2% elapsed time, +16.8% input tokens, +114.5% output tokens, and +40.6% reported cost. T-011 and the overall task moved to done.
+- 2026-08-28: User authorized implementation in the reviewed order. T-014 through T-017 were added; T-014 moved to in_progress for behavior-neutral trace instrumentation before any product prompt/result change.
+- 2026-08-28: T-014 instrumentation passed 3/3 default tests and root `npm run check`. The first real diagnostic attempt stopped on an observed 11-turn seed under the 10-turn cap; a diagnostic-only 12-turn cap was recorded without weakening the paired benchmark cap.
+- 2026-08-28: T-014 completed after the bounded five-seed v2 move diagnostic passed 5/5. Traces found 13 invalid-read errors, split move/update behavior in four runs, post-move search in three, and no move+update batch; post-edit reads were zero. T-015 moved to in_progress for an isolated prompt-only ablation; receipt/schema changes are not selected.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: passed
-- Evidence: T-001 through T-010, T-012, and T-013 retain their recorded implementation/static evidence. T-011 completed the authorized 2-task × 5-seed × 2-profile real benchmark with `openai-codex/gpt-5.6-luna` at `max`: 20/20 sessions completed, both profiles scored 10/10, paired delta was 0, clustered-bootstrap 95% interval was `[0,0]`, and bounded usage/latency/cost metrics were recorded. The authority-document validator passed after recording results; repository status showed no benchmark fixture/session residue.
-- Limitations: With all ten paired clusters succeeding, completion-rate data cannot distinguish the profiles; `[0,0]` is a degenerate interval caused by identical binary scores, not proof of general equivalence. Efficiency differences are descriptive for two small synthetic tasks and may not generalize. Two earlier authorized attempts consumed additional provider usage before their safety breakers stopped them; their partial records were not mixed into the final statistical aggregate.
+- Result: not_run
+- Evidence: T-001 through T-013 retain their recorded evidence; ordered instrumentation, intervention ablation, and held-out validation are in progress.
+- Limitations: No causal product optimization claim will be made until T-014 traces identify the extra-turn mechanism and T-015/T-016 isolate and reproduce any improvement.
