@@ -77,6 +77,7 @@ describe("v2 tool profile", () => {
 		expect(v2.getToolDefinition("edit")?.parameters).toMatchObject({ required: ["operations"] });
 		expect(v2.getToolDefinition("run")?.parameters).toMatchObject({ required: ["command"] });
 		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
+		expect(v2.systemPrompt).toContain("use one edit batch with move first");
 		v2.dispose();
 	});
 

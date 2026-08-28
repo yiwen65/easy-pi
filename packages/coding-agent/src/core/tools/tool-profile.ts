@@ -37,7 +37,10 @@ const promptContributions = {
 	},
 	edit: {
 		snippet: "Create, update, move, or delete files in one structured batch",
-		guidelines: ["Use edit for file mutations; make exact updates from freshly read content."],
+		guidelines: [
+			"Use edit for file mutations; make exact updates from freshly read content.",
+			"When moving and updating the same file, use one edit batch with move first and update on the destination second.",
+		],
 	},
 	run: {
 		snippet: "Run builds, tests, Git, and other commands in an explicit cwd",

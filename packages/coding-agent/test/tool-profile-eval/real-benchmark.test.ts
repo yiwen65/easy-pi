@@ -1,9 +1,9 @@
 /**
  * Manual real-provider benchmark for legacy versus v2 tool profiles.
  *
- * No provider call occurs unless PI_REAL_TOOL_PROFILE_BENCHMARK=1 or the
- * narrower PI_REAL_TOOL_PROFILE_DIAGNOSTIC=1 is explicit. The benchmark
- * persists neither sessions nor model responses and prints only content-free metrics.
+ * No provider call occurs unless one explicit benchmark, diagnostic, or
+ * prompt-ablation opt-in is set. The benchmark persists neither sessions nor
+ * model responses and prints only content-free metrics.
  */
 
 import { execFileSync } from "node:child_process";
@@ -19,13 +19,18 @@ import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { createV2ToolDefinitions } from "../../src/core/tools/tool-profile.ts";
+import { type PromptVariant, runPromptAblation } from "./prompt-ablation.ts";
 import { type EvalExecutionInput, runToolProfileEvaluation, type ToolProfileEvalManifest } from "./runner.ts";
 import { createSanitizedToolTraceCollector } from "./trace.ts";
 
 const RUN = process.env.PI_REAL_TOOL_PROFILE_BENCHMARK === "1";
 const RUN_DIAGNOSTIC = process.env.PI_REAL_TOOL_PROFILE_DIAGNOSTIC === "1";
-if (RUN && RUN_DIAGNOSTIC) throw new Error("Select either benchmark or diagnostic mode, not both");
-if (RUN || RUN_DIAGNOSTIC) configureHttpDispatcher();
+const RUN_ABLATION = process.env.PI_REAL_TOOL_PROFILE_ABLATION === "1";
+if ([RUN, RUN_DIAGNOSTIC, RUN_ABLATION].filter(Boolean).length > 1) {
+	throw new Error("Select only one real tool-profile mode");
+}
+if (RUN || RUN_DIAGNOSTIC || RUN_ABLATION) configureHttpDispatcher();
 
 const PROVIDER = process.env.PI_REAL_TOOL_PROFILE_PROVIDER ?? "openai-codex";
 const MODEL_ID = process.env.PI_REAL_TOOL_PROFILE_MODEL ?? "gpt-5.6-luna";
@@ -83,6 +88,16 @@ function resetFixture(cwd: string, taskId: string, seed: number): { prompt: stri
 	throw new Error(`Unknown benchmark task: ${taskId}`);
 }
 
+function promptVariantTools(cwd: string, variant: PromptVariant) {
+	const definitions = createV2ToolDefinitions(cwd);
+	if (variant === "control") {
+		definitions.edit.promptGuidelines = [
+			"Use edit for file mutations; make exact updates from freshly read content.",
+		];
+	}
+	return Object.values(definitions);
+}
+
 function testPasses(cwd: string): boolean {
 	try {
 		execFileSync(process.execPath, ["test.js"], { cwd, stdio: "ignore", timeout: 10_000 });
@@ -92,7 +107,7 @@ function testPasses(cwd: string): boolean {
 	}
 }
 
-describe.skipIf(!RUN && !RUN_DIAGNOSTIC)("real tool-profile five-seed benchmark", () => {
+describe.skipIf(!RUN && !RUN_DIAGNOSTIC && !RUN_ABLATION)("real tool-profile five-seed benchmark", () => {
 	let benchmarkRoot: string;
 	let runtime: ModelRuntime;
 	let totalSessions = 0;
@@ -118,13 +133,17 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC)("real tool-profile five-seed benchmark"
 		expect(config.seeds).toHaveLength(5);
 		expect(config.tasks.length * config.seeds.length * config.profiles.length).toBe(MAX_SESSIONS);
 		const sessionLimit = RUN_DIAGNOSTIC ? config.seeds.length : MAX_SESSIONS;
-		const budgets = RUN_DIAGNOSTIC ? { ...config.budgets, maxTurns: 12 } : config.budgets;
+		const budgets = RUN_ABLATION
+			? { ...config.budgets, maxTurns: 18 }
+			: RUN_DIAGNOSTIC
+				? { ...config.budgets, maxTurns: 12 }
+				: config.budgets;
 		const maxModelTurns = sessionLimit * budgets.maxTurns;
 		const cwd = join(benchmarkRoot, "fixture");
 		const model = runtime.getModel(PROVIDER, MODEL_ID);
 		if (!model) throw new Error(`${PROVIDER}/${MODEL_ID} disappeared from the local model catalog`);
 
-		const execute = async (input: EvalExecutionInput) => {
+		const execute = async (input: EvalExecutionInput, promptVariant?: PromptVariant) => {
 			if (totalSessions >= sessionLimit) throw new Error(`Session budget exceeded: ${totalSessions}`);
 			totalSessions += 1;
 			const fixture = resetFixture(cwd, input.task.id, input.seed);
@@ -147,6 +166,7 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC)("real tool-profile five-seed benchmark"
 				model,
 				thinkingLevel: "max",
 				toolProfile: input.profile,
+				customTools: promptVariant ? promptVariantTools(cwd, promptVariant) : undefined,
 				settingsManager,
 				resourceLoader,
 				sessionManager: SessionManager.inMemory(cwd),
@@ -178,6 +198,7 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC)("real tool-profile five-seed benchmark"
 					JSON.stringify({
 						eval: "real-tool-profile-call",
 						taskId: input.task.id,
+						...(promptVariant ? { promptVariant } : {}),
 						seed: input.seed,
 						profile: input.profile,
 						success,
@@ -217,6 +238,18 @@ describe.skipIf(!RUN && !RUN_DIAGNOSTIC)("real tool-profile five-seed benchmark"
 				session.dispose();
 			}
 		};
+
+		if (RUN_ABLATION) {
+			const summary = await runPromptAblation({ ...config, budgets }, (input) =>
+				execute({ task: input.task, seed: input.seed, profile: "v2", budgets: input.budgets }, input.variant),
+			);
+			expect(summary.records).toHaveLength(MAX_SESSIONS);
+			expect(totalSessions).toBe(MAX_SESSIONS);
+			console.log(
+				JSON.stringify({ eval: "real-tool-profile-prompt-ablation", provider: PROVIDER, model: MODEL_ID, summary }),
+			);
+			return;
+		}
 
 		if (RUN_DIAGNOSTIC) {
 			const task = config.tasks.find((candidate) => candidate.id === "move-edit-test");

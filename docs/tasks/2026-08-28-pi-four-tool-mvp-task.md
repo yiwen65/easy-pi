@@ -461,9 +461,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-015 — Implement and ablate the evidence-selected intervention
+### [x] T-015 — Implement and ablate the evidence-selected intervention
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Apply only the smallest intervention supported by T-014, then compare current, prompt-only, receipt-only if justified, and combined variants without changing unrelated tool semantics.
 - Inputs and prerequisites: T-014 causal classification.
@@ -481,13 +481,13 @@ Non-goals:
   - Any product change has focused prompt/result regression tests.
 - Verification method:
   - Targeted unit/integration tests, root check, and authorized gated ablation output.
-- Validation evidence: Not run.
+- Validation evidence: Added one production prompt guideline, with a focused profile test, telling v2 to place move then destination update in one edit batch. Added a deterministic content-free prompt-ablation runner and unit test. The first real ablation attempt correctly stopped when a control run exceeded the initial 12-turn cap; its partial evidence also showed that added read-range prose did not prevent `INVALID_INPUT`, so that unsupported prose was removed before the final isolated run. The final authorized 2-task × 5-seed × 2-variant run passed 20/20 in 632.31 seconds under an 18-turn ablation-only cap. Candidate versus control aggregate: mean turns 6.4 vs 7.7 (−16.9%), tool calls 5.7 vs 7.1 (−19.7%), tool errors 1.4 vs 2.2 (−36.4%), input tokens 7,262.3 vs 8,696.4 (−16.5%), output tokens 687.5 vs 907.1 (−24.2%), elapsed 26.84s vs 36.17s (−25.8%), and cost $0.02308 vs $0.02892 (−20.2%); completion remained 10/10 each. The unchanged locate task tied at 5.4 mean turns; the move task improved from 10.0 to 7.4 mean turns and used a `[move, update]` batch in 4/5 candidate runs. Candidate first-edit success was 8/10 vs control 9/10, but total errors and recovery calls fell and all hidden filesystem grades passed, so held-out safety/recovery validation remains required before final retention.
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-016 — Validate on held-out context-stress tasks
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: Test the selected candidate on held-out tasks that activate the intended bounded-context advantages rather than only tiny-fixture orchestration overhead.
 - Inputs and prerequisites: T-015 candidate or explicit no-change outcome.
@@ -505,8 +505,8 @@ Non-goals:
 - Verification method:
   - Targeted default-skipped tests, authorized held-out run if a candidate exists, and aggregate consistency checks.
 - Validation evidence: Not run.
-- Blocker: T-015 not done.
-- Unblock condition: Candidate and gates are recorded.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-017 — Complete instrumentation/intervention delivery
 
@@ -583,6 +583,8 @@ Non-goals:
 - 2026-08-28: User authorized implementation in the reviewed order. T-014 through T-017 were added; T-014 moved to in_progress for behavior-neutral trace instrumentation before any product prompt/result change.
 - 2026-08-28: T-014 instrumentation passed 3/3 default tests and root `npm run check`. The first real diagnostic attempt stopped on an observed 11-turn seed under the 10-turn cap; a diagnostic-only 12-turn cap was recorded without weakening the paired benchmark cap.
 - 2026-08-28: T-014 completed after the bounded five-seed v2 move diagnostic passed 5/5. Traces found 13 invalid-read errors, split move/update behavior in four runs, post-move search in three, and no move+update batch; post-edit reads were zero. T-015 moved to in_progress for an isolated prompt-only ablation; receipt/schema changes are not selected.
+- 2026-08-28: T-015's first real ablation stopped on an observed 14-turn control run under the 12-turn cap. Partial evidence rejected the combined read-guidance experiment, so the candidate was narrowed to the independently supported move+update batch instruction and the ablation-only cap was bounded at 18.
+- 2026-08-28: T-015 completed after the final 20-session prompt-only ablation passed 20/20. Candidate completion tied control while reducing aggregate turns 16.9%, tool calls 19.7%, errors 36.4%, input 16.5%, output 24.2%, elapsed 25.8%, and cost 20.2%; move-task turns fell 26% while locate-task turns tied. T-016 moved to in_progress for held-out context-stress gates before retention.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
