@@ -28,6 +28,8 @@ import {
 	ok,
 	type Result,
 	type ShellExecOptions,
+	type TextRangeReadOptions,
+	type TextRangeReadResult,
 	toError,
 } from "../types.ts";
 
@@ -122,6 +124,26 @@ function toFileError(error: unknown, fallbackPath?: string): FileError {
 
 function abortResult<TValue>(signal: AbortSignal | undefined, path?: string): Result<TValue, FileError> | undefined {
 	return signal?.aborted ? err(new FileError("aborted", "aborted", path)) : undefined;
+}
+
+function validatePositiveInteger(value: number | undefined, name: string): FileError | undefined {
+	if (value === undefined) return undefined;
+	if (!Number.isSafeInteger(value) || value <= 0) {
+		return new FileError("invalid", `${name} must be a positive safe integer`);
+	}
+	return undefined;
+}
+
+function decodeUtf8(bytes: Uint8Array, allowIncompleteTail: boolean): { length: number; text: string } | undefined {
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	const maxTrim = allowIncompleteTail ? Math.min(3, Math.max(0, bytes.length - 1)) : 0;
+	for (let trim = 0; trim <= maxTrim; trim++) {
+		const length = bytes.length - trim;
+		try {
+			return { length, text: decoder.decode(bytes.subarray(0, length)) };
+		} catch {}
+	}
+	return undefined;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -537,6 +559,105 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			return err(toFileError(error, resolved));
 		} finally {
 			lineReader?.close();
+			stream?.destroy();
+		}
+	}
+
+	async readTextRange(
+		path: string,
+		options: TextRangeReadOptions = {},
+	): Promise<Result<TextRangeReadResult, FileError>> {
+		const resolved = resolvePath(this.cwd, path);
+		const aborted = abortResult<TextRangeReadResult>(options.abortSignal, resolved);
+		if (aborted) return aborted;
+		const startLineError = validatePositiveInteger(options.startLine, "startLine");
+		if (startLineError) return err(startLineError);
+		const maxLinesError = validatePositiveInteger(options.maxLines, "maxLines");
+		if (maxLinesError) return err(maxLinesError);
+		const maxBytesError = validatePositiveInteger(options.maxBytes, "maxBytes");
+		if (maxBytesError) return err(maxBytesError);
+		if (options.maxBytes !== undefined && options.maxBytes < 4) {
+			return err(new FileError("invalid", "maxBytes must be at least 4 to preserve UTF-8 code points", resolved));
+		}
+		if (options.startByte !== undefined && (!Number.isSafeInteger(options.startByte) || options.startByte < 0)) {
+			return err(new FileError("invalid", "startByte must be a non-negative safe integer", resolved));
+		}
+
+		const requestedStartLine = options.startLine ?? 1;
+		const requestedStartByte = options.startByte;
+		const maxLines = options.maxLines ?? Number.MAX_SAFE_INTEGER;
+		const maxBytes = options.maxBytes ?? Number.MAX_SAFE_INTEGER;
+		let stream: ReturnType<typeof createReadStream> | undefined;
+		try {
+			stream = createReadStream(resolved, {
+				start: requestedStartByte,
+				signal: options.abortSignal,
+			});
+			let absoluteOffset = requestedStartByte ?? 0;
+			let linesToSkip = requestedStartByte === undefined ? requestedStartLine - 1 : 0;
+			let outputStartByte = absoluteOffset;
+			let outputLineBreaks = 0;
+			let truncatedByLines = false;
+			let truncatedByBytes = false;
+			let reachedEof = true;
+			const output: number[] = [];
+
+			outer: for await (const rawChunk of stream) {
+				const loopAbort = abortResult<TextRangeReadResult>(options.abortSignal, resolved);
+				if (loopAbort) return loopAbort;
+				const chunk = rawChunk as Buffer;
+				for (const byte of chunk) {
+					if (linesToSkip > 0) {
+						absoluteOffset++;
+						if (byte === 0x0a) {
+							linesToSkip--;
+							outputStartByte = absoluteOffset;
+						}
+						continue;
+					}
+					if (output.length >= maxBytes) {
+						truncatedByBytes = true;
+						reachedEof = false;
+						break outer;
+					}
+					output.push(byte);
+					absoluteOffset++;
+					if (byte === 0x0a) {
+						outputLineBreaks++;
+						if (outputLineBreaks >= maxLines) {
+							truncatedByLines = true;
+							reachedEof = false;
+							break outer;
+						}
+					}
+				}
+			}
+
+			if (linesToSkip > 0) {
+				return err(new FileError("invalid", `startLine ${requestedStartLine} is beyond end of file`, resolved));
+			}
+			const prefix = decodeUtf8(Uint8Array.from(output), truncatedByBytes);
+			if (!prefix) return err(new FileError("invalid", "File is not valid UTF-8", resolved));
+			const acceptedEndByte = outputStartByte + prefix.length;
+			if (prefix.length < output.length) truncatedByBytes = true;
+			let lines = prefix.text.split(/\r?\n/);
+			if (prefix.text.endsWith("\n")) lines.pop();
+			if (prefix.text.length === 0) lines = [];
+			const startLine = requestedStartByte === undefined ? requestedStartLine : requestedStartLine;
+			const endLine = lines.length > 0 ? startLine + lines.length - 1 : startLine;
+			const partialLine = truncatedByBytes && !prefix.text.endsWith("\n");
+			return ok({
+				lines,
+				startLine,
+				endLine,
+				eof: reachedEof && !truncatedByBytes && !truncatedByLines,
+				partialLine,
+				...(truncatedByLines ? { nextLine: startLine + lines.length } : {}),
+				...(truncatedByBytes ? { nextByte: acceptedEndByte } : {}),
+			});
+		} catch (error) {
+			return err(toFileError(error, resolved));
+		} finally {
 			stream?.destroy();
 		}
 	}

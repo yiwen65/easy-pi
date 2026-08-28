@@ -301,9 +301,9 @@ type SearchDetails = {
   returnedCount: number;
   truncated: boolean;
 };
+```
 
 `returnedCount` 只表示本次返回数量；MVP 不计算被截断查询的总命中数。
-```
 
 ---
 
