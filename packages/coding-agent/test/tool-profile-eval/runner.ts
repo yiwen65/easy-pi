@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ToolProfile } from "../../src/core/sdk.ts";
+import type { SanitizedToolTrace } from "./trace.ts";
 
 export interface ToolProfileEvalManifest {
 	version: 1;
@@ -23,8 +24,12 @@ export interface EvalExecutionOutput {
 	turns: number;
 	inputTokens?: number;
 	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
 	costUsd?: number;
 	elapsedMs?: number;
+	modelElapsedMs?: number;
+	trace?: SanitizedToolTrace;
 	systemPrompt: string;
 	tools: Array<{ name: string; description: string; parameters: unknown }>;
 }
@@ -43,8 +48,12 @@ export interface ToolProfileEvalRecord {
 	turns: number;
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 	costUsd: number;
 	elapsedMs: number;
+	modelElapsedMs: number;
+	trace?: SanitizedToolTrace;
 }
 
 export interface ToolProfileEvalSummary {
@@ -58,8 +67,11 @@ export interface ToolProfileEvalSummary {
 			meanScore: number;
 			meanTurns: number;
 			meanElapsedMs: number;
+			meanModelElapsedMs: number;
 			totalInputTokens: number;
 			totalOutputTokens: number;
+			totalCacheReadTokens: number;
+			totalCacheWriteTokens: number;
 			totalCostUsd: number;
 		}
 	>;
@@ -112,8 +124,11 @@ function summarizeProfile(records: ToolProfileEvalRecord[], profile: ToolProfile
 		meanScore: mean(selected.map((record) => record.score)),
 		meanTurns: mean(selected.map((record) => record.turns)),
 		meanElapsedMs: mean(selected.map((record) => record.elapsedMs)),
+		meanModelElapsedMs: mean(selected.map((record) => record.modelElapsedMs)),
 		totalInputTokens: selected.reduce((sum, record) => sum + record.inputTokens, 0),
 		totalOutputTokens: selected.reduce((sum, record) => sum + record.outputTokens, 0),
+		totalCacheReadTokens: selected.reduce((sum, record) => sum + record.cacheReadTokens, 0),
+		totalCacheWriteTokens: selected.reduce((sum, record) => sum + record.cacheWriteTokens, 0),
 		totalCostUsd: selected.reduce((sum, record) => sum + record.costUsd, 0),
 	};
 }
@@ -146,8 +161,12 @@ export async function runToolProfileEvaluation(
 					turns: output.turns,
 					inputTokens: output.inputTokens ?? 0,
 					outputTokens: output.outputTokens ?? 0,
+					cacheReadTokens: output.cacheReadTokens ?? 0,
+					cacheWriteTokens: output.cacheWriteTokens ?? 0,
 					costUsd: output.costUsd ?? 0,
 					elapsedMs: output.elapsedMs ?? 0,
+					modelElapsedMs: output.modelElapsedMs ?? output.elapsedMs ?? 0,
+					...(output.trace ? { trace: output.trace } : {}),
 				});
 			}
 		}

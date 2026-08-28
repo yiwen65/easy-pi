@@ -94,6 +94,12 @@ describe("tool profile A/B evaluation scaffold", () => {
 				success: judged.success,
 				score: judged.score,
 				turns: 1,
+				inputTokens: 10,
+				outputTokens: 2,
+				cacheReadTokens: 20,
+				cacheWriteTokens: 3,
+				elapsedMs: 8,
+				modelElapsedMs: 6,
 				systemPrompt: session.systemPrompt,
 				tools: session.getAllTools().map(({ name, description, parameters }) => ({
 					name,
@@ -122,5 +128,10 @@ describe("tool profile A/B evaluation scaffold", () => {
 		expect(first.records.find((record) => record.profile === "legacy")?.schemaHash).not.toBe(
 			first.records.find((record) => record.profile === "v2")?.schemaHash,
 		);
+		expect(first.profiles.v2).toMatchObject({
+			meanModelElapsedMs: 6,
+			totalCacheReadTokens: first.profiles.v2.runs * 20,
+			totalCacheWriteTokens: first.profiles.v2.runs * 3,
+		});
 	});
 });
