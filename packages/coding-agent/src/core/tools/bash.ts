@@ -161,14 +161,13 @@ export interface BashSpawnContext {
 
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
-function resolveSpawnContext(
-	command: string,
-	cwd: string,
-	spawnHook: BashSpawnHook | undefined,
+export function resolveSessionShellEnvironment(
 	exposeSessionEnvironment: boolean,
 	ctx: ExtensionContext | undefined,
-): BashSpawnContext {
-	const env = { ...getShellEnv() };
+): Record<string, string> {
+	const env = Object.fromEntries(
+		Object.entries(getShellEnv()).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	);
 	delete env.PI_SESSION_ID;
 	delete env.PI_SESSION_FILE;
 	delete env.PI_PROVIDER;
@@ -185,6 +184,17 @@ function resolveSpawnContext(
 		}
 		if (ctx.thinkingLevel) env.PI_REASONING_LEVEL = ctx.thinkingLevel;
 	}
+	return env;
+}
+
+function resolveSpawnContext(
+	command: string,
+	cwd: string,
+	spawnHook: BashSpawnHook | undefined,
+	exposeSessionEnvironment: boolean,
+	ctx: ExtensionContext | undefined,
+): BashSpawnContext {
+	const env = resolveSessionShellEnvironment(exposeSessionEnvironment, ctx);
 	const baseContext: BashSpawnContext = { command, cwd, env };
 	return spawnHook ? spawnHook(baseContext) : baseContext;
 }

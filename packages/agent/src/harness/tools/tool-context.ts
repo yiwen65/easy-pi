@@ -7,4 +7,9 @@ export interface ExecutionToolContext {
 	env: ExecutionEnv;
 	searchProvider?: SearchProvider;
 	workspacePolicy?: WorkspacePolicy;
+	run?: {
+		commandPrefix?: string;
+		env?: Record<string, string>;
+		inheritEnv?: boolean;
+	};
 }

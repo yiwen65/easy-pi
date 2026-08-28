@@ -1,13 +1,14 @@
 import { type Static, Type } from "typebox";
 import type { AgentHarnessTool, ExecutionErrorCode } from "../types.ts";
 import { getOrThrow } from "../types.ts";
-import { executeShellWithCapture } from "../utils/shell-output.ts";
+import { executeShellWithCapture, type ShellCaptureResult } from "../utils/shell-output.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "../utils/truncate.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
 import { V2ToolError } from "./v2-errors.ts";
 import { resolveWorkspacePath } from "./workspace-policy.ts";
 
 const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000;
+const RUN_UPDATE_THROTTLE_MS = 100;
 const runV2Schema = Type.Object({
 	command: Type.String({ description: "Command to execute" }),
 	cwd: Type.Optional(Type.String({ description: "Initial working directory" })),
@@ -62,7 +63,7 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 		parameters: runV2Schema,
 		executionMode: "sequential",
 		replay: "never",
-		async execute(_toolCallId, input, signal, _onUpdate, context) {
+		async execute(_toolCallId, input, signal, onUpdate, context) {
 			validateInput(input);
 			const cwd = await resolveWorkspacePath(
 				context.env,
@@ -80,14 +81,78 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 			if (cwdInfo.value.kind !== "directory")
 				throw new V2ToolError("NOT_A_DIRECTORY", `cwd is not a directory: ${input.cwd ?? context.env.cwd}`);
 			const startedAt = Date.now();
-			const capture = getOrThrow(
-				await executeShellWithCapture(context.env, input.command, {
-					cwd: cwd.absolutePath,
-					timeout: input.timeout,
-					abortSignal: signal,
-					returnExecutionErrors: true,
-				}),
-			);
+			const resolvedCommand = context.run?.commandPrefix
+				? `${context.run.commandPrefix}\n${input.command}`
+				: input.command;
+			let updateTimer: ReturnType<typeof setTimeout> | undefined;
+			let latestProgress:
+				| (() => {
+						output: string;
+						truncation: TruncationResult;
+						fullOutputPath?: string;
+				  })
+				| undefined;
+			let updateDirty = false;
+			let lastUpdateAt = 0;
+
+			const emitUpdate = () => {
+				if (!onUpdate || !updateDirty || !latestProgress) return;
+				updateDirty = false;
+				lastUpdateAt = Date.now();
+				const progress = latestProgress();
+				onUpdate({
+					content: [{ type: "text", text: progress.output }],
+					details: {
+						command: input.command,
+						cwd: cwd.absolutePath,
+						exitCode: null,
+						timedOut: false,
+						durationMs: Date.now() - startedAt,
+						managedProcessesTerminated: false,
+						truncation: progress.truncation.truncated ? progress.truncation : undefined,
+						fullOutputPath: progress.fullOutputPath,
+					},
+				});
+			};
+			const scheduleUpdate = (getProgress: NonNullable<typeof latestProgress>) => {
+				if (!onUpdate) return;
+				latestProgress = getProgress;
+				updateDirty = true;
+				const delay = RUN_UPDATE_THROTTLE_MS - (Date.now() - lastUpdateAt);
+				if (delay <= 0) {
+					if (updateTimer) clearTimeout(updateTimer);
+					updateTimer = undefined;
+					emitUpdate();
+					return;
+				}
+				updateTimer ??= setTimeout(() => {
+					updateTimer = undefined;
+					emitUpdate();
+				}, delay);
+			};
+
+			let capture: ShellCaptureResult;
+			try {
+				capture = getOrThrow(
+					await executeShellWithCapture(context.env, resolvedCommand, {
+						cwd: cwd.absolutePath,
+						env: context.run?.env,
+						inheritEnv: context.run?.inheritEnv,
+						timeout: input.timeout,
+						abortSignal: signal,
+						returnExecutionErrors: true,
+						onChunk: (_chunk, getProgress) => scheduleUpdate(getProgress),
+					}),
+				);
+			} finally {
+				if (updateTimer) clearTimeout(updateTimer);
+				updateTimer = undefined;
+			}
+			if (onUpdate) {
+				latestProgress = () => capture;
+				updateDirty = true;
+				emitUpdate();
+			}
 			if (capture.cancelled || signal?.aborted) throw new V2ToolError("ABORTED", "Command was aborted.");
 			const timedOut = capture.executionError?.code === "timeout";
 			if (capture.executionError && !timedOut) {
