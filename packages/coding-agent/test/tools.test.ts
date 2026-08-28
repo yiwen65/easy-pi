@@ -918,6 +918,30 @@ describe("edit tool fuzzy matching", () => {
 		expect(content).toBe("replaced\nline three\n");
 	});
 
+	it("should tolerate stale blank-line counts in oldText", async () => {
+		const testFile = join(testDir, "blank-lines.txt");
+		writeFileSync(testFile, "before\n\nafter\n");
+
+		await editTool.execute("test-fuzzy-blank-lines", {
+			path: testFile,
+			edits: [{ oldText: "before\n\n\nafter\n", newText: "replaced\n" }],
+		});
+
+		expect(readFileSync(testFile, "utf-8")).toBe("replaced\n");
+	});
+
+	it("should reject ambiguous blank-line-tolerant matches", async () => {
+		const testFile = join(testDir, "blank-lines-duplicate.txt");
+		writeFileSync(testFile, "before\nafter\nbefore\n\nafter\n");
+
+		await expect(
+			editTool.execute("test-fuzzy-blank-lines-duplicate", {
+				path: testFile,
+				edits: [{ oldText: "before\n\n\nafter\n", newText: "replaced\n" }],
+			}),
+		).rejects.toThrow(/Found 2 occurrences/);
+	});
+
 	it("should match fullwidth punctuation in Chinese text", async () => {
 		const testFile = join(testDir, "chinese-punctuation.txt");
 		writeFileSync(testFile, "你好，世界\n你好（世界）\n");

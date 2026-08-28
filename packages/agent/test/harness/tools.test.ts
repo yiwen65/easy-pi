@@ -373,6 +373,21 @@ describe("AgentHarness tools", () => {
 			).rejects.toThrow(/Found 3 occurrences/);
 		});
 
+		it("tolerates stale blank-line counts in oldText", async () => {
+			const context = createContext();
+			getOrThrow(await context.env.writeFile("edit.txt", "before\n\nafter\n"));
+
+			await createEditTool().execute(
+				"edit-blank-lines",
+				{ path: "edit.txt", edits: [{ oldText: "before\n\n\nafter\n", newText: "replaced\n" }] },
+				undefined,
+				undefined,
+				context,
+			);
+
+			expect(getOrThrow(await context.env.readTextFile("edit.txt"))).toBe("replaced\n");
+		});
+
 		it("keeps the mutation queue locked until an aborted edit write settles", async () => {
 			const env = new BlockingEditExecutionEnv({ cwd: createTempDir() });
 			getOrThrow(await env.writeFile("file.txt", "alpha\nbeta\n"));
