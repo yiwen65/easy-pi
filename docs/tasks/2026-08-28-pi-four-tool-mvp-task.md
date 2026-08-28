@@ -250,9 +250,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-007 — Add deterministic A/B evaluation scaffold
+### [x] T-007 — Add deterministic A/B evaluation scaffold
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Add a credential-free evaluation manifest and runner scaffold comparing legacy and v2 profile wiring under fixed conditions.
 - Inputs and prerequisites: T-006 integrated profile.
@@ -271,13 +271,13 @@ Non-goals:
   - Real-model path is gated and not run in this task.
 - Verification method:
   - Targeted evaluation scaffold test and deterministic output comparison.
-- Validation evidence: Not run.
+- Validation evidence: `packages/coding-agent/test/tool-profile-eval/runner.test.ts` passed 1/1 with the in-process faux provider and no external credentials. It executed all task×seed×profile pairs twice and proved byte-equivalent records/summary, balanced profile runs, distinct stable schema hashes, deterministic randomized pair order, and deterministic clustered bootstrap output. Root `tsgo --noEmit` passed. The scaffold documents that any future real-model executor requires explicit `PI_REAL_MODEL_EVAL=1`-style opt-in; none was implemented or run.
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-008 — Complete cross-package validation and delivery
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: Reconcile all outputs, run required checks, update durable evidence, and deliver only after all acceptance criteria pass.
 - Inputs and prerequisites: T-001 through T-007 implementation reports and diffs.
@@ -299,8 +299,8 @@ Non-goals:
 - Verification method:
   - Targeted tests listed below, `npm run check`, task-document validator, and git diff/status inspection.
 - Validation evidence: Not run.
-- Blocker: T-001 through T-007 not done.
-- Unblock condition: All dependencies pass their verification.
+- Blocker: None.
+- Unblock condition: None.
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -340,6 +340,7 @@ Non-goals:
 - 2026-08-28: T-002 through T-005 completed; four focused files passed 16/16 tests and root `npm run check` passed after explicit type fixes. T-006 moved to in_progress for integration.
 - 2026-08-28: A read-only T-006/T-007 analyst DAG could not access the delegated repository snapshot and returned no usable changes; coordinator continued from direct repository evidence.
 - 2026-08-28: T-006 completed after 97/97 focused coding-agent tests, root typecheck, and full `npm run check` passed. The opt-in SDK/CLI profile, shared v2 definitions, prompts, renderers, local search adapter, filtering, override, and non-persistence behavior are integrated. T-007 moved to in_progress.
+- 2026-08-28: T-007 completed after its faux-provider test passed twice-run deterministic records, profile-specific hashes, paired ordering, and clustered bootstrap checks; root typecheck passed. T-008 moved to in_progress for contract-gap review and final cross-package validation.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
