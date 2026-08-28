@@ -155,6 +155,70 @@ describe("ToolExecutionComponent parity", () => {
 		await promise;
 	});
 
+	test("v2 read renderer uses structured text ranges, syntax, and directory snapshot metadata", () => {
+		const tool = createV2ToolDefinitions(process.cwd()).read;
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-read-render",
+			{ path: "src/example.ts", offset: 20, limit: 14 },
+			{},
+			tool,
+			createFakeTui(),
+			process.cwd(),
+		);
+		const lines = Array.from({ length: 14 }, (_, index) => `const value${index} = ${index};`);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "CONTENT_SENTINEL_MUST_NOT_BE_PARSED" }],
+				details: {
+					path: "src/example.ts",
+					kind: "text",
+					range: [20, 33],
+					lines,
+					hasMore: true,
+					nextOffset: 34,
+				},
+				isError: false,
+			},
+			false,
+		);
+		const collapsed = stripAnsi(component.render(48).join("\n"));
+		expect(collapsed).toContain("read src/example.ts · offset 20 · limit");
+		expect(collapsed).toContain("20 const value0 = 0;");
+		expect(collapsed).toContain("31 const value11 = 11;");
+		expect(collapsed).not.toContain("32 const value12");
+		expect(collapsed).toContain("2 more lines in this page");
+		expect(collapsed).toContain("Continue with offset 34");
+		expect(collapsed).not.toContain("CONTENT_SENTINEL_MUST_NOT_BE_PARSED");
+		for (const line of component.render(48)) expect(stripAnsi(line).length).toBeLessThanOrEqual(48);
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "ANOTHER_SENTINEL" }],
+				details: {
+					path: "src",
+					kind: "directory",
+					entries: [
+						{ name: "nested", kind: "directory", size: 128, mtimeMs: 0 },
+						...Array.from({ length: 13 }, (_, index) => ({ name: `file-${index}`, kind: "file" as const })),
+					],
+					hasMore: true,
+					nextCursor: "r2-next",
+					stable: true,
+				},
+				isError: false,
+			},
+			false,
+		);
+		const directory = stripAnsi(component.render(80).join("\n"));
+		expect(directory).toContain("nested/ · directory 128B");
+		expect(directory).toContain("2 more entries in this page");
+		expect(directory).not.toContain("file-12");
+		expect(directory).toContain("[stable snapshot]");
+		expect(directory).toContain("Continue with cursor r2-next");
+		expect(directory).not.toContain("ANOTHER_SENTINEL");
+	});
+
 	test("v2 search renderer consumes structured hits with grouping, ranges, status, and continuation", () => {
 		const tool = createV2ToolDefinitions(process.cwd()).search;
 		const component = new ToolExecutionComponent(

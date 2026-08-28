@@ -2,6 +2,8 @@ import { join } from "node:path";
 import {
 	Agent,
 	type AgentMessage,
+	type ReadProvider,
+	type ResourceReader,
 	type SearchProvider,
 	setDefaultStreamFn,
 	type ThinkingLevel,
@@ -54,6 +56,10 @@ export interface CreateAgentSessionOptions {
 	toolsV2?: {
 		search?: {
 			provider?: SearchProvider;
+		};
+		read?: {
+			provider?: ReadProvider;
+			resourceReaders?: ResourceReader[];
 		};
 	};
 	/** Global config directory. Default: ~/.pi/agent */
@@ -407,6 +413,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					getShellCommandPrefix: () => settingsManager.getShellCommandPrefix(),
 					workspacePolicy: options.workspacePolicy,
 					searchProvider: options.toolsV2?.search?.provider,
+					readProvider: options.toolsV2?.read?.provider,
+					resourceReaders: options.toolsV2?.read?.resourceReaders,
 				})
 			: undefined;
 	const session = new AgentSession({

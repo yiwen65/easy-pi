@@ -27,6 +27,18 @@ export {
 	type ReadToolInput,
 	type ReadToolOptions,
 } from "./read.ts";
+export {
+	type DirectoryReadEntry,
+	type DirectoryReadPage,
+	type DirectoryReadRequest,
+	ExecutionEnvReadProvider,
+	type ReadCapabilities,
+	type ReadProvider,
+	ReadProviderError,
+	type ReadProviderErrorCode,
+	type ResourceReader,
+	type ResourceReadResult,
+} from "./read-provider.ts";
 export { createReadV2Tool, type ReadV2Details, type ReadV2Input } from "./read-v2.ts";
 export { createRunV2Tool, type RunV2Details, type RunV2Input } from "./run-v2.ts";
 export {

@@ -161,10 +161,10 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — Implement V2.2 ReadProvider and bounded continuations
+### [x] T-004 — Implement V2.2 ReadProvider and bounded continuations
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Route read through injectable providers with capability detection and bounded compatibility behavior.
 - Inputs and prerequisites: Stable provider lifecycle conventions from V2.1.
 - Scope or files: Agent ReadProvider/runtime/types, Node/ExecutionEnv providers, resource readers, focused read tests.
@@ -181,14 +181,14 @@ Non-goals:
   - Snapshot/cursor consistency and stale recovery are deterministic.
 - Verification method:
   - Targeted read/provider tests, stress benchmarks, root check.
-- Validation evidence: Not run.
-- Blocker: T-003 not done.
-- Unblock condition: V2.1 provider lifecycle is committed.
+- Validation evidence: Agent Read/Search/Edit focused tests passed 17/17. Coding-agent Node Read/provider/profile/component tests passed 41/41. Coverage includes missing range capability, oversized fallback rejection, stable request-bound cursors, generation checks, page-only metadata, external-sort entry/byte quotas, deterministic JS-equivalent ordering, special filenames, final-page cursor retry, immediate and close-time spool cleanup, and ResourceReader routing. A 1 GiB sparse UTF-8/NUL file benchmark on Node v24.15.0 / Darwin arm64 / Apple M5 returned a late `startLine=1000` range in 3172.672 ms with a 31,637,504-byte RSS delta and a near-EOF byte range in 0.479 ms; this confirms bounded memory and O(file-size) uncached line seeking. Root `npm run check` and `git diff --check` passed.
+- Blocker: None.
+- Unblock condition: None.
 
-### [ ] T-005 — Implement Read TUI and stage validation
+### [x] T-005 — Implement Read TUI and stage validation
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Add dedicated text/directory/image rendering and complete V2.2 staged delivery.
 - Inputs and prerequisites: T-004 structured Read details.
 - Scope or files: coding-agent Read renderer, component/profile tests, stage docs.
@@ -203,9 +203,9 @@ Non-goals:
   - V2.2 is independently releasable and committed.
 - Verification method:
   - Targeted renderer/profile tests, root check, git inspection.
-- Validation evidence: Not run.
-- Blocker: T-004 not done.
-- Unblock condition: Read details are stable.
+- Validation evidence: Dedicated Read renderer consumes only structured details, renders line-numbered syntax-highlighted text, bounded collapsed text/directory previews, directory kind/size and stable/partial status, image/resource MIME and size, and all continuation forms. The 41/41 coding-agent focused result covers expanded/collapsed output, width bounds, content-sentinel non-parsing, and directory preview truncation. Root `npm run check` and `git diff --check` passed.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-006 — Implement V2.3 Shared Mutation Core and dialects
 
@@ -394,7 +394,7 @@ Non-goals:
 - Real evaluation can spend paid tokens or leak sensitive content. Mitigation: explicit flag, exact model/budget, fixed fixtures, sanitized aggregates, stop at 15 sessions.
 - Darwin/Unix-only guarantee can be misread as cross-platform. Mitigation: runtime platform guards, docs, and explicit Windows rejection for durable mode.
 - Root check auto-fixes can touch shared-worktree files. Mitigation: inspect status/diff immediately after every root check and preserve the unrelated untracked user file.
-- Current blocker: None for T-001; all downstream tasks are dependency-blocked.
+- Current blocker: None; T-006 through T-012 remain dependency-ordered.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -408,10 +408,14 @@ Non-goals:
 - 2026-08-29: T-002 started by coordinator; first implementation slice is the agent Search contract plus direct local structured providers and focused red/green tests.
 - 2026-08-29: T-002 completed with structured contracts, Pi-owned cursor binding, direct rg/fd/fs providers, and exact-version FFF 0.10.5 opt-in provider. Security review found MIT licensing, no package lifecycle install script, signed/provenance npm artifacts, and `npm install --ignore-scripts` reported 0 vulnerabilities.
 - 2026-08-29: T-003 completed with details-only Search TUI, 13/13 agent tests, 43/43 coding-agent tests, 5,000-file component measurements, root check, generated shrinkwrap/install lock, and clean diff checks.
+- 2026-08-29: V2.1 committed as `63326d57d`; protected user-owned `Pi Agent Tools v2.md` remained untracked and untouched.
+- 2026-08-29: T-004 started by coordinator after the V2.1 commit.
+- 2026-08-29: T-004 completed with injectable ReadProvider/ResourceReader contracts, bounded legacy degradation, stable Pi-owned directory cursors, Node streaming directory pages, and opt-in Unix external sorting with quotas and cleanup. The 1 GiB benchmark confirmed bounded memory while documenting the uncached line-seek cost.
+- 2026-08-29: T-005 completed with a details-only, width-aware Read renderer and bounded collapsed previews. Agent focused tests passed 17/17, coding-agent focused tests passed 41/41, root `npm run check` passed with no auto-fixes, and diff checks passed.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: not_run
 - Evidence: Not run.
-- Limitations: T-001 through T-012 are pending; candidate remains opt-in and default profile remains legacy.
+- Limitations: T-006 through T-012 remain pending; candidate remains opt-in and default profile remains legacy.

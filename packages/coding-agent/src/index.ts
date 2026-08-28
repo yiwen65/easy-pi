@@ -308,6 +308,8 @@ export {
 	type LsToolDetails,
 	type LsToolInput,
 	type LsToolOptions,
+	type NodeReadProviderOptions,
+	NodeReadProviderV2,
 	type ReadOperations,
 	type ReadToolDetails,
 	type ReadToolInput,
