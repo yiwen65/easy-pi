@@ -49,14 +49,14 @@ class ThinkingMarqueeComponent implements Component {
 		const padLeft = " ".repeat(this.pad);
 		const contentWidth = Math.max(1, width - this.pad);
 		if (!this.live()) {
-			const label = theme.italic(theme.fg("thinkingText", `${MARQUEE_PREFIX}${this.label}`));
+			const label = theme.italic(theme.fg("accent", `${MARQUEE_PREFIX}${this.label}`));
 			return [padLeft + truncateToWidth(label, contentWidth, "")];
 		}
 		const body =
 			this.flat.length > 0
 				? marqueeWindow(this.flat, Math.max(1, contentWidth - visibleWidth(MARQUEE_PREFIX)), this.tick)
 				: this.label;
-		const line = theme.italic(theme.fg("thinkingText", `${MARQUEE_PREFIX}${body}`));
+		const line = theme.italic(theme.fg("accent", `${MARQUEE_PREFIX}${body}`));
 		return [padLeft + truncateToWidth(line, contentWidth, "")];
 	}
 }
@@ -214,7 +214,7 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 		}
 		const padLeft = " ".repeat(this.outputPad);
 		const contentWidth = Math.max(1, width - this.outputPad);
-		const label = theme.italic(theme.fg("thinkingText", `${MARQUEE_PREFIX}${this.grokThinkingLabel}`));
+		const label = theme.italic(theme.fg("accent", `${MARQUEE_PREFIX}${this.grokThinkingLabel}`));
 		return [padLeft + truncateToWidth(label, contentWidth, ""), ...body];
 	}
 

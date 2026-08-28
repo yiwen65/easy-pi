@@ -6,7 +6,7 @@ import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
-import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { GrokAssistantMessageComponent } from "../src/modes/interactive-grok/components/grok-assistant-message.ts";
 import { GrokThinkingTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-thinking-turn-group.ts";
 import { GrokToolExecutionComponent } from "../src/modes/interactive-grok/components/grok-tool-execution.ts";
@@ -329,13 +329,17 @@ describe("Grok transcript components", () => {
 
 		// Streaming: thinking is a compact live one-line marquee.
 		component.updateContent(thinkingMessage, true);
-		const streaming = stripAnsi(component.render(80).join("\n"));
+		const streamingFrame = component.render(80).join("\n");
+		const streaming = stripAnsi(streamingFrame);
+		expect(streamingFrame).toContain(theme.fg("accent", "✦ 推理过程 🤫"));
 		expect(streaming).toContain("✦ 推理过程 🤫");
 		expect(streaming).not.toContain("THINKING");
 
 		// Completed: thinking collapses to the hidden label.
 		component.updateContent(thinkingMessage, false);
-		const collapsed = stripAnsi(component.render(80).join("\n"));
+		const collapsedFrame = component.render(80).join("\n");
+		const collapsed = stripAnsi(collapsedFrame);
+		expect(collapsedFrame).toContain(theme.fg("accent", "✦ Thinking..."));
 		expect(collapsed).not.toContain("推理过程 🤫");
 		expect(collapsed).not.toContain("◇ THINKING");
 		expect(collapsed).toContain("Thinking...");
@@ -376,14 +380,18 @@ describe("Grok transcript components", () => {
 		group.updateThinking({ id: 2 }, "second reasoning", false);
 
 		// Internal assistant/tool boundaries keep the latest thinking visible.
-		const active = stripAnsi(group.render(80).join("\n"));
+		const activeFrame = group.render(80).join("\n");
+		const active = stripAnsi(activeFrame);
+		expect(activeFrame).toContain(theme.fg("accent", "✦ second reasoning"));
 		expect(active).toContain("✦ second reasoning");
 		expect(active).not.toContain("first reasoning");
 		expect(active).not.toContain("Thinking...");
 
 		// Only the complete user→answer turn switches to the static label.
 		group.completeTurn();
-		const collapsed = stripAnsi(group.render(80).join("\n"));
+		const collapsedFrame = group.render(80).join("\n");
+		const collapsed = stripAnsi(collapsedFrame);
+		expect(collapsedFrame).toContain(theme.fg("accent", "✦ Thinking..."));
 		expect(group.entryCount).toBe(2);
 		expect(group.render(80)).toHaveLength(1);
 		expect(collapsed).toContain("✦ Thinking...");
