@@ -6,8 +6,14 @@ import {
 	createSearchV2Tool,
 	type EditV2Details,
 	type EditV2Dialect,
+	type ExecutionEnv,
+	ExecutionEnvMutationBackend,
+	ExecutionEnvReadProvider,
+	ExecutionEnvSearchProvider,
 	type ExecutionToolContext,
+	HookedMutationBackend,
 	type MutationBackend,
+	type MutationBackendHooks,
 	type MutationLimits,
 	type ReadProvider,
 	type ReadV2Details,
@@ -43,20 +49,35 @@ export type ToolProfile = "legacy" | "v2";
 
 export const V2_TOOL_NAMES = ["search", "read", "edit", "run"] as const;
 
+export type V2SessionResourceSource<T> = T | (() => T);
+
+// The runtime registry is intentionally heterogeneous across four schemas/detail types.
+type V2ToolDefinition = ToolDefinition<any, any>;
+
 export interface CreateV2ToolDefinitionsOptions {
 	shellPath?: string;
 	getShellCommandPrefix?: () => string | undefined;
 	autoResizeImages?: boolean;
 	workspacePolicy?: WorkspacePolicy;
-	/** Directly injected providers are host-owned and must be closed by their caller. */
-	searchProvider?: SearchProvider;
-	/** Directly injected providers/readers are host-owned and must be closed by their caller. */
-	readProvider?: ReadProvider;
-	resourceReaders?: ResourceReader[];
-	/** Directly injected backends are host-owned and must be closed by their caller. */
-	mutationBackend?: MutationBackend;
+	/** Instances are host-owned; factory results and the default Node environment are session-owned. */
+	executionEnv?: V2SessionResourceSource<ExecutionEnv>;
+	/** Instances are host-owned; factory results are session-owned. */
+	searchProvider?: V2SessionResourceSource<SearchProvider>;
+	/** Instances are host-owned; factory results are session-owned. */
+	readProvider?: V2SessionResourceSource<ReadProvider>;
+	resourceReaders?: Array<V2SessionResourceSource<ResourceReader>>;
+	/** Instances are host-owned; factory results are session-owned. */
+	mutationBackend?: V2SessionResourceSource<MutationBackend>;
+	mutationHooks?: MutationBackendHooks;
 	editDialect?: EditV2Dialect;
 	editLimits?: Partial<MutationLimits>;
+}
+
+export interface V2ToolRuntimeHandle {
+	readonly definitions: Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>;
+	readonly lifecycleErrors: readonly Error[];
+	reload(): Promise<Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>>;
+	close(): Promise<void>;
 }
 
 const promptContributions = {
@@ -758,39 +779,135 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 	};
 }
 
-/** Create the four coding-agent definitions for the opt-in v2 profile. */
+type CloseableV2Resource = { close(): Promise<void> };
+
+function resolveSessionResource<T>(source: V2SessionResourceSource<T> | undefined): { value?: T; owned: boolean } {
+	if (typeof source === "function") return { value: (source as () => T)(), owned: true };
+	return { value: source, owned: false };
+}
+
+class V2ToolRuntime implements V2ToolRuntimeHandle {
+	readonly lifecycleErrors: Error[] = [];
+	private readonly cwd: string;
+	private readonly options: CreateV2ToolDefinitionsOptions;
+	private currentDefinitions!: Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>;
+	private resources = new Set<CloseableV2Resource>();
+	private env: ExecutionEnv | undefined;
+	private envOwned = false;
+	private closed = false;
+
+	constructor(cwd: string, options: CreateV2ToolDefinitionsOptions) {
+		this.cwd = cwd;
+		this.options = options;
+		this.build();
+	}
+
+	get definitions(): Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition> {
+		return this.currentDefinitions;
+	}
+
+	private build(): void {
+		const resolvedEnv = resolveSessionResource(this.options.executionEnv);
+		const usesDefaultNodeEnv = resolvedEnv.value === undefined;
+		const env = resolvedEnv.value ?? new NodeExecutionEnv({ cwd: this.cwd, shellPath: this.options.shellPath });
+		this.env = env;
+		this.envOwned = resolvedEnv.owned || usesDefaultNodeEnv;
+		const search = resolveSessionResource(this.options.searchProvider);
+		const searchProvider =
+			search.value ?? (usesDefaultNodeEnv ? new LocalSearchProviderV2(env) : new ExecutionEnvSearchProvider(env));
+		if (search.owned || !search.value) this.resources.add(searchProvider);
+		const read = resolveSessionResource(this.options.readProvider);
+		const readProvider =
+			read.value ??
+			(usesDefaultNodeEnv ? new NodeReadProviderV2(env as NodeExecutionEnv) : new ExecutionEnvReadProvider(env));
+		if (read.owned || !read.value) this.resources.add(readProvider);
+		const backendSource = resolveSessionResource(this.options.mutationBackend);
+		const baseMutationBackend = backendSource.value ?? new ExecutionEnvMutationBackend(env);
+		if (backendSource.owned || !backendSource.value) this.resources.add(baseMutationBackend);
+		const mutationBackend = this.options.mutationHooks
+			? new HookedMutationBackend(baseMutationBackend, this.options.mutationHooks)
+			: baseMutationBackend;
+		const resourceReaders = (this.options.resourceReaders ?? []).map((source) => {
+			const resolved = resolveSessionResource(source);
+			if (!resolved.value) throw new Error("Resource reader factory returned no reader.");
+			if (resolved.owned) this.resources.add(resolved.value);
+			return resolved.value;
+		});
+		const context: ExecutionToolContext = {
+			env,
+			searchProvider,
+			readProvider,
+			resourceReaders,
+			mutationBackend,
+			workspacePolicy: this.options.workspacePolicy,
+		};
+		this.currentDefinitions = {
+			search: bindV2Tool(createSearchV2Tool(), context),
+			read: bindV2Tool(
+				createReadV2Tool({
+					autoResizeImages: this.options.autoResizeImages,
+					imageProcessor: processImage,
+				}),
+				context,
+			),
+			edit: bindV2Tool(
+				createEditV2Tool({
+					dialect: this.options.editDialect,
+					backend: mutationBackend,
+					limits: this.options.editLimits,
+				}),
+				context,
+			),
+			run: bindV2Tool(createRunV2Tool(), context, this.options.getShellCommandPrefix),
+		};
+	}
+
+	private async closeCurrent(): Promise<void> {
+		const resources = this.resources;
+		this.resources = new Set();
+		for (const resource of resources) {
+			try {
+				await resource.close();
+			} catch (error) {
+				this.lifecycleErrors.push(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+		const env = this.env;
+		const envOwned = this.envOwned;
+		this.env = undefined;
+		this.envOwned = false;
+		if (env && envOwned) {
+			try {
+				await env.cleanup();
+			} catch (error) {
+				this.lifecycleErrors.push(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+	}
+
+	async reload(): Promise<Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>> {
+		if (this.closed) throw new Error("Cannot reload a closed v2 tool runtime.");
+		await this.closeCurrent();
+		this.build();
+		return this.currentDefinitions;
+	}
+
+	async close(): Promise<void> {
+		if (this.closed) return;
+		this.closed = true;
+		await this.closeCurrent();
+	}
+}
+
+/** Create an owned, reloadable runtime for the four opt-in v2 tool definitions. */
+export function createV2ToolRuntime(cwd: string, options: CreateV2ToolDefinitionsOptions = {}): V2ToolRuntimeHandle {
+	return new V2ToolRuntime(cwd, options);
+}
+
+/** Create definitions for compatibility callers. Session hosts should prefer createV2ToolRuntime for cleanup. */
 export function createV2ToolDefinitions(
 	cwd: string,
 	options: CreateV2ToolDefinitionsOptions = {},
-): Record<(typeof V2_TOOL_NAMES)[number], ToolDefinition<any, any>> {
-	const env = new NodeExecutionEnv({ cwd, shellPath: options.shellPath });
-	const searchProvider: SearchProvider = options.searchProvider ?? new LocalSearchProviderV2(env);
-	const readProvider: ReadProvider = options.readProvider ?? new NodeReadProviderV2(env);
-	const context: ExecutionToolContext = {
-		env,
-		searchProvider,
-		readProvider,
-		resourceReaders: options.resourceReaders,
-		mutationBackend: options.mutationBackend,
-		workspacePolicy: options.workspacePolicy,
-	};
-	return {
-		search: bindV2Tool(createSearchV2Tool(), context),
-		read: bindV2Tool(
-			createReadV2Tool({
-				autoResizeImages: options.autoResizeImages,
-				imageProcessor: processImage,
-			}),
-			context,
-		),
-		edit: bindV2Tool(
-			createEditV2Tool({
-				dialect: options.editDialect,
-				backend: options.mutationBackend,
-				limits: options.editLimits,
-			}),
-			context,
-		),
-		run: bindV2Tool(createRunV2Tool(), context, options.getShellCommandPrefix),
-	};
+): Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition> {
+	return createV2ToolRuntime(cwd, options).definitions;
 }

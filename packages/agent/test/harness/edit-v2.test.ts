@@ -5,8 +5,10 @@ import { createEditV2Tool } from "../../src/harness/tools/edit-v2.ts";
 import {
 	type EditPlan,
 	ExecutionEnvMutationBackend,
+	HookedMutationBackend,
 	type MutationBackend,
 } from "../../src/harness/tools/mutation-core.ts";
+import { V2ToolError } from "../../src/harness/tools/v2-errors.ts";
 import { err, FileError, getOrThrow, type Result } from "../../src/harness/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
@@ -63,6 +65,92 @@ class StaleBeforeCommitBackend implements MutationBackend {
 }
 
 describe("v2 edit", () => {
+	it("orders mutation hooks and preserves backend outcomes when notifications fail", async () => {
+		const events: string[] = [];
+		const plan: EditPlan = {
+			observations: [],
+			operations: [{ kind: "create", path: "/a.txt", content: "a" }],
+			limits: { maxOperations: 1, maxFiles: 1, maxFileBytes: 10, maxTotalBytes: 10 },
+		};
+		const backend: MutationBackend = {
+			id: "hook-test",
+			capabilities: {
+				atomicRenameSameFilesystem: false,
+				fsyncFile: false,
+				fsyncDirectory: false,
+				preserveMode: false,
+				detectCrossFilesystem: false,
+				durableJournal: false,
+			},
+			commit: async () => {
+				events.push("commit");
+				return { completedOperationIndexes: [0], changedPaths: ["/a.txt"], createdDirectories: [] };
+			},
+			close: async () => {},
+		};
+		const hooked = new HookedMutationBackend(backend, {
+			beforeCommit: () => {
+				events.push("before");
+			},
+			afterCommit: () => {
+				events.push("after");
+				throw new Error("notification failed");
+			},
+			onHookError: (stage) => {
+				events.push(`error:${stage}`);
+				throw new Error("observer failed");
+			},
+		});
+
+		await expect(hooked.commit(plan)).resolves.toMatchObject({ changedPaths: ["/a.txt"] });
+		expect(events).toEqual(["before", "commit", "after", "error:afterCommit"]);
+	});
+
+	it("rejects before commit without calling the backend and reports confirmed rollbacks", async () => {
+		const plan: EditPlan = {
+			observations: [{ path: "/a.txt", exists: true, size: 1 }],
+			operations: [{ kind: "update", path: "/a.txt", content: "b" }],
+			limits: { maxOperations: 1, maxFiles: 1, maxFileBytes: 10, maxTotalBytes: 10 },
+		};
+		let commits = 0;
+		const rollbackError = new V2ToolError("EDIT_ROLLED_BACK", "rolled back");
+		const backend: MutationBackend = {
+			id: "hook-test",
+			capabilities: {
+				atomicRenameSameFilesystem: false,
+				fsyncFile: false,
+				fsyncDirectory: false,
+				preserveMode: false,
+				detectCrossFilesystem: false,
+				durableJournal: false,
+			},
+			commit: async () => {
+				commits++;
+				throw rollbackError;
+			},
+			close: async () => {},
+		};
+		const denied = new HookedMutationBackend(backend, {
+			beforeCommit: () => {
+				throw new Error("denied");
+			},
+		});
+		await expect(denied.commit(plan)).rejects.toMatchObject({ code: "EDIT_ROLLED_BACK" });
+		expect(commits).toBe(0);
+
+		const rollbacks: string[] = [];
+		const notified = new HookedMutationBackend(backend, {
+			afterRollback: (_plan, error) => {
+				rollbacks.push(error.message);
+				throw new Error("rollback notification failed");
+			},
+			onHookError: (stage) => rollbacks.push(stage),
+		});
+		await expect(notified.commit(plan)).rejects.toBe(rollbackError);
+		expect(commits).toBe(1);
+		expect(rollbacks).toEqual([rollbackError.message, "afterRollback"]);
+	});
+
 	it("applies ordered create, update, move, update, and delete operations", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		env.mutations = 0;

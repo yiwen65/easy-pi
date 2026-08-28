@@ -44,6 +44,12 @@ export {
 	type LsToolInput,
 	type LsToolOptions,
 } from "./ls.ts";
+export { MemoryExecutionEnv } from "./memory-execution-env.ts";
+export {
+	NativeEditOperationsMutationBackend,
+	NativeFindOperationsSearchProvider,
+	NativeReadOperationsProvider,
+} from "./native-operations-v2-adapters.ts";
 export {
 	type JournalFailurePoint,
 	type JournalRecoveryResult,
@@ -65,11 +71,15 @@ export {
 	type ReadToolInput,
 	type ReadToolOptions,
 } from "./read.ts";
+export { SshExecutionEnv, type SshOperations } from "./ssh-execution-env.ts";
 export {
 	type CreateV2ToolDefinitionsOptions,
 	createV2ToolDefinitions,
+	createV2ToolRuntime,
 	type ToolProfile,
 	V2_TOOL_NAMES,
+	type V2SessionResourceSource,
+	type V2ToolRuntimeHandle,
 } from "./tool-profile.ts";
 export {
 	DEFAULT_MAX_BYTES,

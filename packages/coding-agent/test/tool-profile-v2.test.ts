@@ -1,6 +1,23 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type {
+	DirectoryReadPage,
+	DirectoryReadRequest,
+	EditPlan,
+	FileInfo,
+	MutationBackend,
+	MutationCommitResult,
+	ReadProvider,
+	ResourceReader,
+	ResourceReadResult,
+	SearchExecutionContext,
+	SearchPage,
+	SearchProvider,
+	SearchRequest,
+	TextRangeReadOptions,
+	TextRangeReadResult,
+} from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -10,8 +27,92 @@ import { type CreateAgentSessionOptions, createAgentSession, type InlineExtensio
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { FffSearchProvider } from "../src/core/tools/fff-search-provider.ts";
+import { createV2ToolRuntime } from "../src/core/tools/tool-profile.ts";
 
 const V2_NAMES = ["search", "read", "edit", "run"];
+
+class TrackingSearchProvider implements SearchProvider {
+	readonly id = "tracking-search";
+	readonly capabilities = {
+		textLiteral: false,
+		textRegex: false,
+		context: false,
+		fuzzyFiles: false,
+		glob: false,
+		stableCursor: false,
+		globalRanking: false,
+	};
+	closeCalls = 0;
+	throwOnClose = false;
+
+	async search(_request: SearchRequest, _context: SearchExecutionContext): Promise<SearchPage> {
+		return { hits: [], complete: true, approximate: false, partial: false };
+	}
+
+	async close(): Promise<void> {
+		this.closeCalls++;
+		if (this.throwOnClose) throw new Error("search close failed");
+	}
+}
+
+class TrackingReadProvider implements ReadProvider {
+	readonly id = "tracking-read";
+	readonly capabilities = { textRange: false, directoryPage: false, stableDirectoryCursor: false, binary: false };
+	closeCalls = 0;
+
+	async stat(_path: string): Promise<FileInfo> {
+		throw new Error("not used");
+	}
+	async readText(_path: string, _options: TextRangeReadOptions): Promise<TextRangeReadResult> {
+		throw new Error("not used");
+	}
+	async readDirectory(_request: DirectoryReadRequest): Promise<DirectoryReadPage> {
+		throw new Error("not used");
+	}
+	async readBinary(_path: string): Promise<Uint8Array> {
+		throw new Error("not used");
+	}
+	async close(): Promise<void> {
+		this.closeCalls++;
+	}
+}
+
+class TrackingMutationBackend implements MutationBackend {
+	readonly id = "tracking-mutation";
+	readonly capabilities = {
+		atomicRenameSameFilesystem: false,
+		fsyncFile: false,
+		fsyncDirectory: false,
+		preserveMode: false,
+		detectCrossFilesystem: false,
+		durableJournal: false,
+	};
+	closeCalls = 0;
+
+	async commit(_plan: EditPlan): Promise<MutationCommitResult> {
+		return { completedOperationIndexes: [], changedPaths: [], createdDirectories: [] };
+	}
+	async close(): Promise<void> {
+		this.closeCalls++;
+	}
+}
+
+class TrackingResourceReader implements ResourceReader {
+	readonly id = "tracking-resource";
+	closeCalls = 0;
+	throwOnClose = false;
+
+	canRead(): boolean {
+		return false;
+	}
+	async read(): Promise<ResourceReadResult> {
+		throw new Error("not used");
+	}
+	async close(): Promise<void> {
+		this.closeCalls++;
+		if (this.throwOnClose) throw new Error("resource close failed");
+	}
+}
 
 describe("v2 tool profile", () => {
 	let cwd: string;
@@ -64,6 +165,126 @@ describe("v2 tool profile", () => {
 		await expect(createAgentSession({ toolProfile: "future" as "v2" })).rejects.toThrow(
 			"Unknown tool profile: future",
 		);
+	});
+
+	it("owns factory resources across reload and keeps direct instances host-owned", async () => {
+		const searches: TrackingSearchProvider[] = [];
+		const reads: TrackingReadProvider[] = [];
+		const backends: TrackingMutationBackend[] = [];
+		const readers: TrackingResourceReader[] = [];
+		const runtime = createV2ToolRuntime(cwd, {
+			searchProvider: () => {
+				const provider = new TrackingSearchProvider();
+				searches.push(provider);
+				return provider;
+			},
+			readProvider: () => {
+				const provider = new TrackingReadProvider();
+				reads.push(provider);
+				return provider;
+			},
+			mutationBackend: () => {
+				const backend = new TrackingMutationBackend();
+				backends.push(backend);
+				return backend;
+			},
+			resourceReaders: [
+				() => {
+					const reader = new TrackingResourceReader();
+					readers.push(reader);
+					return reader;
+				},
+			],
+		});
+		expect([searches.length, reads.length, backends.length, readers.length]).toEqual([1, 1, 1, 1]);
+
+		await runtime.reload();
+		expect([searches.length, reads.length, backends.length, readers.length]).toEqual([2, 2, 2, 2]);
+		expect([searches[0].closeCalls, reads[0].closeCalls, backends[0].closeCalls, readers[0].closeCalls]).toEqual([
+			1, 1, 1, 1,
+		]);
+		await runtime.close();
+		await runtime.close();
+		expect([searches[1].closeCalls, reads[1].closeCalls, backends[1].closeCalls, readers[1].closeCalls]).toEqual([
+			1, 1, 1, 1,
+		]);
+
+		const hostSearch = new TrackingSearchProvider();
+		const hostRead = new TrackingReadProvider();
+		const hostBackend = new TrackingMutationBackend();
+		const hostReader = new TrackingResourceReader();
+		const hostRuntime = createV2ToolRuntime(cwd, {
+			searchProvider: hostSearch,
+			readProvider: hostRead,
+			mutationBackend: hostBackend,
+			resourceReaders: [hostReader],
+		});
+		await hostRuntime.reload();
+		await hostRuntime.close();
+		expect([hostSearch.closeCalls, hostRead.closeCalls, hostBackend.closeCalls, hostReader.closeCalls]).toEqual([
+			0, 0, 0, 0,
+		]);
+	});
+
+	it("continues lifecycle cleanup after close failures", async () => {
+		const search = new TrackingSearchProvider();
+		search.throwOnClose = true;
+		const read = new TrackingReadProvider();
+		const runtime = createV2ToolRuntime(cwd, {
+			searchProvider: () => search,
+			readProvider: () => read,
+		});
+
+		await runtime.close();
+		expect(search.closeCalls).toBe(1);
+		expect(read.closeCalls).toBe(1);
+		expect(runtime.lifecycleErrors).toHaveLength(1);
+		expect(runtime.lifecycleErrors[0].message).toBe("search close failed");
+	});
+
+	it("rebuilds session-owned v2 resources on session reload and closes them on dispose", async () => {
+		const readers: TrackingResourceReader[] = [];
+		const session = await createSession({
+			toolProfile: "v2",
+			toolsV2: {
+				read: {
+					resourceReaders: [
+						() => {
+							const reader = new TrackingResourceReader();
+							readers.push(reader);
+							return reader;
+						},
+					],
+				},
+			},
+		});
+		expect(readers).toHaveLength(1);
+		const firstReadDefinition = session.getToolDefinition("read");
+
+		await session.reload();
+		expect(readers).toHaveLength(2);
+		expect(readers[0].closeCalls).toBe(1);
+		expect(session.getToolDefinition("read")).not.toBe(firstReadDefinition);
+		session.dispose();
+		session.dispose();
+		await expect.poll(() => readers[1].closeCalls).toBe(1);
+		expect(session.v2ToolLifecycleErrors).toEqual([]);
+	});
+
+	it("records session disposal failures without skipping later cleanup", async () => {
+		const failing = new TrackingResourceReader();
+		failing.throwOnClose = true;
+		const following = new TrackingResourceReader();
+		const session = await createSession({
+			toolProfile: "v2",
+			toolsV2: { read: { resourceReaders: [() => failing, () => following] } },
+		});
+
+		session.dispose();
+		await expect.poll(() => session.v2ToolLifecycleErrors.length).toBe(1);
+		expect(failing.closeCalls).toBe(1);
+		expect(following.closeCalls).toBe(1);
+		expect(session.v2ToolLifecycleErrors[0].message).toBe("resource close failed");
 	});
 
 	it("keeps legacy as the default and selects exactly four v2 built-ins", async () => {

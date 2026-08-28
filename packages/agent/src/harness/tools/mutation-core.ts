@@ -75,6 +75,84 @@ export interface MutationBackend {
 	close(): Promise<void>;
 }
 
+export interface MutationBackendHooks {
+	/** Approval hook. Throwing rejects the plan before the backend is called. */
+	beforeCommit?: (plan: Readonly<EditPlan>, signal?: AbortSignal) => void | Promise<void>;
+	/** Notification hook. It must not mutate the plan or result. */
+	afterCommit?: (plan: Readonly<EditPlan>, result: Readonly<MutationCommitResult>) => void | Promise<void>;
+	/** Notification hook for a confirmed live rollback. Recovery scans do not invoke hooks. */
+	afterRollback?: (plan: Readonly<EditPlan>, error: V2ToolError) => void | Promise<void>;
+	/** Best-effort observer for notification hook failures. It must not throw. */
+	onHookError?: (stage: "afterCommit" | "afterRollback", error: Error) => void;
+}
+
+function reportMutationHookError(
+	hooks: MutationBackendHooks,
+	stage: "afterCommit" | "afterRollback",
+	error: unknown,
+): void {
+	try {
+		hooks.onHookError?.(stage, error instanceof Error ? error : new Error(String(error)));
+	} catch {
+		// Notification failures must never rewrite the backend outcome.
+	}
+}
+
+/** Minimal approval/notification wrapper; post-commit hook failures never rewrite mutation outcomes. */
+export class HookedMutationBackend implements MutationBackend {
+	readonly id: string;
+	readonly capabilities: MutationCapabilities;
+	private readonly backend: MutationBackend;
+	private readonly hooks: MutationBackendHooks;
+	private readonly closeBackend: boolean;
+
+	constructor(backend: MutationBackend, hooks: MutationBackendHooks, options: { closeBackend?: boolean } = {}) {
+		this.backend = backend;
+		this.hooks = hooks;
+		this.closeBackend = options.closeBackend ?? false;
+		this.id = `${backend.id}+hooks`;
+		this.capabilities = backend.capabilities;
+	}
+
+	async commit(plan: EditPlan, signal?: AbortSignal): Promise<MutationCommitResult> {
+		try {
+			await this.hooks.beforeCommit?.(plan, signal);
+		} catch (error) {
+			throw new V2ToolError(
+				"EDIT_ROLLED_BACK",
+				"Mutation approval failed before commit. No files were changed.",
+				{ recovery: { kind: "inspect_paths", paths: plan.observations.map((item) => item.path) } },
+				error instanceof Error ? error : undefined,
+			);
+		}
+		let result: MutationCommitResult;
+		try {
+			result = await this.backend.commit(plan, signal);
+		} catch (error) {
+			if (error instanceof V2ToolError && error.code === "EDIT_ROLLED_BACK" && this.hooks.afterRollback) {
+				try {
+					await this.hooks.afterRollback(plan, error);
+				} catch (hookError) {
+					reportMutationHookError(this.hooks, "afterRollback", hookError);
+				}
+			}
+			throw error;
+		}
+		if (this.hooks.afterCommit) {
+			try {
+				await this.hooks.afterCommit(plan, result);
+			} catch (error) {
+				reportMutationHookError(this.hooks, "afterCommit", error);
+			}
+		}
+		return result;
+	}
+
+	async close(): Promise<void> {
+		if (this.closeBackend) await this.backend.close();
+	}
+}
+
 export interface ObservedTextFile {
 	observation: FileObservation;
 	content: string;
