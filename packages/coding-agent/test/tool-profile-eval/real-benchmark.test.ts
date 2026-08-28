@@ -27,7 +27,6 @@ if (RUN) configureHttpDispatcher();
 const PROVIDER = process.env.PI_REAL_TOOL_PROFILE_PROVIDER ?? "openai-codex";
 const MODEL_ID = process.env.PI_REAL_TOOL_PROFILE_MODEL ?? "gpt-5.6-luna";
 const MAX_SESSIONS = 20;
-const MAX_MODEL_TURNS = 80;
 const MAX_REPORTED_COST_USD = Number(process.env.PI_REAL_TOOL_PROFILE_MAX_COST_USD ?? "20");
 
 function manifest(): ToolProfileEvalManifest {
@@ -115,6 +114,7 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 		expect(config.tasks.map((task) => task.id)).toEqual(["locate-edit-test", "move-edit-test"]);
 		expect(config.seeds).toHaveLength(5);
 		expect(config.tasks.length * config.seeds.length * config.profiles.length).toBe(MAX_SESSIONS);
+		const maxModelTurns = MAX_SESSIONS * config.budgets.maxTurns;
 		const cwd = join(benchmarkRoot, "fixture");
 		const model = runtime.getModel(PROVIDER, MODEL_ID);
 		if (!model) throw new Error(`${PROVIDER}/${MODEL_ID} disappeared from the local model catalog`);
@@ -160,7 +160,7 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 						`${input.task.id}/${input.seed}/${input.profile} exceeded ${input.budgets.maxTurns} model turns`,
 					);
 				}
-				if (totalModelTurns > MAX_MODEL_TURNS) throw new Error(`Model-turn budget exceeded: ${totalModelTurns}`);
+				if (totalModelTurns > maxModelTurns) throw new Error(`Model-turn budget exceeded: ${totalModelTurns}`);
 				if (totalReportedCostUsd > MAX_REPORTED_COST_USD) {
 					throw new Error(`Reported cost budget exceeded: ${totalReportedCostUsd.toFixed(6)} USD`);
 				}
