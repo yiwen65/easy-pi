@@ -35,4 +35,12 @@ PI_REAL_TOOL_PROFILE_ABLATION=1 node "$(git rev-parse --show-toplevel)/node_modu
   --run test/tool-profile-eval/real-benchmark.test.ts --silent=false
 ```
 
-All real modes are mutually exclusive. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.
+Held-out validation uses five independent stress layers (large directory, large file, long output, ambiguous edit, and multi-file operation), two new seeds, hidden filesystem grading, and the same paired prompt variants:
+
+```bash
+cd packages/coding-agent
+PI_REAL_TOOL_PROFILE_CONTEXT_STRESS=1 node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" \
+  --run test/tool-profile-eval/context-stress.test.ts --silent=false
+```
+
+All real modes are explicit opt-ins. The three modes in `real-benchmark.test.ts` are mutually exclusive. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.

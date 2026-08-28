@@ -29,6 +29,7 @@ export interface SanitizedToolCallTrace {
 	errorCode?: string;
 	operationKinds?: string[];
 	durationMs: number;
+	truncated: boolean;
 	recovery: boolean;
 	postEditRead: boolean;
 }
@@ -40,6 +41,7 @@ export interface SanitizedToolTrace {
 	firstEditSuccess: boolean | null;
 	postEditReadCount: number;
 	recoveryCallCount: number;
+	truncationCount: number;
 	toolElapsedMs: number;
 	peakContextTokens: number;
 }
@@ -82,6 +84,14 @@ function errorCode(result: unknown): string | undefined {
 	return firstLine && V2_ERROR_CODES.has(firstLine) ? firstLine : undefined;
 }
 
+function resultWasTruncated(result: unknown): boolean {
+	if (!result || typeof result !== "object" || !("details" in result)) return false;
+	const details = result.details;
+	if (!details || typeof details !== "object") return false;
+	if ("truncated" in details && details.truncated === true) return true;
+	return "truncation" in details && details.truncation !== undefined;
+}
+
 function contextTokens(event: AgentSessionEvent): number | undefined {
 	if (event.type !== "message_end" || event.message.role !== "assistant") return undefined;
 	const usage = event.message.usage;
@@ -103,6 +113,7 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 	let awaitingRecovery = false;
 	let recoveryCallCount = 0;
 	let postEditReadCount = 0;
+	let truncationCount = 0;
 	let peakContextTokens = 0;
 	let activeTools = 0;
 	let activeIntervalStartedAt = 0;
@@ -150,6 +161,8 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 				if (firstEditSuccess === null) firstEditSuccess = !event.isError;
 				if (!event.isError) successfulEditSeen = true;
 			}
+			const truncated = resultWasTruncated(event.result);
+			if (truncated) truncationCount += 1;
 			calls.push({
 				sequence: started.sequence,
 				toolName: started.toolName,
@@ -157,6 +170,7 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 				...(event.isError && errorCode(event.result) ? { errorCode: errorCode(event.result) } : {}),
 				...(started.operationKinds ? { operationKinds: started.operationKinds } : {}),
 				durationMs: Math.max(0, endedAt - started.startedAt),
+				truncated,
 				recovery: started.recovery,
 				postEditRead: started.postEditRead,
 			});
@@ -169,6 +183,7 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 				firstEditSuccess,
 				postEditReadCount,
 				recoveryCallCount,
+				truncationCount,
 				toolElapsedMs,
 				peakContextTokens,
 			};

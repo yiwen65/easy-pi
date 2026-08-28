@@ -485,9 +485,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-016 — Validate on held-out context-stress tasks
+### [x] T-016 — Validate on held-out context-stress tasks
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Test the selected candidate on held-out tasks that activate the intended bounded-context advantages rather than only tiny-fixture orchestration overhead.
 - Inputs and prerequisites: T-015 candidate or explicit no-change outcome.
@@ -504,13 +504,13 @@ Non-goals:
   - Efficiency gains must reproduce outside the original move fixture to justify rollout.
 - Verification method:
   - Targeted default-skipped tests, authorized held-out run if a candidate exists, and aggregate consistency checks.
-- Validation evidence: Not run.
+- Validation evidence: Added an explicit-opt-in held-out evaluator with two new seeds and five independent hidden-verifier layers: 400-file directory discovery, a 2,500-line bounded-read target, deliberately truncated long command output, ambiguous same-text editing, and a move/update/import/config multi-file operation. Added content-free truncation detection to traces. Default focused tests passed 3/3 with the real file skipped; root `npm run check` passed. The authorized 20-session held-out run passed 20/20 in 718.59 seconds. Candidate vs control aggregate: mean turns 7.3 vs 8.2 (−11.0%), tool calls 8.6 vs 9.8 (−12.2%), errors 2.5 vs 2.7 (−7.4%), input tokens 10,937.1 vs 11,790.0 (−7.2%), output tokens 855.8 vs 1,113.6 (−23.2%), cache reads 15,974.4 vs 20,275.2 (−21.2%), elapsed 27.25s vs 44.37s (−38.6%), and cost $0.03534 vs $0.04100 (−13.8%). Completion tied 10/10, candidate first-edit success improved to 9/10 from 7/10, recovery calls tied at 19, and both variants successfully handled truncation in both long-output runs. Per-layer mean-turn candidate−control deltas were directory +0.5, large file −2.0, long output −1.0, ambiguous edit −1.0, and multi-file −1.0; no correctness or recovery regression was observed.
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-017 — Complete instrumentation/intervention delivery
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: Reconcile evidence, retain only validated product changes, run final checks, record go/no-go, and commit task-owned files.
 - Inputs and prerequisites: T-014 through T-016.
@@ -528,8 +528,8 @@ Non-goals:
 - Verification method:
   - Targeted tests, root check, task validator, and git status/diff inspection.
 - Validation evidence: Not run.
-- Blocker: T-014 through T-016 not done.
-- Unblock condition: Dependencies complete.
+- Blocker: None.
+- Unblock condition: None.
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -585,6 +585,7 @@ Non-goals:
 - 2026-08-28: T-014 completed after the bounded five-seed v2 move diagnostic passed 5/5. Traces found 13 invalid-read errors, split move/update behavior in four runs, post-move search in three, and no move+update batch; post-edit reads were zero. T-015 moved to in_progress for an isolated prompt-only ablation; receipt/schema changes are not selected.
 - 2026-08-28: T-015's first real ablation stopped on an observed 14-turn control run under the 12-turn cap. Partial evidence rejected the combined read-guidance experiment, so the candidate was narrowed to the independently supported move+update batch instruction and the ablation-only cap was bounded at 18.
 - 2026-08-28: T-015 completed after the final 20-session prompt-only ablation passed 20/20. Candidate completion tied control while reducing aggregate turns 16.9%, tool calls 19.7%, errors 36.4%, input 16.5%, output 24.2%, elapsed 25.8%, and cost 20.2%; move-task turns fell 26% while locate-task turns tied. T-016 moved to in_progress for held-out context-stress gates before retention.
+- 2026-08-28: T-016 completed after the held-out 20-session context-stress run passed 20/20, including bounded directory/file discovery, actual long-output truncation, ambiguous edit safety, and multi-file mutation. Candidate retained correctness, improved first-edit success, tied recovery count, and reduced aggregate turns 11.0%, input 7.2%, output 23.2%, cache reads 21.2%, elapsed 38.6%, and cost 13.8%. T-017 moved to in_progress for final checks and retained-change delivery.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result

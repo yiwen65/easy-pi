@@ -38,6 +38,7 @@ describe("prompt ablation runner", () => {
 					firstEditSuccess: true,
 					postEditReadCount: 0,
 					recoveryCallCount: candidate ? 0 : 2,
+					truncationCount: 0,
 					toolElapsedMs: 5,
 					peakContextTokens: candidate ? 80 : 100,
 				},

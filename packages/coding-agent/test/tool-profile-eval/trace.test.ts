@@ -60,6 +60,7 @@ describe("sanitized tool trace collector", () => {
 			firstEditSuccess: false,
 			recoveryCallCount: 1,
 			postEditReadCount: 0,
+			truncationCount: 0,
 			toolElapsedMs: 17,
 		});
 		expect(trace.calls).toEqual([
@@ -70,6 +71,7 @@ describe("sanitized tool trace collector", () => {
 				errorCode: "EDIT_CONTEXT_NOT_FOUND",
 				operationKinds: ["move", "update"],
 				durationMs: 12,
+				truncated: false,
 				recovery: false,
 				postEditRead: false,
 			},
@@ -78,6 +80,7 @@ describe("sanitized tool trace collector", () => {
 				toolName: "read",
 				status: "success",
 				durationMs: 5,
+				truncated: false,
 				recovery: true,
 				postEditRead: false,
 			},
@@ -138,7 +141,7 @@ describe("sanitized tool trace collector", () => {
 				toolCallId: "read",
 				toolName: "read",
 				isError: false,
-				result: { content: [] },
+				result: { content: [], details: { truncation: { truncated: true, outputLines: 10 } } },
 			}),
 		);
 
@@ -146,6 +149,7 @@ describe("sanitized tool trace collector", () => {
 		expect(trace.firstEditSuccess).toBe(true);
 		expect(trace.postEditReadCount).toBe(1);
 		expect(trace.peakContextTokens).toBe(95);
+		expect(trace.truncationCount).toBe(1);
 		expect(trace.calls[1]).toMatchObject({ postEditRead: true });
 		expect(JSON.stringify(trace)).not.toContain("sensitive");
 	});
