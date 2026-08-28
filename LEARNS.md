@@ -226,3 +226,12 @@
 - Correct approach: 默认键位避免依赖 Option-as-Meta 和操作系统保留组合；本次改为 Shift+PageUp/PageDown 跳转、F6 打开列表，并用实际终端序列验证每个 action 唯一命中。grok regular 触发任一 prompt 导航时先切换到 fullscreen，再定位目标。
 - Prevention: 新默认键位依次验证 (1) 全部 KEYBINDINGS 命中集合，(2) 目标终端真实发送的字节，(3) 目标 OS 是否抢占，(4) 应用默认运行模式的端到端效果；合成 ESC 序列或非默认 fullscreen smoke 不能替代后两层。
 - Verified by: 用户在 macOS 复现两轮失败；`grok-prompt-navigation.test.ts` 对键位和 regular→fullscreen 先红后绿；构建后用 22-prompt session 从 `--tui-mode regular` 实测上一条跳转与 F6 列表均通过，相关 6 files / 29 tests、Biome、tsgo 通过。
+
+## 真实工具 A/B 评测——turn breaker 必须按完整工具链预算
+
+- Wrong approach: 把简单任务的模型轮次先验设为 4，首次超限后仅按已观察到的 5 轮加一个 spare 调到 6，就直接重跑包含 move/edit/test 的完整矩阵。
+- Why it failed: 每个 search/read/edit/run 反馈都可能触发下一次 assistant turn；多操作任务在 `max` thinking 下实际需要 8–10 轮，简单任务的局部观察不能代表复杂任务上界。
+- Recognition signal: 真实评测在功能已完成或接近完成时仍报 `exceeded N model turns`，且较复杂 task/profile 总在相同 breaker 处中止。
+- Correct approach: turn cap 按最复杂预期工具链加 bounded headroom 设置，global cap 机械派生为 `sessions × perSessionTurns`；breaker 错误必须打印 observed turns。校准失败的 partial records 只作诊断，不能混入最终统计 aggregate。
+- Prevention: 全矩阵前先为每种任务形态各跑一对 calibration；至少覆盖 discovery→read→edit→run→final 和 discovery→read→move/update→run→recovery→final，再冻结预算。
+- Verified by: 2026-08-28 `tool-profile-eval/real-benchmark.test.ts` 的 4-turn、6-turn breaker 分别在首个 v2 locate 与首个 v2 move 任务停止；最终 10-turn cap 完成 20/20 sessions，v2 move 实际最高 10 turns。
