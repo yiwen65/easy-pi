@@ -44,6 +44,12 @@ export {
 	type LsToolInput,
 	type LsToolOptions,
 } from "./ls.ts";
+export {
+	type JournalFailurePoint,
+	type JournalRecoveryResult,
+	NodeJournaledMutationBackend,
+	type NodeJournaledMutationBackendOptions,
+} from "./node-journaled-mutation-backend.ts";
 export { type NodeReadProviderOptions, NodeReadProviderV2 } from "./node-read-provider-v2.ts";
 export {
 	createReadTool,

@@ -253,10 +253,10 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-008 — Implement opt-in Darwin/Unix journaled mutation
+### [x] T-008 — Implement opt-in Darwin/Unix journaled mutation
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Add durable conditional recovery with explicit capability gates and failure/crash coverage.
 - Inputs and prerequisites: T-006 stable MutationBackend and observations; T-007 committed UI states.
 - Scope or files: Journal backend/store/recovery scanner, Unix capability implementation, fault/crash tests.
@@ -273,9 +273,9 @@ Non-goals:
   - No strict multi-file external atomicity claim is made.
 - Verification method:
   - Targeted fault/crash tests, Unix filesystem checks, root check.
-- Validation evidence: Not run.
-- Blocker: T-007 not done.
-- Unblock condition: Shared Mutation Core and UI are committed.
+- Validation evidence: `node-journaled-mutation-backend.test.ts` passed 16/16 on Node v24.15.0 / Darwin arm64, including unchanged-schema integration, durable success and mode preservation, every persisted state transition (`planned`, `staged`, `originals_secured`, `installing`, `committed`, `cleanup_complete`, `rollback_started`, `rollback_complete`, and fail-closed `indeterminate`), injected payload-write/fsync/directory-fsync/rename/cleanup failures, private 0700/0600 journal permissions, byte quotas, active/stale process locks, manifest path tampering, external modification preservation, and an actual child process exiting after the first file install followed by scanner rollback. Agent Edit tests passed 11/11; combined journal/profile/component tests passed 55/55. Root `npm run check` and `git diff --check` passed. The backend is explicit opt-in, rejects Windows construction, persists an expiry bound, and documents that it does not provide cross-file atomic visibility.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-009 — Implement opt-in Overlay backend
 
@@ -394,7 +394,7 @@ Non-goals:
 - Real evaluation can spend paid tokens or leak sensitive content. Mitigation: explicit flag, exact model/budget, fixed fixtures, sanitized aggregates, stop at 15 sessions.
 - Darwin/Unix-only guarantee can be misread as cross-platform. Mitigation: runtime platform guards, docs, and explicit Windows rejection for durable mode.
 - Root check auto-fixes can touch shared-worktree files. Mitigation: inspect status/diff immediately after every root check and preserve the unrelated untracked user file.
-- Current blocker: None; T-008 through T-012 remain dependency-ordered.
+- Current blocker: None; T-009 through T-012 remain dependency-ordered.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -415,10 +415,12 @@ Non-goals:
 - 2026-08-29: V2.2 committed as `bde2807b9`; protected user-owned `Pi Agent Tools v2.md` remained untracked and untouched. T-006 started by coordinator.
 - 2026-08-29: T-006 completed with one canonical EditPlan/MutationBackend path, pre-commit observations, pre-write budgets, UTF-8/BOM/line-ending/mode preservation boundaries, and explicitly selectable operations/replacement/Pi Edit Patch v1 schemas; operations remains the default.
 - 2026-08-29: T-007 completed with a details-only multi-file Edit renderer, bounded highlighted diffs, structured stale/split/partial error states, and control-sequence-safe inline paths. Agent focused tests passed 23/23, coding-agent focused tests passed 39/39, and root `npm run check` passed after formatting with no remaining warnings.
+- 2026-08-29: V2.3 committed as `44b10bd1e`; operations remains the v2 edit default and the overall default profile remains legacy. T-008 started by coordinator. A read-only journal analyst again received an empty delegated snapshot, so its inconclusive report was discarded and implementation investigation remains coordinator-owned in the real worktree.
+- 2026-08-29: T-008 completed with an opt-in private Darwin/Unix journal, durable state transitions, same-directory staged installs, verified rollback payloads, recovery locking/scanning, quotas/expiry, external-state fail-closed handling, and explicit no-cross-file-atomicity scope. An independent child-process crash after one installed file recovered to both originals; focused tests passed 16/16, related agent tests 11/11, combined coding-agent tests 55/55, and root checks passed.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: not_run
 - Evidence: Not run.
-- Limitations: T-008 through T-012 remain pending; candidate remains opt-in, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
+- Limitations: T-009 through T-012 remain pending; the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.

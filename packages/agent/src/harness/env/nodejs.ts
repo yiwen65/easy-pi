@@ -99,7 +99,7 @@ function fileInfoFromStats(
 		size: stats.size,
 		mtimeMs: stats.mtimeMs,
 		identity: stats.dev === undefined || stats.ino === undefined ? undefined : `${stats.dev}:${stats.ino}`,
-		mode: stats.mode,
+		mode: stats.mode === undefined ? undefined : stats.mode & 0o7777,
 	});
 }
 
