@@ -1570,10 +1570,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
 
-				models.push({
+				const workersModel = {
 					id: modelId,
 					name: m.name || modelId,
-					api: "openai-completions",
+					api: "openai-completions" as const,
 					provider: "cloudflare-workers-ai",
 					baseUrl: CLOUDFLARE_WORKERS_AI_BASE_URL,
 					reasoning: m.reasoning === true,
@@ -1587,8 +1587,22 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 					compat: { sendSessionAffinityHeaders: true },
-				});
+				};
+				models.push(workersModel);
 				recordModelsDevReasoningOptions("cloudflare-workers-ai", modelId, m);
+
+				// AI Gateway's Unified API accepts the complete Workers AI catalog via
+				// `workers-ai/<native-id>`, but models.dev does not list those derived
+				// routes under the gateway provider. Generate them from the canonical
+				// Workers AI metadata so runtime routing and the typed catalog agree.
+				const gatewayId = `workers-ai/${modelId}`;
+				models.push({
+					...workersModel,
+					id: gatewayId,
+					provider: "cloudflare-ai-gateway",
+					baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
+				});
+				recordModelsDevReasoningOptions("cloudflare-ai-gateway", gatewayId, m);
 			}
 		}
 
