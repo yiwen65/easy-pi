@@ -308,10 +308,11 @@ Pi 当前由 TypeScript `InteractiveMode` 直接驱动 `@earendil-works/pi-tui` 
 - 2026-08-22: Final task document validation passed with all tasks done and final result `passed`.
 - 2026-08-22: New workspace `npm pack --dry-run` passed with 29 expected files and no generated tarball; task document validation was rerun after recording this evidence.
 - 2026-08-22: User reported global `pi --tui-engine grok` as unknown. Proved the FNM global registry copy was stale while the repository build was good, linked the global coding-agent package to the workspace, and verified the original argument plus a real global-command PTY smoke. T-008 completed.
+- 2026-08-22: Post-task user decision made Grok the default engine. Added one shared `DEFAULT_TUI_ENGINE`, normalized both direct `createInteractiveTui()` calls and the `InteractiveMode` component/session pipeline, updated CLI help, and retained explicit `--tui-engine legacy` rollback. Targeted tests, repository check, offline build, no-flag Grok tmux smoke, and explicit legacy tmux smoke passed.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: passed
-- Evidence: T-001 through T-008 are done with current evidence. The new renderer package, production CLI/session/renderer wiring, legacy rollback, full isolated test suite, repository check, complete offline workspace build, package dry-run, dual-engine PTY smoke, global command wiring, and final task document validator all passed.
-- Limitations: 默认仍为 `legacy`，需显式 `--tui-engine grok` 启用，以保留一键回滚；首版有意复用 Pi Component 视图和扩展 ABI，不是 grok-build 字符级视觉复制。真实第三方扩展、非 tmux 终端矩阵、付费 provider 和动态在线模型目录再生成未运行；没有把这些项目描述为已验证。
+- Evidence: T-001 through T-008 are done with current evidence. The new renderer package, production CLI/session/renderer wiring, explicit legacy rollback, full isolated test suite, repository check, complete offline workspace build, package dry-run, dual-engine PTY smoke, global command wiring, and final task document validator all passed. A later no-flag smoke verified Grok as the default pipeline.
+- Limitations: 默认现为 `grok`；出现回归时可显式使用 `--tui-engine legacy` 回滚。首版有意复用 Pi Component 视图和扩展 ABI，不是 grok-build 字符级视觉复制。真实第三方扩展、非 tmux 终端矩阵、付费 provider 和动态在线模型目录再生成未运行；没有把这些项目描述为已验证。
