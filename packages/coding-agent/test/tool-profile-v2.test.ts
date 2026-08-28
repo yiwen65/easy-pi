@@ -116,33 +116,36 @@ describe("v2 tool profile", () => {
 			PI_REASONING_LEVEL: "stale-reasoning",
 		});
 		const settingsManager = SettingsManager.inMemory();
-		settingsManager.setShellCommandPrefix("export PI_PREFIX_MARKER=prefix-applied");
+		settingsManager.setShellCommandPrefix("export PI_PREFIX_MARKER=prefix-first");
 		const sessionManager = SessionManager.inMemory(cwd);
 		const session = await createSession({ toolProfile: "v2", settingsManager, sessionManager });
 
 		try {
 			const run = session.getToolDefinition("run");
 			if (!run) throw new Error("v2 run definition is missing");
-			const updates: string[] = [];
-			const result = await run.execute(
-				"run-session-env",
-				{
-					command: `printf "%s|%s|%s|%s|%s|%s" "$PI_PREFIX_MARKER" "$PI_SESSION_ID" "\${PI_SESSION_FILE-unset}" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"`,
-				},
-				undefined,
-				(update) => {
-					const content = update.content[0];
-					if (content?.type === "text") updates.push(content.text);
-				},
-				{
-					model: getModel("anthropic", "claude-sonnet-4-5")!,
-					thinkingLevel: "high",
-					sessionManager,
-				} as unknown as Parameters<typeof run.execute>[4],
-			);
-			const expectedOutput = `prefix-applied|${sessionManager.getSessionId()}|unset|anthropic|claude-sonnet-4-5|high`;
-			expect(result.content[0]).toMatchObject({ text: `${expectedOutput}\n\nexit 0` });
-			expect(updates).toContain(expectedOutput);
+			const extensionContext = {
+				model: getModel("anthropic", "claude-sonnet-4-5")!,
+				thinkingLevel: "high",
+				sessionManager,
+			} as unknown as Parameters<typeof run.execute>[4];
+			const execute = (toolCallId: string) =>
+				run.execute(
+					toolCallId,
+					{
+						command: `printf "%s|%s|%s|%s|%s|%s" "$PI_PREFIX_MARKER" "$PI_SESSION_ID" "\${PI_SESSION_FILE-unset}" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"`,
+					},
+					undefined,
+					undefined,
+					extensionContext,
+				);
+
+			const first = await execute("run-session-env-first");
+			const environmentSuffix = `${sessionManager.getSessionId()}|unset|anthropic|claude-sonnet-4-5|high`;
+			expect(first.content[0]).toMatchObject({ text: `prefix-first|${environmentSuffix}\n\nexit 0` });
+
+			settingsManager.setShellCommandPrefix("export PI_PREFIX_MARKER=prefix-second");
+			const second = await execute("run-session-env-second");
+			expect(second.content[0]).toMatchObject({ text: `prefix-second|${environmentSuffix}\n\nexit 0` });
 			expect(session.systemPrompt).toContain("inspect PI_* environment variables");
 		} finally {
 			session.dispose();
