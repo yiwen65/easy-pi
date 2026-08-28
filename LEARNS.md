@@ -227,11 +227,11 @@
 - Prevention: 新默认键位依次验证 (1) 全部 KEYBINDINGS 命中集合，(2) 目标终端真实发送的字节，(3) 目标 OS 是否抢占，(4) 应用默认运行模式的端到端效果；合成 ESC 序列或非默认 fullscreen smoke 不能替代后两层。
 - Verified by: 用户在 macOS 复现两轮失败；`grok-prompt-navigation.test.ts` 对键位和 regular→fullscreen 先红后绿；构建后用 22-prompt session 从 `--tui-mode regular` 实测上一条跳转与 F6 列表均通过，相关 6 files / 29 tests、Biome、tsgo 通过。
 
-## 真实工具 A/B 评测——turn breaker 必须按完整工具链预算
+## 真实工具 A/B 评测——turn breaker 必须覆盖完整工具链与随机波动
 
-- Wrong approach: 把简单任务的模型轮次先验设为 4，首次超限后仅按已观察到的 5 轮加一个 spare 调到 6，就直接重跑包含 move/edit/test 的完整矩阵。
-- Why it failed: 每个 search/read/edit/run 反馈都可能触发下一次 assistant turn；多操作任务在 `max` thinking 下实际需要 8–10 轮，简单任务的局部观察不能代表复杂任务上界。
-- Recognition signal: 真实评测在功能已完成或接近完成时仍报 `exceeded N model turns`，且较复杂 task/profile 总在相同 breaker 处中止。
-- Correct approach: turn cap 按最复杂预期工具链加 bounded headroom 设置，global cap 机械派生为 `sessions × perSessionTurns`；breaker 错误必须打印 observed turns。校准失败的 partial records 只作诊断，不能混入最终统计 aggregate。
-- Prevention: 全矩阵前先为每种任务形态各跑一对 calibration；至少覆盖 discovery→read→edit→run→final 和 discovery→read→move/update→run→recovery→final，再冻结预算。
-- Verified by: 2026-08-28 `tool-profile-eval/real-benchmark.test.ts` 的 4-turn、6-turn breaker 分别在首个 v2 locate 与首个 v2 move 任务停止；最终 10-turn cap 完成 20/20 sessions，v2 move 实际最高 10 turns。
+- Wrong approach: 把简单任务的模型轮次先验设为 4，首次超限后只按单次已观察值逐级加 spare；后续 prompt ablation 又沿用了已完成基准的 10/12-turn 上界。
+- Why it failed: 每个 search/read/edit/run 反馈都可能触发下一次 assistant turn；多操作任务在 `max` thinking 下既有更长工具链，也有跨运行波动，历史最高 10 轮的同类 control 后来实际达到 14 轮。
+- Recognition signal: 真实评测在功能已完成或接近完成时仍报 `exceeded N model turns`，且复杂 task/variant 总在相同 breaker 处中止。
+- Correct approach: turn cap 按最复杂预期工具链与多次 pilot 的波动加 bounded headroom 设置，global cap 机械派生为 `sessions × perSessionTurns`；breaker 错误必须打印 observed turns。校准失败的 partial records 只作诊断，不能混入最终统计 aggregate。
+- Prevention: 全矩阵前为每种任务形态与实验 variant 跑多个 calibration seed；至少覆盖 discovery→read→edit→run→final 和 discovery→read→move/update→run→recovery→final，再冻结预算。
+- Verified by: 2026-08-28 `tool-profile-eval` 中 4-turn、6-turn breaker 分别在 v2 locate/move 停止；后续诊断和 ablation 的 10/12-turn cap 又观察到 11/14 turns，最终 bounded 18-turn ablation cap 完成 20/20，held-out 18-turn cap再完成 20/20。
