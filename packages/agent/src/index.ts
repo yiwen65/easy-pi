@@ -132,6 +132,8 @@ export {
 	type Shell,
 	type ShellExecOptions,
 	type Skill,
+	type TextRangeReadOptions,
+	type TextRangeReadResult,
 	toError,
 } from "./harness/types.ts";
 export * from "./harness/utils/shell-output.ts";

@@ -221,9 +221,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-006 — Integrate the v2 profile into packages and coding-agent
+### [x] T-006 — Integrate the v2 profile into packages and coding-agent
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Export a coherent v2 tool factory and connect it to coding-agent CLI, SDK, local provider, prompts, registries, filtering and renderers while preserving legacy defaults.
 - Inputs and prerequisites: T-002 through T-005 completed and verified.
@@ -246,14 +246,14 @@ Non-goals:
 - Verification method:
   - Targeted SDK, args, tools, prompt and AgentSession tests.
   - Focused server harness tests if its public creation path receives profile support.
-- Validation evidence: Not run.
+- Validation evidence: `packages/coding-agent` targeted Vitest run passed 97/97 tests across `args.test.ts`, `tool-profile-v2.test.ts`, `local-search-provider-v2.test.ts`, and legacy `default-tools-setting.test.ts`; root `tsgo --noEmit` passed; root `npm run check` passed all formatting, dependency, import, shrinkwrap, type, and browser-smoke checks. Tests verify legacy default, exact v2 baseline, one-required-field schemas, prompt/renderer binding, allowlist/denylist and extension override precedence, non-persistence on session recreation, unknown profile rejection, and local literal/file search. The server Harness remains on its existing explicit `tools` override seam because the server protocol has no CLI/SDK profile input; no implicit server profile state was added.
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-007 — Add deterministic A/B evaluation scaffold
 
-- Status: pending
-- Owner: unassigned
+- Status: in_progress
+- Owner: coordinator
 - Objective: Add a credential-free evaluation manifest and runner scaffold comparing legacy and v2 profile wiring under fixed conditions.
 - Inputs and prerequisites: T-006 integrated profile.
 - Scope or files: A bounded evaluation directory under coding-agent tests or scripts, fixtures/manifest, focused smoke test, and evaluation documentation.
@@ -272,8 +272,8 @@ Non-goals:
 - Verification method:
   - Targeted evaluation scaffold test and deterministic output comparison.
 - Validation evidence: Not run.
-- Blocker: T-006 not done.
-- Unblock condition: Integrated profile tests pass.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-008 — Complete cross-package validation and delivery
 
@@ -338,6 +338,8 @@ Non-goals:
 - 2026-08-28: Initial Batch 2 writer DAG rejected/inconclusive with no workspace changes. Root `npm run check` then found only test matcher type arguments in T-001; coordinator corrected them, reran 7/7 tests, and completed a clean full check. Batch 2 will be retried from a committed foundation snapshot.
 - 2026-08-28: Second Batch 2 writer DAG also rejected/inconclusive without workspace changes; coordinator retained the planned boundaries and implemented the four disjoint tools directly.
 - 2026-08-28: T-002 through T-005 completed; four focused files passed 16/16 tests and root `npm run check` passed after explicit type fixes. T-006 moved to in_progress for integration.
+- 2026-08-28: A read-only T-006/T-007 analyst DAG could not access the delegated repository snapshot and returned no usable changes; coordinator continued from direct repository evidence.
+- 2026-08-28: T-006 completed after 97/97 focused coding-agent tests, root typecheck, and full `npm run check` passed. The opt-in SDK/CLI profile, shared v2 definitions, prompts, renderers, local search adapter, filtering, override, and non-persistence behavior are integrated. T-007 moved to in_progress.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result

@@ -7,6 +7,7 @@ import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 import type { TuiMode } from "../core/settings-manager.ts";
+import type { ToolProfile } from "../core/tools/index.ts";
 import type { JsonEventProfile } from "../modes/json-event.ts";
 
 export type Mode = "text" | "json" | "rpc";
@@ -31,6 +32,7 @@ export interface Args {
 	fork?: string;
 	sessionDir?: string;
 	models?: string[];
+	toolProfile?: ToolProfile;
 	tools?: string[];
 	excludeTools?: string[];
 	noTools?: boolean;
@@ -138,6 +140,20 @@ export function parseArgs(args: string[]): Args {
 			result.sessionDir = args[++i];
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i].split(",").map((s) => s.trim());
+		} else if (arg === "--tool-profile" || arg.startsWith("--tool-profile=")) {
+			const profile = arg.startsWith("--tool-profile=") ? arg.slice("--tool-profile=".length) : args[i + 1];
+			if (profile === "legacy" || profile === "v2") {
+				result.toolProfile = profile;
+				if (arg === "--tool-profile") i++;
+			} else if (profile === undefined || profile.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--tool-profile requires legacy or v2" });
+			} else {
+				if (arg === "--tool-profile") i++;
+				result.diagnostics.push({
+					type: "error",
+					message: `Invalid tool profile "${profile}". Valid values: legacy, v2`,
+				});
+			}
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
@@ -318,6 +334,7 @@ ${chalk.bold("Options:")}
   --name, -n <name>              Set session display name
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
+  --tool-profile <profile>       Built-in tools for this run: legacy (default) or v2
   --no-tools, -nt                Disable all tools by default (built-in and extension)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
@@ -459,6 +476,9 @@ ${chalk.bold("Environment Variables:")}
   PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
+  legacy profile: read, bash, edit, write (default); optional grep, find, ls
+  v2 profile: search, read, edit, run
+
   read   - Read file contents
   bash   - Execute bash commands
   edit   - Edit files with find/replace

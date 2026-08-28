@@ -149,6 +149,17 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("rpc");
 		});
 
+		test("parses and validates --tool-profile", () => {
+			expect(parseArgs(["--tool-profile=v2"]).toolProfile).toBe("v2");
+			expect(parseArgs(["--tool-profile", "legacy"]).toolProfile).toBe("legacy");
+			expect(parseArgs(["--tool-profile", "future"]).diagnostics).toEqual([
+				{ type: "error", message: 'Invalid tool profile "future". Valid values: legacy, v2' },
+			]);
+			expect(parseArgs(["--tool-profile"]).diagnostics).toEqual([
+				{ type: "error", message: "--tool-profile requires legacy or v2" },
+			]);
+		});
+
 		test("parses --session", () => {
 			const result = parseArgs(["--session", "/path/to/session.jsonl"]);
 			expect(result.session).toBe("/path/to/session.jsonl");

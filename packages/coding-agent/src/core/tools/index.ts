@@ -51,6 +51,12 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	type CreateV2ToolDefinitionsOptions,
+	createV2ToolDefinitions,
+	type ToolProfile,
+	V2_TOOL_NAMES,
+} from "./tool-profile.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
