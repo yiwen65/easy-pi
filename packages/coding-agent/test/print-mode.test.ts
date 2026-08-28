@@ -1,7 +1,15 @@
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionShutdownEvent } from "../src/index.ts";
+import type { AgentSessionEvent, SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
+
+const outputGuard = vi.hoisted(() => ({ chunks: [] as string[] }));
+
+vi.mock("../src/core/output-guard.ts", () => ({
+	writeRawStdout: (text: string) => outputGuard.chunks.push(text),
+	waitForRawStdoutBackpressure: async () => {},
+	flushRawStdout: async () => {},
+}));
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -87,6 +95,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 }
 
 afterEach(() => {
+	outputGuard.chunks.length = 0;
 	vi.restoreAllMocks();
 });
 
@@ -121,6 +130,39 @@ describe("runPrintMode", () => {
 		expect(session.prompt).toHaveBeenCalledWith("hello");
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("projects compact events before writing JSON lines", async () => {
+		const assistant = createAssistantMessage({ text: "final" });
+		const runtimeHost = createRuntimeHost(assistant);
+		const { session } = runtimeHost;
+		const sentinel = `tool-payload-${"x".repeat(300_000)}`;
+		session.prompt.mockImplementation(async () => {
+			const listener = session.subscribe.mock.calls[0]?.[0] as ((event: AgentSessionEvent) => void) | undefined;
+			if (!listener) throw new Error("session listener was not registered");
+			listener({
+				type: "tool_execution_end",
+				toolCallId: "call-1",
+				toolName: "read",
+				result: { content: [{ type: "text", text: sentinel }] },
+				isError: false,
+			});
+			listener({ type: "agent_end", messages: [assistant], willRetry: false });
+			listener({ type: "message_end", message: assistant });
+		});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "json",
+			jsonProfile: "compact",
+			messages: ["hello"],
+		});
+
+		expect(exitCode).toBe(0);
+		const output = outputGuard.chunks.join("");
+		expect(output).not.toContain("tool-payload");
+		expect(output).not.toContain("agent_end");
+		expect(output).toContain('"type":"tool_execution_end"');
+		expect(output).toContain('"type":"message_end"');
 	});
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {

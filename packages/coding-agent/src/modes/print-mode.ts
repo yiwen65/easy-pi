@@ -10,14 +10,16 @@ import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
-import { toJsonEvent } from "./json-event.ts";
+import { type JsonEventProfile, toCompactJsonEvent, toJsonEvent } from "./json-event.ts";
 
 /**
  * Options for print mode.
  */
 export interface PrintModeOptions {
-	/** Output mode: "text" for final response only, "json" for all events */
+	/** Output mode: "text" for final response only, "json" for session events. */
 	mode: "text" | "json";
+	/** JSON only: full public events by default, or a bounded process-observer projection. */
+	jsonProfile?: JsonEventProfile;
 	/** Array of additional prompts to send after initialMessage */
 	messages?: string[];
 	/** First message to send (may contain @file content) */
@@ -31,7 +33,7 @@ export interface PrintModeOptions {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages } = options;
+	const { mode, jsonProfile = "full", messages = [], initialMessage, initialImages } = options;
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -106,9 +108,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
-			}
+			if (mode !== "json") return;
+			const jsonEvent = jsonProfile === "compact" ? toCompactJsonEvent(event) : toJsonEvent(event);
+			if (jsonEvent) writeRawStdout(`${JSON.stringify(jsonEvent)}\n`);
 		});
 		unsubscribeBackpressure =
 			mode === "json"

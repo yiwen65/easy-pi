@@ -6,6 +6,21 @@ pi --mode json "Your prompt"
 
 Outputs all session events as JSON lines to stdout. Useful for integrating pi into other tools or custom UIs.
 
+For bounded process observers that need usage, tool lifecycle integrity, and final assistant text—but not tool payloads or replayable history—use the additive compact profile:
+
+```bash
+pi --mode json --json-profile compact "Your prompt"
+```
+
+The default `full` profile and RPC event stream are unchanged. Compact mode emits only:
+
+- `message_update` with cumulative `usage`;
+- `tool_execution_start` with `toolCallId`, `toolName`, and a stable SHA-256 `argsHash`;
+- `tool_execution_end` with IDs, name, and `isError`;
+- assistant `message_end` with text blocks, usage, model, stop reason, and optional error.
+
+It omits tool results, partial tool updates, tool-result messages, and aggregate `turn_end`/`agent_end` snapshots before `JSON.stringify()`. The model still receives normal tool results internally; only the observer stream is projected. Use the full profile if a client must render or replay complete events.
+
 ## Event Types
 
 Wire events use `JsonAgentSessionEvent`. It matches

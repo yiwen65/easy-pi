@@ -964,6 +964,7 @@ export async function main(args: string[], options?: MainOptions) {
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {
 			mode: toPrintOutputMode(appMode),
+			jsonProfile: parsed.jsonProfile,
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,

@@ -120,6 +120,30 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("json");
 		});
 
+		test("parses JSON event profiles only with JSON mode", () => {
+			expect(parseArgs(["--mode", "json", "--json-profile", "compact"])).toMatchObject({
+				mode: "json",
+				jsonProfile: "compact",
+				diagnostics: [],
+			});
+			expect(parseArgs(["--mode", "json", "--json-profile", "full"])).toMatchObject({
+				jsonProfile: "full",
+				diagnostics: [],
+			});
+		});
+
+		test("rejects missing, invalid, or non-JSON profiles", () => {
+			expect(parseArgs(["--json-profile"]).diagnostics).toEqual([
+				{ type: "error", message: "--json-profile requires full or compact" },
+			]);
+			expect(parseArgs(["--mode", "json", "--json-profile", "other"]).diagnostics).toEqual([
+				{ type: "error", message: 'Invalid JSON profile "other". Valid values: full, compact' },
+			]);
+			expect(parseArgs(["--mode", "text", "--json-profile", "compact"]).diagnostics).toEqual([
+				{ type: "error", message: "--json-profile requires --mode json" },
+			]);
+		});
+
 		test("parses --mode rpc", () => {
 			const result = parseArgs(["--mode", "rpc"]);
 			expect(result.mode).toBe("rpc");
