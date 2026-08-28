@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import type { ToolProfile } from "../../src/core/sdk.ts";
 import type { SanitizedToolTrace } from "./trace.ts";
 
+export type ToolProfileEvalVariant = "A" | "B" | "C";
+
 export interface ToolProfileEvalManifest {
-	version: 1;
-	profiles: ["legacy", "v2"];
+	version: 2;
+	profiles: ["A", "B", "C"];
 	seeds: number[];
 	budgets: { maxTurns: number; timeoutMs: number };
 	tasks: Array<{ id: string; prompt: string }>;
@@ -13,7 +14,7 @@ export interface ToolProfileEvalManifest {
 
 export interface EvalExecutionInput {
 	task: ToolProfileEvalManifest["tasks"][number];
-	profile: ToolProfile;
+	variant: ToolProfileEvalVariant;
 	seed: number;
 	budgets: ToolProfileEvalManifest["budgets"];
 }
@@ -38,9 +39,9 @@ export type EvalExecutor = (input: EvalExecutionInput) => Promise<EvalExecutionO
 
 export interface ToolProfileEvalRecord {
 	taskId: string;
-	profile: ToolProfile;
+	variant: ToolProfileEvalVariant;
 	seed: number;
-	pairOrder: number;
+	order: number;
 	promptHash: string;
 	schemaHash: string;
 	success: boolean;
@@ -59,8 +60,8 @@ export interface ToolProfileEvalRecord {
 export interface ToolProfileEvalSummary {
 	manifestVersion: number;
 	records: ToolProfileEvalRecord[];
-	profiles: Record<
-		ToolProfile,
+	variants: Record<
+		ToolProfileEvalVariant,
 		{
 			runs: number;
 			successes: number;
@@ -73,10 +74,15 @@ export interface ToolProfileEvalSummary {
 			totalCacheReadTokens: number;
 			totalCacheWriteTokens: number;
 			totalCostUsd: number;
+			meanToolCalls: number;
+			meanToolErrors: number;
+			firstEditSuccesses: number;
+			runMisuseCount: number;
+			targetFirstReadCount: number;
 		}
 	>;
-	pairedScoreDeltaV2MinusLegacy: number;
-	clusteredBootstrap95: [number, number];
+	pairedScoreDeltas: { BMinusA: number; CMinusB: number; CMinusA: number };
+	clusteredBootstrap95CMinusA: [number, number];
 }
 
 function stableValue(value: unknown): unknown {
@@ -116,8 +122,8 @@ function percentile(sorted: number[], fraction: number): number {
 	return sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))] ?? 0;
 }
 
-function summarizeProfile(records: ToolProfileEvalRecord[], profile: ToolProfile) {
-	const selected = records.filter((record) => record.profile === profile);
+function summarizeVariant(records: ToolProfileEvalRecord[], variant: ToolProfileEvalVariant) {
+	const selected = records.filter((record) => record.variant === variant);
 	return {
 		runs: selected.length,
 		successes: selected.filter((record) => record.success).length,
@@ -130,30 +136,42 @@ function summarizeProfile(records: ToolProfileEvalRecord[], profile: ToolProfile
 		totalCacheReadTokens: selected.reduce((sum, record) => sum + record.cacheReadTokens, 0),
 		totalCacheWriteTokens: selected.reduce((sum, record) => sum + record.cacheWriteTokens, 0),
 		totalCostUsd: selected.reduce((sum, record) => sum + record.costUsd, 0),
+		meanToolCalls: mean(selected.map((record) => record.trace?.toolCallCount ?? 0)),
+		meanToolErrors: mean(selected.map((record) => record.trace?.toolErrorCount ?? 0)),
+		firstEditSuccesses: selected.filter((record) => record.trace?.firstEditSuccess === true).length,
+		runMisuseCount: selected.reduce((sum, record) => sum + (record.trace?.runMisuseCount ?? 0), 0),
+		targetFirstReadCount: selected.filter((record) => record.trace?.targetFirstRead === true).length,
 	};
 }
 
-/** Run paired profile evaluations and compute a deterministic task×seed clustered bootstrap interval. */
+function randomizedVariants(seed: number, taskId: string): ToolProfileEvalVariant[] {
+	const variants: ToolProfileEvalVariant[] = ["A", "B", "C"];
+	const rng = random(seed ^ Number.parseInt(hash(taskId).slice(0, 8), 16));
+	for (let index = variants.length - 1; index > 0; index--) {
+		const swap = Math.floor(rng() * (index + 1));
+		[variants[index], variants[swap]] = [variants[swap], variants[index]];
+	}
+	return variants;
+}
+
+/** Run fixed A/B/C evaluations and compute deterministic task×seed clustered C-minus-A intervals. */
 export async function runToolProfileEvaluation(
 	manifest: ToolProfileEvalManifest,
 	execute: EvalExecutor,
 ): Promise<ToolProfileEvalSummary> {
-	if (manifest.profiles[0] !== "legacy" || manifest.profiles[1] !== "v2") {
-		throw new Error("Evaluation profiles must be [legacy, v2]");
-	}
+	if (manifest.profiles.join(",") !== "A,B,C") throw new Error("Evaluation profiles must be [A, B, C]");
 	const records: ToolProfileEvalRecord[] = [];
 	for (const task of manifest.tasks) {
 		for (const seed of manifest.seeds) {
-			const pairProfiles: ToolProfile[] =
-				random(seed ^ Number.parseInt(hash(task.id).slice(0, 8), 16))() < 0.5 ? ["legacy", "v2"] : ["v2", "legacy"];
-			for (let pairOrder = 0; pairOrder < pairProfiles.length; pairOrder++) {
-				const profile = pairProfiles[pairOrder];
-				const output = await execute({ task, profile, seed, budgets: manifest.budgets });
+			const variants = randomizedVariants(seed, task.id);
+			for (let order = 0; order < variants.length; order++) {
+				const variant = variants[order];
+				const output = await execute({ task, variant, seed, budgets: manifest.budgets });
 				records.push({
 					taskId: task.id,
-					profile,
+					variant,
 					seed,
-					pairOrder,
+					order,
 					promptHash: hash(output.systemPrompt),
 					schemaHash: hash(output.tools),
 					success: output.success,
@@ -174,26 +192,38 @@ export async function runToolProfileEvaluation(
 
 	const clusters = manifest.tasks.flatMap((task) =>
 		manifest.seeds.map((seed) => {
-			const pair = records.filter((record) => record.taskId === task.id && record.seed === seed);
-			const legacy = pair.find((record) => record.profile === "legacy");
-			const v2 = pair.find((record) => record.profile === "v2");
-			if (!legacy || !v2) throw new Error(`Incomplete pair for ${task.id}/${seed}`);
-			return v2.score - legacy.score;
+			const group = records.filter((record) => record.taskId === task.id && record.seed === seed);
+			const find = (variant: ToolProfileEvalVariant) => {
+				const record = group.find((candidate) => candidate.variant === variant);
+				if (!record) throw new Error(`Incomplete A/B/C group for ${task.id}/${seed}`);
+				return record.score;
+			};
+			return { A: find("A"), B: find("B"), C: find("C") };
 		}),
 	);
 	const rng = random(manifest.version * 1_000_003 + manifest.bootstrapSamples);
 	const bootstrap = Array.from({ length: manifest.bootstrapSamples }, () =>
-		mean(Array.from({ length: clusters.length }, () => clusters[Math.floor(rng() * clusters.length)])),
+		mean(
+			Array.from({ length: clusters.length }, () => {
+				const cluster = clusters[Math.floor(rng() * clusters.length)];
+				return cluster.C - cluster.A;
+			}),
+		),
 	).sort((left, right) => left - right);
 
 	return {
 		manifestVersion: manifest.version,
 		records,
-		profiles: {
-			legacy: summarizeProfile(records, "legacy"),
-			v2: summarizeProfile(records, "v2"),
+		variants: {
+			A: summarizeVariant(records, "A"),
+			B: summarizeVariant(records, "B"),
+			C: summarizeVariant(records, "C"),
 		},
-		pairedScoreDeltaV2MinusLegacy: mean(clusters),
-		clusteredBootstrap95: [percentile(bootstrap, 0.025), percentile(bootstrap, 0.975)],
+		pairedScoreDeltas: {
+			BMinusA: mean(clusters.map((cluster) => cluster.B - cluster.A)),
+			CMinusB: mean(clusters.map((cluster) => cluster.C - cluster.B)),
+			CMinusA: mean(clusters.map((cluster) => cluster.C - cluster.A)),
+		},
+		clusteredBootstrap95CMinusA: [percentile(bootstrap, 0.025), percentile(bootstrap, 0.975)],
 	};
 }

@@ -1,19 +1,15 @@
 {
-  "version": 1,
-  "profiles": ["legacy", "v2"],
+  "version": 2,
+  "profiles": ["A", "B", "C"],
   "seeds": [17, 41, 73, 101, 137],
   "budgets": {
-    "maxTurns": 10,
-    "timeoutMs": 120000
+    "maxTurns": 12,
+    "timeoutMs": 180000
   },
   "tasks": [
     {
-      "id": "locate-edit-test",
-      "prompt": "Locate a marked source value, update it to the seed-specific target, and run the focused test."
-    },
-    {
-      "id": "move-edit-test",
-      "prompt": "Locate a marked source file, move and update it, and run the focused test."
+      "id": "discover-read-move-edit-test",
+      "prompt": "Locate a marked source file, inspect it, move and update it with a related config change, and run the focused test."
     }
   ],
   "bootstrapSamples": 5000

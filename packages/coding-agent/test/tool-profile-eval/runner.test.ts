@@ -70,9 +70,10 @@ describe("tool profile A/B evaluation scaffold", () => {
 	});
 
 	async function execute(input: EvalExecutionInput) {
-		const score = ((input.seed + input.task.id.length + (input.profile === "v2" ? 1 : 0)) % 3) / 2;
+		const variantOffset = input.variant === "A" ? 0 : input.variant === "B" ? 1 : 2;
+		const score = ((input.seed + input.task.id.length + variantOffset) % 3) / 2;
 		faux.setResponses([fauxAssistantMessage(JSON.stringify({ success: true, score }))]);
-		const cwd = join(tempDir, "fixtures", `${input.task.id}-${input.seed}-${input.profile}`);
+		const cwd = join(tempDir, "fixtures", `${input.task.id}-${input.seed}-${input.variant}`);
 		mkdirSync(cwd, { recursive: true });
 		const settingsManager = SettingsManager.inMemory();
 		const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: tempDir, settingsManager });
@@ -85,7 +86,8 @@ describe("tool profile A/B evaluation scaffold", () => {
 			settingsManager,
 			resourceLoader,
 			sessionManager: SessionManager.inMemory(cwd),
-			toolProfile: input.profile,
+			toolProfile: input.variant === "A" ? "legacy" : "v2",
+			tools: input.variant === "A" ? ["read", "bash", "edit", "write", "grep", "find", "ls"] : undefined,
 		});
 		try {
 			await session.prompt(input.task.prompt);
@@ -117,21 +119,26 @@ describe("tool profile A/B evaluation scaffold", () => {
 		const second = await runToolProfileEvaluation(manifest, execute);
 
 		expect(second).toEqual(first);
-		expect(first.records).toHaveLength(manifest.tasks.length * manifest.seeds.length * 2);
-		expect(first.profiles.legacy.runs).toBe(first.profiles.v2.runs);
-		expect(
-			new Set(first.records.filter((record) => record.profile === "legacy").map((record) => record.schemaHash)).size,
-		).toBe(1);
-		expect(
-			new Set(first.records.filter((record) => record.profile === "v2").map((record) => record.schemaHash)).size,
-		).toBe(1);
-		expect(first.records.find((record) => record.profile === "legacy")?.schemaHash).not.toBe(
-			first.records.find((record) => record.profile === "v2")?.schemaHash,
+		expect(first.records).toHaveLength(manifest.tasks.length * manifest.seeds.length * 3);
+		expect(first.variants.A.runs).toBe(5);
+		expect(first.variants.B.runs).toBe(5);
+		expect(first.variants.C.runs).toBe(5);
+		for (const variant of ["A", "B", "C"] as const) {
+			expect(
+				new Set(first.records.filter((record) => record.variant === variant).map((record) => record.schemaHash))
+					.size,
+			).toBe(1);
+		}
+		expect(first.records.find((record) => record.variant === "A")?.schemaHash).not.toBe(
+			first.records.find((record) => record.variant === "B")?.schemaHash,
 		);
-		expect(first.profiles.v2).toMatchObject({
+		expect(first.records.find((record) => record.variant === "B")?.schemaHash).toBe(
+			first.records.find((record) => record.variant === "C")?.schemaHash,
+		);
+		expect(first.variants.C).toMatchObject({
 			meanModelElapsedMs: 6,
-			totalCacheReadTokens: first.profiles.v2.runs * 20,
-			totalCacheWriteTokens: first.profiles.v2.runs * 3,
+			totalCacheReadTokens: first.variants.C.runs * 20,
+			totalCacheWriteTokens: first.variants.C.runs * 3,
 		});
 	});
 });

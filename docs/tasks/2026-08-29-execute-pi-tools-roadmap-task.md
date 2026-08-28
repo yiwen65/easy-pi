@@ -323,9 +323,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-011 — Run faux and bounded real A/B/C evaluation
+### [x] T-011 — Run faux and bounded real A/B/C evaluation
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: Compare native, current V2, and full opt-in candidate without switching defaults.
 - Inputs and prerequisites: T-010 complete implementation; existing sanitized eval harness; authorized model/budget.
@@ -343,7 +343,7 @@ Non-goals:
   - Results are reported truthfully; candidate remains opt-in regardless of outcome.
 - Verification method:
   - Targeted faux and real eval files, manifest graders, aggregate consistency checks.
-- Validation evidence: Not run.
+- Validation evidence: Credential-free runner/trace/prompt tests passed 6/6. The explicitly gated real test ran exactly 15 sessions (A/B/C × five fixed seeds) on `openai-codex/gpt-5.6-luna` with thinking=max in 284.43s: every variant completed 5/5, with zero tool/schema errors and first-edit success 5/5. Mean turns were A=6.0, B=5.6, C=5.2; mean tool calls A=10.6, B=7.4, C=6.2; run misuse A=6, B=0, C=0; B/C ranked the target first in 5/5 searches. Mean elapsed milliseconds were A=20,305.4, B=19,215.0, C=16,959.6; reported total cost was $0.03241452. B/C schema hashes matched and differed from A. Only sanitized aggregate behavior metrics/hashes were persisted in `RESULTS.md`; no credentials or content traces were stored. Root `npm run check` and `git diff --check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -367,8 +367,8 @@ Non-goals:
 - Verification method:
   - Cross-stage targeted tests, root check, task validator, git log/status/diff.
 - Validation evidence: Not run.
-- Blocker: T-011 not done.
-- Unblock condition: Evaluation is complete within budget.
+- Blocker: None.
+- Unblock condition: None.
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -421,10 +421,12 @@ Non-goals:
 - 2026-08-29: T-009 completed with a private quota-bounded workspace copy, validation callback, unchanged model schema, pending-acceptance result state, explicit host accept/discard/list APIs, stale-base protection, expiry cleanup, and fail-closed interrupted acceptance. Overlay tests passed 6/6, combined coding-agent tests 37/37, Agent Edit tests 11/11, and root checks passed.
 - 2026-08-29: Overlay stage committed as `3aaee2ee9`; T-010 started with session-vs-host ownership, reload/dispose lifecycle, minimal mutation hooks, capability-accurate adapters, and Memory/SSH reference hosts as the remaining scope.
 - 2026-08-29: T-010 completed with a reloadable owned runtime, factory-vs-instance lifecycle and error isolation, minimal approval/notification hooks, capability-narrow native Operations adapters, Memory/SSH execution environments, unchanged four-tool schemas, and SDK migration guidance. Focused tests passed 13/13 agent and 20/20 coding-agent; root checks passed.
+- 2026-08-29: V2.5 Host ABI stage committed as `d4ba3372f`; T-011 started with the fixed faux manifest/grader and explicit opt-in 15-session A/B/C real-model budget.
+- 2026-08-29: T-011 completed. Faux evaluation tests passed 6/6; the gated real A/B/C run consumed exactly the authorized 15 sessions, completed 15/15, emitted no tool/schema errors, and persisted only aggregate sanitized results. C retained the same four schemas as B, used fewer mean turns/tool calls in this bounded sample, and remains opt-in.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: not_run
 - Evidence: Not run.
-- Limitations: T-011 and T-012 remain pending; Overlay is an opt-in bounded workspace copy rather than an OS sandbox, the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
+- Limitations: T-012 remains pending; Overlay is an opt-in bounded workspace copy rather than an OS sandbox, the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
