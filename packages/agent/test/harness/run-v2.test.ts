@@ -97,6 +97,7 @@ describe("v2 run", () => {
 
 		await env.firstChunkWritten.promise;
 		expect(settled).toBe(false);
+		expect(updates[0]).toBe("");
 		expect(updates).toContain("first\n");
 		expect(env.command).toBe("export PREFIXED=yes\nprintf test");
 		expect(env.options).toMatchObject({ env: { SESSION_VALUE: "current" }, inheritEnv: false });

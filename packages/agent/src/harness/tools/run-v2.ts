@@ -81,6 +81,19 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 			if (cwdInfo.value.kind !== "directory")
 				throw new V2ToolError("NOT_A_DIRECTORY", `cwd is not a directory: ${input.cwd ?? context.env.cwd}`);
 			const startedAt = Date.now();
+			if (onUpdate) {
+				onUpdate({
+					content: [],
+					details: {
+						command: input.command,
+						cwd: cwd.absolutePath,
+						exitCode: null,
+						timedOut: false,
+						durationMs: 0,
+						managedProcessesTerminated: false,
+					},
+				});
+			}
 			const resolvedCommand = context.run?.commandPrefix
 				? `${context.run.commandPrefix}\n${input.command}`
 				: input.command;

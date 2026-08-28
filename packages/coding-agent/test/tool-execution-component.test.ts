@@ -1,11 +1,12 @@
 import { join, resolve } from "node:path";
 import { Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
+import { createV2ToolDefinitions } from "../src/core/tools/tool-profile.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
@@ -152,6 +153,113 @@ describe("ToolExecutionComponent parity", () => {
 		);
 		expect(updates).toEqual([{ content: [], details: undefined }]);
 		await promise;
+	});
+
+	test("v2 run renderer shows call metadata and the latest collapsed output", () => {
+		const tool = createV2ToolDefinitions(process.cwd()).run;
+		const component = new ToolExecutionComponent(
+			"run",
+			"tool-run-render",
+			{ command: "npm run check", cwd: "workspace/subdir", timeout: 7 },
+			{},
+			tool,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.setArgsComplete();
+		const output = [
+			"oldest-marker",
+			...Array.from({ length: 20 }, (_, index) => `middle-${index}`),
+			"newest-marker",
+		].join("\n");
+		component.updateResult({ content: [{ type: "text", text: output }], details: {}, isError: false }, false);
+
+		const collapsed = stripAnsi(component.render(80).join("\n"));
+		expect(collapsed).toContain("$ npm run check");
+		expect(collapsed).toContain("cwd workspace/subdir");
+		expect(collapsed).toContain("timeout 7s");
+		expect(collapsed).toContain("newest-marker");
+		expect(collapsed).toContain("earlier lines");
+		expect(collapsed).not.toContain("oldest-marker");
+		expect(collapsed).toContain("Took");
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(80).join("\n"));
+		expect(expanded).toContain("oldest-marker");
+		expect(expanded).toContain("newest-marker");
+	});
+
+	test("v2 run renderer preserves final status without duplicating truncation details", () => {
+		const tool = createV2ToolDefinitions(process.cwd()).run;
+		const component = new ToolExecutionComponent(
+			"run",
+			"tool-run-truncated",
+			{ command: "generate output" },
+			{},
+			tool,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.setExpanded(true);
+		component.updateResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: "latest\n\n[Output truncated to 50KB or configured line limit. Full output: /tmp/run.log]\n\nexit 0",
+					},
+				],
+				details: {
+					truncation: { truncated: true, truncatedBy: "lines", outputLines: 1, totalLines: 2 },
+					fullOutputPath: "/tmp/run.log",
+				},
+				isError: false,
+			},
+			false,
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("latest");
+		expect(rendered).toContain("exit 0");
+		expect(rendered.match(/Full output:/g)).toHaveLength(1);
+		expect(rendered).toContain("Truncated: showing 1 of 2 lines");
+	});
+
+	test("v2 run renderer refreshes elapsed time for silent partial execution and stops after final output", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-08-29T00:00:00Z"));
+		let renderRequests = 0;
+		const tui = { requestRender: () => renderRequests++ } as unknown as TUI;
+		const tool = createV2ToolDefinitions(process.cwd()).run;
+		const component = new ToolExecutionComponent(
+			"run",
+			"tool-run-silent",
+			{ command: "sleep 10" },
+			{},
+			tool,
+			tui,
+			process.cwd(),
+		);
+
+		try {
+			component.markExecutionStarted();
+			component.updateResult({ content: [], details: {}, isError: false }, true);
+			expect(stripAnsi(component.render(80).join("\n"))).toContain("Elapsed 0.0s");
+
+			const requestsAfterStart = renderRequests;
+			vi.advanceTimersByTime(1200);
+			expect(renderRequests).toBeGreaterThan(requestsAfterStart);
+			expect(stripAnsi(component.render(80).join("\n"))).toContain("Elapsed 1.0s");
+
+			component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+			const requestsAfterFinal = renderRequests;
+			vi.advanceTimersByTime(2000);
+			expect(renderRequests).toBe(requestsAfterFinal);
+			expect(stripAnsi(component.render(80).join("\n"))).toContain("Took 1.2s");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("bash renderer does not duplicate final full output truncation details", async () => {

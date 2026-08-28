@@ -397,7 +397,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? createV2ToolDefinitions(cwd, {
 					autoResizeImages: settingsManager.getImageAutoResize(),
 					shellPath: settingsManager.getShellPath(),
-					shellCommandPrefix: settingsManager.getShellCommandPrefix(),
+					getShellCommandPrefix: () => settingsManager.getShellCommandPrefix(),
 					workspacePolicy: options.workspacePolicy,
 				})
 			: undefined;
