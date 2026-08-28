@@ -20,6 +20,8 @@ export interface NormalizedProviderError {
 	status?: number;
 	/** Raw HTTP body reason, already trimmed and truncated to the cap. */
 	body?: string;
+	/** Bounded nested error details hidden behind generic messages such as `fetch failed`. */
+	causeDetails?: string;
 	/** `error.message`, or `safeJsonStringify(error)` for a non-`Error` throw. */
 	message: string;
 	/** True when `message` already contains the body (no separate body to add). */
@@ -48,9 +50,35 @@ export function normalizeProviderError(error: unknown): NormalizedProviderError 
 	return {
 		status,
 		body,
+		causeDetails: extractCauseDetails(error),
 		message: error.message,
 		messageCarriesBody,
 	} satisfies NormalizedProviderError;
+}
+
+function extractCauseDetails(error: Error): string | undefined {
+	const details: string[] = [];
+	const seen = new Set<unknown>([error]);
+
+	const visit = (value: unknown): void => {
+		if (value === undefined || value === null || seen.has(value) || details.length >= 3) return;
+		seen.add(value);
+
+		if (value instanceof AggregateError) {
+			for (const nested of value.errors) visit(nested);
+			return;
+		}
+		if (!(value instanceof Error)) return;
+
+		const code = "code" in value && typeof value.code === "string" ? value.code : undefined;
+		const detail = code ? `${code}: ${value.message}` : value.message;
+		if (detail && !details.includes(detail)) details.push(detail);
+		visit(value.cause);
+	};
+
+	visit(error.cause);
+	if (details.length === 0) return undefined;
+	return truncateErrorText(details.join("; "), 500);
 }
 
 /**
@@ -126,12 +154,18 @@ function isPlainNonEmptyObject(value: unknown): boolean {
  * - prefix:    `"<prefix> (<status>): <body>"`
  */
 export function formatProviderError(norm: NormalizedProviderError, prefix?: string): string {
+	let formatted: string;
 	if (norm.messageCarriesBody || norm.status === undefined || norm.body === undefined) {
-		return prefix !== undefined && norm.status !== undefined
-			? `${prefix} (${norm.status}): ${norm.message}`
-			: norm.message;
+		formatted =
+			prefix !== undefined && norm.status !== undefined
+				? `${prefix} (${norm.status}): ${norm.message}`
+				: norm.message;
+	} else {
+		formatted = prefix !== undefined ? `${prefix} (${norm.status}): ${norm.body}` : `${norm.status}: ${norm.body}`;
 	}
-	return prefix !== undefined ? `${prefix} (${norm.status}): ${norm.body}` : `${norm.status}: ${norm.body}`;
+	return norm.causeDetails && !formatted.includes(norm.causeDetails)
+		? `${formatted} (${norm.causeDetails})`
+		: formatted;
 }
 
 export function truncateErrorText(text: string, maxChars: number): string {

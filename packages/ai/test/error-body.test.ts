@@ -145,6 +145,19 @@ describe("normalizeProviderError", () => {
 		expect(norm.messageCarriesBody).toBe(false);
 	});
 
+	it("surfaces nested transport causes hidden by fetch failed", () => {
+		const error = new TypeError("fetch failed", {
+			cause: new AggregateError([
+				Object.assign(new Error("connect timeout"), { code: "ETIMEDOUT" }),
+				Object.assign(new Error("network unreachable"), { code: "ENETUNREACH" }),
+			]),
+		});
+
+		expect(formatProviderError(normalizeProviderError(error))).toBe(
+			"fetch failed (ETIMEDOUT: connect timeout; ENETUNREACH: network unreachable)",
+		);
+	});
+
 	it("treats an empty parsed body object as no body", () => {
 		const error = Object.assign(new Error("403 status code (no body)"), {
 			status: 403,
