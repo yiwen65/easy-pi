@@ -580,12 +580,13 @@ cat README.md | pi -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
+| `--tool-profile <profile>` | Select built-ins for this invocation: `legacy` (default) or `v2` |
 | `--tools <list>`, `-t <list>` | Allowlist specific tool names across built-in, extension, and custom tools |
 | `--exclude-tools <list>`, `-xt <list>` | Disable specific tool names across built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+The default `legacy` profile provides `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The opt-in `v2` profile provides exactly `search`, `read`, `edit`, and `run` before allowlist, denylist, custom-tool, or extension changes. Profiles apply only to the current invocation and are not stored in sessions.
 
 ### Resource Options
 
@@ -654,7 +655,10 @@ pi --model sonnet:high "Solve this complex problem"
 # Limit model cycling
 pi --models "claude-*,gpt-4o"
 
-# Read-only mode
+# Opt in to the four-tool v2 profile for this invocation
+pi --tool-profile=v2 -p "Review and test the code"
+
+# Read-only legacy mode
 pi --tools read,grep,find,ls -p "Review the code"
 
 # Disable one extension or built-in tool while keeping the rest available

@@ -1,5 +1,11 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	setDefaultStreamFn,
+	type ThinkingLevel,
+	type WorkspacePolicy,
+} from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -25,8 +31,9 @@ import {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
+	createV2ToolDefinitions,
 	createWriteTool,
-	type ToolName,
+	type ToolProfile,
 	withFileMutationQueue,
 } from "./tools/index.ts";
 
@@ -38,6 +45,10 @@ setDefaultStreamFn(streamSimple);
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
+	/** Built-in tool profile for this invocation. Default: legacy. Not persisted in sessions. */
+	toolProfile?: ToolProfile;
+	/** Optional path policy applied by v2 tools. Compatibility mode is used when omitted. */
+	workspacePolicy?: WorkspacePolicy;
 	/** Global config directory. Default: ~/.pi/agent */
 	agentDir?: string;
 
@@ -111,7 +122,7 @@ export type {
 } from "./extensions/index.ts";
 export type { PromptTemplate } from "./prompt-templates.ts";
 export type { Skill } from "./skills.ts";
-export type { Tool } from "./tools/index.ts";
+export type { Tool, ToolProfile } from "./tools/index.ts";
 
 export {
 	withFileMutationQueue,
@@ -169,6 +180,10 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	const toolProfile = options.toolProfile ?? "legacy";
+	if (toolProfile !== "legacy" && toolProfile !== "v2") {
+		throw new Error(`Unknown tool profile: ${String(toolProfile)}`);
+	}
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
@@ -244,7 +259,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	const defaultActiveToolNames =
+		toolProfile === "v2" ? ["search", "read", "edit", "run"] : ["read", "bash", "edit", "write"];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
@@ -376,6 +392,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
+	const baseToolDefinitionsOverride =
+		toolProfile === "v2"
+			? createV2ToolDefinitions(cwd, {
+					autoResizeImages: settingsManager.getImageAutoResize(),
+					shellPath: settingsManager.getShellPath(),
+					workspacePolicy: options.workspacePolicy,
+				})
+			: undefined;
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -388,6 +412,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		initialActiveToolNames,
 		allowedToolNames,
 		excludedToolNames,
+		baseToolDefinitionsOverride,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});

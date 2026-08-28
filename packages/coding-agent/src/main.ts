@@ -533,6 +533,9 @@ function buildSessionOptions(
 	// (handled by caller before createAgentSession)
 
 	// Tools
+	if (parsed.toolProfile) {
+		options.toolProfile = parsed.toolProfile;
+	}
 	if (parsed.noTools) {
 		options.noTools = "all";
 	} else if (parsed.noBuiltinTools) {
@@ -827,6 +830,7 @@ export async function main(args: string[], options?: MainOptions) {
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
+			toolProfile: sessionOptions.toolProfile,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,
