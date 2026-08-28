@@ -95,19 +95,29 @@ type RunRenderState = {
 type RunResultRenderState = {
 	cachedWidth: number | undefined;
 	cachedLines: string[] | undefined;
-	cachedSkipped: number | undefined;
+	cachedHasEarlierOutput: boolean | undefined;
 };
 
 class RunResultRenderComponent extends Container {
 	state: RunResultRenderState = {
 		cachedWidth: undefined,
 		cachedLines: undefined,
-		cachedSkipped: undefined,
+		cachedHasEarlierOutput: undefined,
 	};
 }
 
 function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function takeRunPreviewSuffix(output: string): { text: string; hasEarlierOutput: boolean } {
+	let start = output.length;
+	for (let line = 0; line < RUN_PREVIEW_LINES; line++) {
+		const newline = output.lastIndexOf("\n", start - 1);
+		if (newline === -1) return { text: output, hasEarlierOutput: false };
+		start = newline;
+	}
+	return { text: output.slice(start + 1), hasEarlierOutput: true };
 }
 
 function renderRunCall(
@@ -151,24 +161,29 @@ function rebuildRunResult(
 	}
 
 	if (output) {
-		const styledOutput = output
-			.split("\n")
-			.map((line) => theme.fg("toolOutput", line))
-			.join("\n");
 		if (options.expanded) {
+			const styledOutput = output
+				.split("\n")
+				.map((line) => theme.fg("toolOutput", line))
+				.join("\n");
 			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
 		} else {
+			const suffix = takeRunPreviewSuffix(output);
+			const styledSuffix = suffix.text
+				.split("\n")
+				.map((line) => theme.fg("toolOutput", line))
+				.join("\n");
 			component.addChild({
 				render: (width: number) => {
 					if (state.cachedLines === undefined || state.cachedWidth !== width) {
-						const preview = truncateToVisualLines(styledOutput, RUN_PREVIEW_LINES, width);
+						const preview = truncateToVisualLines(styledSuffix, RUN_PREVIEW_LINES, width);
 						state.cachedLines = preview.visualLines;
-						state.cachedSkipped = preview.skippedCount;
+						state.cachedHasEarlierOutput = suffix.hasEarlierOutput || preview.skippedCount > 0;
 						state.cachedWidth = width;
 					}
-					if (state.cachedSkipped && state.cachedSkipped > 0) {
+					if (state.cachedHasEarlierOutput) {
 						const hint =
-							theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
+							theme.fg("muted", "... (earlier lines,") +
 							` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
 					}
@@ -177,7 +192,7 @@ function rebuildRunResult(
 				invalidate: () => {
 					state.cachedWidth = undefined;
 					state.cachedLines = undefined;
-					state.cachedSkipped = undefined;
+					state.cachedHasEarlierOutput = undefined;
 				},
 			});
 		}
