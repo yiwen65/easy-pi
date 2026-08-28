@@ -361,6 +361,10 @@ export class AgentSession {
 	private _resolveAutoCompactionCompletion?: () => void;
 	private _overflowRecoveryAttempted = false;
 	private _providerCompactionPreflightActive = false;
+	/** Advances whenever compaction replaces the authoritative live message projection. */
+	private _providerContextProjectionRevision = 0;
+	/** Projection revision captured by the currently running agent-core loop. */
+	private _agentLoopProjectionRevision = 0;
 	private _lastProviderContextInput?: ProviderContextIdentityInput;
 	private _lastObservedCheckpointId?: string;
 	private _nextProviderContextChangeReason?: ContextChangeReason;
@@ -706,12 +710,18 @@ export class AgentSession {
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
+			const projectionChangedDuringLoop =
+				this._agentLoopProjectionRevision !== this._providerContextProjectionRevision;
+			if (projectionChangedDuringLoop) {
+				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
+			}
 
 			const baseSystemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
+					messages: projectionChangedDuringLoop ? this.agent.state.messages.slice() : previousContext.messages,
 					systemPrompt: baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
@@ -753,6 +763,7 @@ export class AgentSession {
 		const branchEntries = this.sessionManager.getBranch();
 		this._hfHost?.syncFromEntries(branchEntries);
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		this._providerContextProjectionRevision++;
 		return entry;
 	}
 
@@ -1261,8 +1272,12 @@ export class AgentSession {
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._isAgentRunActive = true;
 		try {
+			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
+				// continue() snapshots agent.state, which already contains any projection
+				// activated after the preceding agent-core loop ended.
+				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 				await this.agent.continue();
 			}
 		} finally {
