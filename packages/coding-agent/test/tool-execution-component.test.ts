@@ -171,7 +171,7 @@ describe("ToolExecutionComponent parity", () => {
 		const output = [
 			"oldest-marker",
 			...Array.from({ length: 20 }, (_, index) => `middle-${index}`),
-			"newest-marker",
+			`${"x".repeat(400)}-newest-marker`,
 		].join("\n");
 		component.updateResult({ content: [{ type: "text", text: output }], details: {}, isError: false }, false);
 
