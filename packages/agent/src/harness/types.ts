@@ -205,6 +205,31 @@ export class BranchSummaryError extends Error {
 	}
 }
 
+/** Options for bounded UTF-8 text reads. */
+export interface TextRangeReadOptions {
+	/** First line to return, 1-indexed. Ignored when startByte is provided. Defaults to 1. */
+	startLine?: number;
+	/** Absolute byte offset returned by a previous bounded read. */
+	startByte?: number;
+	/** Maximum logical lines to return. */
+	maxLines?: number;
+	/** Maximum UTF-8 bytes to return. */
+	maxBytes?: number;
+	/** Abort signal used to stop the read. */
+	abortSignal?: AbortSignal;
+}
+
+/** Result of a bounded UTF-8 text read. */
+export interface TextRangeReadResult {
+	lines: string[];
+	startLine: number;
+	endLine: number;
+	eof: boolean;
+	partialLine: boolean;
+	nextLine?: number;
+	nextByte?: number;
+}
+
 /** Metadata for one filesystem object in a {@link FileSystem}. */
 export interface FileInfo {
 	/** Basename of {@link path}. */
@@ -243,6 +268,11 @@ export interface FileSystem {
 		path: string,
 		options?: { maxLines?: number; abortSignal?: AbortSignal },
 	): Promise<Result<string[], FileError>>;
+	/**
+	 * Read a bounded UTF-8 text range without retaining skipped lines.
+	 * Optional for compatibility with existing custom backends; v2 read requires this capability.
+	 */
+	readTextRange?(path: string, options?: TextRangeReadOptions): Promise<Result<TextRangeReadResult, FileError>>;
 	/** Read a binary file. */
 	readBinaryFile(path: string, abortSignal?: AbortSignal): Promise<Result<Uint8Array, FileError>>;
 	/** Create or overwrite a file, creating parent directories when supported. */
