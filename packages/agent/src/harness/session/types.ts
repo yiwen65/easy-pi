@@ -117,6 +117,18 @@ export interface AbortRequestedRecord extends RecordBase {
 	runId: string;
 }
 
+/** Interrupt intent: the driver suspends the operation at the next safe point, keeping it resumable. */
+export interface PauseRequestedRecord extends RecordBase {
+	type: "pause_requested";
+	runId: string;
+}
+
+/** Resume after a pause: clears the pause intent for the operation. */
+export interface PauseClearedRecord extends RecordBase {
+	type: "pause_cleared";
+	runId: string;
+}
+
 export interface OperationFinishedRecord extends RecordBase {
 	type: "operation_finished";
 	runId: string;
@@ -156,6 +168,8 @@ export interface ToolStartedRecord extends RecordBase {
 	toolName: string;
 	effectiveArgs: { [key: string]: unknown };
 	resultEntryId: string;
+	/** Stable logical operation identity, shared by every physical attempt. */
+	operationId?: string;
 	replay: "never" | "safe";
 }
 
@@ -203,6 +217,8 @@ export type UsageRecord = RecordBase & { type: "usage"; usage: Usage } & (
 export type LaneRecord =
 	| OperationStartedRecord
 	| AbortRequestedRecord
+	| PauseRequestedRecord
+	| PauseClearedRecord
 	| OperationFinishedRecord
 	| StepAttemptRecord
 	| ToolStartedRecord

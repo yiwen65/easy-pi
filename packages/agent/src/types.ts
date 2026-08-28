@@ -397,10 +397,40 @@ export interface AgentToolResult<T> {
  */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+/** Declarative execution contract for a tool. Absent fields mean no guarantees. */
+export interface ToolContract {
+	/** Side-effect class. Default assumption: the tool may have side effects. */
+	sideEffects?: "none" | "filesystem" | "process" | "external";
+	/** The tool never mutates anything. */
+	readOnly?: boolean;
+	/** Repeating the call with the same arguments has the same effect as calling once. */
+	idempotent?: boolean;
+	/** The effect can be undone by a compensating action. */
+	reversible?: boolean;
+	/** Maximum execution time; exceeding it yields an unknown-outcome result, never a silent failure. */
+	timeoutMs?: number;
+	/** Automatic retry budget. Honored only for read-only/idempotent/no-side-effect tools. */
+	retry?: { maxRetries: number };
+	/** "required" fails closed unless the host provides an approval channel. */
+	approval?: "never" | "required";
+}
+
+/** Stable identity of one logical tool execution, shared across retries and crash recovery. */
+export interface ToolExecutionInfo {
+	readonly runId: string;
+	readonly toolCallId: string;
+	/** Stable across physical attempts; derived from run + assistant entry + tool ordinal. */
+	readonly operationId: string;
+	/** Physical execution attempt, 1-based. */
+	readonly attempt: number;
+}
+
 /** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
 	label: string;
+	/** Declarative execution contract used by durable drivers for dispatch gating. */
+	contract?: ToolContract;
 	/**
 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
 	 * Must return an object that matches `TParameters`.
