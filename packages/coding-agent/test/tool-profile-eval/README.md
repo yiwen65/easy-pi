@@ -1,6 +1,6 @@
 # Tool profile A/B scaffold
 
-`manifest.json` defines paired `legacy` (A) and `v2` (C) runs with fixed tasks, seeds, and budgets. `runner.ts` records profile-specific system-prompt and tool-schema SHA-256 hashes, usage/cache and elapsed metrics, randomizes pair order deterministically, and reports a deterministic task×seed clustered bootstrap interval. `trace.ts` records only tool names, status, stable error codes, edit operation kinds, timing, and derived behavior counts; it never retains tool arguments, paths, commands, file content, or response text.
+`manifest.json` defines paired `legacy` (A) and `v2` (C) runs with fixed tasks, seeds, and budgets. `runner.ts` records profile-specific system-prompt and tool-schema SHA-256 hashes, usage/cache and elapsed metrics, randomizes pair order deterministically, and reports a deterministic task×seed clustered bootstrap interval. `trace.ts` records only tool names, status, stable error codes, allowlisted content-free validation-reason categories, edit operation kinds, timing, and derived behavior counts; it never retains tool arguments, paths, commands, file content, or response text.
 
 The focused test uses Pi's in-process faux provider and requires no network, credentials, or paid tokens:
 

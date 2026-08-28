@@ -76,7 +76,7 @@ Non-goals:
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-012 -> T-013 -> T-011 -> T-014 -> T-015 -> T-016 -> T-017`.
+- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-012 -> T-013 -> T-011 -> T-014 -> T-015 -> T-016 -> T-017 -> T-018 -> T-019`.
 - Parallel batches:
   - Batch 1: T-001 only, because it defines shared contracts used by all tools.
   - Batch 2: T-002, T-003, T-004, and T-005 in parallel after T-001; their owned implementation/test files must be disjoint and shared export integration is deferred.
@@ -92,6 +92,8 @@ Non-goals:
   - Batch 12: T-015 only for evidence-selected single-variable intervention and factorial/ablation validation.
   - Batch 13: T-016 only for held-out context-stress tasks and go/no-go evaluation.
   - Batch 14: T-017 only for final integration checks and delivery.
+  - Batch 15: T-018 only to classify the remaining read failures without retaining sensitive arguments.
+  - Batch 16: T-019 only for the causally selected read fix, regression coverage, and bounded real validation.
 - Serialization constraints: `packages/agent/src/harness/tools/index.ts`, coding-agent tool registries, SDK/CLI files, system prompt files, task document, changelogs, and package exports are coordinator/integration-owned. Subagents must not edit this task document.
 
 <!-- task-doc-section:task-list -->
@@ -531,6 +533,52 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-018 — Diagnose repeated v2 read INVALID_INPUT
+
+- Status: done
+- Owner: coordinator
+- Objective: Resolve the broad error code into a content-free reason category and prove the dominant invalid read argument pattern on a bounded real reproducer.
+- Inputs and prerequisites: T-017 traces showing repeated `read INVALID_INPUT`; current v2 read schema and validation rules.
+- Scope or files: Trace reason categorization, focused unit tests, gated diagnostic reuse, and this authority document.
+- Expected output: A repeatable bad baseline and one falsifiable root-cause classification without retaining paths, arguments, or response text.
+- Dependencies: T-017.
+- Execution steps:
+  1. Add allowlisted content-free reason categories for v2 read validation failures.
+  2. Prove sanitization and categorization in focused tests.
+  3. Run a bounded existing diagnostic and classify the dominant reason before changing read behavior.
+- Acceptance criteria:
+  - Diagnostic output cannot reconstruct argument values, paths, or content.
+  - A specific validation boundary, not merely `INVALID_INPUT`, explains the observed failures.
+- Verification method:
+  - Focused trace tests, default-skipped real evaluator, and one bounded authorized diagnostic.
+- Validation evidence: Added allowlisted `errorReason` categories to the content-free trace and a focused test proving that argument values, paths, and validation messages remain absent. The first bounded real diagnostic produced eight completed `read INVALID_INPUT` calls before its final-seed turn breaker; every one was classified `bounded_read_unsupported`, rejecting offset/limit misuse. A direct source-vs-runtime probe found the first divergence: the v2 read factory resolved from workspace source while `@earendil-works/pi-agent-core/node` resolved through Vitest to stale `packages/agent/dist/node.js`, whose `NodeExecutionEnv` prototype lacked `readTextRange`; the source class exposed the method. A coding-agent regression reproduced the exact failure before the fix with `This execution environment does not support bounded text reads.`
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-019 — Fix and validate repeated v2 read INVALID_INPUT
+
+- Status: done
+- Owner: coordinator
+- Objective: Apply the smallest contract-compatible change at the proven cause and verify that it removes the repeated failure without weakening bounded-read safety.
+- Inputs and prerequisites: T-018 root-cause evidence.
+- Scope or files: v2 read schema/prompt or narrowly justified normalization, focused agent/coding-agent tests, real before/after evaluator, and this authority document.
+- Expected output: Regression-protected read behavior with materially fewer invalid read calls and no correctness/context regression.
+- Dependencies: T-018.
+- Execution steps:
+  1. Add a regression that exposes the proven cause before the fix.
+  2. Implement only the causally supported read change.
+  3. Run focused tests, root check, and bounded paired real validation.
+  4. Retain the change only if correctness holds and the target error falls materially.
+- Acceptance criteria:
+  - The original reason-category failure is absent or materially reduced in the paired real validation.
+  - Positive 1-indexed line continuation and non-negative byte continuation remain unambiguous.
+  - No broad coercion hides unrelated invalid inputs.
+- Verification method:
+  - Targeted agent/coding-agent tests, root `npm run check`, paired real evidence, task validation, and git inspection.
+- Validation evidence: Added the missing exact `@earendil-works/pi-agent-core/node` workspace-source alias to `vitest.base.ts`, so source tests cannot mix source v2 tools with stale built Node environments. The regression that failed before the alias now passes and reads the requested bounded line. The post-fix authorized five-seed move diagnostic passed 5/5 in 86.50 seconds: all runs completed in exactly 5 turns, all 8 observed read calls succeeded except one separate expected-path `NOT_FOUND`, and `read INVALID_INPUT`/`bounded_read_unsupported` fell from at least 8 in four completed pre-fix seeds to 0 across all five post-fix seeds. Agent read/foundation tests passed 11/11; coding-agent profile/evaluation tests passed 9/9 with two real files skipped by default; root `npm run check` passed cleanly. Positive 1-indexed and byte-offset contracts were unchanged; no input coercion or schema weakening was introduced.
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -551,7 +599,7 @@ Non-goals:
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
 - R-006: Real model runs require credentials, money, and network. Mitigation: T-010/T-011 are explicitly authorized, fixed at 20 sessions with timeout/turn/cost breakers, use ephemeral fixtures/sessions, and do not persist responses or credentials.
-- Current blocker: None; all dependency gates are complete.
+- Current blocker: None; T-018 and T-019 are complete.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -587,10 +635,13 @@ Non-goals:
 - 2026-08-28: T-015 completed after the final 20-session prompt-only ablation passed 20/20. Candidate completion tied control while reducing aggregate turns 16.9%, tool calls 19.7%, errors 36.4%, input 16.5%, output 24.2%, elapsed 25.8%, and cost 20.2%; move-task turns fell 26% while locate-task turns tied. T-016 moved to in_progress for held-out context-stress gates before retention.
 - 2026-08-28: T-016 completed after the held-out 20-session context-stress run passed 20/20, including bounded directory/file discovery, actual long-output truncation, ambiguous edit safety, and multi-file mutation. Candidate retained correctness, improved first-edit success, tied recovery count, and reduced aggregate turns 11.0%, input 7.2%, output 23.2%, cache reads 21.2%, elapsed 38.6%, and cost 13.8%. T-017 moved to in_progress for final checks and retained-change delivery.
 - 2026-08-28: T-017 completed. Final targeted tests passed 8/8 with both real evaluators skipped by default, root `npm run check` passed cleanly, the reusable turn-budget lesson was refined, and only the evidence-backed prompt guideline was retained. Overall task returned to done.
+- 2026-08-29: User requested resolution of the remaining frequent v2 `read INVALID_INPUT`. T-018 was added and moved to in_progress for reason-level diagnosis before any read behavior change; T-019 is pending behind causal evidence.
+- 2026-08-29: T-018 completed. Reason-level traces classified all eight completed pre-fix read failures as `bounded_read_unsupported`; a red regression and runtime probe proved Vitest was mixing source v2 tools with stale `dist/node.js` lacking `readTextRange`. T-019 moved to in_progress.
+- 2026-08-29: T-019 completed after adding the missing agent-core `/node` source alias. The regression turned green, the five-seed real diagnostic passed 5/5 at 5 turns each with zero read `INVALID_INPUT`, targeted tests and root check passed, and the overall task returned to done.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: passed
-- Evidence: T-001 through T-017 are done with recorded focused/static/real-run evidence. T-014 identified split move/update orchestration as an actionable cause; T-015 isolated one prompt-only factor and passed 20/20; T-016 reproduced correctness and aggregate efficiency gains on 20/20 held-out context-stress sessions; T-017 final targeted tests, root check, diff check, task validation, and git-scope inspection passed.
-- Limitations: Real evidence is specific to `openai-codex/gpt-5.6-luna` at `max`, two tuning tasks/five seeds and five held-out tasks/two seeds; latency remains provider-variable. Repeated v2 `read INVALID_INPUT` calls remain a separately evidenced optimization opportunity, but no speculative read/schema change was retained because content-free traces did not identify a safe causal intervention.
+- Evidence: T-001 through T-019 are done. For the read defect, a red coding-agent regression, reason-level real trace, source/dist capability probe, minimal alias fix, green regression, five-seed post-fix real run, focused neighboring tests, root check, diff check, task validation, and git-scope inspection provide current evidence.
+- Limitations: The fixed failure was specific to workspace Vitest/source evaluation resolving an unaliased subpath from stale local dist; built release artifacts that are regenerated in dependency order were not shown to have this missing method. One post-fix model call attempted an unrelated nonexistent path and returned `NOT_FOUND`; no read `INVALID_INPUT` remained.

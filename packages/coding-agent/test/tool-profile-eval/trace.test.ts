@@ -88,6 +88,37 @@ describe("sanitized tool trace collector", () => {
 		expect(JSON.stringify(trace)).not.toMatch(/secret|private|classified|call-id|read-id/);
 	});
 
+	it("classifies invalid read reasons without retaining values or messages", () => {
+		let time = 0;
+		const collector = createSanitizedToolTraceCollector(() => time++);
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "read",
+				toolName: "read",
+				args: { path: "/secret/file", offset: -8472 },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "read",
+				toolName: "read",
+				isError: true,
+				result: {
+					content: [{ type: "text", text: "INVALID_INPUT\n\noffset must be a positive safe integer." }],
+				},
+			}),
+		);
+
+		const serialized = JSON.stringify(collector.snapshot());
+		expect(collector.snapshot().calls[0]).toMatchObject({
+			errorCode: "INVALID_INPUT",
+			errorReason: "offset_not_positive_integer",
+		});
+		expect(serialized).not.toMatch(/8472|secret|positive safe integer/);
+	});
+
 	it("counts successful edit confirmation reads and peak context without retaining message content", () => {
 		let time = 0;
 		const collector = createSanitizedToolTraceCollector(() => time);

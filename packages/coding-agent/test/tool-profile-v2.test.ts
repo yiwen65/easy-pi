@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";
@@ -79,6 +79,24 @@ describe("v2 tool profile", () => {
 		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
 		expect(v2.systemPrompt).toContain("use one edit batch with move first");
 		v2.dispose();
+	});
+
+	it("executes v2 bounded reads against the workspace source Node environment", async () => {
+		writeFileSync(join(cwd, "sample.txt"), "first\nsecond\nthird\n");
+		const session = await createSession({ toolProfile: "v2" });
+		const read = session.getToolDefinition("read");
+		if (!read) throw new Error("v2 read definition is missing");
+
+		const result = await read.execute(
+			"read-source-env",
+			{ path: "sample.txt", offset: 2, limit: 1 },
+			undefined,
+			undefined,
+			{} as Parameters<typeof read.execute>[4],
+		);
+
+		expect(result.content).toContainEqual({ type: "text", text: "second\n\n[More lines. Continue with offset=3.]" });
+		session.dispose();
 	});
 
 	it("applies allowlist, denylist, and extension overrides after profile selection", async () => {
