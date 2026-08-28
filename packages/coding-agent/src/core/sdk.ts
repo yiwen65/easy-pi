@@ -3,7 +3,9 @@ import {
 	Agent,
 	type AgentMessage,
 	type EditV2Dialect,
+	type ExecutionEnv,
 	type MutationBackend,
+	type MutationBackendHooks,
 	type MutationLimits,
 	type ReadProvider,
 	type ResourceReader,
@@ -37,9 +39,10 @@ import {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
-	createV2ToolDefinitions,
+	createV2ToolRuntime,
 	createWriteTool,
 	type ToolProfile,
+	type V2SessionResourceSource,
 	withFileMutationQueue,
 } from "./tools/index.ts";
 
@@ -55,17 +58,19 @@ export interface CreateAgentSessionOptions {
 	toolProfile?: ToolProfile;
 	/** Optional path policy applied by v2 tools. Compatibility mode is used when omitted. */
 	workspacePolicy?: WorkspacePolicy;
-	/** Optional host-owned v2 services. The caller must close directly injected providers. */
+	/** Optional v2 services. Direct instances are host-owned; factory results are session-owned. */
 	toolsV2?: {
+		executionEnv?: V2SessionResourceSource<ExecutionEnv>;
 		search?: {
-			provider?: SearchProvider;
+			provider?: V2SessionResourceSource<SearchProvider>;
 		};
 		read?: {
-			provider?: ReadProvider;
-			resourceReaders?: ResourceReader[];
+			provider?: V2SessionResourceSource<ReadProvider>;
+			resourceReaders?: Array<V2SessionResourceSource<ResourceReader>>;
 		};
 		edit?: {
-			backend?: MutationBackend;
+			backend?: V2SessionResourceSource<MutationBackend>;
+			hooks?: MutationBackendHooks;
 			dialect?: EditV2Dialect;
 			limits?: Partial<MutationLimits>;
 		};
@@ -413,37 +418,46 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
-	const baseToolDefinitionsOverride =
+	const v2ToolRuntime =
 		toolProfile === "v2"
-			? createV2ToolDefinitions(cwd, {
+			? createV2ToolRuntime(cwd, {
 					autoResizeImages: settingsManager.getImageAutoResize(),
 					shellPath: settingsManager.getShellPath(),
 					getShellCommandPrefix: () => settingsManager.getShellCommandPrefix(),
 					workspacePolicy: options.workspacePolicy,
+					executionEnv: options.toolsV2?.executionEnv,
 					searchProvider: options.toolsV2?.search?.provider,
 					readProvider: options.toolsV2?.read?.provider,
 					resourceReaders: options.toolsV2?.read?.resourceReaders,
 					mutationBackend: options.toolsV2?.edit?.backend,
+					mutationHooks: options.toolsV2?.edit?.hooks,
 					editDialect: options.toolsV2?.edit?.dialect,
 					editLimits: options.toolsV2?.edit?.limits,
 				})
 			: undefined;
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settingsManager,
-		cwd,
-		scopedModels: options.scopedModels,
-		resourceLoader,
-		customTools: options.customTools,
-		modelRuntime,
-		initialActiveToolNames,
-		allowedToolNames,
-		excludedToolNames,
-		baseToolDefinitionsOverride,
-		extensionRunnerRef,
-		sessionStartEvent: options.sessionStartEvent,
-	});
+	let session: AgentSession;
+	try {
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd,
+			scopedModels: options.scopedModels,
+			resourceLoader,
+			customTools: options.customTools,
+			modelRuntime,
+			initialActiveToolNames,
+			allowedToolNames,
+			excludedToolNames,
+			baseToolDefinitionsOverride: v2ToolRuntime?.definitions,
+			v2ToolRuntime,
+			extensionRunnerRef,
+			sessionStartEvent: options.sessionStartEvent,
+		});
+	} catch (error) {
+		await v2ToolRuntime?.close();
+		throw error;
+	}
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

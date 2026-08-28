@@ -63,6 +63,40 @@ const { session } = await createAgentSession({
 });
 ```
 
+### Opt-in v2 tool hosts
+
+Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. The default remains `legacy` and the profile is not persisted.
+
+```typescript
+import { createAgentSession, MemoryExecutionEnv } from "@earendil-works/pi-coding-agent";
+
+const { session } = await createAgentSession({
+  toolProfile: "v2",
+  toolsV2: {
+    executionEnv: () => new MemoryExecutionEnv({ files: { "README.md": "Hello\n" } }),
+    edit: {
+      hooks: {
+        beforeCommit: async (plan, signal) => approve(plan, signal),
+        afterCommit: async (_plan, result) => notify(result),
+      },
+    },
+  },
+});
+```
+
+Lifecycle rules:
+
+- a direct `ExecutionEnv`, provider, backend, or resource reader is host-owned and is never closed by the session;
+- a zero-argument factory creates a session-owned resource, which is replaced on `reload()` and closed on `dispose()`;
+- close failures are best-effort and available in `session.v2ToolLifecycleErrors`;
+- `beforeCommit` may reject before writes; `afterCommit` and `afterRollback` are notifications whose failures do not change the mutation result;
+- hooks receive the caller's abort signal and add no separate timeout; hosts must make shared hooks concurrency-safe;
+- crash-recovery scans do not replay mutation hooks.
+
+`SshExecutionEnv` adapts a host-supplied, already-authenticated result-based SSH/RPC operations object. It never opens a connection or reads credentials. `MemoryExecutionEnv` is a deterministic reference host without a shell. Both preserve the same four model schemas. Generic execution environments intentionally degrade search to file/glob traversal unless a richer `SearchProvider` is injected.
+
+Legacy Operations can migrate incrementally with `NativeFindOperationsSearchProvider`, `NativeReadOperationsProvider`, and `NativeEditOperationsMutationBackend`. Their capability declarations are intentionally narrow: legacy find is glob-only, legacy read has no bounded text-range guarantee, and legacy edit is update-only without durability or mode-preservation guarantees.
+
 ### AgentSession
 
 The session manages agent lifecycle, message history, model state, compaction, and event streaming.

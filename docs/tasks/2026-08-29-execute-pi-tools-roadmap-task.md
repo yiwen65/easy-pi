@@ -299,10 +299,10 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-010 — Stabilize Host ABI, adapters, hooks, and reference providers
+### [x] T-010 — Stabilize Host ABI, adapters, hooks, and reference providers
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Complete V2.5 lifecycle/extension surface without duplicating execution semantics.
 - Inputs and prerequisites: Search, Read, Mutation, Journal, and Overlay contracts.
 - Scope or files: Public factories/options/exports, lifecycle, native adapters, minimal hooks, Memory/SSH reference implementations, docs/tests.
@@ -319,9 +319,9 @@ Non-goals:
   - Model schemas remain unchanged across local/SSH/Memory hosts.
 - Verification method:
   - Targeted lifecycle/adapter/reference tests, root check.
-- Validation evidence: Not run.
-- Blocker: T-009 not done.
-- Unblock condition: All backend contracts are stable.
+- Validation evidence: Factory and direct-instance lifecycle tests prove per-session/reload creation, host ownership, idempotent close, continued cleanup after failures, and independently inspectable lifecycle errors through `AgentSession`; hook tests prove approval ordering, zero backend calls on rejection, live rollback notification, and outcome preservation when notification/error observers throw. `MemoryExecutionEnv` executes structured search/read/edit; `SshExecutionEnv` delegates a remote read without changing any of the four model schemas. Native Find/Read/Edit adapters declare and test glob-only, no-range, and update-only degradation. Agent mutation tests passed 13/13; coding-agent profile/host/reload tests passed 20/20; root `npm run check` and `git diff --check` passed.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-011 — Run faux and bounded real A/B/C evaluation
 
@@ -344,8 +344,8 @@ Non-goals:
 - Verification method:
   - Targeted faux and real eval files, manifest graders, aggregate consistency checks.
 - Validation evidence: Not run.
-- Blocker: T-010 not done.
-- Unblock condition: Full candidate implementation is committed and eval harness is ready.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-012 — Complete full-roadmap validation and delivery
 
@@ -419,10 +419,12 @@ Non-goals:
 - 2026-08-29: T-008 completed with an opt-in private Darwin/Unix journal, durable state transitions, same-directory staged installs, verified rollback payloads, recovery locking/scanning, quotas/expiry, external-state fail-closed handling, and explicit no-cross-file-atomicity scope. An independent child-process crash after one installed file recovered to both originals; focused tests passed 16/16, related agent tests 11/11, combined coding-agent tests 55/55, and root checks passed.
 - 2026-08-29: V2.4 journal stage committed as `5e74f3999`; T-009 started by coordinator with a bounded private workspace-copy reference backend and explicit host accept/discard API.
 - 2026-08-29: T-009 completed with a private quota-bounded workspace copy, validation callback, unchanged model schema, pending-acceptance result state, explicit host accept/discard/list APIs, stale-base protection, expiry cleanup, and fail-closed interrupted acceptance. Overlay tests passed 6/6, combined coding-agent tests 37/37, Agent Edit tests 11/11, and root checks passed.
+- 2026-08-29: Overlay stage committed as `3aaee2ee9`; T-010 started with session-vs-host ownership, reload/dispose lifecycle, minimal mutation hooks, capability-accurate adapters, and Memory/SSH reference hosts as the remaining scope.
+- 2026-08-29: T-010 completed with a reloadable owned runtime, factory-vs-instance lifecycle and error isolation, minimal approval/notification hooks, capability-narrow native Operations adapters, Memory/SSH execution environments, unchanged four-tool schemas, and SDK migration guidance. Focused tests passed 13/13 agent and 20/20 coding-agent; root checks passed.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: not_run
 - Evidence: Not run.
-- Limitations: T-010 through T-012 remain pending; Overlay is an opt-in bounded workspace copy rather than an OS sandbox, the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
+- Limitations: T-011 and T-012 remain pending; Overlay is an opt-in bounded workspace copy rather than an OS sandbox, the durable journal is Darwin/Unix-only and opt-in, cross-file changes are not atomically visible, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.
