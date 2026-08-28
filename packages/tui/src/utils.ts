@@ -375,9 +375,13 @@ export function getOsc8LinkAtColumn(line: string, column: number): string | unde
  */
 const THAI_LAO_AM_REGEX = /[\u0e33\u0eb3]/;
 const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
+// Rendered content must never change terminal-global DEC private modes. Tool
+// output can contain alternate-screen, mouse, paste, or cursor sequences; if
+// passed through, one log line can tear down the active fullscreen renderer.
+const DEC_PRIVATE_MODE_GLOBAL_REGEX = /\x1b\[\?[0-9;]*[hl]/g;
 
 export function normalizeTerminalOutput(str: string): string {
-	let normalized = str;
+	let normalized = str.includes("\x1b[?") ? str.replace(DEC_PRIVATE_MODE_GLOBAL_REGEX, "") : str;
 	if (THAI_LAO_AM_REGEX.test(normalized)) {
 		normalized = normalized.replace(THAI_LAO_AM_GLOBAL_REGEX, (char) =>
 			char === "\u0e33" ? "\u0e4d\u0e32" : "\u0ecd\u0eb2",
