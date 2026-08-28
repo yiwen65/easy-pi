@@ -353,6 +353,14 @@ class EditResultRenderComponent extends Container {
 			);
 		}
 		if (details.files.length === 0) lines.push(theme.fg("muted", "No net content changes."));
+		if (details.pendingAcceptance) {
+			lines.push(
+				theme.fg(
+					"warning",
+					`[overlay ${safeInlineDisplay(details.pendingAcceptance.id)} awaits host accept/discard]`,
+				),
+			);
+		}
 		lines.push(theme.fg("muted", `[${details.dialect} · ${details.changedPaths.length} changed path(s)]`));
 		if (lines.length > EDIT_MAX_RENDER_LINES) {
 			lines.length = EDIT_MAX_RENDER_LINES;

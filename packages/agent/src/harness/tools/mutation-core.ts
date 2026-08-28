@@ -62,6 +62,10 @@ export interface MutationCommitResult {
 	completedOperationIndexes: number[];
 	changedPaths: string[];
 	createdDirectories: string[];
+	pendingAcceptance?: {
+		id: string;
+		workspacePath: string;
+	};
 }
 
 export interface MutationBackend {

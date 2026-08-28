@@ -50,6 +50,12 @@ export {
 	NodeJournaledMutationBackend,
 	type NodeJournaledMutationBackendOptions,
 } from "./node-journaled-mutation-backend.ts";
+export {
+	NodeOverlayMutationBackend,
+	type NodeOverlayMutationBackendOptions,
+	type OverlayRecord,
+	type OverlayValidationContext,
+} from "./node-overlay-mutation-backend.ts";
 export { type NodeReadProviderOptions, NodeReadProviderV2 } from "./node-read-provider-v2.ts";
 export {
 	createReadTool,

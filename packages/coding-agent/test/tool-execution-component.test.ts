@@ -254,6 +254,7 @@ describe("ToolExecutionComponent parity", () => {
 					changedPaths: files.map((file) => file.path),
 					files,
 					patch: "PATCH_SENTINEL_MUST_NOT_BE_PARSED",
+					pendingAcceptance: { id: "overlay-1", workspacePath: "/tmp/overlay-1" },
 				},
 				isError: false,
 			},
@@ -266,6 +267,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(collapsed).toContain("deleted src/file-1.ts · line 4");
 		expect(collapsed).toContain("2 more diff lines for this file");
 		expect(collapsed).toContain("1 more changed files");
+		expect(collapsed).toContain("overlay overlay-1 awaits host accept/discard");
 		expect(collapsed).toContain("src/bad\\nname.ts");
 		expect(rawCollapsed).not.toContain("\u001b[?1049h");
 		expect(collapsed).not.toContain("src/file-3.ts");
