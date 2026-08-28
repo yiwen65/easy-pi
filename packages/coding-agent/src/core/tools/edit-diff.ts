@@ -23,6 +23,20 @@ export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string 
 	return ending === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
 }
 
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function findBlankLineTolerantMatches(content: string, oldText: string): RegExpMatchArray[] {
+	if (!oldText.includes("\n")) return [];
+
+	const pattern = oldText
+		.split(/\n(?:[\t ]*\n)*/)
+		.map(escapeRegExp)
+		.join("\\n(?:[\\t ]*\\n)*");
+	return [...content.matchAll(new RegExp(pattern, "gu"))];
+}
+
 /**
  * Normalize text for fuzzy matching. Applies progressive transformations:
  * - Strip trailing whitespace from each line
@@ -221,25 +235,39 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
 	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
 
-	if (fuzzyIndex === -1) {
+	if (fuzzyIndex !== -1) {
+		// When fuzzy matching, return offsets in normalized space. Callers can use
+		// the normalized content to compute replacements, then decide how much of
+		// that normalized output should be written back.
 		return {
-			found: false,
-			index: -1,
-			matchLength: 0,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
+			found: true,
+			index: fuzzyIndex,
+			matchLength: fuzzyOldText.length,
+			usedFuzzyMatch: true,
+			contentForReplacement: fuzzyContent,
 		};
 	}
 
-	// When fuzzy matching, return offsets in normalized space. Callers can use
-	// the normalized content to compute replacements, then decide how much of
-	// that normalized output should be written back.
+	// Models occasionally reproduce a recently read block with one blank line
+	// added or omitted. Treat blank-line runs as equivalent, while preserving all
+	// non-blank text and relying on the existing uniqueness check for safety.
+	const [blankLineMatch] = findBlankLineTolerantMatches(fuzzyContent, fuzzyOldText);
+	if (blankLineMatch?.index !== undefined) {
+		return {
+			found: true,
+			index: blankLineMatch.index,
+			matchLength: blankLineMatch[0].length,
+			usedFuzzyMatch: true,
+			contentForReplacement: fuzzyContent,
+		};
+	}
+
 	return {
-		found: true,
-		index: fuzzyIndex,
-		matchLength: fuzzyOldText.length,
-		usedFuzzyMatch: true,
-		contentForReplacement: fuzzyContent,
+		found: false,
+		index: -1,
+		matchLength: 0,
+		usedFuzzyMatch: false,
+		contentForReplacement: content,
 	};
 }
 
@@ -251,7 +279,8 @@ export function stripBom(content: string): { bom: string; text: string } {
 function countOccurrences(content: string, oldText: string): number {
 	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
+	const exactOccurrences = fuzzyContent.split(fuzzyOldText).length - 1;
+	return exactOccurrences || findBlankLineTolerantMatches(fuzzyContent, fuzzyOldText).length;
 }
 
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
