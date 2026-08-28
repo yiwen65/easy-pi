@@ -235,3 +235,12 @@
 - Correct approach: turn cap 按最复杂预期工具链与多次 pilot 的波动加 bounded headroom 设置，global cap 机械派生为 `sessions × perSessionTurns`；breaker 错误必须打印 observed turns。校准失败的 partial records 只作诊断，不能混入最终统计 aggregate。
 - Prevention: 全矩阵前为每种任务形态与实验 variant 跑多个 calibration seed；至少覆盖 discovery→read→edit→run→final 和 discovery→read→move/update→run→recovery→final，再冻结预算。
 - Verified by: 2026-08-28 `tool-profile-eval` 中 4-turn、6-turn breaker 分别在 v2 locate/move 停止；后续诊断和 ablation 的 10/12-turn cap 又观察到 11/14 turns，最终 bounded 18-turn ablation cap 完成 20/20，held-out 18-turn cap再完成 20/20。
+
+## Workspace source 测试——package subpath alias 必须与根导出一起覆盖
+
+- Wrong approach: Vitest 只把 `@earendil-works/pi-agent-core` 映射到 workspace source，却让同包的 `/node` subpath 从本地 `dist` 解析。
+- Why it failed: source 中新增的 v2 read 依赖 `NodeExecutionEnv.readTextRange`，而未重建的 `dist/node.js` 仍是旧实现；同一测试进程混用了新工具与旧环境，所有文本 read 都报 `bounded_read_unsupported`。
+- Recognition signal: workspace 单包测试中 package 根导出的新能力存在，但 subpath 导出的实例缺少对应 prototype method；`import.meta.resolve` 指向 `packages/*/dist`。
+- Correct approach: 在共享 Vitest alias 中为每个被 source 测试引用的精确 package subpath 添加 source 映射，并用跨包行为测试实际执行该能力，而非只检查类型或 tool registry。
+- Prevention: 新增或使用 workspace package subpath 时，同时检查 package exports、root tsconfig paths、共享 Vitest aliases 和 source CLI resolver；回归应在消费包中调用新能力。
+- Verified by: 2026-08-29 v2 read 回归修复前稳定报 `This execution environment does not support bounded text reads`；补充 agent-core `/node` alias 后回归通过，五种子真实诊断从至少 8 次该错误降至 0。

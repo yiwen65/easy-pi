@@ -27,6 +27,7 @@ export interface SanitizedToolCallTrace {
 	toolName: string;
 	status: "success" | "error";
 	errorCode?: string;
+	errorReason?: string;
 	operationKinds?: string[];
 	durationMs: number;
 	truncated: boolean;
@@ -65,23 +66,46 @@ function operationKinds(args: unknown): string[] | undefined {
 	return kinds.length > 0 ? kinds : undefined;
 }
 
-function errorCode(result: unknown): string | undefined {
-	let firstLine: string | undefined;
-	if (typeof result === "string") {
-		firstLine = result.split("\n", 1)[0];
-	} else if (result && typeof result === "object" && "content" in result && Array.isArray(result.content)) {
-		const firstText = result.content.find(
-			(part: unknown): part is { type: "text"; text: string } =>
-				!!part &&
-				typeof part === "object" &&
-				"type" in part &&
-				part.type === "text" &&
-				"text" in part &&
-				typeof part.text === "string",
-		);
-		firstLine = firstText?.text.split("\n", 1)[0];
+function errorText(result: unknown): string | undefined {
+	if (typeof result === "string") return result;
+	if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content))
+		return undefined;
+	return result.content.find(
+		(part: unknown): part is { type: "text"; text: string } =>
+			!!part &&
+			typeof part === "object" &&
+			"type" in part &&
+			part.type === "text" &&
+			"text" in part &&
+			typeof part.text === "string",
+	)?.text;
+}
+
+function classifyError(result: unknown): { errorCode?: string; errorReason?: string } {
+	const text = errorText(result);
+	const firstLine = text?.split("\n", 1)[0];
+	if (!firstLine || !V2_ERROR_CODES.has(firstLine)) return {};
+	if (firstLine !== "INVALID_INPUT") return { errorCode: firstLine };
+	const message = text?.split("\n\n", 2)[1] ?? "";
+	let errorReason = "other_invalid_input";
+	if (message.startsWith("offset must be a positive safe integer")) {
+		errorReason = "offset_not_positive_integer";
+	} else if (message.startsWith("limit must be a positive safe integer")) {
+		errorReason = "limit_not_positive_integer";
+	} else if (message.startsWith("byteOffset must be a non-negative safe integer")) {
+		errorReason = "byte_offset_invalid";
+	} else if (message.startsWith("byteOffset cannot be combined")) {
+		errorReason = "byte_offset_with_line_range";
+	} else if (message.startsWith("byteOffset is invalid for a directory")) {
+		errorReason = "byte_offset_for_directory";
+	} else if (message.startsWith("offset ") && message.includes(" is beyond ")) {
+		errorReason = "offset_beyond_directory";
+	} else if (message.startsWith("This execution environment does not support bounded text reads")) {
+		errorReason = "bounded_read_unsupported";
+	} else if (message.startsWith("offset, limit, and byteOffset are invalid for images")) {
+		errorReason = "range_for_image";
 	}
-	return firstLine && V2_ERROR_CODES.has(firstLine) ? firstLine : undefined;
+	return { errorCode: firstLine, errorReason };
 }
 
 function resultWasTruncated(result: unknown): boolean {
@@ -163,11 +187,12 @@ export function createSanitizedToolTraceCollector(now: () => number = Date.now):
 			}
 			const truncated = resultWasTruncated(event.result);
 			if (truncated) truncationCount += 1;
+			const error = event.isError ? classifyError(event.result) : {};
 			calls.push({
 				sequence: started.sequence,
 				toolName: started.toolName,
 				status: event.isError ? "error" : "success",
-				...(event.isError && errorCode(event.result) ? { errorCode: errorCode(event.result) } : {}),
+				...error,
 				...(started.operationKinds ? { operationKinds: started.operationKinds } : {}),
 				durationMs: Math.max(0, endedAt - started.startedAt),
 				truncated,
