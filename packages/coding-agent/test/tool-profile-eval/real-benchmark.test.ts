@@ -157,7 +157,7 @@ describe.skipIf(!RUN)("real tool-profile five-seed benchmark", () => {
 				totalReportedCostUsd += stats.cost;
 				if (stats.assistantMessages > input.budgets.maxTurns) {
 					throw new Error(
-						`${input.task.id}/${input.seed}/${input.profile} exceeded ${input.budgets.maxTurns} model turns`,
+						`${input.task.id}/${input.seed}/${input.profile} used ${stats.assistantMessages} model turns, exceeding ${input.budgets.maxTurns}`,
 					);
 				}
 				if (totalModelTurns > maxModelTurns) throw new Error(`Model-turn budget exceeded: ${totalModelTurns}`);

@@ -3,7 +3,7 @@
   "profiles": ["legacy", "v2"],
   "seeds": [17, 41, 73, 101, 137],
   "budgets": {
-    "maxTurns": 6,
+    "maxTurns": 10,
     "timeoutMs": 120000
   },
   "tasks": [

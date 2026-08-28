@@ -76,7 +76,7 @@ Non-goals:
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-012 -> T-011`.
+- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-012 -> T-013 -> T-011`.
 - Parallel batches:
   - Batch 1: T-001 only, because it defines shared contracts used by all tools.
   - Batch 2: T-002, T-003, T-004, and T-005 in parallel after T-001; their owned implementation/test files must be disjoint and shared export integration is deferred.
@@ -86,7 +86,8 @@ Non-goals:
   - Batch 6: T-009 only for the separately authorized bounded real-model paired smoke test.
   - Batch 7: T-010 only to implement and locally validate the gated real benchmark executor.
   - Batch 8: T-012 only to correct the empirically undersized turn breaker exposed by the first authorized run.
-  - Batch 9: T-011 only to execute the authorized five-seed matrix and record results.
+  - Batch 9: T-013 only to calibrate the multi-operation move workflow breaker exposed by the second run.
+  - Batch 10: T-011 only to execute the authorized five-seed matrix and record results.
 - Serialization constraints: `packages/agent/src/harness/tools/index.ts`, coding-agent tool registries, SDK/CLI files, system prompt files, task document, changelogs, and package exports are coordinator/integration-owned. Subagents must not edit this task document.
 
 <!-- task-doc-section:task-list -->
@@ -367,7 +368,7 @@ Non-goals:
 - Inputs and prerequisites: T-010 done; configured openai-codex credentials; real-provider authorization.
 - Scope or files: Temporary fixture/result paths and this authority document; no production or persistent session writes.
 - Expected output: Twenty bounded real profile sessions, ten paired cluster deltas, deterministic bootstrap 95% interval, per-profile completion/turn/token/latency/cost summary, and truthful failure diagnostics.
-- Dependencies: T-010, T-012.
+- Dependencies: T-010, T-012, T-013.
 - Execution steps:
   1. Run only the targeted gated real benchmark file with the explicit environment flag.
   2. Monitor hard breakers and stop on authorization, credential, cost, or systemic provider failure.
@@ -380,7 +381,7 @@ Non-goals:
   - Repository contains no credentials, response transcripts, or unintended fixture changes.
 - Verification method:
   - Targeted real Vitest output, aggregate consistency checks, task-document validator, and git status.
-- Validation evidence: First authorized targeted run stopped after 19.94 seconds at `locate-edit-test/17/v2` because the real tool workflow produced 5 assistant/model turns while the initial breaker allowed only 4. The breaker worked before the remaining matrix ran; no benchmark result was claimed. T-012 subsequently satisfied the unblock condition, so the rerun is in progress.
+- Validation evidence: First authorized targeted run stopped after 19.94 seconds at `locate-edit-test/17/v2` because the real tool workflow produced 5 assistant/model turns while the initial breaker allowed only 4. The second run completed all ten locate/edit sessions and `move-edit-test/17/legacy`, then stopped at `move-edit-test/17/v2` because that multi-operation workflow exceeded the calibrated 6-turn limit. Eleven successful records were emitted before the breaker; no aggregate result was claimed. T-013 subsequently satisfied the unblock condition, so the final rerun is in progress.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -408,6 +409,30 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-013 — Calibrate the multi-operation benchmark breaker
+
+- Status: done
+- Owner: coordinator
+- Objective: Set a final bounded turn budget that covers the observed move/edit/test workflow variability under `max` thinking without weakening session, timeout, or cost controls.
+- Inputs and prerequisites: T-012; second T-011 attempt showing the v2 move workflow exceeds 6 turns after eleven successful sessions.
+- Scope or files: Benchmark manifest, breaker diagnostic, focused validation, and this authority document.
+- Expected output: A 10-turn/session cap, derived 200-turn global cap, and diagnostics that report observed turns on any future breach.
+- Dependencies: T-012.
+- Execution steps:
+  1. Raise the session cap to 10, covering the observed at-least-seven-turn move workflow with bounded headroom.
+  2. Include observed turn count in breaker errors.
+  3. Rerun targeted skipped-path validation, typecheck, and full static check.
+  4. Return T-011 to in_progress only after validation passes.
+- Acceptance criteria:
+  - Locate and move workflows observed so far fit below the cap.
+  - Global cap remains mechanically derived as sessions × per-session turns.
+  - Other timeout/session/cost breakers remain unchanged.
+- Verification method:
+  - Targeted non-real Vitest, root typecheck/check, and task-document validator.
+- Validation evidence: Raised the per-session cap to 10 turns, yielding a mechanically derived 200-turn global cap while preserving 20-session, 120-second/session, and $20 reported-cost limits. Breaker diagnostics now include the observed turn count. Targeted default Vitest passed 1 faux test and skipped 1 real test without provider calls; root typecheck and full `npm run check` passed with no fixes.
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -428,7 +453,7 @@ Non-goals:
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
 - R-006: Real model runs require credentials, money, and network. Mitigation: T-010/T-011 are explicitly authorized, fixed at 20 sessions with timeout/turn/cost breakers, use ephemeral fixtures/sessions, and do not persist responses or credentials.
-- Current blocker: None. T-012 is done and T-011 rerun is in progress.
+- Current blocker: None. T-013 is done and T-011 final rerun is in progress.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -454,6 +479,8 @@ Non-goals:
 - 2026-08-28: T-010 completed after the gated executor's default path passed 1 faux test and skipped 1 real test, root typecheck passed, and full `npm run check` passed. T-011 moved to in_progress for the authorized 20-session run.
 - 2026-08-28: T-011 first real attempt stopped correctly after 19.94 seconds: `locate-edit-test/17/v2` used 5 turns and exceeded the assumed 4-turn/session breaker. T-011 moved to blocked, T-012 was added and moved to in_progress, and no aggregate claim was made.
 - 2026-08-28: T-012 completed after calibrating the session breaker to 6 turns and deriving the global 120-turn cap; targeted skipped-path validation, root typecheck, and full `npm run check` passed. T-011 returned to in_progress.
+- 2026-08-28: T-011 second attempt emitted eleven successful records over 267.44 seconds, then stopped at `move-edit-test/17/v2` because the move workflow exceeded 6 turns. T-011 moved to blocked, T-013 was added and moved to in_progress, and no incomplete aggregate was reported.
+- 2026-08-28: T-013 completed after setting a 10-turn/session and derived 200-turn global cap plus observed-turn diagnostics; targeted skipped-path validation, root typecheck, and full `npm run check` passed. T-011 returned to in_progress for the final rerun.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
