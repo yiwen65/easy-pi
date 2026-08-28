@@ -5,6 +5,9 @@ import {
 	createRunV2Tool,
 	createSearchV2Tool,
 	type ExecutionToolContext,
+	type ReadProvider,
+	type ReadV2Details,
+	type ResourceReader,
 	type RunV2Details,
 	type SearchProvider,
 	type SearchV2Details,
@@ -15,7 +18,7 @@ import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import { processImage } from "../../utils/image-process.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type {
@@ -26,6 +29,8 @@ import type {
 } from "../extensions/types.ts";
 import { resolveSessionShellEnvironment } from "./bash.ts";
 import { LocalSearchProviderV2 } from "./local-search-provider-v2.ts";
+import { NodeReadProviderV2 } from "./node-read-provider-v2.ts";
+import { replaceTabs } from "./render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "./truncate.ts";
 
 export type ToolProfile = "legacy" | "v2";
@@ -39,6 +44,9 @@ export interface CreateV2ToolDefinitionsOptions {
 	workspacePolicy?: WorkspacePolicy;
 	/** Directly injected providers are host-owned and must be closed by their caller. */
 	searchProvider?: SearchProvider;
+	/** Directly injected providers/readers are host-owned and must be closed by their caller. */
+	readProvider?: ReadProvider;
+	resourceReaders?: ResourceReader[];
 }
 
 const promptContributions = {
@@ -86,6 +94,106 @@ function renderResult(
 	const remaining = lines.length - visible.length;
 	const suffix = remaining > 0 ? `\n... (${remaining} more lines)` : "";
 	return new Text(theme.fg("toolOutput", `${visible.join("\n")}${suffix}`), 0, 0);
+}
+
+const READ_PREVIEW_LINES = 12;
+const READ_PREVIEW_ENTRIES = 12;
+
+function renderReadCall(
+	args: { path?: unknown; offset?: unknown; limit?: unknown; byteOffset?: unknown; cursor?: unknown },
+	theme: Theme,
+	context: ToolRenderContext,
+): Text {
+	const path = typeof args.path === "string" ? args.path : "...";
+	const metadata: string[] = [];
+	if (typeof args.offset === "number") metadata.push(`offset ${args.offset}`);
+	if (typeof args.limit === "number") metadata.push(`limit ${args.limit}`);
+	if (typeof args.byteOffset === "number") metadata.push(`byte ${args.byteOffset}`);
+	if (typeof args.cursor === "string") metadata.push("snapshot continuation");
+	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+	component.setText(
+		theme.fg("toolTitle", theme.bold("read")) +
+			theme.fg("accent", ` ${path}`) +
+			(metadata.length > 0 ? theme.fg("muted", ` · ${metadata.join(" · ")}`) : ""),
+	);
+	return component;
+}
+
+class ReadResultRenderComponent extends Container {
+	private details: ReadV2Details | undefined;
+	private options: ToolRenderResultOptions = { expanded: false, isPartial: false };
+	private renderTheme: Theme | undefined;
+
+	setResult(details: ReadV2Details, options: ToolRenderResultOptions, theme: Theme): void {
+		this.details = details;
+		this.options = options;
+		this.renderTheme = theme;
+		this.invalidate();
+	}
+
+	override render(width: number): string[] {
+		const details = this.details;
+		const theme = this.renderTheme;
+		if (!details || !theme) return [];
+		const lines: string[] = [""];
+		if (details.kind === "text") {
+			const sourceLines = details.lines ?? [];
+			const visible = this.options.expanded ? sourceLines : sourceLines.slice(0, READ_PREVIEW_LINES);
+			const language = getLanguageFromPath(details.path);
+			const highlighted = language ? highlightCode(replaceTabs(visible.join("\n")), language) : visible;
+			const startLine = details.range?.[0] ?? 1;
+			const gutterWidth = String(startLine + Math.max(0, visible.length - 1)).length;
+			for (let index = 0; index < visible.length; index++) {
+				const code = language ? (highlighted[index] ?? "") : theme.fg("toolOutput", replaceTabs(visible[index]));
+				lines.push(`${theme.fg("muted", String(startLine + index).padStart(gutterWidth, " "))} ${code}`);
+			}
+			const remaining = sourceLines.length - visible.length;
+			if (remaining > 0) lines.push(theme.fg("muted", `... (${remaining} more lines in this page)`));
+		} else if (details.kind === "directory") {
+			const entries = details.entries ?? [];
+			const visible = this.options.expanded ? entries : entries.slice(0, READ_PREVIEW_ENTRIES);
+			for (const entry of visible) {
+				const suffix = entry.kind === "directory" ? "/" : "";
+				const metadata = entry.size === undefined ? "" : ` ${formatSize(entry.size)}`;
+				lines.push(
+					`${theme.fg("accent", `${entry.name}${suffix}`)}${theme.fg("muted", ` · ${entry.kind}${metadata}`)}`,
+				);
+			}
+			if (entries.length > visible.length) {
+				lines.push(theme.fg("muted", `... (${entries.length - visible.length} more entries in this page)`));
+			}
+			lines.push(
+				theme.fg(details.stable ? "muted" : "warning", details.stable ? "[stable snapshot]" : "[best effort]"),
+			);
+		} else {
+			const label = details.kind === "image" ? "image" : "resource";
+			const metadata = [details.mediaType, details.size === undefined ? undefined : formatSize(details.size)]
+				.filter((value): value is string => value !== undefined)
+				.join(" · ");
+			lines.push(theme.fg("muted", `[${label}${metadata ? ` · ${metadata}` : ""}]`));
+		}
+		if (details.nextOffset !== undefined) lines.push(theme.fg("muted", `Continue with offset ${details.nextOffset}`));
+		if (details.nextByteOffset !== undefined)
+			lines.push(theme.fg("muted", `Continue with byteOffset ${details.nextByteOffset}`));
+		if (details.nextCursor) lines.push(theme.fg("muted", `Continue with cursor ${details.nextCursor}`));
+		if (details.partial) lines.push(theme.fg("warning", "[partial directory page]"));
+		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "..."));
+	}
+}
+
+function renderReadResult(
+	result: { content: Array<{ type: string; text?: string }>; details: ReadV2Details },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	context: ToolRenderContext,
+): ReadResultRenderComponent | Text {
+	if (!result.details || typeof result.details.kind !== "string") return renderResult(result, options, theme);
+	const component =
+		context.lastComponent instanceof ReadResultRenderComponent
+			? context.lastComponent
+			: new ReadResultRenderComponent();
+	component.setResult(result.details, options, theme);
+	return component;
 }
 
 const SEARCH_PREVIEW_HITS = 8;
@@ -408,6 +516,7 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 		renderCall: (args, theme, renderContext) => {
 			if (tool.name === "run") return renderRunCall(args, theme, renderContext);
 			if (tool.name === "search") return renderSearchCall(args, theme, renderContext);
+			if (tool.name === "read") return renderReadCall(args, theme, renderContext);
 			return renderCall(tool.name, args, theme);
 		},
 		renderResult: (result, options, theme, renderContext) => {
@@ -427,6 +536,14 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 					renderContext,
 				);
 			}
+			if (tool.name === "read") {
+				return renderReadResult(
+					result as unknown as { content: Array<{ type: string; text?: string }>; details: ReadV2Details },
+					options,
+					theme,
+					renderContext,
+				);
+			}
 			return renderResult(result, options, theme);
 		},
 	};
@@ -439,9 +556,12 @@ export function createV2ToolDefinitions(
 ): Record<(typeof V2_TOOL_NAMES)[number], ToolDefinition<any, any>> {
 	const env = new NodeExecutionEnv({ cwd, shellPath: options.shellPath });
 	const searchProvider: SearchProvider = options.searchProvider ?? new LocalSearchProviderV2(env);
+	const readProvider: ReadProvider = options.readProvider ?? new NodeReadProviderV2(env);
 	const context: ExecutionToolContext = {
 		env,
 		searchProvider,
+		readProvider,
+		resourceReaders: options.resourceReaders,
 		workspacePolicy: options.workspacePolicy,
 	};
 	return {

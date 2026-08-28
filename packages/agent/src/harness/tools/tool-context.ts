@@ -1,4 +1,5 @@
 import type { ExecutionEnv } from "../types.ts";
+import type { ReadProvider, ResourceReader } from "./read-provider.ts";
 import type { SearchProvider } from "./search-provider.ts";
 import type { WorkspacePolicy } from "./workspace-policy.ts";
 
@@ -7,6 +8,11 @@ export interface ExecutionToolContext {
 	env: ExecutionEnv;
 	searchProvider?: SearchProvider;
 	search?: {
+		scopeId?: string;
+	};
+	readProvider?: ReadProvider;
+	resourceReaders?: ResourceReader[];
+	read?: {
 		scopeId?: string;
 	};
 	workspacePolicy?: WorkspacePolicy;
