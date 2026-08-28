@@ -33,7 +33,7 @@ Non-goals:
 - changing the default profile or removing legacy tools;
 - session profile persistence;
 - claiming cwd/path checks are a sandbox or strong adversarial symlink protection;
-- paid/real-model evaluation runs without separate explicit approval.
+- paid/real-model evaluation runs without separate explicit approval. The user subsequently authorized a bounded real-model test with `openai-codex/gpt-5.6-luna` at `max` thinking on 2026-08-28; only T-009 is covered by that approval.
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -55,7 +55,7 @@ Non-goals:
 ## Assumptions and open questions
 
 - Assumption: SearchProvider may use existing coding-agent rg/fd facilities through a local adapter; provider brands remain hidden from the model. Impact: adapter ownership is settled during T-006 after inspecting current operations interfaces.
-- Assumption: The evaluation deliverable is a deterministic manifest/runner and faux-provider smoke coverage, not paid real-model execution. Impact: real comparative completion-rate evidence remains a post-MVP operational activity requiring explicit approval.
+- Confirmed decision: The user explicitly authorized a bounded real-model test using `openai-codex/gpt-5.6-luna` with `max` thinking after the MVP scaffold was complete. Impact: T-009 may make real provider calls but must remain targeted, avoid credential output, and report that one pair is a smoke test rather than a statistical benchmark.
 - Assumption: The bounded-read interface may be added as a new capability or a backward-compatible extension, whichever produces the smaller complete change after T-001 inspection. Impact: existing session header reads must retain their current behavior.
 - Open question: None; the user confirmed execution against MVP v1.1.
 
@@ -76,13 +76,14 @@ Non-goals:
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008`.
+- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009`.
 - Parallel batches:
   - Batch 1: T-001 only, because it defines shared contracts used by all tools.
   - Batch 2: T-002, T-003, T-004, and T-005 in parallel after T-001; their owned implementation/test files must be disjoint and shared export integration is deferred.
   - Batch 3: T-006 only, because it integrates all tools into coding-agent registries, CLI, SDK, prompts, and renderers.
   - Batch 4: T-007 only, because evaluation depends on an integrated v2 profile.
-  - Batch 5: T-008 only for cross-package verification, documentation reconciliation, and final status.
+  - Batch 5: T-008 only for cross-package verification, documentation reconciliation, and initial delivery.
+  - Batch 6: T-009 only for the separately authorized bounded real-model paired smoke test.
 - Serialization constraints: `packages/agent/src/harness/tools/index.ts`, coding-agent tool registries, SDK/CLI files, system prompt files, task document, changelogs, and package exports are coordinator/integration-owned. Subagents must not edit this task document.
 
 <!-- task-doc-section:task-list -->
@@ -302,12 +303,38 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-009 — Run an authorized real-model paired profile smoke test
+
+- Status: done
+- Owner: coordinator
+- Objective: Exercise one identical end-to-end coding fixture under legacy and v2 with `openai-codex/gpt-5.6-luna` at `max` thinking, then verify the resulting files and tests without exposing credentials.
+- Inputs and prerequisites: T-008 complete; user authorization for this model and real-provider use; locally configured openai-codex credentials; source CLI via `pi-test.sh` so unbuilt v2 changes are exercised.
+- Scope or files: Temporary fixtures and logs under `/tmp`; this authority document only. No production writes, credential output, or persistent session files.
+- Expected output: One legacy run and one v2 run against byte-identical fixtures, with command exit status, elapsed time, final fixture verification, and concise comparison recorded.
+- Dependencies: T-008.
+- Execution steps:
+  1. Create two byte-identical temporary fixtures containing a discover-edit-test task.
+  2. Run the source CLI once per profile with `--no-session`, the specified model, and `--thinking max`.
+  3. Capture non-secret stdout/stderr in temporary logs and record exit status/time.
+  4. Independently run the fixture test and inspect the changed value for both profiles.
+  5. Report limitations: one pair is connectivity/integration evidence, not a statistically powered A/B result.
+- Acceptance criteria:
+  - Both calls resolve `openai-codex/gpt-5.6-luna` and use `max` thinking.
+  - Legacy and v2 receive identical fixture bytes and task text.
+  - Each successful run leaves the fixture test passing with the requested value.
+  - No credential is printed or persisted, and no repository file other than this task document is changed.
+- Verification method:
+  - CLI exit codes and bounded temporary logs; `node test.js` in each fixture; direct content/hash inspection; repository `git status`.
+- Validation evidence: Local catalog lookup resolved `openai-codex/gpt-5.6-luna` with thinking support. Two source-CLI runs used the identical prompt and byte-identical fixtures under `/tmp/pi-tool-profile-real-eval-20260828`, with `--no-session --provider openai-codex --model gpt-5.6-luna --thinking max`: legacy exited 0 in 19 seconds and v2 exited 0 in 18 seconds. Both independently changed `src/value.js` from `answer = 1` to `answer = 42`, reported `PASS answer=42`, passed an independent `node test.js`, and produced identical final fixture SHA-256 hashes (`58d578b...` for the changed file). Temporary logs were 89/90 bytes and contained only final task summaries. Repository status after execution showed only this task-document update plus the untouched untracked vision document.
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
 - Agent foundations/tools: run each newly added focused Vitest file from `packages/agent` with the repository-local Vitest CLI.
 - Coding-agent profile integration: run modified/new args, SDK, default-tools, tools, prompt contribution and AgentSession tests from `packages/coding-agent`.
-- Evaluation scaffold: run only its credential-free faux-provider test; do not run real-model evaluation.
+- Evaluation scaffold: default automated coverage remains credential-free; T-009 is the separately authorized targeted real-model smoke run.
 - Cross-package static validation: run `npm run check` from repository root after all code changes.
 - Repository-wide non-e2e suite: use `./test.sh` only if targeted and static checks indicate broader integration risk or root instructions require it; never invoke the full Vitest suite directly.
 - Contract/task docs: validate Markdown fence/headings and run `task_document.py validate` after each material task status update and before final reporting.
@@ -321,8 +348,8 @@ Non-goals:
 - R-003: Structured edit can partially mutate after commit begins. Mitigation: prove zero mutations only for prevalidation failures and require truthful failed/unknown path reporting.
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
-- R-006: Real A/B model runs require credentials, money, network and explicit approval. Mitigation: deliver only the deterministic scaffold and faux-provider verification in this task.
-- Current blocker: None. All planned tasks are complete.
+- R-006: Real model runs require credentials, money, and network. Mitigation: T-009 is separately authorized, bounded to one paired smoke case, uses no persistent sessions, and makes no statistical superiority claim.
+- Current blocker: None. All planned and separately authorized tasks are complete.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -342,10 +369,12 @@ Non-goals:
 - 2026-08-28: T-006 completed after 97/97 focused coding-agent tests, root typecheck, and full `npm run check` passed. The opt-in SDK/CLI profile, shared v2 definitions, prompts, renderers, local search adapter, filtering, override, and non-persistence behavior are integrated. T-007 moved to in_progress.
 - 2026-08-28: T-007 completed after its faux-provider test passed twice-run deterministic records, profile-specific hashes, paired ordering, and clustered bootstrap checks; root typecheck passed. T-008 moved to in_progress for contract-gap review and final cross-package validation.
 - 2026-08-28: T-008 contract-gap review added replay metadata, create/move parent-directory creation and partial reporting, five evaluation seeds, and managed-process termination coverage. Final agent tests passed 26/26, coding-agent tests passed 98/98, `npm run check` passed with no fixes, and `git diff --check` passed. T-008 and the overall task moved to done.
+- 2026-08-28: User separately authorized real-provider testing with `openai-codex/gpt-5.6-luna` at `max` thinking. Local model listing confirmed that exact provider/model. T-009 was added and moved to in_progress for one bounded paired profile smoke test.
+- 2026-08-28: T-009 completed. Legacy and v2 source-CLI sessions ran against identical temporary fixtures and prompt; both exited 0, made the requested edit, and passed independent fixture verification. Legacy elapsed 19 seconds and v2 elapsed 18 seconds. No credentials or response internals were persisted, and repository source remained unchanged.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: passed
-- Evidence: All T-001 through T-008 tasks are done with recorded targeted tests; final agent tests passed 26/26, coding-agent tests passed 98/98, root `npm run check` passed, `git diff --check` passed, and the authority-document validator passed before final commit.
-- Limitations: No paid or real-model A/B run was authorized or performed; the delivered evaluation evidence is deterministic faux-provider scaffold coverage. Workspace policy remains best-effort path enforcement rather than a sandbox, as required by the MVP contract.
+- Evidence: T-001 through T-008 retain their recorded automated evidence. T-009 added a successful real-provider paired smoke run with `openai-codex/gpt-5.6-luna` at `max`: both legacy and v2 exited 0, produced identical requested fixture changes, and passed independent `node test.js` verification. The authority-document validator passed after recording these results.
+- Limitations: The real-model evidence is one paired end-to-end smoke case, not the five-seed statistical A/B benchmark and not evidence that one profile is superior. Workspace policy remains best-effort path enforcement rather than a sandbox, as required by the MVP contract.
