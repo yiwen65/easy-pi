@@ -13,9 +13,11 @@ function formatClock(timestamp: number): string {
  *
  * The inherited component remains the authoritative Markdown/OSC renderer;
  * this class only adds the elevated prompt band used to scan turn boundaries.
+ * The band carries no role label — just the prompt marker and clock time.
  */
 export class GrokUserMessageComponent extends UserMessageComponent {
 	private readonly timestamp: number;
+	private highlighted = false;
 
 	constructor(
 		text: string,
@@ -28,14 +30,20 @@ export class GrokUserMessageComponent extends UserMessageComponent {
 		this.timestamp = timestamp;
 	}
 
+	/** Flash marker used by prompt jump navigation. */
+	setHighlighted(highlighted: boolean): void {
+		this.highlighted = highlighted;
+	}
+
 	override render(width: number): string[] {
 		const body = super.render(width);
 		if (body.length === 0 || width <= 0) {
 			return body;
 		}
 
-		const signature = `${theme.fg("accent", theme.bold("❯ USER"))}  ${theme.fg("muted", formatClock(this.timestamp))}`;
-		const band = theme.bg("userMessageBg", truncateToWidth(` ${signature}`, width, "", true));
+		const signature = `${theme.fg("accent", theme.bold("❯"))} ${theme.fg("muted", formatClock(this.timestamp))}`;
+		const bandText = truncateToWidth(` ${signature}`, width, "", true);
+		const band = this.highlighted ? theme.bg("searchMatchBg", bandText) : theme.bg("userMessageBg", bandText);
 		return [band, ...body];
 	}
 }

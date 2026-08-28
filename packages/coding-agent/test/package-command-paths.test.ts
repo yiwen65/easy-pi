@@ -20,6 +20,7 @@ describe("package commands", () => {
 	let originalCwd: string;
 	let originalAgentDir: string | undefined;
 	let originalPiPackageDir: string | undefined;
+	let originalEasyPiUpdateUrl: string | undefined;
 	let originalPath: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
@@ -64,6 +65,7 @@ describe("package commands", () => {
 		originalCwd = process.cwd();
 		originalAgentDir = process.env[ENV_AGENT_DIR];
 		originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+		originalEasyPiUpdateUrl = process.env.EASY_PI_UPDATE_URL;
 		originalPath = process.env.PATH;
 		originalExitCode = process.exitCode;
 		originalExecPath = process.execPath;
@@ -77,6 +79,7 @@ describe("package commands", () => {
 			return undefined as never;
 		}) as typeof process.exit);
 		process.env[ENV_AGENT_DIR] = agentDir;
+		process.env.EASY_PI_UPDATE_URL = "https://updates.easy-pi.invalid/api/latest-version";
 		process.chdir(projectDir);
 	});
 
@@ -94,6 +97,11 @@ describe("package commands", () => {
 			delete process.env.PI_PACKAGE_DIR;
 		} else {
 			process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+		}
+		if (originalEasyPiUpdateUrl === undefined) {
+			delete process.env.EASY_PI_UPDATE_URL;
+		} else {
+			process.env.EASY_PI_UPDATE_URL = originalEasyPiUpdateUrl;
 		}
 		if (originalPath === undefined) {
 			delete process.env.PATH;

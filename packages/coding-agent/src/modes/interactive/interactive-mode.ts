@@ -20,6 +20,7 @@ import type {
 	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
+	ScrollView,
 	SlashCommand,
 	Terminal,
 	TuiAltScreenOptions,
@@ -31,8 +32,6 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
-	getCapabilities,
-	hyperlink,
 	Markdown,
 	matchesKey,
 	ProcessTerminal,
@@ -107,18 +106,21 @@ import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
-import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren, sanitizeBinaryOutput } from "../../utils/shell.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { GrokAssistantMessageComponent } from "../interactive-grok/components/grok-assistant-message.ts";
+import { GrokThinkingTurnGroupComponent } from "../interactive-grok/components/grok-thinking-turn-group.ts";
 import { GrokToolExecutionComponent } from "../interactive-grok/components/grok-tool-execution.ts";
+import { GrokToolTurnGroupComponent } from "../interactive-grok/components/grok-tool-turn-group.ts";
 import type { GrokLocation } from "../interactive-grok/components/grok-top-bar.ts";
+import { GrokTurnDurationComponent } from "../interactive-grok/components/grok-turn-duration.ts";
 import { GrokUserMessageComponent } from "../interactive-grok/components/grok-user-message.ts";
 import { GrokComponentFactory } from "../interactive-grok/grok-component-factory.ts";
 import type { GrokInteractiveView } from "../interactive-grok/grok-interactive-view.ts";
 import { PiSessionPort } from "../interactive-grok/pi-session-port.ts";
+import { findPromptJumpTarget } from "../interactive-grok/prompt-navigation.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -131,6 +133,7 @@ import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
+import { EasyPiStartupHeader } from "./components/easy-pi-startup-header.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -188,24 +191,33 @@ function isExpandable(obj: unknown): obj is Expandable {
 	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
 }
 
-class ExpandableText extends Text implements Expandable {
-	private readonly getCollapsedText: () => string;
-	private readonly getExpandedText: () => string;
+function isDisposable(obj: unknown): obj is { dispose(): void } {
+	return typeof obj === "object" && obj !== null && "dispose" in obj && typeof obj.dispose === "function";
+}
 
-	constructor(
-		getCollapsedText: () => string,
-		getExpandedText: () => string,
-		expanded = false,
-		paddingX = 0,
-		paddingY = 0,
-	) {
-		super(expanded ? getExpandedText() : getCollapsedText(), paddingX, paddingY);
-		this.getCollapsedText = getCollapsedText;
-		this.getExpandedText = getExpandedText;
+class ExpandableResourceSection implements Component, Expandable {
+	private readonly getHeader: () => string;
+	private readonly getExpandedBody: () => string;
+	private expanded: boolean;
+
+	constructor(getHeader: () => string, getExpandedBody: () => string, expanded = false) {
+		this.getHeader = getHeader;
+		this.getExpandedBody = getExpandedBody;
+		this.expanded = expanded;
 	}
 
 	setExpanded(expanded: boolean): void {
-		this.setText(expanded ? this.getExpandedText() : this.getCollapsedText());
+		this.expanded = expanded;
+	}
+
+	invalidate(): void {
+		// Text and theme styling are resolved on every render.
+	}
+
+	render(width: number): string[] {
+		if (!this.expanded) return [];
+		const safeWidth = Math.max(1, Math.floor(width));
+		return [...new Text(`${this.getHeader()}\n${this.getExpandedBody()}`, 0, 0).render(safeWidth), ""];
 	}
 }
 
@@ -240,6 +252,7 @@ function findCheckpointHandoff(
 	return undefined;
 }
 
+export const AGENTPORT_STARTUP_READY_SEQUENCE = "\x1b]6973;startup-ready\x07";
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 
@@ -367,13 +380,18 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** TUI layout mode. */
 	tuiMode?: TuiMode;
-	/** Terminal renderer implementation. */
+	/** Terminal renderer implementation. Defaults to Grok; pass `legacy` for rollback. */
 	tuiEngine?: TuiEngine;
 	/** Initial interactive theme setting for this invocation. */
 	initialThemeSetting?: string;
 }
 
 export type TuiEngine = "legacy" | "grok";
+export const DEFAULT_TUI_ENGINE: TuiEngine = "grok";
+
+function resolveTuiEngine(engine: TuiEngine | undefined): TuiEngine {
+	return engine ?? DEFAULT_TUI_ENGINE;
+}
 
 interface InteractiveTuiOptions {
 	tuiMode: TuiMode;
@@ -382,6 +400,7 @@ interface InteractiveTuiOptions {
 	logDirectory: string;
 	terminal?: Terminal;
 	onRightClickPaste?: () => void;
+	onContentClick?: (click: { scrollView: ScrollView; row: number; col: number }) => boolean;
 }
 
 const interactiveTuiTerminals = new WeakMap<TuiMainScreen | TuiAltScreen, Terminal>();
@@ -394,6 +413,7 @@ function rememberInteractiveTerminal<T extends TuiMainScreen | TuiAltScreen>(tui
 /** Composition root for selecting the interactive terminal renderer. */
 export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen {
 	const terminal = options.terminal ?? new ProcessTerminal();
+	const tuiEngine = resolveTuiEngine(options.tuiEngine);
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
 		const altScreen: TuiAltScreenOptions = {
@@ -401,6 +421,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
 			openUrl: openBrowser,
 			onRightClickPaste: options.onRightClickPaste,
+			onContentClick: options.onContentClick,
 			copySelection: async (text) => {
 				try {
 					await copyToClipboard(text);
@@ -410,7 +431,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 		};
-		if (options.tuiEngine === "grok") {
+		if (tuiEngine === "grok") {
 			return rememberInteractiveTerminal(
 				createGrokTuiRuntime({
 					mode: "fullscreen",
@@ -427,7 +448,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 			terminal,
 		);
 	}
-	if (options.tuiEngine === "grok") {
+	if (tuiEngine === "grok") {
 		return rememberInteractiveTerminal(
 			createGrokTuiRuntime({
 				mode: "regular",
@@ -534,6 +555,9 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private grokTurnStartedAt: number | undefined = undefined;
+	private currentTurnThinkingGroup: GrokThinkingTurnGroupComponent | undefined = undefined;
+	private currentTurnToolGroup: GrokToolTurnGroupComponent | undefined = undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -605,6 +629,13 @@ export class InteractiveMode {
 	private readonly onRightClickPaste = (): void => {
 		void this.handleRightClickPaste();
 	};
+	private readonly onTranscriptContentClick = (click: {
+		scrollView: ScrollView;
+		row: number;
+		col: number;
+	}): boolean => {
+		return this.handleTranscriptContentClick(click);
+	};
 	private autoTrustOnReloadCwd: string | undefined;
 	private themeController: InteractiveThemeController;
 
@@ -656,7 +687,7 @@ export class InteractiveMode {
 
 	private createAssistantMessageComponent(message?: AssistantMessage): AssistantMessageComponent {
 		const ComponentClass = this.grokComponentFactory ? GrokAssistantMessageComponent : AssistantMessageComponent;
-		return new ComponentClass(
+		const component = new ComponentClass(
 			message,
 			this.hideThinkingBlock,
 			this.getMarkdownThemeWithSettings(),
@@ -664,6 +695,12 @@ export class InteractiveMode {
 			this.outputPad,
 			this.getMarkdownTransformers(),
 		);
+		// Keep animation and the global expand toggle consistent for newly arrived Grok turns.
+		if (component instanceof GrokAssistantMessageComponent) {
+			component.setTickerUi(this.ui);
+			component.setExpanded(this.toolOutputExpanded);
+		}
+		return component;
 	}
 
 	private createToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent {
@@ -684,12 +721,96 @@ export class InteractiveMode {
 		return component;
 	}
 
+	private startGrokTurnTiming(now = performance.now()): void {
+		if (this.grokComponentFactory && this.grokTurnStartedAt === undefined) {
+			this.grokTurnStartedAt = now;
+		}
+	}
+
+	private finishGrokTurnTiming(now = performance.now()): number | undefined {
+		if (!this.grokComponentFactory || this.grokTurnStartedAt === undefined) return undefined;
+		const duration = Math.max(0, now - this.grokTurnStartedAt);
+		this.grokTurnStartedAt = undefined;
+		return duration;
+	}
+
+	/**
+	 * Add a tool execution component to the transcript. In Grok mode all tool
+	 * calls of the current turn are grouped into a single collapsible
+	 * GrokToolTurnGroupComponent (one compact line by default); legacy mode
+	 * keeps each tool as a direct chat child.
+	 */
+	private addToolComponentToChat(component: ToolExecutionComponent): void {
+		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent && component.canUseTurnGroup()) {
+			let group = this.currentTurnToolGroup;
+			if (!group || !this.chatContainer.children.includes(group)) {
+				group = new GrokToolTurnGroupComponent(this.ui);
+				group.setExpanded(this.toolOutputExpanded);
+				this.chatContainer.addChild(group);
+				this.currentTurnToolGroup = group;
+			} else if (this.chatContainer.children.at(-1) !== group) {
+				// Keep the live current-tool line at the latest chronological position.
+				this.chatContainer.removeChild(group);
+				this.chatContainer.addChild(group);
+			}
+			component.setTurnGrouped(true);
+			group.addTool(component);
+			return;
+		}
+		this.chatContainer.addChild(component);
+	}
+
+	private completeCurrentTurnThinking(): void {
+		this.currentTurnThinkingGroup?.completeTurn();
+	}
+
+	/** Aggregate one assistant message's thinking into the current turn block. */
+	private updateTurnThinking(component: GrokAssistantMessageComponent, isStreaming: boolean): void {
+		const thinking = component.getThinkingText();
+		if (!thinking.trim()) return;
+		component.setThinkingDelegated(true);
+		let group = this.currentTurnThinkingGroup;
+		if (!group || !this.chatContainer.children.includes(group)) {
+			group = new GrokThinkingTurnGroupComponent(
+				this.getMarkdownThemeWithSettings(),
+				this.hiddenThinkingLabel,
+				this.outputPad,
+				this.hideThinkingBlock,
+				this.ui,
+			);
+			group.setExpanded(this.toolOutputExpanded);
+			this.currentTurnThinkingGroup = group;
+		}
+		group.updateThinking(component, thinking, isStreaming);
+		this.chatContainer.removeChild(group);
+		const componentIndex = this.chatContainer.children.indexOf(component);
+		if (componentIndex >= 0) this.chatContainer.children.splice(componentIndex, 0, group);
+		else this.chatContainer.addChild(group);
+	}
+
+	/** Clear transcript content and stop Grok marquee timers first. */
+	private clearChatContainer(): void {
+		for (const child of this.chatContainer.children) {
+			if (
+				child instanceof GrokAssistantMessageComponent ||
+				child instanceof GrokThinkingTurnGroupComponent ||
+				child instanceof GrokToolTurnGroupComponent
+			) {
+				child.dispose();
+			}
+		}
+		this.chatContainer.clear();
+		this.currentTurnThinkingGroup = undefined;
+		this.currentTurnToolGroup = undefined;
+	}
+
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
-		this.sessionPort = options.tuiEngine === "grok" ? new PiSessionPort(runtimeHost) : undefined;
-		this.grokComponentFactory = options.tuiEngine === "grok" ? new GrokComponentFactory() : undefined;
+		const tuiEngine = resolveTuiEngine(options.tuiEngine);
+		this.sessionPort = tuiEngine === "grok" ? new PiSessionPort(runtimeHost) : undefined;
+		this.grokComponentFactory = tuiEngine === "grok" ? new GrokComponentFactory() : undefined;
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
-		this.options = { ...options, tuiMode };
+		this.options = { ...options, tuiMode, tuiEngine };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
@@ -702,10 +823,11 @@ export class InteractiveMode {
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
 			tuiMode,
-			tuiEngine: options.tuiEngine,
+			tuiEngine,
 			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 			logDirectory: getAgentDir(),
 			onRightClickPaste: this.onRightClickPaste,
+			onContentClick: this.onTranscriptContentClick,
 		});
 		this.ui = createInteractiveTuiReference(() => this.renderer);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
@@ -978,6 +1100,7 @@ export class InteractiveMode {
 			logDirectory: getAgentDir(),
 			terminal,
 			onRightClickPaste: this.onRightClickPaste,
+			onContentClick: this.onTranscriptContentClick,
 		});
 		nextUi.setClearOnShrink(clearOnShrink);
 		nextUi.onDebug = onDebug;
@@ -1086,67 +1209,55 @@ export class InteractiveMode {
 
 		await this.themeController.applyFromSettings();
 
-		// Grok owns its persistent top bar and stats chrome. Keep one empty
-		// built-in header slot so extension setHeader() retains the Pi ABI.
-		if (this.grokView) {
-			this.builtInHeader = new Text("", 0, 0);
-			this.headerContainer.addChild(this.builtInHeader);
-		} else if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
-
-			// Build startup instructions using keybinding hint helpers
+		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-
-			const expandedInstructions = [
-				hint("app.interrupt", "to interrupt"),
-				hint("app.clear", "to clear"),
-				rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
-				hint("app.exit", "to exit (empty)"),
-				hint("app.suspend", "to suspend"),
-				keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
-				hint("app.thinking.cycle", "to cycle thinking level"),
-				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
-				hint("app.model.select", "to select model"),
-				hint("app.tools.expand", "to expand tools"),
-				hint("app.thinking.toggle", "to expand thinking"),
-				hint("app.editor.external", "for external editor"),
-				rawKeyHint("/", "for commands"),
-				rawKeyHint("!", "to run bash"),
-				rawKeyHint("!!", "to run bash (no context)"),
-				hint("app.message.followUp", "to queue follow-up"),
-				hint("app.message.dequeue", "to edit all queued messages"),
-				hint("app.clipboard.pasteImage", "to paste image (with text fallback)"),
-				rawKeyHint("drop files", "to attach"),
-			].join("\n");
-			const compactInstructions = [
-				hint("app.interrupt", "interrupt"),
-				rawKeyHint(`${keyText("app.clear")}/${keyText("app.exit")}`, "clear/exit"),
-				rawKeyHint("/", "commands"),
-				rawKeyHint("!", "bash"),
-				hint("app.tools.expand", "more"),
-			].join(theme.fg("muted", " · "));
-			const compactOnboarding = theme.fg(
-				"dim",
-				`Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`,
-			);
-			const onboarding = theme.fg(
-				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
-			);
-			this.builtInHeader = new ExpandableText(
-				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
-				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
-				this.getStartupExpansionState(),
-				1,
-				0,
-			);
-
-			// Setup UI layout
+			this.builtInHeader = new EasyPiStartupHeader({
+				expanded: this.getStartupExpansionState(),
+				getTelemetry: () => {
+					return {
+						skills: this.session.resourceLoader.getSkills().skills.length,
+						prompts: this.session.promptTemplates.length,
+						extensions: this.session.resourceLoader
+							.getExtensions()
+							.extensions.filter((extension) => !extension.hidden).length,
+					};
+				},
+				getCompactHints: () => [
+					hint("app.interrupt", "interrupt"),
+					rawKeyHint("/", "commands"),
+					rawKeyHint("!", "shell"),
+					hint("app.tools.expand", "details"),
+				],
+				getExpandedHints: () => [
+					hint("app.interrupt", "to interrupt"),
+					hint("app.clear", "to clear"),
+					rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
+					hint("app.exit", "to exit (empty)"),
+					hint("app.suspend", "to suspend"),
+					keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
+					hint("app.thinking.cycle", "to cycle thinking level"),
+					rawKeyHint(
+						`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`,
+						"to cycle models",
+					),
+					hint("app.model.select", "to select model"),
+					hint("app.tools.expand", "to expand tools"),
+					hint("app.thinking.toggle", "to expand thinking"),
+					hint("app.editor.external", "for external editor"),
+					rawKeyHint("/", "for commands"),
+					rawKeyHint("!", "to run shell"),
+					rawKeyHint("!!", "to run shell (no context)"),
+					hint("app.message.followUp", "to queue follow-up"),
+					hint("app.message.dequeue", "to edit all queued messages"),
+					hint("app.clipboard.pasteImage", "to paste image (with text fallback)"),
+					rawKeyHint("drop files", "to attach"),
+				],
+			});
 			this.headerContainer.addChild(new Spacer(1));
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
 		} else {
-			// Minimal header when silenced
+			// Keep an empty built-in slot so extension setHeader() retains the Pi ABI.
 			this.builtInHeader = new Text("", 0, 0);
 			this.headerContainer.addChild(this.builtInHeader);
 		}
@@ -1186,6 +1297,15 @@ export class InteractiveMode {
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
+		this.signalStartupReady();
+	}
+
+	private signalStartupReady(): void {
+		// Flush every startup request against the final transcript before the
+		// semantic marker. AgentPort consumes the marker at the same xterm parser
+		// boundary and only then reveals a restarted Pi pane.
+		this.ui.renderNow();
+		this.ui.terminal.write(AGENTPORT_STARTUP_READY_SEQUENCE);
 	}
 
 	/**
@@ -1441,19 +1561,8 @@ export class InteractiveMode {
 		return result;
 	}
 
-	private formatContextPath(p: string): string {
-		const cwd = path.resolve(this.sessionManager.getCwd());
-		const absolutePath = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cwd, p);
-		const relativePath = getCwdRelativePath(absolutePath, cwd);
-		if (relativePath !== undefined) {
-			return relativePath;
-		}
-
-		return this.formatDisplayPath(absolutePath);
-	}
-
 	private getStartupExpansionState(): boolean {
-		return this.options.verbose || this.toolOutputExpanded;
+		return this.toolOutputExpanded;
 	}
 
 	/**
@@ -1494,115 +1603,6 @@ export class InteractiveMode {
 		}
 
 		return this.formatDisplayPath(fullPath);
-	}
-
-	private getCompactPathLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
-		const shortPath = this.getShortPath(resourcePath, sourceInfo);
-		const normalizedPath = shortPath.replace(/\\/g, "/");
-		const segments = normalizedPath.split("/").filter((segment) => segment.length > 0 && segment !== "~");
-		if (segments.length > 0) {
-			return segments[segments.length - 1]!;
-		}
-		return shortPath;
-	}
-
-	private getCompactPackageSourceLabel(sourceInfo?: SourceInfo): string {
-		const source = sourceInfo?.source ?? "";
-		if (source.startsWith("npm:")) {
-			return source.slice("npm:".length) || source;
-		}
-
-		const gitSource = parseGitUrl(source);
-		if (gitSource) {
-			return gitSource.path || source;
-		}
-
-		return source;
-	}
-
-	private getCompactExtensionLabel(resourcePath: string, sourceInfo?: SourceInfo): string {
-		if (!this.isPackageSource(sourceInfo)) {
-			return this.getCompactPathLabel(resourcePath, sourceInfo);
-		}
-
-		const sourceLabel = this.getCompactPackageSourceLabel(sourceInfo);
-		if (!sourceLabel) {
-			return this.getCompactPathLabel(resourcePath, sourceInfo);
-		}
-
-		const shortPath = this.getShortPath(resourcePath, sourceInfo).replace(/\\/g, "/");
-		const packagePath = shortPath.startsWith("extensions/") ? shortPath.slice("extensions/".length) : shortPath;
-		const parsedPath = path.posix.parse(packagePath);
-
-		if (parsedPath.name === "index") {
-			return !parsedPath.dir || parsedPath.dir === "." ? sourceLabel : `${sourceLabel}:${parsedPath.dir}`;
-		}
-
-		return `${sourceLabel}:${packagePath}`;
-	}
-
-	private getCompactDisplayPathSegments(resourcePath: string): string[] {
-		return this.formatDisplayPath(resourcePath)
-			.replace(/\\/g, "/")
-			.split("/")
-			.filter((segment) => segment.length > 0 && segment !== "~");
-	}
-
-	private getCompactNonPackageExtensionLabel(
-		resourcePath: string,
-		index: number,
-		allPaths: Array<{ path: string; segments: string[] }>,
-	): string {
-		const segments = allPaths[index]?.segments;
-		if (!segments || segments.length === 0) {
-			return this.getCompactPathLabel(resourcePath);
-		}
-
-		for (let segmentCount = 1; segmentCount <= segments.length; segmentCount += 1) {
-			const candidate = segments.slice(-segmentCount).join("/");
-			const isUnique = allPaths.every((item, itemIndex) => {
-				if (itemIndex === index) {
-					return true;
-				}
-				return item.segments.slice(-segmentCount).join("/") !== candidate;
-			});
-
-			if (isUnique) {
-				return candidate;
-			}
-		}
-
-		return segments.join("/");
-	}
-
-	private getCompactExtensionLabels(extensions: Array<{ path: string; sourceInfo?: SourceInfo }>): string[] {
-		const nonPackageExtensions = extensions
-			.map((extension) => {
-				const segments = this.getCompactDisplayPathSegments(extension.path);
-				const lastSegment = segments[segments.length - 1];
-				if (segments.length > 1 && (lastSegment === "index.ts" || lastSegment === "index.js")) {
-					segments.pop();
-				}
-				return {
-					path: extension.path,
-					sourceInfo: extension.sourceInfo,
-					segments,
-				};
-			})
-			.filter((extension) => !this.isPackageSource(extension.sourceInfo));
-
-		return extensions.map((extension) => {
-			if (this.isPackageSource(extension.sourceInfo)) {
-				return this.getCompactExtensionLabel(extension.path, extension.sourceInfo);
-			}
-
-			const nonPackageIndex = nonPackageExtensions.findIndex((item) => item.path === extension.path);
-			if (nonPackageIndex === -1) {
-				return this.getCompactPathLabel(extension.path, extension.sourceInfo);
-			}
-
-			return this.getCompactNonPackageExtensionLabel(extension.path, nonPackageIndex, nonPackageExtensions);
-		});
 	}
 
 	private getDisplaySourceInfo(sourceInfo?: SourceInfo): {
@@ -1810,29 +1810,21 @@ export class InteractiveMode {
 			return;
 		}
 
-		const sectionHeader = (name: string, color: ThemeColor = "mdHeading") => theme.fg(color, `[${name}]`);
-		const formatCompactList = (items: string[], options?: { sort?: boolean }): string => {
-			const labels = items.map((item) => item.trim()).filter((item) => item.length > 0);
-			if (options?.sort !== false) {
-				labels.sort((a, b) => a.localeCompare(b));
-			}
-			return theme.fg("dim", `  ${labels.join(", ")}`);
-		};
+		const sectionHeader = (name: string, summary: string, color: ThemeColor = "mdHeading") =>
+			`${theme.bold(theme.fg(color, name.toUpperCase()))}${theme.fg("dim", `  ${summary}`)}`;
 		const addLoadedSection = (
 			name: string,
-			collapsedBody: string,
-			expandedBody = collapsedBody,
+			summary: string,
+			expandedBody: string,
 			color: ThemeColor = "mdHeading",
 		): void => {
-			const section = new ExpandableText(
-				() => `${sectionHeader(name, color)}\n${collapsedBody}`,
-				() => `${sectionHeader(name, color)}\n${expandedBody}`,
-				this.getStartupExpansionState(),
-				0,
-				0,
+			this.loadedResourcesContainer.addChild(
+				new ExpandableResourceSection(
+					() => sectionHeader(name, summary, color),
+					() => expandedBody,
+					this.getStartupExpansionState(),
+				),
 			);
-			this.loadedResourcesContainer.addChild(section);
-			this.loadedResourcesContainer.addChild(new Spacer(1));
 		};
 
 		const skillsResult = this.session.resourceLoader.getSkills();
@@ -1877,15 +1869,14 @@ export class InteractiveMode {
 				...this.session.resourceLoader.getAgentsFiles().agentsFiles,
 			];
 			if (contextFiles.length > 0) {
-				this.loadedResourcesContainer.addChild(new Spacer(1));
 				const contextList = contextFiles
 					.map((f) => theme.fg("dim", `  ${this.formatDisplayPath(f.path)}`))
 					.join("\n");
-				const contextCompactList = formatCompactList(
-					contextFiles.map((contextFile) => this.formatContextPath(contextFile.path)),
-					{ sort: false },
+				addLoadedSection(
+					"Context",
+					`${contextFiles.length} ${contextFiles.length === 1 ? "source" : "sources"}`,
+					contextList,
 				);
-				addLoadedSection("Context", contextCompactList, contextList);
 			}
 
 			const skills = skillsResult.skills;
@@ -1897,8 +1888,7 @@ export class InteractiveMode {
 					formatPath: (item) => this.formatDisplayPath(item.path),
 					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
 				});
-				const skillCompactList = formatCompactList(skills.map((skill) => skill.name));
-				addLoadedSection("Skills", skillCompactList, skillList);
+				addLoadedSection("Skills", `${skills.length} loaded`, skillList);
 			}
 
 			const templates = this.session.promptTemplates;
@@ -1917,8 +1907,7 @@ export class InteractiveMode {
 						return template ? `/${template.name}` : this.formatDisplayPath(item.path);
 					},
 				});
-				const promptCompactList = formatCompactList(templates.map((template) => `/${template.name}`));
-				addLoadedSection("Prompts", promptCompactList, templateList);
+				addLoadedSection("Prompts", `${templates.length} loaded`, templateList);
 			}
 
 			if (extensions.length > 0) {
@@ -1928,8 +1917,7 @@ export class InteractiveMode {
 					formatPackagePath: (item) =>
 						this.formatExtensionDisplayPath(this.getShortPath(item.path, item.sourceInfo)),
 				});
-				const extensionCompactList = formatCompactList(this.getCompactExtensionLabels(extensions));
-				addLoadedSection("Extensions", extensionCompactList, extList, "mdHeading");
+				addLoadedSection("Extensions", `${extensions.length} loaded`, extList, "mdHeading");
 			}
 
 			// Show loaded themes (excluding built-in)
@@ -1946,26 +1934,11 @@ export class InteractiveMode {
 					formatPath: (item) => this.formatDisplayPath(item.path),
 					formatPackagePath: (item) => this.getShortPath(item.path, item.sourceInfo),
 				});
-				const themeCompactList = formatCompactList(
-					customThemes.map(
-						(loadedTheme) =>
-							loadedTheme.name ?? this.getCompactPathLabel(loadedTheme.sourcePath!, loadedTheme.sourceInfo),
-					),
-				);
-				addLoadedSection("Themes", themeCompactList, themeList);
+				addLoadedSection("Themes", `${customThemes.length} loaded`, themeList);
 			}
 		}
 
 		if (showDiagnostics) {
-			const skillDiagnostics = skillsResult.diagnostics;
-			if (skillDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(skillDiagnostics, sourceInfos);
-				this.loadedResourcesContainer.addChild(
-					new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0),
-				);
-				this.loadedResourcesContainer.addChild(new Spacer(1));
-			}
-
 			const promptDiagnostics = promptsResult.diagnostics;
 			if (promptDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(promptDiagnostics, sourceInfos);
@@ -2053,7 +2026,7 @@ export class InteractiveMode {
 						return { cancelled: true };
 					}
 
-					this.chatContainer.clear();
+					this.clearChatContainer();
 					this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
@@ -2156,9 +2129,10 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
+		this.grokTurnStartedAt = undefined;
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
@@ -2490,6 +2464,9 @@ export class InteractiveMode {
 		const index = this.headerContainer.children.indexOf(currentHeader);
 
 		if (factory) {
+			if (currentHeader === this.builtInHeader && isDisposable(this.builtInHeader)) {
+				this.builtInHeader.dispose();
+			}
 			// Create and add custom header
 			this.customHeader = factory(this.ui, theme);
 			if (isExpandable(this.customHeader)) {
@@ -3027,6 +3004,9 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
+		this.defaultEditor.onAction("app.prompt.prev", () => this.jumpToUserPrompt(-1));
+		this.defaultEditor.onAction("app.prompt.next", () => this.jumpToUserPrompt(1));
+		this.defaultEditor.onAction("app.prompt.list", () => this.showPromptJumpSelector());
 
 		this.defaultEditor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
@@ -3315,6 +3295,7 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.startGrokTurnTiming();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -3382,6 +3363,9 @@ export class InteractiveMode {
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage, true);
+					if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
+						this.updateTurnThinking(this.streamingComponent, true);
+					}
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -3391,7 +3375,7 @@ export class InteractiveMode {
 									content.id,
 									content.arguments,
 								);
-								this.chatContainer.addChild(component);
+								this.addToolComponentToChat(component);
 								this.pendingTools.set(content.id, component);
 							} else {
 								const component = this.pendingTools.get(content.id);
@@ -3419,6 +3403,9 @@ export class InteractiveMode {
 						this.streamingMessage.errorMessage = errorMessage;
 					}
 					this.streamingComponent.updateContent(this.streamingMessage, false);
+					if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
+						this.updateTurnThinking(this.streamingComponent, false);
+					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -3453,7 +3440,7 @@ export class InteractiveMode {
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
 					component = this.createToolExecutionComponent(event.toolName, event.toolCallId, event.args);
-					this.chatContainer.addChild(component);
+					this.addToolComponentToChat(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
 				component.markExecutionStarted();
@@ -3491,6 +3478,13 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				if (!event.willRetry) {
+					this.completeCurrentTurnThinking();
+					const duration = this.finishGrokTurnTiming();
+					if (duration !== undefined) {
+						this.chatContainer.addChild(new GrokTurnDurationComponent(duration, this.outputPad));
+					}
+				}
 
 				this.ui.requestRender();
 				break;
@@ -3531,7 +3525,7 @@ export class InteractiveMode {
 				} else if (event.result) {
 					const entries = this.sessionManager.buildContextEntries();
 					if (entries[0]?.type === "compaction" && !Array.isArray(entries[0].replacementHistory)) {
-						this.chatContainer.clear();
+						this.clearChatContainer();
 						// Legacy compaction prepends its summary for model context; append it
 						// below at its chronological position instead.
 						this.renderSessionEntries(entries.slice(1));
@@ -3739,6 +3733,10 @@ export class InteractiveMode {
 				break;
 			}
 			case "user": {
+				// A user prompt closes the previous history turn and starts new groups.
+				this.completeCurrentTurnThinking();
+				this.currentTurnThinkingGroup = undefined;
+				this.currentTurnToolGroup = undefined;
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
 					if (this.chatContainer.children.length > 0) {
@@ -3772,6 +3770,9 @@ export class InteractiveMode {
 			case "assistant": {
 				const assistantComponent = this.createAssistantMessageComponent(message);
 				this.chatContainer.addChild(assistantComponent);
+				if (assistantComponent instanceof GrokAssistantMessageComponent) {
+					this.updateTurnThinking(assistantComponent, false);
+				}
 				break;
 			}
 			case "toolResult": {
@@ -3789,6 +3790,8 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
+		this.currentTurnThinkingGroup = undefined;
+		this.currentTurnToolGroup = undefined;
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
@@ -3819,7 +3822,7 @@ export class InteractiveMode {
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
 						const component = this.createToolExecutionComponent(content.name, content.id, content.arguments);
-						this.chatContainer.addChild(component);
+						this.addToolComponentToChat(component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -3858,6 +3861,8 @@ export class InteractiveMode {
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
+		// Replayed session items are settled history, not an active streaming turn.
+		this.completeCurrentTurnThinking();
 		this.ui.requestRender();
 	}
 
@@ -3983,7 +3988,7 @@ export class InteractiveMode {
 	}
 
 	private rebuildChatFromMessages(): void {
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.renderSessionEntries(this.sessionManager.buildTranscriptEntries());
 	}
 
@@ -4227,12 +4232,15 @@ export class InteractiveMode {
 	}
 
 	private updateEditorBorderColor(): void {
+		let borderColor: (text: string) => string;
 		if (this.isBashMode) {
-			this.editor.borderColor = theme.getBashModeBorderColor();
+			borderColor = theme.getBashModeBorderColor();
 		} else {
 			const level = this.session.thinkingLevel || "off";
-			this.editor.borderColor = theme.getThinkingBorderColor(level);
+			borderColor = theme.getThinkingBorderColor(level);
 		}
+		this.editor.borderColor = borderColor;
+		this.grokView?.setEditorBorderColor(borderColor);
 		this.ui.requestRender();
 	}
 
@@ -4241,9 +4249,11 @@ export class InteractiveMode {
 		if (newLevel === undefined) {
 			this.showStatus("Current model does not support thinking");
 		} else {
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
-			this.showStatus(`Thinking level: ${newLevel}`);
+			if (this.grokView) {
+				if (!this.activeStatusIndicator) this.grokView.showTransientStatus(`Thinking level: ${newLevel}`);
+			} else {
+				this.showStatus(`Thinking level: ${newLevel}`);
+			}
 		}
 	}
 
@@ -4270,6 +4280,151 @@ export class InteractiveMode {
 		this.setToolsExpanded(!this.toolOutputExpanded);
 	}
 
+	/**
+	 * Row offsets of chat children inside the transcript ScrollView content.
+	 * Shared by transcript click hit-testing and user-prompt navigation.
+	 */
+	private computeChatChildOffsets(width: number): Array<{ component: Component; start: number; height: number }> {
+		let cursor = 0;
+		for (const child of this.documentContainer.children) {
+			if (child === this.chatContainer) break;
+			cursor += child.render(width).length;
+		}
+		const offsets: Array<{ component: Component; start: number; height: number }> = [];
+		for (const child of this.chatContainer.children) {
+			const height = child.render(width).length;
+			offsets.push({ component: child, start: cursor, height });
+			cursor += height;
+		}
+		return offsets;
+	}
+
+	private transcriptContentWidth(): number {
+		const terminal = interactiveTuiTerminals.get(this.renderer) ?? this.renderer.terminal;
+		return this.transcriptScrollView?.getContentWidth(terminal.columns) ?? terminal.columns;
+	}
+
+	private handleTranscriptContentClick(click: { scrollView: ScrollView; row: number; col: number }): boolean {
+		if (!this.grokComponentFactory) return false;
+		if (!this.transcriptScrollView || click.scrollView !== this.transcriptScrollView) return false;
+		const width = this.transcriptContentWidth();
+		const target = this.computeChatChildOffsets(width).find(
+			(entry) => click.row >= entry.start && click.row < entry.start + entry.height,
+		);
+		if (!target) return false;
+		const localRow = click.row - target.start;
+		let toggled = false;
+		if (target.component instanceof GrokThinkingTurnGroupComponent) {
+			toggled = target.component.handleOverviewClick(localRow);
+		} else if (target.component instanceof GrokToolTurnGroupComponent) {
+			toggled = target.component.handleOverviewClick(localRow, width);
+		} else if (target.component instanceof GrokToolExecutionComponent) {
+			toggled = target.component.handleOverviewClick(localRow);
+		} else if (target.component instanceof GrokAssistantMessageComponent) {
+			toggled = target.component.handleThinkingLabelClick(localRow, width);
+		}
+		if (toggled) {
+			this.ui.requestRender();
+		}
+		return toggled;
+	}
+
+	private promptHighlight: { component: GrokUserMessageComponent; timer: ReturnType<typeof setTimeout> } | undefined;
+
+	private ensurePromptNavigationViewport(): boolean {
+		if (!this.grokComponentFactory || !this.transcriptScrollView) return false;
+		if (this.renderer.mode === "fullscreen") return true;
+		return this.switchTuiMode("fullscreen");
+	}
+
+	private jumpToUserPrompt(direction: -1 | 1): void {
+		if (!this.ensurePromptNavigationViewport()) return;
+		const transcriptScrollView = this.transcriptScrollView;
+		if (!transcriptScrollView) return;
+		const width = this.transcriptContentWidth();
+		const prompts = this.computeChatChildOffsets(width).filter(
+			(entry) => entry.component instanceof UserMessageComponent,
+		);
+		if (prompts.length === 0) {
+			this.showStatus("No user prompts to jump to");
+			return;
+		}
+		const targetIndex = findPromptJumpTarget(
+			prompts.map((prompt) => prompt.start),
+			transcriptScrollView.scrollTop,
+			direction,
+		);
+		if (targetIndex === undefined) return;
+		const target = prompts[targetIndex];
+		if (!target) return;
+		this.scrollToTranscriptRow(target.start, target.component);
+	}
+
+	private scrollToTranscriptRow(start: number, component: Component): void {
+		this.transcriptScrollView?.scrollTo(start);
+		this.highlightUserPrompt(component);
+		this.ui.requestRender();
+	}
+
+	private scrollToUserPrompt(component: UserMessageComponent): void {
+		if (!this.transcriptScrollView) return;
+		const width = this.transcriptContentWidth();
+		const entry = this.computeChatChildOffsets(width).find((candidate) => candidate.component === component);
+		if (!entry) return;
+		this.scrollToTranscriptRow(entry.start, component);
+	}
+
+	private showPromptJumpSelector(): void {
+		if (!this.ensurePromptNavigationViewport()) return;
+		const prompts = this.chatContainer.children.filter(
+			(child): child is UserMessageComponent => child instanceof UserMessageComponent,
+		);
+		if (prompts.length === 0) {
+			this.showStatus("No user prompts to jump to");
+			return;
+		}
+
+		this.showSelector((done) => {
+			const selector = new UserMessageSelectorComponent(
+				prompts.map((prompt, index) => ({ id: String(index), text: prompt.getText() })),
+				(id) => {
+					done();
+					const target = prompts[Number.parseInt(id, 10)];
+					if (target) {
+						this.scrollToUserPrompt(target);
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				String(prompts.length - 1),
+				{
+					title: "Jump to Prompt",
+					description: "Select a user prompt to scroll the transcript to it",
+				},
+			);
+			return { component: selector, focus: selector.getMessageList() };
+		});
+	}
+
+	private highlightUserPrompt(component: Component): void {
+		if (this.promptHighlight) {
+			this.promptHighlight.component.setHighlighted(false);
+			clearTimeout(this.promptHighlight.timer);
+			this.promptHighlight = undefined;
+		}
+		if (!(component instanceof GrokUserMessageComponent)) return;
+		component.setHighlighted(true);
+		const timer = setTimeout(() => {
+			component.setHighlighted(false);
+			this.promptHighlight = undefined;
+			this.ui.requestRender();
+		}, 1200);
+		timer.unref?.();
+		this.promptHighlight = { component, timer };
+	}
+
 	private setToolsExpanded(expanded: boolean): void {
 		if (expanded === this.toolOutputExpanded) return;
 
@@ -4293,7 +4448,7 @@ export class InteractiveMode {
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 
 		// Rebuild chat from session messages
-		this.chatContainer.clear();
+		this.clearChatContainer();
 		this.rebuildChatFromMessages();
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
@@ -4301,6 +4456,9 @@ export class InteractiveMode {
 			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 			this.streamingComponent.updateContent(this.streamingMessage);
 			this.chatContainer.addChild(this.streamingComponent);
+			if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
+				this.updateTurnThinking(this.streamingComponent, true);
+			}
 		}
 
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
@@ -4346,49 +4504,18 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(release: LatestPiRelease): void {
-		const action = theme.fg("accent", `${APP_NAME} update`);
-		const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
-		const changelogUrl = "https://pi.dev/changelog";
-		const changelogLink = getCapabilities().hyperlinks
-			? hyperlink(theme.fg("accent", changelogUrl), changelogUrl)
-			: theme.fg("accent", changelogUrl);
-		const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
-		const note = release.note?.trim();
-
+		const changelog = release.changelogUrl ? ` · ${release.changelogUrl}` : "";
+		const message = `Update available: v${release.version} · Run ${APP_NAME} update${changelog}`;
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
-			new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0),
-		);
-		if (note) {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
-				new Markdown(note, 1, 0, this.getMarkdownThemeWithSettings(), {
-					color: (text) => theme.fg("muted", text),
-				}),
-			);
-			this.chatContainer.addChild(new Spacer(1));
-		}
-		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(new Text(theme.fg("dim", message), 1, 0));
 		this.ui.requestRender();
 	}
 
 	showPackageUpdateNotification(packages: string[]): void {
-		const action = theme.fg("accent", `${APP_NAME} update --extensions`);
-		const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
-		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
-
+		const count = `${packages.length} ${packages.length === 1 ? "package" : "packages"}`;
+		const message = `Package updates available: ${count} · Run ${APP_NAME} update --extensions`;
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
-			new Text(
-				`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
-				1,
-				0,
-			),
-		);
-		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(new Text(theme.fg("dim", message), 1, 0));
 		this.ui.requestRender();
 	}
 
@@ -4662,7 +4789,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof GrokToolTurnGroupComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -4670,7 +4797,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof GrokToolTurnGroupComponent) {
 								child.setImageWidthCells(width);
 							}
 						}
@@ -4718,7 +4845,7 @@ export class InteractiveMode {
 								child.setHideThinkingBlock(hidden);
 							}
 						}
-						this.chatContainer.clear();
+						this.clearChatContainer();
 						this.rebuildChatFromMessages();
 					},
 					onMermaidRenderingModeChange: (mode) => {
@@ -5287,7 +5414,7 @@ export class InteractiveMode {
 						}
 
 						// Update UI
-						this.chatContainer.clear();
+						this.clearChatContainer();
 						this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
@@ -6455,6 +6582,9 @@ export class InteractiveMode {
 		const cycleModelForward = this.getAppKeyDisplay("app.model.cycleForward");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
+		const promptPrev = this.getAppKeyDisplay("app.prompt.prev");
+		const promptNext = this.getAppKeyDisplay("app.prompt.next");
+		const promptList = this.getAppKeyDisplay("app.prompt.list");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
 		const cycleModelBackward = this.getAppKeyDisplay("app.model.cycleBackward");
@@ -6501,6 +6631,8 @@ export class InteractiveMode {
 | \`${selectModel}\` | Open model selector |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
+| \`${promptPrev}\` / \`${promptNext}\` | Jump to previous/next user prompt (grok TUI) |
+| \`${promptList}\` | Open user prompt list to jump (grok TUI) |
 | \`${externalEditor}\` | Edit message in external editor |
 | \`${copyMessage}\` | Copy last assistant message |
 | \`${followUp}\` | Queue follow-up message |
@@ -6713,6 +6845,9 @@ export class InteractiveMode {
 		this.clearStatusIndicator();
 		this.themeController.disableAutoSync();
 		this.clearExtensionTerminalInputListeners();
+		if (isDisposable(this.builtInHeader)) {
+			this.builtInHeader.dispose();
+		}
 		this.footer.dispose();
 		this.grokView?.dispose();
 		this.footerDataProvider.dispose();

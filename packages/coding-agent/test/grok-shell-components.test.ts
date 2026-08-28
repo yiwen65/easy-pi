@@ -1,5 +1,8 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Component, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
+import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { type GrokChromeTheme, GrokComponentFactory } from "../src/modes/interactive-grok/grok-component-factory.ts";
@@ -14,6 +17,7 @@ const identityTheme: GrokChromeTheme = {
 	success: identity,
 	warning: identity,
 	error: identity,
+	thinkingLevel: (_level, text) => text,
 };
 
 /** Theme that wraps each style in distinct ANSI codes so styling is assertable at zero visible width. */
@@ -24,6 +28,7 @@ const D = "\x1b[34m";
 const S = "\x1b[35m";
 const W = "\x1b[36m";
 const E = "\x1b[91m";
+const P = "\x1b[95m";
 const X = "\x1b[0m";
 const markerTheme: GrokChromeTheme = {
 	text: (text) => `${T}${text}${X}`,
@@ -34,6 +39,21 @@ const markerTheme: GrokChromeTheme = {
 	success: (text) => `${S}${text}${X}`,
 	warning: (text) => `${W}${text}${X}`,
 	error: (text) => `${E}${text}${X}`,
+	thinkingLevel: (level: ThinkingLevel, text: string) => {
+		const style =
+			level === "minimal"
+				? markerTheme.muted
+				: level === "low"
+					? markerTheme.text
+					: level === "medium"
+						? markerTheme.accent
+						: level === "high"
+							? markerTheme.warning
+							: level === "xhigh"
+								? markerTheme.error
+								: (value: string) => `${P}${value}${X}`;
+		return style(text);
+	},
 };
 
 interface StubUsage {
@@ -173,6 +193,16 @@ describe("Grok shell components", () => {
 		expectWithinWidth(frame, [40, 80, 120]);
 	});
 
+	it("renders the Grok editor frame with the active thinking-level border color", () => {
+		const frame = new GrokComponentFactory(identityTheme).createEditorFrame(new EditorHost());
+		const maxBorder = (text: string) => `${P}${text}${X}`;
+		frame.setBorderColor(maxBorder);
+
+		const rendered = frame.render(40);
+		expect(rendered[0]).toBe(maxBorder(`╭${"─".repeat(38)}╮`));
+		expect(rendered.at(-1)).toBe(maxBorder(`╰${"─".repeat(38)}╯`));
+	});
+
 	it("updates status synchronously and does not create animation timers", () => {
 		const timerSpy = vi.spyOn(globalThis, "setTimeout");
 		const intervalSpy = vi.spyOn(globalThis, "setInterval");
@@ -187,6 +217,71 @@ describe("Grok shell components", () => {
 		timerSpy.mockRestore();
 		intervalSpy.mockRestore();
 		expectWithinWidth(status, [40, 80, 120]);
+	});
+
+	it("reserves the transient status row and clears it without changing layout height", () => {
+		vi.useFakeTimers();
+		const intervalSpy = vi.spyOn(globalThis, "setInterval");
+		const requestRender = vi.fn();
+		const factory = new GrokComponentFactory(identityTheme);
+		const view = factory.createInteractiveView({
+			document: new StubComponent(["document"]),
+			transcriptViewport: new StubComponent(["viewport"]),
+			editorHost: new EditorHost(),
+			location: { path: "/workspace" },
+			contextPercent: 10,
+			ui: { requestRender },
+		});
+
+		try {
+			expect(view.status.render(80)).toEqual([""]);
+			expect(intervalSpy).not.toHaveBeenCalled();
+			view.showTransientStatus("Thinking level: max", 900);
+			expect(view.status.render(80)[0]).toContain("Thinking level: max");
+			expect(view.status.render(80)).toHaveLength(1);
+			expect(requestRender).toHaveBeenCalledTimes(1);
+
+			vi.advanceTimersByTime(900);
+			expect(view.status.render(80)).toEqual([""]);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+		} finally {
+			view.dispose();
+			intervalSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps transient status updates on the differential render path", () => {
+		vi.useFakeTimers();
+		const terminal = new VirtualTerminal(80, 24);
+		const ui = new TuiMainScreen(terminal);
+		ui.setClearOnShrink(true);
+		const view = new GrokComponentFactory(identityTheme).createInteractiveView({
+			document: new StubComponent(["document"]),
+			transcriptViewport: new StubComponent(["viewport"]),
+			editorHost: new EditorHost(),
+			location: { path: "/workspace" },
+			contextPercent: 10,
+			ui,
+		});
+		for (const component of view.regularComponents) ui.addChild(component);
+
+		try {
+			ui.renderNow();
+			const initialFullRedraws = ui.fullRedraws;
+
+			view.showTransientStatus("Thinking level: max", 900);
+			ui.renderNow();
+			expect(ui.fullRedraws).toBe(initialFullRedraws);
+
+			vi.advanceTimersByTime(900);
+			ui.renderNow();
+			expect(ui.fullRedraws).toBe(initialFullRedraws);
+		} finally {
+			view.dispose();
+			ui.stop({ preserveScreen: true });
+			vi.useRealTimers();
+		}
 	});
 
 	it("renders extension statuses and lets a custom footer replace the Grok footer", () => {
@@ -240,7 +335,7 @@ describe("Grok shell components", () => {
 			"extension working indicator",
 		);
 		view.setStatusComponent();
-		expect(view.regularComponents.flatMap((component) => component.render(80)).join("\n")).toContain("○ Ready");
+		expect(view.regularComponents.flatMap((component) => component.render(80)).join("\n")).not.toContain("Ready");
 		expectWithinWidth(view.fullscreenRoot, [40, 80, 120]);
 		view.dispose();
 	});
@@ -261,7 +356,7 @@ describe("Grok shell components", () => {
 
 		const rendered = view.regularComponents.flatMap((component) => component.render(120)).join("\n");
 		expect(rendered).toContain("(main)");
-		expect(rendered).toContain("↑188k ↓17k R1.7M CH90.0% $2.279 35.8%/272k (auto)");
+		expect(rendered).toContain("↑188k ↓17k R1.7M CR90.0% $2.279 35.8%/272k (auto)");
 		expect(rendered).toContain("(openai-codex) gpt-5.6-sol • high");
 		expectWithinWidth(view.fullscreenRoot, [40, 80, 120]);
 		view.dispose();
@@ -282,7 +377,7 @@ describe("GrokStatsBar", () => {
 		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }), createStubFooterData(2));
 
 		const line = bar.render(120)[0] ?? "";
-		expect(line).toContain("↑188k ↓17k R1.7M CH90.0% $2.279 35.8%/272k (auto)");
+		expect(line).toContain("↑188k ↓17k R1.7M CR90.0% $2.279 35.8%/272k (auto)");
 		expect(line).toContain("(openai-codex) gpt-5.6-sol • high");
 		expectWithinWidth(bar, [40, 80, 120]);
 	});
@@ -323,10 +418,12 @@ describe("GrokStatsBar", () => {
 		expect(levelOf("medium").render(120)[0]).toContain(`${A}medium${X}`);
 		expect(levelOf("high").render(120)[0]).toContain(`${W}high${X}`);
 		expect(levelOf("xhigh").render(120)[0]).toContain(`${E}xhigh${X}`);
+		expect(levelOf("max").render(120)[0]).toContain(`${P}max${X}`);
 	});
 
-	it("flashes the model side in accent when the thinking level changes, then settles to the level color", () => {
+	it("updates the thinking level color immediately without scheduling a fade repaint", () => {
 		vi.useFakeTimers();
+		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		try {
 			const session = createStubSession({ usage: fullUsage, thinkingLevel: "high" });
 			const requestRender = vi.fn();
@@ -337,14 +434,12 @@ describe("GrokStatsBar", () => {
 
 			(session.state as { thinkingLevel: string }).thinkingLevel = "low";
 			const switched = bar.render(120)[0] ?? "";
-			expect(switched).toContain(`${A}gpt-5.6-sol • low${X}`);
-
-			vi.advanceTimersByTime(1300);
-			expect(requestRender).toHaveBeenCalled();
-			const settled = bar.render(120)[0] ?? "";
-			expect(settled).toContain(`${A}gpt-5.6-sol${X}${M} • ${X}${T}low${X}`);
+			expect(switched).toContain(`${A}gpt-5.6-sol${X}${M} • ${X}${T}low${X}`);
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(timeoutSpy).not.toHaveBeenCalled();
 			bar.dispose();
 		} finally {
+			timeoutSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});

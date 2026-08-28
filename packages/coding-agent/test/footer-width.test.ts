@@ -2,7 +2,11 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
-import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
+import {
+	computeSessionUsageStats,
+	FooterComponent,
+	formatCwdForFooter,
+} from "../src/modes/interactive/components/footer.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -21,15 +25,16 @@ function createSession(options: {
 	reasoning?: boolean;
 	thinkingLevel?: string;
 	usage?: AssistantUsage;
+	usages?: AssistantUsage[];
 	branchUsage?: AssistantUsage;
 	compactionUsage?: AssistantUsage;
 	toolUsage?: AssistantUsage;
 	usingSubscription?: boolean;
 }): AgentSession {
-	const usage = options.usage;
+	const usages = options.usages ?? (options.usage === undefined ? [] : [options.usage]);
 	const entries: Array<Record<string, unknown>> = [];
 
-	if (usage !== undefined) {
+	for (const usage of usages) {
 		entries.push({
 			type: "message",
 			message: {
@@ -190,7 +195,7 @@ describe("FooterComponent width handling", () => {
 		expect(statsLine).toContain("$1.250");
 	});
 
-	it("shows the latest cache hit rate when cache usage is present", () => {
+	it("shows the latest cache-read ratio when cache usage is present", () => {
 		const session = createSession({
 			sessionName: "",
 			usage: {
@@ -204,7 +209,33 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
-		expect(statsLine).toContain("CH25.0%");
+		expect(statsLine).toContain("CR25.0%");
+	});
+
+	it("uses the latest assistant usage for 0% and 100% cache-read boundaries", () => {
+		const cost = { total: 0 };
+		const zero = createSession({
+			sessionName: "",
+			usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 20, cost },
+		});
+		const full = createSession({
+			sessionName: "",
+			usage: { input: 0, output: 0, cacheRead: 100, cacheWrite: 0, cost },
+		});
+		const latestWins = createSession({
+			sessionName: "",
+			usages: [
+				{ input: 0, output: 0, cacheRead: 100, cacheWrite: 0, cost },
+				{ input: 100, output: 0, cacheRead: 0, cacheWrite: 0, cost },
+			],
+			toolUsage: { input: 0, output: 0, cacheRead: 500, cacheWrite: 0, cost },
+		});
+
+		expect(computeSessionUsageStats(zero).latestCacheReadRatio).toBe(0);
+		expect(computeSessionUsageStats(full).latestCacheReadRatio).toBe(100);
+		const latest = computeSessionUsageStats(latestWins);
+		expect(latest.latestCacheReadRatio).toBe(0);
+		expect(latest.totals.cacheRead).toBe(600);
 	});
 
 	it("marks Kimi Coding costs as subscription estimates", () => {

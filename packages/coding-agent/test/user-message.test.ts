@@ -55,4 +55,10 @@ describe("UserMessageComponent", () => {
 
 		expect(stripAnsi(component.render(80).join("\n"))).toContain("Message after");
 	});
+
+	test("exposes the raw message text for navigation lists", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("raw **markdown** text");
+		expect(component.getText()).toBe("raw **markdown** text");
+	});
 });

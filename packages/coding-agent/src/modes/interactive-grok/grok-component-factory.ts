@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Component } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
@@ -22,6 +23,7 @@ export interface GrokChromeTheme {
 	success: (text: string) => string;
 	warning: (text: string) => string;
 	error: (text: string) => string;
+	thinkingLevel: (level: ThinkingLevel, text: string) => string;
 }
 
 export function createDefaultGrokChromeTheme(overrides: Partial<GrokChromeTheme> = {}): GrokChromeTheme {
@@ -34,6 +36,7 @@ export function createDefaultGrokChromeTheme(overrides: Partial<GrokChromeTheme>
 		success: (text) => theme.fg("success", text),
 		warning: (text) => theme.fg("warning", text),
 		error: (text) => theme.fg("error", text),
+		thinkingLevel: (level, text) => theme.getThinkingBorderColor(level)(text),
 		...overrides,
 	};
 }
@@ -49,8 +52,8 @@ export class GrokComponentFactory {
 		return new GrokTopBar(location, contextPercent, this.theme);
 	}
 
-	createStatus(state: GrokStatusState = { kind: "idle", label: "Ready" }, ui?: GrokRenderDriver): GrokStatus {
-		return new GrokStatus(state, this.theme, { ui });
+	createStatus(state: GrokStatusState = { kind: "idle", label: "Ready" }): GrokStatus {
+		return new GrokStatus(state, this.theme);
 	}
 
 	createEditorFrame(editorHost: Component): GrokEditorFrame {

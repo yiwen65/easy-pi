@@ -16,7 +16,7 @@ export interface GrokInteractiveViewOptions {
 	contextPercent: number | null;
 	/** When provided, a stats bar with native Pi token/model info is mounted. */
 	session?: AgentSession;
-	/** Render driver for flash/pulse animations. Omit for a fully static chrome. */
+	/** Render driver for stats-bar flash animations. Omit for fully static stats. */
 	ui?: GrokRenderDriver;
 	status?: GrokStatusState;
 	footerData?: ReadonlyFooterDataProvider;
@@ -33,13 +33,16 @@ export class GrokInteractiveView {
 	readonly statsBar: GrokStatsBar | undefined;
 	readonly footer: GrokFooter;
 	private readonly statusSlot: Container;
+	private readonly ui: GrokRenderDriver | undefined;
+	private transientStatusTimer: ReturnType<typeof setTimeout> | undefined;
 	readonly regularComponents: readonly Component[];
 	readonly fullscreenRoot: Component;
 
 	constructor(options: GrokInteractiveViewOptions) {
 		const theme = options.theme;
 		this.topBar = new GrokTopBar(options.location, options.contextPercent, theme);
-		this.status = new GrokStatus(options.status ?? { kind: "idle", label: "Ready" }, theme, { ui: options.ui });
+		this.ui = options.ui;
+		this.status = new GrokStatus(options.status ?? { kind: "idle", label: "Ready" }, theme, { reserveLine: true });
 		this.editorFrame = new GrokEditorFrame(options.editorHost, { theme });
 		this.statsBar = options.session
 			? new GrokStatsBar(options.session, theme, options.footerData, options.ui)
@@ -83,6 +86,10 @@ export class GrokInteractiveView {
 		this.editorFrame.setEditorHost(editorHost);
 	}
 
+	setEditorBorderColor(borderColor: (text: string) => string): void {
+		this.editorFrame.setBorderColor(borderColor);
+	}
+
 	setLocation(location: GrokLocation): void {
 		this.topBar.setLocation(location);
 	}
@@ -103,14 +110,25 @@ export class GrokInteractiveView {
 		this.status.setState(status);
 	}
 
+	showTransientStatus(label: string, durationMs = 900): void {
+		if (this.transientStatusTimer) clearTimeout(this.transientStatusTimer);
+		this.status.setState({ kind: "success", label });
+		this.setStatusComponent();
+		this.ui?.requestRender();
+		this.transientStatusTimer = setTimeout(() => {
+			this.transientStatusTimer = undefined;
+			this.status.setState({ kind: "idle", label: "" });
+			this.ui?.requestRender();
+		}, durationMs);
+		this.transientStatusTimer.unref?.();
+	}
+
 	setStatusComponent(component?: Component): void {
-		this.status.setActive(component === undefined);
 		this.statusSlot.clear();
 		this.statusSlot.addChild(component ?? this.status);
 	}
 
 	setStatusVisible(visible: boolean): void {
-		this.status.setActive(visible);
 		this.statusSlot.clear();
 		if (visible) this.statusSlot.addChild(this.status);
 	}
@@ -120,7 +138,10 @@ export class GrokInteractiveView {
 	}
 
 	dispose(): void {
-		this.status.dispose();
+		if (this.transientStatusTimer) {
+			clearTimeout(this.transientStatusTimer);
+			this.transientStatusTimer = undefined;
+		}
 		this.statsBar?.dispose();
 	}
 }
