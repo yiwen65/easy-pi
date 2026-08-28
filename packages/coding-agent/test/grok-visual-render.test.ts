@@ -16,6 +16,7 @@ const identityTheme: GrokChromeTheme = {
 	success: identity,
 	warning: identity,
 	error: identity,
+	thinkingLevel: (_level, text) => text,
 };
 
 class FixedComponent implements Component {
@@ -86,7 +87,7 @@ describe("Grok visual contract", () => {
 		expect(renderRegular(view.regularComponents, 40)).toEqual([
 			"/workspace                    ███░░░ 42%",
 			"transcript",
-			"○ Ready                                 ",
+			"",
 			"╭──────────────────────────────────────╮",
 			"│❯ Build anything                      │",
 			"╰──────────────────────────────────────╯",

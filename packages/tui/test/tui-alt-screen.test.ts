@@ -54,6 +54,24 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("TuiAltScreen", () => {
+	it("does not let rendered log content exit the alternate screen", async () => {
+		const terminal = new RecordingTerminal();
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("before\x1b[?1049lmiddle\x1b[?1049hafter", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		const writes = terminal.events
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+		assert.strictEqual(writes.includes("\x1b[?1049l"), false);
+		assert.strictEqual(writes.match(/\x1b\[\?1049h/g)?.length, 1, "only the renderer may enter alternate screen");
+		assert.match(terminal.getViewport().join("\n"), /beforemiddleafter/);
+
+		tui.stop();
+	});
+
 	it("renders a terminal-height viewport and preserves manual scroll position", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -337,6 +355,62 @@ describe("TuiAltScreen", () => {
 			terminal.events.some((event) => event.type === "write" && event.data.includes(expected)),
 			JSON.stringify(terminal.events.filter((event) => event.type === "write" && event.data.includes("\x1b]52;c;"))),
 		);
+		tui.stop();
+	});
+
+	it("dispatches content clicks and lets the handler consume them", async () => {
+		const terminal = new RecordingTerminal(10, 2);
+		const clicks: Array<{ row: number; col: number }> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onContentClick: (click) => {
+				clicks.push({ row: click.row, col: click.col });
+				return true;
+			},
+		});
+		const scrollView = new ScrollView(new Text("l1\nl2\nl3\nl4", 0, 0), { follow: "end", primary: true });
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(scrollView.scrollTop, 2);
+
+		// Press + release on the same cell: content row = scrollTop + y - 1.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(clicks, [{ row: 2, col: 0 }]);
+		// Consumed clicks skip the selection copy (no OSC 52 write).
+		assert.ok(!terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b]52;")));
+		tui.stop();
+	});
+
+	it("keeps drag selection and falls through when the content click is not consumed", async () => {
+		const terminal = new RecordingTerminal(10, 2);
+		const clicks: Array<{ row: number; col: number }> = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			onContentClick: (click) => {
+				clicks.push({ row: click.row, col: click.col });
+				return false;
+			},
+		});
+		tui.setLayoutRoot(new ScrollView(new Text("123456789A\nabcdefghij\nmore\nlines", 0, 0), { primary: true }));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag: no content click, selection copied as before.
+		terminal.sendInput("\x1b[<0;10;1M");
+		terminal.sendInput("\x1b[<32;10;2M");
+		terminal.sendInput("\x1b[<0;10;2m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(clicks, []);
+		const expected = `\x1b]52;c;${Buffer.from("A\nabcdefghij").toString("base64")}\x07`;
+		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes(expected)));
+
+		// Unconsumed click (handler returns false): selection copy still happens.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(clicks, [{ row: 0, col: 0 }]);
 		tui.stop();
 	});
 

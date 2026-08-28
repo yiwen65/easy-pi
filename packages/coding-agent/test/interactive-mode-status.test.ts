@@ -118,6 +118,28 @@ describe("InteractiveMode.showStatus", () => {
 	});
 });
 
+describe("InteractiveMode.cycleThinkingLevel", () => {
+	test("uses a transient Grok status instead of appending to the transcript", () => {
+		const fakeThis = {
+			session: { cycleThinkingLevel: vi.fn(() => "max") },
+			footer: { invalidate: vi.fn() },
+			updateEditorBorderColor: vi.fn(),
+			grokView: { showTransientStatus: vi.fn() },
+			activeStatusIndicator: undefined,
+			showStatus: vi.fn(),
+		};
+
+		(
+			InteractiveMode.prototype as unknown as {
+				cycleThinkingLevel(this: typeof fakeThis): void;
+			}
+		).cycleThinkingLevel.call(fakeThis);
+
+		expect(fakeThis.grokView.showTransientStatus).toHaveBeenCalledWith("Thinking level: max");
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+	});
+});
+
 describe("InteractiveMode.showManagedToolStatus", () => {
 	beforeAll(() => initTheme("dark"));
 
@@ -559,7 +581,6 @@ describe("InteractiveMode.showLoadedResources", () => {
 			formatDisplayPath: (p: string) => (InteractiveMode as any).prototype.formatDisplayPath.call(fakeThis, p),
 			formatExtensionDisplayPath: (p: string) =>
 				(InteractiveMode as any).prototype.formatExtensionDisplayPath.call(fakeThis, p),
-			formatContextPath: (p: string) => (InteractiveMode as any).prototype.formatContextPath.call(fakeThis, p),
 			getStartupExpansionState: () => (InteractiveMode as any).prototype.getStartupExpansionState.call(fakeThis),
 			buildScopeGroups: () => [],
 			formatScopeGroups: () => "resource-list",
@@ -567,21 +588,6 @@ describe("InteractiveMode.showLoadedResources", () => {
 				(InteractiveMode as any).prototype.isPackageSource.call(fakeThis, sourceInfo),
 			getShortPath: (p: string, sourceInfo?: SourceInfo) =>
 				(InteractiveMode as any).prototype.getShortPath.call(fakeThis, p, sourceInfo),
-			getCompactPathLabel: (p: string, sourceInfo?: SourceInfo) =>
-				(InteractiveMode as any).prototype.getCompactPathLabel.call(fakeThis, p, sourceInfo),
-			getCompactPackageSourceLabel: (sourceInfo?: SourceInfo) =>
-				(InteractiveMode as any).prototype.getCompactPackageSourceLabel.call(fakeThis, sourceInfo),
-			getCompactExtensionLabel: (p: string, sourceInfo?: SourceInfo) =>
-				(InteractiveMode as any).prototype.getCompactExtensionLabel.call(fakeThis, p, sourceInfo),
-			getCompactDisplayPathSegments: (p: string) =>
-				(InteractiveMode as any).prototype.getCompactDisplayPathSegments.call(fakeThis, p),
-			getCompactNonPackageExtensionLabel: (
-				p: string,
-				index: number,
-				allPaths: Array<{ path: string; segments: string[] }>,
-			) => (InteractiveMode as any).prototype.getCompactNonPackageExtensionLabel.call(fakeThis, p, index, allPaths),
-			getCompactExtensionLabels: (extensions: ExtensionFixture[]) =>
-				(InteractiveMode as any).prototype.getCompactExtensionLabels.call(fakeThis, extensions),
 			formatDiagnostics: () => "diagnostics",
 			getBuiltInCommandConflictDiagnostics: () => [],
 		};
@@ -699,40 +705,35 @@ describe("InteractiveMode.showLoadedResources", () => {
 		];
 	}
 
-	test("shows a compact resource listing by default", () => {
+	test("hides detailed resources on the landing page by default", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: false,
+			contextFiles: [{ path: "/tmp/project/AGENTS.md" }],
 			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
+			extensions: [{ path: "/tmp/extensions/answer.ts" }],
 		});
 
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, { force: false });
 
-		const output = renderAll(fakeThis.loadedResourcesContainer);
-		expect(output).toContain("[Skills]");
-		expect(output).toContain("commit");
-		expect(output).not.toContain("resource-list");
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toBe("");
 	});
 
-	test("shows full resource listing when expanded", () => {
+	test("shows full resource details when expanded", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: false,
 			toolOutputExpanded: true,
 			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
 		});
 
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, { force: false });
 
 		const output = renderAll(fakeThis.loadedResourcesContainer);
-		expect(output).toContain("[Skills]");
+		expect(output).toContain("SKILLS");
 		expect(output).toContain("resource-list");
 		expect(output).not.toContain("commit");
 	});
 
-	test("shows full resource listing on verbose startup even when tool output is collapsed", () => {
+	test("keeps resource details behind Ctrl+O on verbose startup", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: true,
 			verbose: true,
@@ -740,392 +741,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
 		});
 
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, { force: false });
 
-		const output = renderAll(fakeThis.loadedResourcesContainer);
-		expect(output).toContain("[Skills]");
-		expect(output).toContain("resource-list");
-		expect(output).not.toContain("commit");
-	});
-
-	test("abbreviates extensions in compact listing", () => {
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions: [{ path: "/tmp/extensions/answer.ts" }, { path: "/tmp/extensions/btw.ts" }],
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		const output = renderAll(fakeThis.loadedResourcesContainer);
-		expect(output).toContain("[Extensions]");
-		expect(output).toContain("answer.ts, btw.ts");
-		expect(output).not.toContain("extensions/answer.ts");
-	});
-
-	test("captures mixed extension layouts in compact output", () => {
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions: createExtensionFixtures(),
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  @scope/pi-scoped, answer.ts, cli-extension.ts, HazAT/pi-interactive-subagents, HazAT/pi-interactive-subagents:subagents, local-index, pi-markdown-preview, user-index"`);
-	});
-
-	test("adds more parent folders until local extension labels are unique", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/alpha/one/index.ts",
-				sourceInfo: createSourceInfo("/tmp/alpha/one/index.ts", {
-					source: "cli",
-					scope: "temporary",
-					origin: "top-level",
-					baseDir: "/tmp/alpha",
-				}),
-			},
-			{
-				path: "/tmp/beta/one/index.ts",
-				sourceInfo: createSourceInfo("/tmp/beta/one/index.ts", {
-					source: "cli",
-					scope: "temporary",
-					origin: "top-level",
-					baseDir: "/tmp/beta",
-				}),
-			},
-			{
-				path: "/tmp/gamma/one/index.ts",
-				sourceInfo: createSourceInfo("/tmp/gamma/one/index.ts", {
-					source: "cli",
-					scope: "temporary",
-					origin: "top-level",
-					baseDir: "/tmp/gamma",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  alpha/one, beta/one, gamma/one"`);
-	});
-
-	test("strips index.ts from local extension label, showing parent dir", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/extensions/plan-mode/index.ts",
-				sourceInfo: createSourceInfo("/tmp/extensions/plan-mode/index.ts", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode"`);
-	});
-
-	test("strips index.js from local extension label, showing parent dir", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/extensions/plan-mode/index.js",
-				sourceInfo: createSourceInfo("/tmp/extensions/plan-mode/index.js", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode"`);
-	});
-
-	test("mixed single-file and subdirectory index.ts extensions strip index.ts", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/extensions/webfetch.ts",
-				sourceInfo: createSourceInfo("/tmp/extensions/webfetch.ts", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-			{
-				path: "/tmp/extensions/plan-mode/index.ts",
-				sourceInfo: createSourceInfo("/tmp/extensions/plan-mode/index.ts", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode, webfetch.ts"`);
-	});
-
-	test("multiple index.ts with unique parent dirs need no disambiguation", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/extensions/foo/index.ts",
-				sourceInfo: createSourceInfo("/tmp/extensions/foo/index.ts", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-			{
-				path: "/tmp/extensions/bar/index.ts",
-				sourceInfo: createSourceInfo("/tmp/extensions/bar/index.ts", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  bar, foo"`);
-	});
-
-	test("multiple index.ts with same parent dir name disambiguated with grandparent", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/alpha/tools/index.ts",
-				sourceInfo: createSourceInfo("/tmp/alpha/tools/index.ts", {
-					source: "cli",
-					scope: "temporary",
-					origin: "top-level",
-					baseDir: "/tmp/alpha",
-				}),
-			},
-			{
-				path: "/tmp/beta/tools/index.ts",
-				sourceInfo: createSourceInfo("/tmp/beta/tools/index.ts", {
-					source: "cli",
-					scope: "temporary",
-					origin: "top-level",
-					baseDir: "/tmp/beta",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  alpha/tools, beta/tools"`);
-	});
-
-	test("non-index file in subdirectory stays as filename", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/extensions/my-ext/main.ts",
-				sourceInfo: createSourceInfo("/tmp/extensions/my-ext/main.ts", {
-					source: "local",
-					scope: "project",
-					origin: "top-level",
-					baseDir: "/tmp/extensions",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  main.ts"`);
-	});
-
-	test("package extensions still strip index.ts correctly (regression guard)", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/project/.pi/npm/node_modules/pi-markdown-preview/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/pi-markdown-preview/extensions/index.ts", {
-					source: "npm:pi-markdown-preview",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.pi/npm/node_modules/pi-markdown-preview",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  pi-markdown-preview"`);
-	});
-
-	test("labels npm sibling extensions relative to the declaring package", () => {
-		const extensions: ExtensionFixture[] = [
-			{
-				path: "/tmp/project/.pi/npm/node_modules/primary-package/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/primary-package/index.ts", {
-					source: "npm:primary-package",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.pi/npm/node_modules/primary-package",
-				}),
-			},
-			{
-				path: "/tmp/project/.pi/npm/node_modules/sibling-package/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.pi/npm/node_modules/sibling-package/index.ts", {
-					source: "npm:primary-package",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.pi/npm/node_modules/primary-package",
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  primary-package, primary-package:../sibling-package"`);
-	});
-
-	test("labels Windows npm sibling extensions relative to the declaring package", () => {
-		const primaryPath = "C:\\Users\\me\\.pi\\agent\\npm\\node_modules\\primary-package\\index.ts";
-		const siblingPath = "C:\\Users\\me\\.pi\\agent\\npm\\node_modules\\sibling-package\\index.ts";
-		const baseDir = "C:\\Users\\me\\.pi\\agent\\npm\\node_modules\\primary-package";
-		const extensions: ExtensionFixture[] = [
-			{
-				path: primaryPath,
-				sourceInfo: createSourceInfo(primaryPath, {
-					source: "npm:primary-package",
-					scope: "user",
-					origin: "package",
-					baseDir,
-				}),
-			},
-			{
-				path: siblingPath,
-				sourceInfo: createSourceInfo(siblingPath, {
-					source: "npm:primary-package",
-					scope: "user",
-					origin: "package",
-					baseDir,
-				}),
-			},
-		];
-
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			extensions,
-			useRealScopeGroups: true,
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  primary-package, primary-package:../sibling-package"`);
+		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toBe("");
 	});
 
 	test("captures mixed extension layouts in expanded output", () => {
@@ -1141,59 +759,40 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.loadedResourcesContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  project
-    /tmp/project/.pi/extensions/answer.ts
-    /tmp/project/.pi/extensions/local-index
-    git:github.com/HazAT/pi-interactive-subagents
-      extensions
-      extensions/subagents
-    npm:@scope/pi-scoped
-      extensions
-    npm:pi-markdown-preview
-      extensions
-  user
-    /tmp/agent/extensions/user-index
-  path
-    /tmp/temp/cli-extension.ts"`);
+			"EXTENSIONS  8 loaded
+			  project
+			    /tmp/project/.pi/extensions/answer.ts
+			    /tmp/project/.pi/extensions/local-index
+			    git:github.com/HazAT/pi-interactive-subagents
+			      extensions
+			      extensions/subagents
+			    npm:@scope/pi-scoped
+			      extensions
+			    npm:pi-markdown-preview
+			      extensions
+			  user
+			    /tmp/agent/extensions/user-index
+			  path
+			    /tmp/temp/cli-extension.ts"
+		`);
 	});
 
-	test("shows context paths relative to cwd while preserving full external paths", () => {
-		const home = homedir();
-		const cwd = path.join(home, "Development", "pi-mono");
-		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: false,
-			cwd,
-			contextFiles: [{ path: path.join(home, ".pi", "agent", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
-		});
-
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
-
-		const output = renderAll(fakeThis.loadedResourcesContainer).replace(/\\/g, "/");
-		expect(output).toContain("[Context]");
-		expect(output).toContain("~/.pi/agent/AGENTS.md, AGENTS.md");
-		expect(output).not.toContain(`${cwd.replace(/\\/g, "/")}/AGENTS.md`);
-	});
-
-	test("shows system prompt context paths before project context files", () => {
+	test("keeps context sources in load order when expanded", () => {
 		const cwd = "/tmp/project";
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: false,
+			toolOutputExpanded: true,
 			cwd,
 			systemPromptSource: { path: path.join(cwd, ".pi", "SYSTEM.md") },
 			appendSystemPromptSources: [{ path: path.join(cwd, ".pi", "APPEND_SYSTEM.md") }],
 			contextFiles: [{ path: path.join(cwd, "AGENTS.md") }],
 		});
 
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-		});
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, { force: false });
 
 		const output = renderAll(fakeThis.loadedResourcesContainer).replace(/\\/g, "/");
-		expect(output).toContain("[Context]");
-		expect(output).toContain(".pi/SYSTEM.md, .pi/APPEND_SYSTEM.md, AGENTS.md");
+		expect(output.indexOf(".pi/SYSTEM.md")).toBeLessThan(output.indexOf(".pi/APPEND_SYSTEM.md"));
+		expect(output.indexOf(".pi/APPEND_SYSTEM.md")).toBeLessThan(output.indexOf("AGENTS.md"));
 	});
 
 	test("shows full context paths when expanded", () => {
@@ -1211,10 +810,10 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.loadedResourcesContainer).replace(/\\/g, "/");
-		expect(output).toContain("[Context]");
+		expect(output).toContain("CONTEXT");
 		expect(output).toContain("~/.pi/agent/AGENTS.md");
 		expect(output).toContain("~/Development/pi-mono/AGENTS.md");
-		expect(output).not.toContain("~/.pi/agent/AGENTS.md, AGENTS.md");
+		expect(output).not.toContain("~/.pi/agent/AGENTS.md · AGENTS.md");
 	});
 
 	test("does not show verbose listing on quiet startup during reload", () => {
@@ -1232,20 +831,111 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(fakeThis.loadedResourcesContainer.children).toHaveLength(0);
 	});
 
-	test("still shows diagnostics on quiet startup when requested", () => {
+	test("does not show skill conflicts", () => {
 		const fakeThis = createShowLoadedResourcesThis({
-			quietStartup: true,
+			quietStartup: false,
 			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
 			skillDiagnostics: [{ type: "warning", message: "duplicate skill name" }],
 		});
 
-		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			force: false,
-			showDiagnosticsWhenQuiet: true,
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, { force: false });
+
+		expect(renderAll(fakeThis.loadedResourcesContainer)).not.toContain("[Skill conflicts]");
+	});
+});
+
+describe("InteractiveMode.setExtensionHeader", () => {
+	test("disposes the animated built-in header when an extension replaces it", () => {
+		const builtInDispose = vi.fn();
+		const builtInSetExpanded = vi.fn();
+		const customDispose = vi.fn();
+		const builtInHeader = {
+			render: () => [],
+			invalidate: () => {},
+			dispose: builtInDispose,
+			setExpanded: builtInSetExpanded,
+		};
+		const customHeader = {
+			render: () => [],
+			invalidate: () => {},
+			dispose: customDispose,
+		};
+		const headerContainer = new Container();
+		headerContainer.addChild(builtInHeader);
+		const requestRender = vi.fn();
+		const context: {
+			builtInHeader: typeof builtInHeader;
+			customHeader: typeof customHeader | undefined;
+			headerContainer: Container;
+			toolOutputExpanded: boolean;
+			ui: { requestRender: typeof requestRender };
+		} = {
+			builtInHeader,
+			customHeader: undefined,
+			headerContainer,
+			toolOutputExpanded: false,
+			ui: { requestRender },
+		};
+		const setExtensionHeader = Reflect.get(InteractiveMode.prototype, "setExtensionHeader") as (
+			this: typeof context,
+			factory: (() => typeof customHeader) | undefined,
+		) => void;
+
+		setExtensionHeader.call(context, () => customHeader);
+		expect(builtInDispose).toHaveBeenCalledOnce();
+		expect(headerContainer.children[0]).toBe(customHeader);
+
+		setExtensionHeader.call(context, undefined);
+		expect(customDispose).toHaveBeenCalledOnce();
+		expect(builtInSetExpanded).toHaveBeenCalledWith(false);
+		expect(headerContainer.children[0]).toBe(builtInHeader);
+		expect(requestRender).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("InteractiveMode update notices", () => {
+	beforeAll(() => initTheme("dark"));
+
+	test("renders the Easy Pi update as a quiet single-line hint", () => {
+		const chatContainer = new Container();
+		const requestRender = vi.fn();
+		const context = { chatContainer, ui: { requestRender } };
+		const showNewVersionNotification = Reflect.get(InteractiveMode.prototype, "showNewVersionNotification") as (
+			this: typeof context,
+			release: { version: string; changelogUrl?: string },
+		) => void;
+
+		showNewVersionNotification.call(context, {
+			version: "1.0.0",
+			changelogUrl: "https://easy-pi.example/changelog",
 		});
 
-		const output = renderAll(fakeThis.loadedResourcesContainer);
-		expect(output).toContain("[Skill conflicts]");
-		expect(output).not.toContain("[Skills]");
+		const output = normalizeRenderedOutput(chatContainer, 100);
+		expect(output).toContain("Update available: v1.0.0");
+		expect(output).toContain("pi update");
+		expect(output).toContain("https://easy-pi.example/changelog");
+		expect(output).not.toMatch(/[╭╮╰╯│]/u);
+		expect(output.split("\n")).toHaveLength(1);
+		expect(requestRender).toHaveBeenCalledOnce();
+	});
+
+	test("renders package updates as a quiet single-line hint", () => {
+		const chatContainer = new Container();
+		const requestRender = vi.fn();
+		const context = {
+			chatContainer,
+			ui: { requestRender },
+		};
+		const showPackageUpdateNotification = Reflect.get(InteractiveMode.prototype, "showPackageUpdateNotification") as (
+			this: typeof context,
+			packages: string[],
+		) => void;
+
+		showPackageUpdateNotification.call(context, ["pi-web-access"]);
+
+		const output = normalizeRenderedOutput(chatContainer, 100);
+		expect(output).toBe("Package updates available: 1 package · Run pi update --extensions");
+		expect(output).not.toMatch(/[╭╮╰╯│]/u);
+		expect(requestRender).toHaveBeenCalledOnce();
 	});
 });

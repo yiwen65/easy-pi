@@ -7,6 +7,7 @@ import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager
 import {
 	createInteractiveTui,
 	createInteractiveTuiReference,
+	DEFAULT_TUI_ENGINE,
 	InteractiveMode,
 	type TuiEngine,
 } from "../src/modes/interactive/interactive-mode.ts";
@@ -40,6 +41,20 @@ class RecordingTerminal extends VirtualTerminal implements Terminal {
 }
 
 describe("createInteractiveTui", () => {
+	it.each([
+		["regular", GrokTuiRuntime],
+		["fullscreen", GrokViewportTuiRuntime],
+	] as const)("defaults to the Grok %s renderer", (tuiMode, Renderer) => {
+		expect(DEFAULT_TUI_ENGINE).toBe("grok");
+		const tui = createInteractiveTui({
+			tuiMode,
+			showHardwareCursor: false,
+			logDirectory: "/tmp",
+			terminal: new RecordingTerminal(),
+		});
+		expect(tui).toBeInstanceOf(Renderer);
+	});
+
 	it.each([
 		["legacy", "regular", TuiMainScreen, false],
 		["legacy", "fullscreen", TuiAltScreen, true],

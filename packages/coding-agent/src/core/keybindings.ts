@@ -21,6 +21,9 @@ export interface AppKeybindings {
 	"app.model.select": true;
 	"app.tools.expand": true;
 	"app.thinking.toggle": true;
+	"app.prompt.prev": true;
+	"app.prompt.next": true;
+	"app.prompt.list": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.message.copy": true;
@@ -87,6 +90,18 @@ export const KEYBINDINGS = {
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
+	},
+	"app.prompt.prev": {
+		defaultKeys: "shift+pageUp",
+		description: "Jump to previous user prompt",
+	},
+	"app.prompt.next": {
+		defaultKeys: "shift+pageDown",
+		description: "Jump to next user prompt",
+	},
+	"app.prompt.list": {
+		defaultKeys: "f6",
+		description: "Open user prompt list to jump",
 	},
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",

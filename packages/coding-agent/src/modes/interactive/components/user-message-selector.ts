@@ -115,15 +115,20 @@ export class UserMessageSelectorComponent extends Container {
 		onSelect: (entryId: string) => void,
 		onCancel: () => void,
 		initialSelectedId?: string,
+		options?: { title?: string; description?: string },
 	) {
 		super();
 
 		// Add header
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.bold("Fork from Message"), 1, 0));
+		this.addChild(new Text(theme.bold(options?.title ?? "Fork from Message"), 1, 0));
 		this.addChild(
 			new Text(
-				theme.fg("muted", "Select a user message to copy the active path up to that point into a new session"),
+				theme.fg(
+					"muted",
+					options?.description ??
+						"Select a user message to copy the active path up to that point into a new session",
+				),
 				1,
 				0,
 			),

@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -16,7 +16,7 @@ export class AssistantMessageComponent extends Container {
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
-	private outputPad: number;
+	protected outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
@@ -59,6 +59,22 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
+	}
+
+	/**
+	 * Set the thinking-hidden flag without rebuilding content. For subclasses
+	 * that compute visibility dynamically before calling updateContent.
+	 */
+	protected setThinkingHiddenSilently(hide: boolean): void {
+		this.hideThinkingBlock = hide;
+	}
+
+	/**
+	 * Factory for the one-line component shown in place of hidden thinking.
+	 * Subclasses may override to render a live/animated placeholder.
+	 */
+	protected createHiddenThinkingComponent(): Component {
+		return new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0);
 	}
 
 	setHiddenThinkingLabel(label: string): void {
@@ -137,10 +153,8 @@ export class AssistantMessageComponent extends Container {
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				if (this.hideThinkingBlock) {
-					// Show one static label for each run of thinking blocks when hidden.
-					this.contentContainer.addChild(
-						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0),
-					);
+					// Show one compact placeholder for each hidden run of thinking blocks.
+					this.contentContainer.addChild(this.createHiddenThinkingComponent());
 				} else {
 					// Render each run of thinking blocks as one Markdown section.
 					this.contentContainer.addChild(

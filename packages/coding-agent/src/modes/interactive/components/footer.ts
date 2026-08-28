@@ -45,18 +45,19 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 
 export interface SessionUsageStats {
 	totals: ReturnType<typeof createUsageTotals>;
-	latestCacheHitRate: number | undefined;
+	/** Percentage of the latest prompt tokens served by provider cache reads. */
+	latestCacheReadRatio: number | undefined;
 }
 
 /**
  * Accumulate usage totals across ALL session entries (not just post-compaction
- * messages), plus the cache hit rate of the most recent assistant message.
- * Shared by the legacy footer and the Grok stats bar so both report identical
- * token/cost numbers.
+ * messages), plus the cached-input token ratio of the most recent assistant
+ * message. Shared by the legacy footer and the Grok stats bar so both report
+ * identical token/cost numbers.
  */
 export function computeSessionUsageStats(session: AgentSession): SessionUsageStats {
 	const totals = createUsageTotals();
-	let latestCacheHitRate: number | undefined;
+	let latestCacheReadRatio: number | undefined;
 
 	for (const entry of session.sessionManager.getEntries()) {
 		if (entry.type === "message" && entry.message.role === "assistant") {
@@ -64,7 +65,7 @@ export function computeSessionUsageStats(session: AgentSession): SessionUsageSta
 
 			const latestPromptTokens =
 				entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-			latestCacheHitRate =
+			latestCacheReadRatio =
 				latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
 		} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 			addUsageToTotals(totals, entry.message.usage);
@@ -73,7 +74,7 @@ export function computeSessionUsageStats(session: AgentSession): SessionUsageSta
 		}
 	}
 
-	return { totals, latestCacheHitRate };
+	return { totals, latestCacheReadRatio };
 }
 
 /**
@@ -118,7 +119,7 @@ export class FooterComponent implements Component {
 		const state = this.session.state;
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		const { totals: usageTotals, latestCacheHitRate } = computeSessionUsageStats(this.session);
+		const { totals: usageTotals, latestCacheReadRatio } = computeSessionUsageStats(this.session);
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
@@ -148,8 +149,8 @@ export class FooterComponent implements Component {
 		if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
 		if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
 		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
-		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
-			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheReadRatio !== undefined) {
+			statsParts.push(`CR${latestCacheReadRatio.toFixed(1)}%`);
 		}
 
 		// Kimi Coding is subscription-backed despite using API-key authentication.

@@ -14,28 +14,6 @@ export interface GrokRenderDriver {
 const FLASH_MS = 1200;
 const MIN_GAP = 2;
 
-/**
- * Heat-map escalation for thinking levels: the more compute a level spends,
- * the hotter its color. Makes the current level distinguishable at a glance.
- * Unknown non-off levels (e.g. provider-specific "max") fall back to text.
- */
-function thinkingLevelColor(level: string, theme: GrokChromeTheme): (text: string) => string {
-	switch (level) {
-		case "minimal":
-			return theme.muted;
-		case "low":
-			return theme.text;
-		case "medium":
-			return theme.accent;
-		case "high":
-			return theme.warning;
-		case "xhigh":
-			return theme.error;
-		default:
-			return theme.text;
-	}
-}
-
 interface StatsSegment {
 	/** Stable identity used for change detection / flash. */
 	key: string;
@@ -49,9 +27,9 @@ interface StatsSegment {
 
 /**
  * Grok stats bar: restores the native Pi footer information (token totals,
- * cache hit rate, cost, context usage) on the left and `(provider) model •
- * thinking` on the right. Segments whose value changed since the previous
- * render briefly flash in the accent color, then fade back.
+ * latest cache-read ratio, cost, context usage) on the left and `(provider)
+ * model • thinking` on the right. Usage segments may briefly flash when they
+ * change; model and thinking colors update immediately without a fade repaint.
  */
 export class GrokStatsBar implements Component {
 	private session: AgentSession;
@@ -117,7 +95,7 @@ export class GrokStatsBar implements Component {
 	}
 
 	private renderLeft(): string {
-		const { totals, latestCacheHitRate } = computeSessionUsageStats(this.session);
+		const { totals, latestCacheReadRatio } = computeSessionUsageStats(this.session);
 		const state = this.session.state;
 
 		const segments: StatsSegment[] = [];
@@ -128,8 +106,8 @@ export class GrokStatsBar implements Component {
 			segments.push({ key: "R", symbol: "R", value: formatTokens(totals.cacheRead), flashable: true });
 		if (totals.cacheWrite)
 			segments.push({ key: "W", symbol: "W", value: formatTokens(totals.cacheWrite), flashable: true });
-		if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
-			segments.push({ key: "CH", symbol: "CH", value: `${latestCacheHitRate.toFixed(1)}%`, flashable: true });
+		if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && latestCacheReadRatio !== undefined) {
+			segments.push({ key: "CR", symbol: "CR", value: `${latestCacheReadRatio.toFixed(1)}%`, flashable: true });
 		}
 
 		// Kimi Coding is subscription-backed despite using API-key authentication.
@@ -195,29 +173,14 @@ export class GrokStatsBar implements Component {
 		const state = this.session.state;
 		const modelName = state.model?.id || "no-model";
 		const level = state.model?.reasoning ? state.thinkingLevel || "off" : "";
-		const modelPart = level ? `${modelName} • ${level === "off" ? "thinking off" : level}` : modelName;
 
 		const providerCount = this.footerData?.getAvailableProviderCount() ?? 0;
 		const provider = providerCount > 1 && state.model ? state.model.provider : undefined;
 		const providerPrefix = provider ? `${this.theme.dim(`(${provider})`)} ` : "";
 
-		// Flash the whole right side briefly when the model or thinking level
-		// changes, then settle into the persistent per-level colors.
-		const plain = `${provider ?? ""}|${modelPart}`;
-		const previous = this.lastValues.get("modelThinking");
-		this.lastValues.set("modelThinking", plain);
-		if (this.hasRendered && previous !== undefined && previous !== plain) {
-			this.flashUntil.set("modelThinking", Date.now() + FLASH_MS);
-			this.scheduleFlashFade();
-		}
-		if ((this.flashUntil.get("modelThinking") ?? 0) > Date.now()) {
-			return providerPrefix + this.theme.accent(modelPart);
-		}
-
 		if (!level) return providerPrefix + this.theme.accent(modelName);
 		const levelLabel = level === "off" ? "thinking off" : level;
-		const styledLevel =
-			level === "off" ? this.theme.dim(levelLabel) : thinkingLevelColor(level, this.theme)(levelLabel);
+		const styledLevel = level === "off" ? this.theme.dim(levelLabel) : this.theme.thinkingLevel(level, levelLabel);
 		return providerPrefix + this.theme.accent(modelName) + this.theme.muted(" • ") + styledLevel;
 	}
 }

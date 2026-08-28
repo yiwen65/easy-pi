@@ -151,6 +151,12 @@ export interface TuiAltScreenOptions {
 	searchCurrentMatchStyle?: (text: string) => string;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
+	/**
+	 * Called when a primary-button click (press+release on the same cell, no drag, no URL)
+	 * lands on ScrollView content. `row`/`col` are content coordinates of the scrolled child.
+	 * Return `true` to consume the click (skips the selection copy).
+	 */
+	onContentClick?: (click: { scrollView: ScrollView; row: number; col: number }) => boolean;
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
 	onRightClickPaste?: () => void;
 	/**
@@ -196,6 +202,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchMatchStyle: (text: string) => string;
 	private readonly searchCurrentMatchStyle: (text: string) => string;
 	private readonly openUrl?: (url: string) => void;
+	private readonly onContentClick?: (click: { scrollView: ScrollView; row: number; col: number }) => boolean;
 	private readonly onRightClickPaste?: () => void;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
 
@@ -219,6 +226,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.openUrl = options.openUrl;
+		this.onContentClick = options.onContentClick;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copySelection = options.copySelection;
 		this.addInputListener((data) => this.handleViewportInput(data));
@@ -983,6 +991,32 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				}
 				this.requestRender();
 				return;
+			}
+			if (
+				!this.selectionDragged &&
+				this.onContentClick &&
+				this.selectionAnchor?.scrollView &&
+				this.selectionAnchor.scrollView === point.scrollView &&
+				this.selectionAnchor.row === point.row &&
+				this.selectionAnchor.col === point.col
+			) {
+				const anchor = this.selectionAnchor;
+				let consumed = false;
+				try {
+					consumed = this.onContentClick({
+						scrollView: anchor.scrollView as ScrollView,
+						row: anchor.row,
+						col: anchor.col,
+					});
+				} catch {
+					// Content click handlers are best-effort.
+				}
+				if (consumed) {
+					this.selectionAnchor = undefined;
+					this.selectionFocus = undefined;
+					this.requestRender();
+					return;
+				}
 			}
 			void this.copySelectionToClipboard();
 			this.requestRender();

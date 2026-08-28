@@ -35,6 +35,10 @@ export class UserMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	getText(): string {
+		return this.text;
+	}
+
 	private rebuild(): void {
 		this.clear();
 		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));

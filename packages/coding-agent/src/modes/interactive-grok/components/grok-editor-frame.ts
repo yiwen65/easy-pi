@@ -12,6 +12,7 @@ function isEditorBorder(line: string): boolean {
 export class GrokEditorFrame implements Component {
 	private editorHost: Component;
 	private readonly theme: GrokChromeTheme;
+	private borderColor: ((text: string) => string) | undefined;
 
 	constructor(editorHost: Component, options: GrokEditorFrameOptions) {
 		this.editorHost = editorHost;
@@ -26,6 +27,10 @@ export class GrokEditorFrame implements Component {
 		return this.editorHost;
 	}
 
+	setBorderColor(borderColor: (text: string) => string): void {
+		this.borderColor = borderColor;
+	}
+
 	handleInput(data: string): void {
 		this.editorHost.handleInput?.(data);
 	}
@@ -36,7 +41,8 @@ export class GrokEditorFrame implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, Math.floor(width));
-		if (safeWidth < 4) return [this.theme.border("─".repeat(safeWidth))];
+		const borderColor = this.borderColor ?? this.theme.border;
+		if (safeWidth < 4) return [borderColor("─".repeat(safeWidth))];
 
 		const interiorWidth = safeWidth - 2;
 		const prompt = "❯ ";
@@ -44,14 +50,14 @@ export class GrokEditorFrame implements Component {
 		const hostWidth = Math.max(1, interiorWidth - promptWidth);
 		const hostLines = this.editorHost.render(hostWidth).filter((line) => !isEditorBorder(line));
 		const contentLines = hostLines.length > 0 ? hostLines : [""];
-		const top = this.theme.border(`╭${"─".repeat(interiorWidth)}╮`);
+		const top = borderColor(`╭${"─".repeat(interiorWidth)}╮`);
 		const body = contentLines.map((line, index) => {
 			const prefix = index === 0 ? this.theme.accent(prompt) : " ".repeat(promptWidth);
 			const fitted = sliceByColumn(line, 0, hostWidth, true);
 			const padding = " ".repeat(Math.max(0, hostWidth - visibleWidth(fitted)));
-			return `${this.theme.border("│")}${prefix}${fitted}${padding}${this.theme.border("│")}`;
+			return `${borderColor("│")}${prefix}${fitted}${padding}${borderColor("│")}`;
 		});
-		const bottom = this.theme.border(`╰${"─".repeat(interiorWidth)}╯`);
+		const bottom = borderColor(`╰${"─".repeat(interiorWidth)}╯`);
 		return [top, ...body, bottom];
 	}
 }
