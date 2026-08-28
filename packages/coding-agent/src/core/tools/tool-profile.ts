@@ -13,7 +13,8 @@ import type { TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { processImage } from "../../utils/image-process.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { resolveSessionShellEnvironment } from "./bash.ts";
 import { LocalSearchProviderV2 } from "./local-search-provider-v2.ts";
 
 export type ToolProfile = "legacy" | "v2";
@@ -22,6 +23,7 @@ export const V2_TOOL_NAMES = ["search", "read", "edit", "run"] as const;
 
 export interface CreateV2ToolDefinitionsOptions {
 	shellPath?: string;
+	shellCommandPrefix?: string;
 	autoResizeImages?: boolean;
 	workspacePolicy?: WorkspacePolicy;
 }
@@ -44,7 +46,10 @@ const promptContributions = {
 	},
 	run: {
 		snippet: "Run builds, tests, Git, and other commands in an explicit cwd",
-		guidelines: ["Use run for commands, not for searching, reading, or editing files."],
+		guidelines: [
+			"Use run for commands, not for searching, reading, or editing files.",
+			"You can inspect PI_* environment variables for current model and session details.",
+		],
 	},
 } as const;
 
@@ -73,6 +78,7 @@ function renderResult(
 function bindV2Tool<TParameters extends TSchema, TDetails>(
 	tool: AgentHarnessTool<ExecutionToolContext, TParameters, TDetails>,
 	context: ExecutionToolContext,
+	commandPrefix?: string,
 ): ToolDefinition<TParameters, TDetails> {
 	const prompt = promptContributions[tool.name as keyof typeof promptContributions];
 	return {
@@ -84,7 +90,20 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 		promptGuidelines: [...prompt.guidelines],
 		constrainedSampling: getExperimentalToolSampling(),
 		executionMode: tool.executionMode,
-		execute: (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate, context),
+		execute: (toolCallId, params, signal, onUpdate, extensionContext: ExtensionContext) => {
+			const executionContext =
+				tool.name === "run"
+					? {
+							...context,
+							run: {
+								commandPrefix,
+								env: resolveSessionShellEnvironment(true, extensionContext),
+								inheritEnv: false,
+							},
+						}
+					: context;
+			return tool.execute(toolCallId, params, signal, onUpdate, executionContext);
+		},
 		renderCall: (args, theme) => renderCall(tool.name, args, theme),
 		renderResult: (result, options, theme) => renderResult(result, options, theme),
 	};
@@ -112,6 +131,6 @@ export function createV2ToolDefinitions(
 			context,
 		),
 		edit: bindV2Tool(createEditV2Tool(), context),
-		run: bindV2Tool(createRunV2Tool(), context),
+		run: bindV2Tool(createRunV2Tool(), context, options.shellCommandPrefix),
 	};
 }

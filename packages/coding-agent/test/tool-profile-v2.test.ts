@@ -30,9 +30,10 @@ describe("v2 tool profile", () => {
 			excludeTools?: string[];
 			extensions?: InlineExtension[];
 			sessionManager?: SessionManager;
+			settingsManager?: SettingsManager;
 		} = {},
 	) {
-		const settingsManager = SettingsManager.inMemory();
+		const settingsManager = options.settingsManager ?? SettingsManager.inMemory();
 		const resourceLoader = new DefaultResourceLoader({
 			cwd,
 			agentDir,
@@ -97,6 +98,59 @@ describe("v2 tool profile", () => {
 
 		expect(result.content).toContainEqual({ type: "text", text: "second\n\n[More lines. Continue with offset=3.]" });
 		session.dispose();
+	});
+
+	it("applies the configured command prefix and current PI session environment to run", async () => {
+		const staleEnvironment = {
+			PI_SESSION_ID: process.env.PI_SESSION_ID,
+			PI_SESSION_FILE: process.env.PI_SESSION_FILE,
+			PI_PROVIDER: process.env.PI_PROVIDER,
+			PI_MODEL: process.env.PI_MODEL,
+			PI_REASONING_LEVEL: process.env.PI_REASONING_LEVEL,
+		};
+		Object.assign(process.env, {
+			PI_SESSION_ID: "stale-session",
+			PI_SESSION_FILE: "stale-file",
+			PI_PROVIDER: "stale-provider",
+			PI_MODEL: "stale-model",
+			PI_REASONING_LEVEL: "stale-reasoning",
+		});
+		const settingsManager = SettingsManager.inMemory();
+		settingsManager.setShellCommandPrefix("export PI_PREFIX_MARKER=prefix-applied");
+		const sessionManager = SessionManager.inMemory(cwd);
+		const session = await createSession({ toolProfile: "v2", settingsManager, sessionManager });
+
+		try {
+			const run = session.getToolDefinition("run");
+			if (!run) throw new Error("v2 run definition is missing");
+			const updates: string[] = [];
+			const result = await run.execute(
+				"run-session-env",
+				{
+					command: `printf "%s|%s|%s|%s|%s|%s" "$PI_PREFIX_MARKER" "$PI_SESSION_ID" "\${PI_SESSION_FILE-unset}" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"`,
+				},
+				undefined,
+				(update) => {
+					const content = update.content[0];
+					if (content?.type === "text") updates.push(content.text);
+				},
+				{
+					model: getModel("anthropic", "claude-sonnet-4-5")!,
+					thinkingLevel: "high",
+					sessionManager,
+				} as unknown as Parameters<typeof run.execute>[4],
+			);
+			const expectedOutput = `prefix-applied|${sessionManager.getSessionId()}|unset|anthropic|claude-sonnet-4-5|high`;
+			expect(result.content[0]).toMatchObject({ text: `${expectedOutput}\n\nexit 0` });
+			expect(updates).toContain(expectedOutput);
+			expect(session.systemPrompt).toContain("inspect PI_* environment variables");
+		} finally {
+			session.dispose();
+			for (const [name, value] of Object.entries(staleEnvironment)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 
 	it("applies allowlist, denylist, and extension overrides after profile selection", async () => {
