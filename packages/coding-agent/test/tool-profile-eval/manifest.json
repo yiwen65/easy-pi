@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "profiles": ["legacy", "v2"],
+  "seeds": [17, 41],
+  "budgets": {
+    "maxTurns": 4,
+    "timeoutMs": 30000
+  },
+  "tasks": [
+    {
+      "id": "inspect",
+      "prompt": "Inspect the fixture and report the marker value."
+    },
+    {
+      "id": "change-and-check",
+      "prompt": "Change the fixture marker and run its focused check."
+    }
+  ],
+  "bootstrapSamples": 500
+}
