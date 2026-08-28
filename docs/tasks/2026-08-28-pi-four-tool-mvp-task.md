@@ -3,7 +3,7 @@
 - Created: 2026-08-28
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: `docs/harness_tools/Pi Agent Tools MVP v1.1.md`; long-term context from `docs/harness_tools/Pi Agent Tools v2.md`
 
 <!-- task-doc-section:background-goal -->
@@ -457,7 +457,7 @@ Non-goals:
   - Five v2 move runs produce enough sequence/error evidence to accept or reject the prompt/receipt hypotheses.
 - Verification method:
   - Focused unit/default-skipped tests, root check, targeted authorized real diagnostic, and output inspection.
-- Validation evidence: Added a content-free event collector with focused tests proving that paths, arguments, command/file/response text, and tool-call IDs are not retained. Default targeted Vitest passed 3/3 with the real test skipped and no provider calls; root `npm run check` passed. The first diagnostic attempt stopped correctly when seed 41 exceeded the original 10-turn cap; the diagnostic-only cap was bounded at 12 while the paired benchmark stayed at 10. The final authorized five-seed v2 move diagnostic passed 5/5 in 152.50 seconds with 6–10 turns. All five runs had successful first edits and zero post-edit reads, rejecting post-edit read as the cause. Every run had 1–5 `read INVALID_INPUT` errors (13 total), accounting for repeated recovery. Four runs split move from update; three of those searched after move, and two then hit `EDIT_CONTEXT_NOT_FOUND`; no run used the supported `[move, update]` batch. One run used a combined `[create, delete]` workaround. Tool execution occupied only 50–60 ms/run versus 21.6–39.8 seconds residual model time, so model rounds—not tool runtime—dominated. This supports a prompt-only intervention that teaches valid initial read ranges and single-batch move+update; it does not support receipt/schema expansion or disabling confirmation reads.
+- Validation evidence: Added a content-free event collector with focused tests proving that paths, arguments, command/file/response text, and tool-call IDs are not retained. Default targeted Vitest passed 3/3 with the real test skipped and no provider calls; root `npm run check` passed. The first diagnostic attempt stopped correctly when seed 41 exceeded the original 10-turn cap; the diagnostic-only cap was bounded at 12 while the paired benchmark stayed at 10. The final authorized five-seed v2 move diagnostic passed 5/5 in 152.50 seconds with 6–10 turns. All five runs had successful first edits and zero post-edit reads, rejecting post-edit read as the cause. Every run had 1–5 `read INVALID_INPUT` errors (13 total), accounting for repeated recovery. Four runs split move from update; three of those searched after move, and two then hit `EDIT_CONTEXT_NOT_FOUND`; no run used the supported `[move, update]` batch. One run used a combined `[create, delete]` workaround. Tool execution occupied only 50–60 ms/run versus 21.6–39.8 seconds residual model time, so model rounds—not tool runtime—dominated. This supports testing a prompt-only single-batch move+update intervention; the broad `INVALID_INPUT` code does not identify a safe read change, and the evidence does not support receipt/schema expansion or disabling confirmation reads.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -508,9 +508,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-017 — Complete instrumentation/intervention delivery
+### [x] T-017 — Complete instrumentation/intervention delivery
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: Reconcile evidence, retain only validated product changes, run final checks, record go/no-go, and commit task-owned files.
 - Inputs and prerequisites: T-014 through T-016.
@@ -527,7 +527,7 @@ Non-goals:
   - Original untracked v2 vision document remains untouched.
 - Verification method:
   - Targeted tests, root check, task validator, and git status/diff inspection.
-- Validation evidence: Not run.
+- Validation evidence: Retained only the validated move+update batching prompt guideline; the rejected read-guidance experiment and all receipt/schema proposals are absent. Final targeted Vitest passed 8/8 across `tool-profile-v2.test.ts`, runner, trace, prompt-ablation, and both default-skipped real evaluators; both real files remained skipped without opt-in. Final root `npm run check` passed Biome, dependency/import/lock checks, full typecheck, and browser smoke with no fixes. `git diff --check` and task-document validation passed. The existing benchmark lesson in `LEARNS.md` was refined with the newly verified cross-run turn variance and multi-seed calibration requirement. Git status contains only this final task/learning update plus the untouched untracked `docs/harness_tools/Pi Agent Tools v2.md` before the final explicit commit.
 - Blocker: None.
 - Unblock condition: None.
 
@@ -551,7 +551,7 @@ Non-goals:
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
 - R-006: Real model runs require credentials, money, and network. Mitigation: T-010/T-011 are explicitly authorized, fixed at 20 sessions with timeout/turn/cost breakers, use ephemeral fixtures/sessions, and do not persist responses or credentials.
-- Current blocker: None for T-014; downstream intervention and held-out tasks are dependency-blocked by design.
+- Current blocker: None; all dependency gates are complete.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -586,10 +586,11 @@ Non-goals:
 - 2026-08-28: T-015's first real ablation stopped on an observed 14-turn control run under the 12-turn cap. Partial evidence rejected the combined read-guidance experiment, so the candidate was narrowed to the independently supported move+update batch instruction and the ablation-only cap was bounded at 18.
 - 2026-08-28: T-015 completed after the final 20-session prompt-only ablation passed 20/20. Candidate completion tied control while reducing aggregate turns 16.9%, tool calls 19.7%, errors 36.4%, input 16.5%, output 24.2%, elapsed 25.8%, and cost 20.2%; move-task turns fell 26% while locate-task turns tied. T-016 moved to in_progress for held-out context-stress gates before retention.
 - 2026-08-28: T-016 completed after the held-out 20-session context-stress run passed 20/20, including bounded directory/file discovery, actual long-output truncation, ambiguous edit safety, and multi-file mutation. Candidate retained correctness, improved first-edit success, tied recovery count, and reduced aggregate turns 11.0%, input 7.2%, output 23.2%, cache reads 21.2%, elapsed 38.6%, and cost 13.8%. T-017 moved to in_progress for final checks and retained-change delivery.
+- 2026-08-28: T-017 completed. Final targeted tests passed 8/8 with both real evaluators skipped by default, root `npm run check` passed cleanly, the reusable turn-budget lesson was refined, and only the evidence-backed prompt guideline was retained. Overall task returned to done.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: not_run
-- Evidence: T-001 through T-013 retain their recorded evidence; ordered instrumentation, intervention ablation, and held-out validation are in progress.
-- Limitations: No causal product optimization claim will be made until T-014 traces identify the extra-turn mechanism and T-015/T-016 isolate and reproduce any improvement.
+- Result: passed
+- Evidence: T-001 through T-017 are done with recorded focused/static/real-run evidence. T-014 identified split move/update orchestration as an actionable cause; T-015 isolated one prompt-only factor and passed 20/20; T-016 reproduced correctness and aggregate efficiency gains on 20/20 held-out context-stress sessions; T-017 final targeted tests, root check, diff check, task validation, and git-scope inspection passed.
+- Limitations: Real evidence is specific to `openai-codex/gpt-5.6-luna` at `max`, two tuning tasks/five seeds and five held-out tasks/two seeds; latency remains provider-variable. Repeated v2 `read INVALID_INPUT` calls remain a separately evidenced optimization opportunity, but no speculative read/schema change was retained because content-free traces did not identify a safe causal intervention.
