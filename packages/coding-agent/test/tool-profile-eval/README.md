@@ -9,4 +9,12 @@ cd packages/coding-agent
 node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/tool-profile-eval/runner.test.ts
 ```
 
-A real-model executor may be supplied to `runToolProfileEvaluation`, but it must be gated by an explicit opt-in such as `PI_REAL_MODEL_EVAL=1`, use fresh fixtures, preserve manifest budgets and seeds, and follow the repository's real-provider rules. No real-model executor or result claim is included in this MVP.
+The manual real executor is pinned by default to `openai-codex/gpt-5.6-luna` with `max` thinking and remains skipped unless explicitly authorized:
+
+```bash
+cd packages/coding-agent
+PI_REAL_TOOL_PROFILE_BENCHMARK=1 node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" \
+  --run test/tool-profile-eval/real-benchmark.test.ts --silent=false
+```
+
+It runs 2 tasks × 5 seeds × 2 profiles against reset ephemeral fixtures, grades filesystem state and local tests, records only bounded metrics, and enforces session, turn, timeout, and reported-cost breakers. Provider/model overrides are available through `PI_REAL_TOOL_PROFILE_PROVIDER` and `PI_REAL_TOOL_PROFILE_MODEL`. Real runs must follow the repository's provider authorization rules.

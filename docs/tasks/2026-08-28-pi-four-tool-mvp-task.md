@@ -3,7 +3,7 @@
 - Created: 2026-08-28
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: done
+- Overall status: in_progress
 - Source: `docs/harness_tools/Pi Agent Tools MVP v1.1.md`; long-term context from `docs/harness_tools/Pi Agent Tools v2.md`
 
 <!-- task-doc-section:background-goal -->
@@ -33,7 +33,7 @@ Non-goals:
 - changing the default profile or removing legacy tools;
 - session profile persistence;
 - claiming cwd/path checks are a sandbox or strong adversarial symlink protection;
-- paid/real-model evaluation runs without separate explicit approval. The user subsequently authorized a bounded real-model test with `openai-codex/gpt-5.6-luna` at `max` thinking on 2026-08-28; only T-009 is covered by that approval.
+- paid/real-model evaluation runs without separate explicit approval. The user subsequently authorized T-009 and then explicitly requested the full five-seed statistical A/B benchmark with `openai-codex/gpt-5.6-luna` at `max` thinking; T-010 and T-011 are covered by that authorization.
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -55,7 +55,7 @@ Non-goals:
 ## Assumptions and open questions
 
 - Assumption: SearchProvider may use existing coding-agent rg/fd facilities through a local adapter; provider brands remain hidden from the model. Impact: adapter ownership is settled during T-006 after inspecting current operations interfaces.
-- Confirmed decision: The user explicitly authorized a bounded real-model test using `openai-codex/gpt-5.6-luna` with `max` thinking after the MVP scaffold was complete. Impact: T-009 may make real provider calls but must remain targeted, avoid credential output, and report that one pair is a smoke test rather than a statistical benchmark.
+- Confirmed decision: The user explicitly authorized real-model testing using `openai-codex/gpt-5.6-luna` with `max` thinking, first as T-009 smoke coverage and then as a five-seed statistical A/B benchmark. Impact: T-010/T-011 may implement and run the gated 2-task × 5-seed × 2-profile matrix, while enforcing call/time/cost breakers and avoiding credential or response-content persistence.
 - Assumption: The bounded-read interface may be added as a new capability or a backward-compatible extension, whichever produces the smaller complete change after T-001 inspection. Impact: existing session header reads must retain their current behavior.
 - Open question: None; the user confirmed execution against MVP v1.1.
 
@@ -76,7 +76,7 @@ Non-goals:
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009`.
+- Dependency graph: `T-001 -> {T-002,T-003,T-004,T-005} -> T-006 -> T-007 -> T-008 -> T-009 -> T-010 -> T-011`.
 - Parallel batches:
   - Batch 1: T-001 only, because it defines shared contracts used by all tools.
   - Batch 2: T-002, T-003, T-004, and T-005 in parallel after T-001; their owned implementation/test files must be disjoint and shared export integration is deferred.
@@ -84,6 +84,8 @@ Non-goals:
   - Batch 4: T-007 only, because evaluation depends on an integrated v2 profile.
   - Batch 5: T-008 only for cross-package verification, documentation reconciliation, and initial delivery.
   - Batch 6: T-009 only for the separately authorized bounded real-model paired smoke test.
+  - Batch 7: T-010 only to implement and locally validate the gated real benchmark executor.
+  - Batch 8: T-011 only to execute the authorized five-seed matrix and record results.
 - Serialization constraints: `packages/agent/src/harness/tools/index.ts`, coding-agent tool registries, SDK/CLI files, system prompt files, task document, changelogs, and package exports are coordinator/integration-owned. Subagents must not edit this task document.
 
 <!-- task-doc-section:task-list -->
@@ -329,6 +331,58 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-010 — Implement the gated five-seed real benchmark executor
+
+- Status: done
+- Owner: coordinator
+- Objective: Add a manual-only executor that runs the existing paired benchmark runner against real profile sessions with deterministic fixtures, automatic grading, usage metrics, and hard safety breakers.
+- Inputs and prerequisites: T-009 successful connectivity smoke; existing `tool-profile-eval` manifest/runner; repository real-provider test patterns.
+- Scope or files: `packages/coding-agent/test/tool-profile-eval/` real benchmark test/executor, manifest task wording, focused credential-free tests as needed, and this authority document.
+- Expected output: A `PI_REAL_TOOL_PROFILE_BENCHMARK=1`-gated test pinned by default to `openai-codex/gpt-5.6-luna`, `max` thinking, 2 tasks × 5 seeds × 2 profiles, with deterministic file grading and machine-readable aggregate metrics.
+- Dependencies: T-009.
+- Execution steps:
+  1. Define two deterministic coding fixtures that exercise discovery, bounded read/edit, move, and test execution.
+  2. Bind real sessions to the requested model/profile/thinking level and fresh reset fixture path.
+  3. Record profile prompt/schema hashes, completion score, model turns, token usage, reported cost, and elapsed time.
+  4. Enforce explicit opt-in, exactly 20 sessions, per-session timeout, model-turn limit, and reported-cost breaker.
+  5. Run typecheck and the default skipped test path before real execution.
+- Acceptance criteria:
+  - Without the opt-in flag, no provider call occurs.
+  - Matrix contains exactly 10 paired task×seed clusters and 20 profile sessions.
+  - Pair order is deterministic and each profile receives identical fixture bytes and prompt within a cluster.
+  - Grading depends on filesystem state and local tests, not model self-report.
+  - Credentials and full response content are never printed or written.
+- Verification method:
+  - Targeted Vitest without opt-in, root typecheck, and code inspection of gates/breakers.
+- Validation evidence: Added `real-benchmark.test.ts` with explicit `PI_REAL_TOOL_PROFILE_BENCHMARK=1` gating, pinned provider/model defaults, `max` thinking assertion, reset same-path fixtures, filesystem/local-test grading, exactly 20 sessions, 4-turn/session, 80-turn/global, 120-second/session, and $20 reported-cost breakers. The default targeted run passed the faux runner 1/1 and skipped the real test 1/1 without provider calls; root `tsgo --noEmit` and full `npm run check` passed. Manifest now defines 2 deterministic coding tasks × 5 seeds and 5,000 clustered bootstrap samples.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-011 — Execute and report the five-seed real statistical A/B benchmark
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: Run the authorized T-010 matrix with `openai-codex/gpt-5.6-luna` at `max`, verify the aggregate, and report completion-rate uncertainty plus descriptive efficiency metrics.
+- Inputs and prerequisites: T-010 done; configured openai-codex credentials; real-provider authorization.
+- Scope or files: Temporary fixture/result paths and this authority document; no production or persistent session writes.
+- Expected output: Twenty bounded real profile sessions, ten paired cluster deltas, deterministic bootstrap 95% interval, per-profile completion/turn/token/latency/cost summary, and truthful failure diagnostics.
+- Dependencies: T-010.
+- Execution steps:
+  1. Run only the targeted gated real benchmark file with the explicit environment flag.
+  2. Monitor hard breakers and stop on authorization, credential, cost, or systemic provider failure.
+  3. Independently inspect machine-readable aggregate output and repository status.
+  4. Record results and limitations; do not infer superiority when the interval includes zero.
+- Acceptance criteria:
+  - All planned 20 sessions either complete or a breaker records why execution stopped.
+  - Summary uses the manifest's deterministic clustered bootstrap over paired task×seed deltas.
+  - Report distinguishes completion-rate inference from descriptive latency/token observations.
+  - Repository contains no credentials, response transcripts, or unintended fixture changes.
+- Verification method:
+  - Targeted real Vitest output, aggregate consistency checks, task-document validator, and git status.
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -348,8 +402,8 @@ Non-goals:
 - R-003: Structured edit can partially mutate after commit begins. Mitigation: prove zero mutations only for prevalidation failures and require truthful failed/unknown path reporting.
 - R-004: Process-tree termination differs across platforms. Mitigation: test managed local fixtures, report confirmation status, and retain documented non-guarantees for detached processes.
 - R-005: coding-agent extension overrides and allowlist order may conflict with profile selection. Mitigation: encode current precedence in focused tests before modifying registry code.
-- R-006: Real model runs require credentials, money, and network. Mitigation: T-009 is separately authorized, bounded to one paired smoke case, uses no persistent sessions, and makes no statistical superiority claim.
-- Current blocker: None. All planned and separately authorized tasks are complete.
+- R-006: Real model runs require credentials, money, and network. Mitigation: T-010/T-011 are explicitly authorized, fixed at 20 sessions with timeout/turn/cost breakers, use ephemeral fixtures/sessions, and do not persist responses or credentials.
+- Current blocker: None for T-010; T-011 is dependency-blocked until the gated executor validates.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -371,10 +425,12 @@ Non-goals:
 - 2026-08-28: T-008 contract-gap review added replay metadata, create/move parent-directory creation and partial reporting, five evaluation seeds, and managed-process termination coverage. Final agent tests passed 26/26, coding-agent tests passed 98/98, `npm run check` passed with no fixes, and `git diff --check` passed. T-008 and the overall task moved to done.
 - 2026-08-28: User separately authorized real-provider testing with `openai-codex/gpt-5.6-luna` at `max` thinking. Local model listing confirmed that exact provider/model. T-009 was added and moved to in_progress for one bounded paired profile smoke test.
 - 2026-08-28: T-009 completed. Legacy and v2 source-CLI sessions ran against identical temporary fixtures and prompt; both exited 0, made the requested edit, and passed independent fixture verification. Legacy elapsed 19 seconds and v2 elapsed 18 seconds. No credentials or response internals were persisted, and repository source remained unchanged.
+- 2026-08-28: User explicitly requested the five-seed statistical A/B benchmark. T-010 was added and moved to in_progress; T-011 is pending behind its gated executor and safety validation.
+- 2026-08-28: T-010 completed after the gated executor's default path passed 1 faux test and skipped 1 real test, root typecheck passed, and full `npm run check` passed. T-011 moved to in_progress for the authorized 20-session run.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: passed
-- Evidence: T-001 through T-008 retain their recorded automated evidence. T-009 added a successful real-provider paired smoke run with `openai-codex/gpt-5.6-luna` at `max`: both legacy and v2 exited 0, produced identical requested fixture changes, and passed independent `node test.js` verification. The authority-document validator passed after recording these results.
-- Limitations: The real-model evidence is one paired end-to-end smoke case, not the five-seed statistical A/B benchmark and not evidence that one profile is superior. Workspace policy remains best-effort path enforcement rather than a sandbox, as required by the MVP contract.
+- Result: not_run
+- Evidence: T-001 through T-009 retain their recorded evidence; T-010/T-011 five-seed benchmark work is in progress.
+- Limitations: Statistical A/B results must not be reported until the gated executor validates and all planned real sessions complete or a breaker truthfully stops the run.

@@ -4,17 +4,17 @@
   "seeds": [17, 41, 73, 101, 137],
   "budgets": {
     "maxTurns": 4,
-    "timeoutMs": 30000
+    "timeoutMs": 120000
   },
   "tasks": [
     {
-      "id": "inspect",
-      "prompt": "Inspect the fixture and report the marker value."
+      "id": "locate-edit-test",
+      "prompt": "Locate a marked source value, update it to the seed-specific target, and run the focused test."
     },
     {
-      "id": "change-and-check",
-      "prompt": "Change the fixture marker and run its focused check."
+      "id": "move-edit-test",
+      "prompt": "Locate a marked source file, move and update it, and run the focused test."
     }
   ],
-  "bootstrapSamples": 500
+  "bootstrapSamples": 5000
 }
