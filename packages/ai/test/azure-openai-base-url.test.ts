@@ -146,15 +146,50 @@ describe("azure-openai-responses base URL normalization", () => {
 		expect(result.errorMessage).toContain("Invalid Azure OpenAI base URL");
 	});
 
-	it("clamps prompt_cache_key to OpenAI's 64-character limit", async () => {
+	it("bounds long prompt_cache_key values without collapsing distinct suffixes", async () => {
+		const model = getModel("azure-openai-responses", "gpt-4o-mini");
+		const sharedPrefix = "x".repeat(64);
+		await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			sessionId: `${sharedPrefix}-first`,
+		}).result();
+		const first = azureMock.lastParams?.prompt_cache_key;
+
+		await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			sessionId: `${sharedPrefix}-second`,
+		}).result();
+		const second = azureMock.lastParams?.prompt_cache_key;
+
+		expect(Array.from(first ?? "")).toHaveLength(64);
+		expect(Array.from(second ?? "")).toHaveLength(64);
+		expect(first).not.toBe(second);
+	});
+
+	it("prefers promptCacheKey over the transport session identifier", async () => {
 		const model = getModel("azure-openai-responses", "gpt-4o-mini");
 		await streamAzureOpenAIResponses(model, context, {
 			apiKey: "test-api-key",
 			azureBaseUrl: "https://my-resource.openai.azure.com",
-			sessionId: "x".repeat(67),
+			promptCacheKey: "shared-agent-prefix",
+			sessionId: "transport-session",
 		}).result();
 
-		expect(azureMock.lastParams?.prompt_cache_key).toBe("x".repeat(64));
+		expect(azureMock.lastParams?.prompt_cache_key).toBe("shared-agent-prefix");
+	});
+
+	it("omits prompt_cache_key when cache retention is none", async () => {
+		const model = getModel("azure-openai-responses", "gpt-4o-mini");
+		await streamAzureOpenAIResponses(model, context, {
+			apiKey: "test-api-key",
+			azureBaseUrl: "https://my-resource.openai.azure.com",
+			cacheRetention: "none",
+			sessionId: "disabled-cache-session",
+		}).result();
+
+		expect(azureMock.lastParams?.prompt_cache_key).toBeUndefined();
 	});
 
 	it("disables server-side response storage", async () => {

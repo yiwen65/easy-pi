@@ -92,6 +92,7 @@ describe("openai-completions prompt caching", () => {
 	async function captureRequest(
 		options?: {
 			cacheRetention?: "none" | "short" | "long";
+			promptCacheKey?: string;
 			sessionId?: string;
 			headers?: Record<string, string>;
 		},
@@ -119,6 +120,18 @@ describe("openai-completions prompt caching", () => {
 		expect(payload?.prompt_cache_retention).toBeUndefined();
 	});
 
+	it("uses promptCacheKey for cache identity while preserving session affinity", async () => {
+		const model = createModel({ compat: { sendSessionAffinityHeaders: true } });
+		const { payload, headers } = await captureRequest(
+			{ promptCacheKey: "shared-agent-prefix", sessionId: "transport-session" },
+			model,
+		);
+
+		expect(payload?.prompt_cache_key).toBe("shared-agent-prefix");
+		expect(headers.session_id).toBe("transport-session");
+		expect(headers["x-client-request-id"]).toBe("transport-session");
+	});
+
 	it("sets prompt_cache_retention to 24h for direct OpenAI requests when cacheRetention is long", async () => {
 		const { payload } = await captureRequest({ cacheRetention: "long", sessionId: "session-456" });
 
@@ -126,11 +139,34 @@ describe("openai-completions prompt caching", () => {
 		expect(payload?.prompt_cache_retention).toBe("24h");
 	});
 
-	it("clamps prompt_cache_key to OpenAI's 64-character limit", async () => {
-		const sessionId = "x".repeat(67);
+	it("preserves prompt_cache_key values at the 64-code-point boundary", async () => {
+		const asciiSessionId = "x".repeat(64);
+		const unicodeSessionId = "😀".repeat(64);
+
+		expect((await captureRequest({ sessionId: asciiSessionId })).payload?.prompt_cache_key).toBe(asciiSessionId);
+		expect((await captureRequest({ sessionId: unicodeSessionId })).payload?.prompt_cache_key).toBe(unicodeSessionId);
+	});
+
+	it("bounds long prompt_cache_key values without collapsing distinct suffixes", async () => {
+		const sharedPrefix = "x".repeat(64);
+		const firstSessionId = `${sharedPrefix}-first`;
+		const secondSessionId = `${sharedPrefix}-second`;
+		const first = (await captureRequest({ sessionId: firstSessionId })).payload?.prompt_cache_key;
+		const firstAgain = (await captureRequest({ sessionId: firstSessionId })).payload?.prompt_cache_key;
+		const second = (await captureRequest({ sessionId: secondSessionId })).payload?.prompt_cache_key;
+
+		expect(first).toBe(firstAgain);
+		expect(first).not.toBe(second);
+		expect(first?.startsWith("x".repeat(40))).toBe(true);
+		expect(Array.from(first ?? "")).toHaveLength(64);
+		expect(Array.from(second ?? "")).toHaveLength(64);
+	});
+
+	it("counts Unicode code points when bounding prompt_cache_key", async () => {
+		const sessionId = `${"😀".repeat(70)}-suffix`;
 		const { payload } = await captureRequest({ sessionId });
 
-		expect(payload?.prompt_cache_key).toBe("x".repeat(64));
+		expect(Array.from(payload?.prompt_cache_key ?? "")).toHaveLength(64);
 	});
 
 	it("omits prompt cache fields when cacheRetention is none", async () => {

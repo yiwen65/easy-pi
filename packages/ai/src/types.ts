@@ -203,9 +203,15 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 */
 	cacheRetention?: CacheRetention;
 	/**
-	 * Optional session identifier for providers that support session-based caching.
-	 * Providers can use this to enable prompt caching, request routing, or other
-	 * session-aware features. Ignored by providers that don't support it.
+	 * Optional logical grouping key for provider prompt caches. Use the same key for
+	 * requests whose stable prompt prefix may be shared. Providers fall back to
+	 * `sessionId` for backward compatibility. This does not affect transport affinity.
+	 */
+	promptCacheKey?: string;
+	/**
+	 * Optional session identifier for provider request routing, transport affinity,
+	 * and connection reuse. It is also the legacy prompt-cache key when
+	 * `promptCacheKey` is not set. Ignored by providers that don't support it.
 	 */
 	sessionId?: string;
 	/**
@@ -638,7 +644,7 @@ export interface OpenAIResponsesCompat {
 	supportsAdditionalTools?: boolean;
 	/** Whether the model supports client-executed tool search for deferred tools. Default: false. */
 	supportsToolSearch?: boolean;
-	/** Whether the model accepts `prompt_cache_options` (OpenAI GPT-5.6+ explicit prompt caching). Older OpenAI models reject the parameter. Default: false. */
+	/** Whether the model accepts `prompt_cache_options` and input-text `prompt_cache_breakpoint` fields (OpenAI GPT-5.6+ prompt caching). Older OpenAI models reject them. Default: false. */
 	supportsExplicitPromptCacheMode?: boolean;
 }
 

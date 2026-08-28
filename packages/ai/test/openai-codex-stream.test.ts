@@ -494,7 +494,7 @@ describe("openai-codex streaming", () => {
 		expect(cancelled).toBe(true);
 	});
 
-	it("sets session-id/x-client-request-id headers and prompt_cache_key when sessionId is provided", async () => {
+	it("separates prompt cache identity from session affinity", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;
 
@@ -544,6 +544,7 @@ describe("openai-codex streaming", () => {
 		});
 
 		const sessionId = "test-session-123";
+		const promptCacheKey = "shared-agent-prefix";
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
 			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
@@ -559,9 +560,9 @@ describe("openai-codex streaming", () => {
 				expect(headers?.has("session_id")).toBe(false);
 				expect(headers?.get("x-client-request-id")).toBe(sessionId);
 
-				// Verify sessionId is set in request body as prompt_cache_key
+				// Cache identity can span compatible sessions without changing transport affinity.
 				const body = decodeCodexRequestBody(init?.body);
-				expect(body?.prompt_cache_key).toBe(sessionId);
+				expect(body?.prompt_cache_key).toBe(promptCacheKey);
 
 				return new Response(stream, {
 					status: 200,
@@ -591,7 +592,12 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 		};
 
-		const streamResult = streamOpenAICodexResponses(model, context, { apiKey: token, sessionId, transport: "sse" });
+		const streamResult = streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			promptCacheKey,
+			sessionId,
+			transport: "sse",
+		});
 		await streamResult.result();
 	});
 
@@ -646,7 +652,7 @@ describe("openai-codex streaming", () => {
 		expect(capturedBody).not.toHaveProperty("prompt_cache_key");
 	});
 
-	it("clamps prompt_cache_key to OpenAI's 64-character limit", async () => {
+	it("bounds prompt_cache_key at 64 code points while preserving suffix identity", async () => {
 		const token = mockToken();
 		const sessionId = "x".repeat(67);
 		let capturedPayload: { prompt_cache_key?: string } | undefined;
@@ -693,10 +699,12 @@ describe("openai-codex streaming", () => {
 			},
 		}).result();
 
-		expect(capturedPayload?.prompt_cache_key).toBe("x".repeat(64));
+		expect(Array.from(capturedPayload?.prompt_cache_key ?? "")).toHaveLength(64);
+		expect(capturedPayload?.prompt_cache_key).toContain("~");
+		expect(capturedPayload?.prompt_cache_key).not.toBe("x".repeat(64));
 	});
 
-	it("clamps Codex session-id header to 64 characters", async () => {
+	it("uses the bounded prompt cache key for Codex affinity headers", async () => {
 		const token = mockToken();
 		const sessionId = "x".repeat(67);
 		let capturedHeaders: Headers | undefined;
@@ -740,8 +748,10 @@ describe("openai-codex streaming", () => {
 			sessionId,
 		}).result();
 
-		expect(capturedHeaders?.get("session-id")).toBe("x".repeat(64));
-		expect(capturedHeaders?.get("x-client-request-id")).toBe("x".repeat(64));
+		const boundedSessionId = capturedHeaders?.get("session-id") ?? "";
+		expect(Array.from(boundedSessionId)).toHaveLength(64);
+		expect(boundedSessionId).toContain("~");
+		expect(capturedHeaders?.get("x-client-request-id")).toBe(boundedSessionId);
 	});
 
 	it("preserves gpt-5.5 xhigh reasoning effort from simple options", async () => {

@@ -886,4 +886,27 @@ describe("Agent", () => {
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
 	});
+
+	it("forwards promptCacheKey independently from sessionId", async () => {
+		let receivedOptions: { promptCacheKey?: string; sessionId?: string } | undefined;
+		const agent = new Agent({
+			promptCacheKey: "shared-agent-prefix",
+			sessionId: "transport-session",
+			streamFn: (_model, _context, options) => {
+				receivedOptions = options;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage("ok");
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("hello");
+		expect(receivedOptions).toMatchObject({
+			promptCacheKey: "shared-agent-prefix",
+			sessionId: "transport-session",
+		});
+	});
 });

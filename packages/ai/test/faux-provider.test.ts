@@ -324,6 +324,31 @@ describe("faux provider", () => {
 		expect(second.usage.input + second.usage.cacheRead).toBeGreaterThan(second.usage.input);
 	});
 
+	it("shares simulated prompt caching across sessions with an explicit promptCacheKey", async () => {
+		const registration = registerFauxProvider();
+		registrations.push(registration);
+		registration.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+
+		const context: Context = {
+			systemPrompt: "Be concise.",
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+		};
+
+		await complete(registration.getModel(), context, {
+			promptCacheKey: "shared-agent-prefix",
+			sessionId: "transport-session-1",
+		});
+		context.messages.push(fauxAssistantMessage("first"));
+		context.messages.push({ role: "user", content: "follow up", timestamp: Date.now() + 1 });
+
+		const second = await complete(registration.getModel(), context, {
+			promptCacheKey: "shared-agent-prefix",
+			sessionId: "transport-session-2",
+		});
+
+		expect(second.usage.cacheRead).toBeGreaterThan(0);
+	});
+
 	it("does not simulate caching when cacheRetention is none", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);

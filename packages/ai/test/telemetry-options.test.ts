@@ -72,6 +72,18 @@ function completedStream(requestModel: Model<string>): AssistantMessageEventStre
 }
 
 describe("ProviderRequestOptions.telemetryContext", () => {
+	it("preserves promptCacheKey through simple-stream conversion", () => {
+		expect(
+			buildBaseOptions(model, context, {
+				promptCacheKey: "shared-agent-prefix",
+				sessionId: "transport-session",
+			}),
+		).toMatchObject({
+			promptCacheKey: "shared-agent-prefix",
+			sessionId: "transport-session",
+		});
+	});
+
 	it("is inherited by every request option surface and simple-stream conversion", () => {
 		const options = { telemetryContext } satisfies ProviderRequestOptions;
 		expect(options.telemetryContext).toBe(telemetryContext);

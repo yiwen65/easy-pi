@@ -294,7 +294,22 @@ describe("openai-responses provider defaults", () => {
 		expect(captured.clientRequestId).toBe("session-123");
 	});
 
-	it("clamps prompt_cache_key to OpenAI's 64-character limit", async () => {
+	it("uses promptCacheKey for cache identity without changing session-affinity headers", async () => {
+		let capturedPayload: CapturedResponsesPayload | undefined;
+		const captured = await captureOpenAIResponseHeaders({
+			sessionId: "transport-session",
+			promptCacheKey: "shared-agent-prefix",
+			onPayload: (payload) => {
+				capturedPayload = payload as CapturedResponsesPayload;
+			},
+		});
+
+		expect(captured.sessionId).toBe("transport-session");
+		expect(captured.clientRequestId).toBe("transport-session");
+		expect(capturedPayload?.prompt_cache_key).toBe("shared-agent-prefix");
+	});
+
+	it("bounds prompt_cache_key at 64 code points while preserving suffix identity", async () => {
 		const sessionId = "x".repeat(67);
 		let capturedPayload: Pick<CapturedResponsesPayload, "prompt_cache_key"> | undefined;
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -323,7 +338,9 @@ describe("openai-responses provider defaults", () => {
 			if (event.type === "done" || event.type === "error") break;
 		}
 
-		expect(capturedPayload?.prompt_cache_key).toBe("x".repeat(64));
+		expect(Array.from(capturedPayload?.prompt_cache_key ?? "")).toHaveLength(64);
+		expect(capturedPayload?.prompt_cache_key).toContain("~");
+		expect(capturedPayload?.prompt_cache_key).not.toBe("x".repeat(64));
 	});
 
 	it("sets cache-affinity headers for proxy OpenAI Responses requests with a sessionId", async () => {

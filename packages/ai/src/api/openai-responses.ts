@@ -82,7 +82,23 @@ function getPromptCacheRetention(
 	compat: Required<OpenAIResponsesCompat>,
 	cacheRetention: CacheRetention,
 ): "24h" | undefined {
-	return cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined;
+	return cacheRetention === "long" && compat.supportsLongCacheRetention && !compat.supportsExplicitPromptCacheMode
+		? "24h"
+		: undefined;
+}
+
+interface OpenAIPromptCacheOptions {
+	mode: "explicit" | "implicit";
+	ttl?: "30m" | "24h";
+}
+
+function getPromptCacheOptions(
+	compat: Required<OpenAIResponsesCompat>,
+	cacheRetention: CacheRetention,
+): OpenAIPromptCacheOptions | undefined {
+	if (!compat.supportsExplicitPromptCacheMode) return undefined;
+	if (cacheRetention === "none") return { mode: "explicit" };
+	return { mode: "implicit", ttl: cacheRetention === "long" ? "24h" : "30m" };
 }
 
 function formatOpenAIResponsesError(error: unknown): string {
@@ -279,7 +295,9 @@ function buildParams(
 			? "tool-search"
 			: undefined;
 	const toolPlacement = splitDeferredTools(context, deferredToolsMode !== undefined);
+	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+		promptCacheBreakpointAfterSystem: compat.supportsExplicitPromptCacheMode && cacheRetention !== "none",
 		grammarToolInputProperties,
 		deferredTools: toolPlacement.deferred,
 		deferredToolsMode,
@@ -289,15 +307,16 @@ function buildParams(
 		},
 	});
 
-	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
-	const disableImplicitPromptCache = cacheRetention === "none" && compat.supportsExplicitPromptCacheMode;
-	const params: ResponseCreateParamsStreaming & { prompt_cache_options?: { mode: "explicit" } } = {
+	const params: ResponseCreateParamsStreaming & { prompt_cache_options?: OpenAIPromptCacheOptions } = {
 		model: model.id,
 		input: messages,
 		stream: true,
-		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
+		prompt_cache_key:
+			cacheRetention === "none"
+				? undefined
+				: clampOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId),
 		prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
-		prompt_cache_options: disableImplicitPromptCache ? { mode: "explicit" } : undefined,
+		prompt_cache_options: getPromptCacheOptions(compat, cacheRetention),
 		store: false,
 	};
 

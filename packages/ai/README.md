@@ -1242,6 +1242,9 @@ faux.setResponses([
 
 const first = await models.complete(model, context, {
   sessionId: 'session-1',
+  // Optional: share the provider prompt cache across compatible sessions while
+  // keeping transport affinity and connection reuse scoped to sessionId.
+  promptCacheKey: 'shared-agent-prefix',
   cacheRetention: 'short'
 });
 context.messages.push(first);
@@ -1289,7 +1292,7 @@ Notes:
 - Use `faux.setResponses([...])` to replace the remaining queue and `faux.appendResponses([...])` to add more responses.
 - `faux.models` exposes all faux models. `faux.getModel()` returns the first one, and `faux.getModel(id)` returns a specific one.
 - Use `fauxAssistantMessage(...)` for scripted assistant replies. Use `fauxText(...)`, `fauxThinking(...)`, and `fauxToolCall(...)` to build content blocks without filling in low-level fields manually.
-- Usage is estimated at roughly 1 token per 4 characters. When `sessionId` is present and `cacheRetention` is not `"none"`, prompt cache reads and writes are simulated automatically.
+- Usage is estimated at roughly 1 token per 4 characters. When `promptCacheKey` (or the backward-compatible `sessionId` fallback) is present and `cacheRetention` is not `"none"`, prompt cache reads and writes are simulated automatically.
 - Tool call arguments stream incrementally via `toolcall_delta` chunks.
 - By default, each streamed chunk is emitted on its own microtask. Set `tokensPerSecond` to pace chunk delivery in real time.
 - The intended use is one deterministic scripted flow per handle. If you need independent concurrent flows, create separate faux providers with distinct `provider` ids.
@@ -1556,7 +1559,7 @@ Built-in login and refresh flows are private provider implementations. Use provi
 
 Provider notes:
 
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options unless `cacheRetention` is `"none"`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity.
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles prompt caching when `promptCacheKey` or its backward-compatible `sessionId` fallback is provided unless `cacheRetention` is `"none"`. `promptCacheKey` changes only the prompt-cache identity; transport affinity remains scoped to `sessionId`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity.
 
 **Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
 
