@@ -115,10 +115,10 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-002 — Implement shared v2 search
+### [x] T-002 — Implement shared v2 search
 
-- Status: in_progress
-- Owner: search
+- Status: done
+- Owner: coordinator
 - Objective: Implement provider-agnostic v2 search schema, normalization, deterministic ranking, truncation, results, and errors.
 - Inputs and prerequisites: T-001 shared context, errors, policy and SearchProvider contract.
 - Scope or files: New search tool/provider modules under `packages/agent/src/harness/tools/`, dedicated agent search tests; no shared index export edits.
@@ -137,14 +137,14 @@ Non-goals:
   - Provider branding is absent from model schema/content.
 - Verification method:
   - Targeted new agent search test file.
-- Validation evidence: Not run.
+- Validation evidence: Focused `search-v2.test.ts` passed 4/4; combined Batch 2 run passed 16/16; root `npm run check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-003 — Implement shared v2 read
+### [x] T-003 — Implement shared v2 read
 
-- Status: in_progress
-- Owner: read-v2
+- Status: done
+- Owner: coordinator
 - Objective: Implement v2 read for bounded text, directories, images, and unsupported binary detection without regressing legacy read.
 - Inputs and prerequisites: T-001 bounded range and policy capabilities; current image helpers.
 - Scope or files: New v2 read tool module under `packages/agent/src/harness/tools/`, dedicated read-v2 tests; no shared index export edits.
@@ -163,14 +163,14 @@ Non-goals:
   - Existing image behavior remains available.
 - Verification method:
   - Targeted new agent read-v2 test file.
-- Validation evidence: Not run.
+- Validation evidence: Focused `read-v2.test.ts` passed 4/4; combined Batch 2 run passed 16/16; root `npm run check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — Implement shared structured v2 edit
+### [x] T-004 — Implement shared structured v2 edit
 
-- Status: in_progress
-- Owner: edit-v2
+- Status: done
+- Owner: coordinator
 - Objective: Implement file-only structured create/update/move/delete with sequential virtual prevalidation and truthful partial-commit reporting.
 - Inputs and prerequisites: T-001 errors, policy/path identity and context; existing diff helpers.
 - Scope or files: New edit-v2 planner/tool/coordinator modules under `packages/agent/src/harness/tools/`, dedicated edit-v2 tests; no shared index export edits.
@@ -190,14 +190,14 @@ Non-goals:
   - No rollback, transaction, stale or fuzzy behavior is introduced.
 - Verification method:
   - Targeted new agent edit-v2 test file.
-- Validation evidence: Not run.
+- Validation evidence: Focused `edit-v2.test.ts` passed 4/4, including zero-mutation prevalidation and partial failure; combined Batch 2 run passed 16/16; root `npm run check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-005 — Implement shared v2 run
+### [x] T-005 — Implement shared v2 run
 
-- Status: in_progress
-- Owner: run-v2
+- Status: done
+- Owner: coordinator
 - Objective: Implement run with explicit cwd, nonzero normal results, timeout output retention, and managed-process termination status.
 - Inputs and prerequisites: T-001 errors, policy and context; current shell output capture.
 - Scope or files: New run tool module and any narrowly required shell result capability under `packages/agent/src/harness/`, dedicated run-v2 tests; no shared index export edits.
@@ -217,14 +217,14 @@ Non-goals:
   - cwd is explicit but never described as sandbox containment.
 - Verification method:
   - Targeted new agent run-v2 test file.
-- Validation evidence: Not run.
+- Validation evidence: Focused `run-v2.test.ts` passed 4/4, including real local nonzero and timeout fixtures; combined Batch 2 run passed 16/16; root `npm run check` passed.
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-006 — Integrate the v2 profile into packages and coding-agent
 
-- Status: pending
-- Owner: unassigned
+- Status: in_progress
+- Owner: coordinator
 - Objective: Export a coherent v2 tool factory and connect it to coding-agent CLI, SDK, local provider, prompts, registries, filtering and renderers while preserving legacy defaults.
 - Inputs and prerequisites: T-002 through T-005 completed and verified.
 - Scope or files: agent tool exports/factory; coding-agent tools/definitions or adapters; SDK, CLI args/help/main wiring, AgentSession registry, system prompt, server harness where applicable, focused coding-agent tests and public docs.
@@ -247,8 +247,8 @@ Non-goals:
   - Targeted SDK, args, tools, prompt and AgentSession tests.
   - Focused server harness tests if its public creation path receives profile support.
 - Validation evidence: Not run.
-- Blocker: T-002 through T-005 not done.
-- Unblock condition: All four shared v2 tool tasks pass verification.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-007 — Add deterministic A/B evaluation scaffold
 
@@ -336,6 +336,8 @@ Non-goals:
 - 2026-08-28: T-001 completed after 7/7 focused tests, diff check, and contract Markdown check passed; shared bounded range, errors, policy, provider context, and contract formatting are present.
 - 2026-08-28: T-002, T-003, T-004, and T-005 moved to in_progress as parallel-ready Batch 2 tasks; authority document validated before delegation.
 - 2026-08-28: Initial Batch 2 writer DAG rejected/inconclusive with no workspace changes. Root `npm run check` then found only test matcher type arguments in T-001; coordinator corrected them, reran 7/7 tests, and completed a clean full check. Batch 2 will be retried from a committed foundation snapshot.
+- 2026-08-28: Second Batch 2 writer DAG also rejected/inconclusive without workspace changes; coordinator retained the planned boundaries and implemented the four disjoint tools directly.
+- 2026-08-28: T-002 through T-005 completed; four focused files passed 16/16 tests and root `npm run check` passed after explicit type fixes. T-006 moved to in_progress for integration.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
