@@ -123,7 +123,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 		const body = liveThinking
 			? marqueeWindow(flattenInline(liveThinking), Math.max(1, contentWidth - visibleWidth(PREFIX)), this.tick)
 			: this.hiddenLabel;
-		const line = theme.italic(theme.fg("thinkingText", `${PREFIX}${body}`));
+		const line = theme.italic(theme.fg("accent", `${PREFIX}${body}`));
 		return padLeft + truncateToWidth(line, contentWidth, "");
 	}
 
