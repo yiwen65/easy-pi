@@ -74,6 +74,7 @@ describe("Mistral HTTP transport", () => {
 			promptMode: "reasoning",
 			reasoningEffort: "high",
 			toolChoice: { type: "function", function: { name: "lookup" } },
+			promptCacheKey: "shared-agent-prefix",
 			sessionId: "session-1",
 			onPayload: (payload) => {
 				callbackPayload = payload as Record<string, unknown>;
@@ -111,7 +112,7 @@ describe("Mistral HTTP transport", () => {
 		expect(headers.get("x-custom")).toBe("value");
 		expect(callbackPayload?.maxTokens).toBe(123);
 		expect(callbackPayload?.promptMode).toBe("reasoning");
-		expect(callbackPayload?.promptCacheKey).toBe("session-1");
+		expect(callbackPayload?.promptCacheKey).toBe("shared-agent-prefix");
 		expect(callbackResponse).toEqual({
 			status: 200,
 			headers: { "content-type": "text/event-stream", "x-request-id": "request-1" },
@@ -122,7 +123,7 @@ describe("Mistral HTTP transport", () => {
 		expect(wirePayload.prompt_mode).toBe("reasoning");
 		expect(wirePayload.reasoning_effort).toBe("high");
 		expect(wirePayload.tool_choice).toEqual({ type: "function", function: { name: "lookup" } });
-		expect(wirePayload.prompt_cache_key).toBe("session-1");
+		expect(wirePayload.prompt_cache_key).toBe("shared-agent-prefix");
 		expect(wirePayload.top_p).toBe(0.9);
 		expect(wirePayload.random_seed).toBe(42);
 		expect(wirePayload.presence_penalty).toBe(0.1);

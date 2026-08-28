@@ -121,6 +121,7 @@ export interface AgentOptions {
 	onProviderContext?: (model: Model<any>, context: Context) => void;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
+	promptCacheKey?: string;
 	sessionId?: string;
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
@@ -209,6 +210,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	/** Logical provider prompt-cache grouping key, independent from transport affinity. */
+	public promptCacheKey?: string;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -238,6 +241,7 @@ export class Agent {
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time");
+		this.promptCacheKey = runtimeOptions.promptCacheKey;
 		this.sessionId = runtimeOptions.sessionId;
 		this.thinkingBudgets = runtimeOptions.thinkingBudgets;
 		this.transport = runtimeOptions.transport ?? "auto";
@@ -465,6 +469,7 @@ export class Agent {
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			promptCacheKey: this.promptCacheKey,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,

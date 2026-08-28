@@ -238,10 +238,10 @@ function withUsageEstimate(
 	let input = promptTokens;
 	let cacheRead = 0;
 	let cacheWrite = 0;
-	const sessionId = options?.sessionId;
+	const promptCacheKey = options?.promptCacheKey ?? options?.sessionId;
 
-	if (sessionId && options?.cacheRetention !== "none") {
-		const previousPrompt = promptCache.get(sessionId);
+	if (promptCacheKey && options?.cacheRetention !== "none") {
+		const previousPrompt = promptCache.get(promptCacheKey);
 		if (previousPrompt) {
 			const cachedChars = commonPrefixLength(previousPrompt, promptText);
 			cacheRead = estimateTokens(previousPrompt.slice(0, cachedChars));
@@ -250,7 +250,7 @@ function withUsageEstimate(
 		} else {
 			cacheWrite = promptTokens;
 		}
-		promptCache.set(sessionId, promptText);
+		promptCache.set(promptCacheKey, promptText);
 	}
 
 	return {

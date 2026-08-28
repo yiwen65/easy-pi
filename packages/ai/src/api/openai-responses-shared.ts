@@ -118,6 +118,7 @@ export interface OpenAIResponsesStreamOptions {
 
 export interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
+	promptCacheBreakpointAfterSystem?: boolean;
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	deferredTools?: ReadonlyMap<string, Tool>;
 	deferredToolsMode?: "additional-tools" | "tool-search";
@@ -175,9 +176,19 @@ export function convertResponsesMessages<TApi extends Api>(
 	if (includeSystemPrompt && context.systemPrompt) {
 		const compat = model.compat as { supportsDeveloperRole?: boolean } | undefined;
 		const role = model.reasoning && compat?.supportsDeveloperRole !== false ? "developer" : "system";
+		const text = sanitizeSurrogates(context.systemPrompt);
+		const content = options?.promptCacheBreakpointAfterSystem
+			? [
+					{
+						type: "input_text" as const,
+						text,
+						prompt_cache_breakpoint: { mode: "explicit" as const },
+					},
+				]
+			: text;
 		messages.push({
 			role,
-			content: sanitizeSurrogates(context.systemPrompt),
+			content,
 		});
 	}
 

@@ -19,7 +19,11 @@ interface OpenAICompletionsCachePayload {
 }
 
 interface OpenAIResponsesCachePayload extends OpenAICompletionsCachePayload {
-	prompt_cache_options?: { mode: "explicit" };
+	input?: Array<{
+		role?: string;
+		content?: string | Array<{ type?: string; text?: string; prompt_cache_breakpoint?: { mode: "explicit" } }>;
+	}>;
+	prompt_cache_options?: { mode: "explicit" | "implicit"; ttl?: "30m" | "24h" };
 }
 
 function stopAfterPayload<TPayload>(capture: (payload: TPayload) => void): (payload: unknown) => never {
@@ -240,6 +244,61 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 	});
 
 	describe("OpenAI Responses Provider", () => {
+		it("should add a stable system breakpoint with the default GPT-5.6 TTL", async () => {
+			const model = getModel("openai", "gpt-5.6-sol");
+			let capturedPayload: OpenAIResponsesCachePayload | undefined;
+
+			try {
+				const s = streamOpenAIResponses(model, context, {
+					apiKey: "fake-key",
+					promptCacheKey: "shared-agent-prefix",
+					onPayload: stopAfterPayload<OpenAIResponsesCachePayload>((payload) => {
+						capturedPayload = payload;
+					}),
+				});
+
+				for await (const event of s) {
+					if (event.type === "error") break;
+				}
+			} catch {
+				// Expected after payload capture.
+			}
+
+			expect(capturedPayload?.prompt_cache_key).toBe("shared-agent-prefix");
+			expect(capturedPayload?.prompt_cache_retention).toBeUndefined();
+			expect(capturedPayload?.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
+			expect(capturedPayload?.input?.[0]?.content).toEqual([
+				{
+					type: "input_text",
+					text: context.systemPrompt,
+					prompt_cache_breakpoint: { mode: "explicit" },
+				},
+			]);
+		});
+
+		it("should use the modern 24h GPT-5.6 TTL without the deprecated retention field", async () => {
+			const model = getModel("openai", "gpt-5.6-terra");
+			let capturedPayload: OpenAIResponsesCachePayload | undefined;
+
+			try {
+				const s = streamOpenAIResponses(model, context, {
+					apiKey: "fake-key",
+					cacheRetention: "long",
+					onPayload: stopAfterPayload<OpenAIResponsesCachePayload>((payload) => {
+						capturedPayload = payload;
+					}),
+				});
+				for await (const event of s) {
+					if (event.type === "error") break;
+				}
+			} catch {
+				// Expected after payload capture.
+			}
+
+			expect(capturedPayload?.prompt_cache_retention).toBeUndefined();
+			expect(capturedPayload?.prompt_cache_options).toEqual({ mode: "implicit", ttl: "24h" });
+		});
+
 		it.skipIf(!process.env.OPENAI_API_KEY)(
 			"should not set prompt_cache_retention when PI_CACHE_RETENTION is not set",
 			async () => {
@@ -370,6 +429,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			expect(capturedPayload?.prompt_cache_key).toBeUndefined();
 			expect(capturedPayload?.prompt_cache_retention).toBeUndefined();
 			expect(capturedPayload?.prompt_cache_options).toEqual({ mode: "explicit" });
+			expect(capturedPayload?.input?.[0]?.content).toBe(context.systemPrompt);
 		});
 
 		it("should omit prompt_cache_options for models that reject it", async () => {
@@ -396,6 +456,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			expect(capturedPayload).toBeDefined();
 			expect(capturedPayload?.prompt_cache_key).toBeUndefined();
 			expect(capturedPayload?.prompt_cache_options).toBeUndefined();
+			expect(capturedPayload?.input?.[0]?.content).toBe(context.systemPrompt);
 		});
 
 		it("should set prompt_cache_retention when cacheRetention is long", async () => {

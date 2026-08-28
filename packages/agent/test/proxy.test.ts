@@ -76,4 +76,32 @@ describe("streamProxy", () => {
 			namespace: "dynamic_tools",
 		});
 	});
+
+	it("forwards promptCacheKey independently from sessionId", async () => {
+		let requestOptions: Record<string, unknown> | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+				requestOptions = JSON.parse(String(init?.body)).options as Record<string, unknown>;
+				return new Response(`data: ${JSON.stringify({ type: "done", reason: "stop", usage })}\n\n`, {
+					status: 200,
+				});
+			}),
+		);
+
+		const stream = streamProxy(
+			model,
+			{ messages: [] },
+			{
+				authToken: "test-token",
+				proxyUrl: "https://proxy.example.com",
+				promptCacheKey: "shared-agent-prefix",
+				sessionId: "transport-session",
+			},
+		);
+		await stream.result();
+
+		expect(requestOptions?.promptCacheKey).toBe("shared-agent-prefix");
+		expect(requestOptions?.sessionId).toBe("transport-session");
+	});
 });

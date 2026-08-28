@@ -264,9 +264,13 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				context.tools,
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
-			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
-			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
-			let body = buildRequestBody(model, context, options, codexSessionId, grammarToolInputProperties);
+			const transportSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
+			const codexSessionId = clampOpenAIPromptCacheKey(transportSessionId);
+			const promptCacheKey =
+				options?.cacheRetention === "none"
+					? undefined
+					: clampOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
+			let body = buildRequestBody(model, context, options, promptCacheKey, grammarToolInputProperties);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
@@ -285,9 +289,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
 			let startEmitted = false;
-			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
+			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(transportSessionId);
 			if (websocketDisabledForSession) {
-				recordWebSocketSseFallback(cacheSessionId);
+				recordWebSocketSseFallback(transportSessionId);
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
@@ -313,7 +317,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							},
 							httpTimeoutMs,
 							websocketConnectTimeoutMs,
-							cacheSessionId,
+							transportSessionId,
 							accountId,
 							grammarToolInputProperties,
 							options,
@@ -355,11 +359,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 								requestBytes: new TextEncoder().encode(bodyJson).byteLength,
 							}),
 						);
-						recordWebSocketFailure(cacheSessionId, error);
+						recordWebSocketFailure(transportSessionId, error);
 						if (websocketStarted) {
 							throw error;
 						}
-						recordWebSocketSseFallback(cacheSessionId);
+						recordWebSocketSseFallback(transportSessionId);
 						break;
 					}
 				}
@@ -520,7 +524,7 @@ function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
-	cacheSessionId: string | undefined,
+	promptCacheKey: string | undefined,
 	grammarToolInputProperties: ReadonlyMap<string, string> = createGrammarToolInputProperties(
 		context.tools,
 		model.compat?.supportsOpenAIGrammarTools ?? false,
@@ -554,7 +558,7 @@ function buildRequestBody(
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
-		prompt_cache_key: cacheSessionId,
+		prompt_cache_key: promptCacheKey,
 		tool_choice: options?.toolChoice ?? "auto",
 		parallel_tool_calls: true,
 	};
