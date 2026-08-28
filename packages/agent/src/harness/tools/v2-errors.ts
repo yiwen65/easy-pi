@@ -19,10 +19,28 @@ export type V2ToolErrorCode =
 	| "EDIT_CONTEXT_AMBIGUOUS"
 	| "EDIT_CONFLICT"
 	| "EDIT_MOVE_NOT_SUPPORTED"
+	| "STALE_FILE"
+	| "PATCH_PARSE_ERROR"
+	| "PATCH_CONTEXT_NOT_FOUND"
+	| "PATCH_AMBIGUOUS"
+	| "EDIT_PLAN_TOO_LARGE"
+	| "EDIT_ROLLED_BACK"
+	| "EDIT_INDETERMINATE"
 	| "EDIT_PARTIAL_COMMIT"
 	| "SPAWN_FAILED"
 	| "SHELL_UNAVAILABLE"
 	| "ABORTED";
+
+export interface V2RecoveryAction {
+	kind:
+		| "retry_without_cursor"
+		| "narrow_scope"
+		| "read_again"
+		| "split_edit"
+		| "inspect_paths"
+		| "configure_capability";
+	paths?: string[];
+}
 
 /** Stable failure returned by v2 tools. Throwing marks the tool result as an error. */
 export class V2ToolError<TDetails = unknown> extends Error {

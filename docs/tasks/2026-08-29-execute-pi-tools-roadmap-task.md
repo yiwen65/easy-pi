@@ -207,10 +207,10 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-006 — Implement V2.3 Shared Mutation Core and dialects
+### [x] T-006 — Implement V2.3 Shared Mutation Core and dialects
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Introduce one EditPlan runtime with observations, preservation, limits, and separately advertised operations/replacement/patch dialects.
 - Inputs and prerequisites: Stable provider/lifecycle patterns through V2.2.
 - Scope or files: Agent mutation core/backend/types, edit-v2 adapters, native shared edit helpers, focused mutation tests.
@@ -227,14 +227,14 @@ Non-goals:
   - No default dialect switch occurs.
 - Verification method:
   - Targeted agent/coding-agent mutation tests, root check.
-- Validation evidence: Not run.
-- Blocker: T-005 not done.
-- Unblock condition: V2.2 committed.
+- Validation evidence: Agent Edit/Read/Search focused tests passed 23/23. The shared MutationBackend accepts only canonical EditPlan operations with initial existence/content hash/size/mtime/identity/mode observations and centralized operation/file/byte limits. Default operations, native-style replacement, and versioned JSON-line Pi Edit Patch v1 dialects produced equivalent updates while only one selected schema was advertised per session. Tests cover stale-file zero-write rejection, pre-write limits, exact uniqueness/overlap behavior, BOM/CRLF/executable-mode preservation, mixed-ending and non-UTF-8 rejection, special patch paths/content markers, move/create/update/delete sequencing, and explicit partial commits. Root `npm run check` and `git diff --check` passed.
+- Blocker: None.
+- Unblock condition: None.
 
-### [ ] T-007 — Implement Edit TUI and stage validation
+### [x] T-007 — Implement Edit TUI and stage validation
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: Add structured multi-file call/result/error rendering and complete V2.3 delivery.
 - Inputs and prerequisites: T-006 EditPlan/details.
 - Scope or files: coding-agent Edit renderer, profile/component tests, stage docs.
@@ -249,9 +249,9 @@ Non-goals:
   - V2.3 is independently releasable and committed.
 - Verification method:
   - Targeted TUI/profile tests, root check, git inspection.
-- Validation evidence: Not run.
-- Blocker: T-006 not done.
-- Unblock condition: Mutation details are stable.
+- Validation evidence: Dedicated Edit renderer consumes structured call/result/error details, summarizes all three dialects, renders per-file status and colored bounded diffs with first-change navigation hints, supports expanded/collapsed folding and a 2,000-line hard render cap, and reports stale/split/partial recovery states without parsing model-visible content. Coding-agent component/profile tests passed 39/39, including narrow-width, control-sequence/path sanitization, structured error sentinels, dialect schema selection, and expanded output. Root `npm run check` and `git diff --check` passed.
+- Blocker: None.
+- Unblock condition: None.
 
 ### [ ] T-008 — Implement opt-in Darwin/Unix journaled mutation
 
@@ -394,7 +394,7 @@ Non-goals:
 - Real evaluation can spend paid tokens or leak sensitive content. Mitigation: explicit flag, exact model/budget, fixed fixtures, sanitized aggregates, stop at 15 sessions.
 - Darwin/Unix-only guarantee can be misread as cross-platform. Mitigation: runtime platform guards, docs, and explicit Windows rejection for durable mode.
 - Root check auto-fixes can touch shared-worktree files. Mitigation: inspect status/diff immediately after every root check and preserve the unrelated untracked user file.
-- Current blocker: None; T-006 through T-012 remain dependency-ordered.
+- Current blocker: None; T-008 through T-012 remain dependency-ordered.
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -412,10 +412,13 @@ Non-goals:
 - 2026-08-29: T-004 started by coordinator after the V2.1 commit.
 - 2026-08-29: T-004 completed with injectable ReadProvider/ResourceReader contracts, bounded legacy degradation, stable Pi-owned directory cursors, Node streaming directory pages, and opt-in Unix external sorting with quotas and cleanup. The 1 GiB benchmark confirmed bounded memory while documenting the uncached line-seek cost.
 - 2026-08-29: T-005 completed with a details-only, width-aware Read renderer and bounded collapsed previews. Agent focused tests passed 17/17, coding-agent focused tests passed 41/41, root `npm run check` passed with no auto-fixes, and diff checks passed.
+- 2026-08-29: V2.2 committed as `bde2807b9`; protected user-owned `Pi Agent Tools v2.md` remained untracked and untouched. T-006 started by coordinator.
+- 2026-08-29: T-006 completed with one canonical EditPlan/MutationBackend path, pre-commit observations, pre-write budgets, UTF-8/BOM/line-ending/mode preservation boundaries, and explicitly selectable operations/replacement/Pi Edit Patch v1 schemas; operations remains the default.
+- 2026-08-29: T-007 completed with a details-only multi-file Edit renderer, bounded highlighted diffs, structured stale/split/partial error states, and control-sequence-safe inline paths. Agent focused tests passed 23/23, coding-agent focused tests passed 39/39, and root `npm run check` passed after formatting with no remaining warnings.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: not_run
 - Evidence: Not run.
-- Limitations: T-006 through T-012 remain pending; candidate remains opt-in and default profile remains legacy.
+- Limitations: T-008 through T-012 remain pending; candidate remains opt-in, the operations edit dialect remains the v2 default, and the overall default profile remains legacy.

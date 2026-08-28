@@ -4,7 +4,11 @@ import {
 	createReadV2Tool,
 	createRunV2Tool,
 	createSearchV2Tool,
+	type EditV2Details,
+	type EditV2Dialect,
 	type ExecutionToolContext,
+	type MutationBackend,
+	type MutationLimits,
 	type ReadProvider,
 	type ReadV2Details,
 	type ResourceReader,
@@ -19,7 +23,9 @@ import type { TSchema } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../../utils/ansi.ts";
 import { processImage } from "../../utils/image-process.ts";
+import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type {
 	ExtensionContext,
@@ -47,6 +53,10 @@ export interface CreateV2ToolDefinitionsOptions {
 	/** Directly injected providers/readers are host-owned and must be closed by their caller. */
 	readProvider?: ReadProvider;
 	resourceReaders?: ResourceReader[];
+	/** Directly injected backends are host-owned and must be closed by their caller. */
+	mutationBackend?: MutationBackend;
+	editDialect?: EditV2Dialect;
+	editLimits?: Partial<MutationLimits>;
 }
 
 const promptContributions = {
@@ -193,6 +203,188 @@ function renderReadResult(
 			? context.lastComponent
 			: new ReadResultRenderComponent();
 	component.setResult(result.details, options, theme);
+	return component;
+}
+
+function safeInlineDisplay(value: string): string {
+	return sanitizeBinaryOutput(stripAnsi(value))
+		.replaceAll("\t", "\\t")
+		.replaceAll("\r", "\\r")
+		.replaceAll("\n", "\\n");
+}
+
+function safeLineDisplay(value: string): string {
+	return sanitizeBinaryOutput(stripAnsi(value)).replaceAll("\r", "");
+}
+
+const EDIT_PREVIEW_FILES = 3;
+const EDIT_PREVIEW_DIFF_LINES = 8;
+const EDIT_MAX_EXPANDED_DIFF_LINES = 200;
+const EDIT_MAX_RENDER_LINES = 2000;
+
+function renderEditCall(
+	args: { operations?: unknown; path?: unknown; edits?: unknown; patch?: unknown },
+	theme: Theme,
+	context: ToolRenderContext,
+): Text {
+	let summary = "structured edit";
+	if (Array.isArray(args.operations)) {
+		const paths = args.operations
+			.flatMap((operation) =>
+				typeof operation === "object" && operation !== null && "path" in operation
+					? [safeInlineDisplay(String(operation.path))]
+					: [],
+			)
+			.slice(0, 2);
+		summary = `${args.operations.length} operation(s)${paths.length > 0 ? ` · ${paths.join(", ")}` : ""}`;
+	} else if (typeof args.path === "string") {
+		summary = `${safeInlineDisplay(args.path)} · ${Array.isArray(args.edits) ? args.edits.length : 0} replacement(s)`;
+	} else if (typeof args.patch === "string") {
+		summary = "Pi Edit Patch v1";
+	}
+	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+	component.setText(theme.fg("toolTitle", theme.bold("edit")) + theme.fg("muted", ` · ${summary}`));
+	return component;
+}
+
+function styleEditDiffLine(line: string, theme: Theme): string {
+	const safeLine = safeLineDisplay(line);
+	if (safeLine.startsWith("+")) return theme.fg("success", safeLine);
+	if (safeLine.startsWith("-")) return theme.fg("error", safeLine);
+	return theme.fg("muted", safeLine);
+}
+
+class StructuredEditErrorComponent extends Container {
+	private lines: string[] = [];
+
+	setLines(lines: string[]): void {
+		this.lines = lines;
+		this.invalidate();
+	}
+
+	override render(width: number): string[] {
+		return this.lines.map((line) => truncateToWidth(line, Math.max(1, width), "..."));
+	}
+}
+
+function renderStructuredEditError(
+	details: unknown,
+	theme: Theme,
+	context: ToolRenderContext,
+): StructuredEditErrorComponent | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const record = details as Record<string, unknown>;
+	const lines = [""];
+	if (typeof record.failedOperationIndex === "number") {
+		lines.push(theme.fg("error", `[partial commit · failed operation ${record.failedOperationIndex}]`));
+		if (Array.isArray(record.changedPaths)) {
+			lines.push(
+				theme.fg(
+					"warning",
+					`Changed: ${record.changedPaths.map(String).map(safeInlineDisplay).join(", ") || "none"}`,
+				),
+			);
+		}
+		if (Array.isArray(record.unknownPaths)) {
+			lines.push(
+				theme.fg(
+					"error",
+					`Inspect: ${record.unknownPaths.map(String).map(safeInlineDisplay).join(", ") || "none"}`,
+				),
+			);
+		}
+	} else {
+		const recovery =
+			typeof record.recovery === "object" && record.recovery !== null
+				? (record.recovery as Record<string, unknown>)
+				: undefined;
+		if (recovery?.kind === "split_edit") lines.push(theme.fg("error", "[edit plan too large · split the edit]"));
+		else if (recovery?.kind === "read_again") lines.push(theme.fg("error", "[stale edit · no files changed]"));
+		else return undefined;
+		if (Array.isArray(record.paths) && record.paths.length > 0) {
+			lines.push(theme.fg("warning", `Read again: ${record.paths.map(String).map(safeInlineDisplay).join(", ")}`));
+		}
+	}
+	const component =
+		context.lastComponent instanceof StructuredEditErrorComponent
+			? context.lastComponent
+			: new StructuredEditErrorComponent();
+	component.setLines(lines);
+	return component;
+}
+
+class EditResultRenderComponent extends Container {
+	private details: EditV2Details | undefined;
+	private options: ToolRenderResultOptions = { expanded: false, isPartial: false };
+	private renderTheme: Theme | undefined;
+
+	setResult(details: EditV2Details, options: ToolRenderResultOptions, theme: Theme): void {
+		this.details = details;
+		this.options = options;
+		this.renderTheme = theme;
+		this.invalidate();
+	}
+
+	override render(width: number): string[] {
+		const details = this.details;
+		const theme = this.renderTheme;
+		if (!details || !theme) return [];
+		const lines: string[] = [""];
+		const visibleFiles = this.options.expanded ? details.files : details.files.slice(0, EDIT_PREVIEW_FILES);
+		for (const file of visibleFiles) {
+			const location = file.firstChangedLine === undefined ? "" : ` · line ${file.firstChangedLine}`;
+			lines.push(
+				theme.fg(
+					file.status === "deleted" ? "error" : "success",
+					`${file.status} ${safeInlineDisplay(file.path)}${location}`,
+				),
+			);
+			const diffLines = file.diff ? file.diff.split("\n") : [];
+			const limit = this.options.expanded ? EDIT_MAX_EXPANDED_DIFF_LINES : EDIT_PREVIEW_DIFF_LINES;
+			for (const line of diffLines.slice(0, limit)) lines.push(styleEditDiffLine(line, theme));
+			if (diffLines.length > limit) {
+				lines.push(theme.fg("muted", `... (${diffLines.length - limit} more diff lines for this file)`));
+			}
+		}
+		if (details.files.length > visibleFiles.length) {
+			lines.push(
+				theme.fg("muted", `... (${details.files.length - visibleFiles.length} more changed files,`) +
+					` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+			);
+		}
+		if (details.files.length === 0) lines.push(theme.fg("muted", "No net content changes."));
+		lines.push(theme.fg("muted", `[${details.dialect} · ${details.changedPaths.length} changed path(s)]`));
+		if (lines.length > EDIT_MAX_RENDER_LINES) {
+			lines.length = EDIT_MAX_RENDER_LINES;
+			lines.push(theme.fg("warning", "[render truncated at 2000 lines]"));
+		}
+		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "..."));
+	}
+}
+
+function renderEditResult(
+	result: { content: Array<{ type: string; text?: string }>; details: unknown },
+	options: ToolRenderResultOptions,
+	theme: Theme,
+	context: ToolRenderContext,
+): EditResultRenderComponent | StructuredEditErrorComponent | Text {
+	if (context.isError) {
+		const errorComponent = renderStructuredEditError(result.details, theme, context);
+		if (errorComponent) return errorComponent;
+	}
+	if (
+		typeof result.details !== "object" ||
+		result.details === null ||
+		!("files" in result.details) ||
+		!Array.isArray(result.details.files)
+	) {
+		return renderResult(result, options, theme);
+	}
+	const component =
+		context.lastComponent instanceof EditResultRenderComponent
+			? context.lastComponent
+			: new EditResultRenderComponent();
+	component.setResult(result.details as unknown as EditV2Details, options, theme);
 	return component;
 }
 
@@ -517,6 +709,7 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 			if (tool.name === "run") return renderRunCall(args, theme, renderContext);
 			if (tool.name === "search") return renderSearchCall(args, theme, renderContext);
 			if (tool.name === "read") return renderReadCall(args, theme, renderContext);
+			if (tool.name === "edit") return renderEditCall(args, theme, renderContext);
 			return renderCall(tool.name, args, theme);
 		},
 		renderResult: (result, options, theme, renderContext) => {
@@ -544,6 +737,14 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 					renderContext,
 				);
 			}
+			if (tool.name === "edit") {
+				return renderEditResult(
+					result as unknown as { content: Array<{ type: string; text?: string }>; details: unknown },
+					options,
+					theme,
+					renderContext,
+				);
+			}
 			return renderResult(result, options, theme);
 		},
 	};
@@ -562,6 +763,7 @@ export function createV2ToolDefinitions(
 		searchProvider,
 		readProvider,
 		resourceReaders: options.resourceReaders,
+		mutationBackend: options.mutationBackend,
 		workspacePolicy: options.workspacePolicy,
 	};
 	return {
@@ -573,7 +775,14 @@ export function createV2ToolDefinitions(
 			}),
 			context,
 		),
-		edit: bindV2Tool(createEditV2Tool(), context),
+		edit: bindV2Tool(
+			createEditV2Tool({
+				dialect: options.editDialect,
+				backend: options.mutationBackend,
+				limits: options.editLimits,
+			}),
+			context,
+		),
 		run: bindV2Tool(createRunV2Tool(), context, options.getShellCommandPrefix),
 	};
 }

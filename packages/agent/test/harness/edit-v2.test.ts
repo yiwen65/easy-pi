@@ -1,6 +1,12 @@
+import { chmod, stat } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { createEditV2Tool } from "../../src/harness/tools/edit-v2.ts";
+import {
+	type EditPlan,
+	ExecutionEnvMutationBackend,
+	type MutationBackend,
+} from "../../src/harness/tools/mutation-core.ts";
 import { err, FileError, getOrThrow, type Result } from "../../src/harness/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
@@ -28,6 +34,32 @@ class TrackingEnv extends NodeExecutionEnv {
 		this.mutations++;
 		return super.remove(path, options);
 	}
+	writeExternal(path: string, content: string | Uint8Array, signal?: AbortSignal) {
+		return super.writeFile(path, content, signal);
+	}
+}
+
+class StaleBeforeCommitBackend implements MutationBackend {
+	readonly id = "stale-before-commit";
+	readonly capabilities;
+	private readonly env: TrackingEnv;
+	private readonly inner: ExecutionEnvMutationBackend;
+	private readonly path: string;
+
+	constructor(env: TrackingEnv, path: string) {
+		this.env = env;
+		this.path = path;
+		this.inner = new ExecutionEnvMutationBackend(env);
+		this.capabilities = this.inner.capabilities;
+	}
+
+	async commit(plan: EditPlan, signal?: AbortSignal) {
+		getOrThrow(await this.env.writeExternal(this.path, "external change", signal));
+		this.env.mutations = 0;
+		return this.inner.commit(plan, signal);
+	}
+
+	async close(): Promise<void> {}
 }
 
 describe("v2 edit", () => {
@@ -107,6 +139,179 @@ describe("v2 edit", () => {
 				{ env },
 			),
 		).rejects.toMatchObject({ code: "EDIT_CONFLICT" });
+		expect(env.mutations).toBe(0);
+	});
+
+	it("rejects stale observations before performing any planned mutation", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "original"));
+		env.mutations = 0;
+		const backend = new StaleBeforeCommitBackend(env, "a.txt");
+		await expect(
+			createEditV2Tool({ backend }).execute(
+				"id",
+				{ operations: [{ kind: "update", path: "a.txt", oldText: "original", newText: "planned" }] },
+				undefined,
+				undefined,
+				{ env },
+			),
+		).rejects.toMatchObject({ code: "STALE_FILE" });
+		expect(env.mutations).toBe(0);
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("external change");
+	});
+
+	it("enforces plan limits before writes", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		env.mutations = 0;
+		await expect(
+			createEditV2Tool({ limits: { maxOperations: 1 } }).execute(
+				"id",
+				{
+					operations: [
+						{ kind: "create", path: "a.txt", content: "a" },
+						{ kind: "create", path: "b.txt", content: "b" },
+					],
+				},
+				undefined,
+				undefined,
+				{ env },
+			),
+		).rejects.toMatchObject({ code: "EDIT_PLAN_TOO_LARGE" });
+		expect(env.mutations).toBe(0);
+	});
+
+	it("preserves UTF-8 BOM, CRLF, and executable mode for updates", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("script.txt", "\uFEFFone\r\ntwo\r\n"));
+		await chmod(`${env.cwd}/script.txt`, 0o755);
+		env.mutations = 0;
+		await createEditV2Tool().execute(
+			"id",
+			{ operations: [{ kind: "update", path: "script.txt", oldText: "one\ntwo", newText: "ONE\nTWO" }] },
+			undefined,
+			undefined,
+			{ env },
+		);
+		expect(getOrThrow(await env.readTextFile("script.txt"))).toBe("\uFEFFONE\r\nTWO\r\n");
+		expect((await stat(`${env.cwd}/script.txt`)).mode & 0o777).toBe(0o755);
+	});
+
+	it("normalizes replacement and versioned patch dialects into canonical operations", async () => {
+		const replacementEnv = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await replacementEnv.writeFile("a.txt", "alpha beta gamma"));
+		const replacement = await createEditV2Tool({ dialect: "replacement" }).execute(
+			"replacement",
+			{
+				path: "a.txt",
+				edits: [
+					{ oldText: "alpha", newText: "A" },
+					{ oldText: "gamma", newText: "G" },
+				],
+			},
+			undefined,
+			undefined,
+			{ env: replacementEnv },
+		);
+		expect(getOrThrow(await replacementEnv.readTextFile("a.txt"))).toBe("A beta G");
+		expect(replacement.details).toMatchObject({ dialect: "replacement", operations: [{ kind: "update" }] });
+
+		const patchEnv = new TrackingEnv({ cwd: createTempDir() });
+		const path = "line\nbreak -> file.txt";
+		const content = "content with\n*** End Pi Edit Patch\ninside";
+		const patch = [
+			"*** Pi Edit Patch v1",
+			JSON.stringify({ kind: "create", path, content }),
+			"*** End Pi Edit Patch",
+		].join("\n");
+		const patched = await createEditV2Tool({ dialect: "patch" }).execute("patch", { patch }, undefined, undefined, {
+			env: patchEnv,
+		});
+		expect(getOrThrow(await patchEnv.readTextFile(path))).toBe(content);
+		expect(patched.details).toMatchObject({ dialect: "patch", operations: [{ kind: "create" }] });
+	});
+
+	it("produces the same update through operations, replacement, and patch dialects", async () => {
+		const cases = [
+			{
+				dialect: "operations" as const,
+				input: { operations: [{ kind: "update" as const, path: "a.txt", oldText: "two", newText: "TWO" }] },
+			},
+			{
+				dialect: "replacement" as const,
+				input: { path: "a.txt", edits: [{ oldText: "two", newText: "TWO" }] },
+			},
+			{
+				dialect: "patch" as const,
+				input: {
+					patch: [
+						"*** Pi Edit Patch v1",
+						JSON.stringify({ kind: "update", path: "a.txt", oldText: "two", newText: "TWO" }),
+						"*** End Pi Edit Patch",
+					].join("\n"),
+				},
+			},
+		];
+		for (const candidate of cases) {
+			const env = new TrackingEnv({ cwd: createTempDir() });
+			getOrThrow(await env.writeFile("a.txt", "one\ntwo\nthree\n"));
+			await createEditV2Tool({ dialect: candidate.dialect }).execute(
+				candidate.dialect,
+				candidate.input,
+				undefined,
+				undefined,
+				{ env },
+			);
+			expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("one\nTWO\nthree\n");
+		}
+	});
+
+	it("rejects malformed patches and non-UTF-8 files before mutation", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("binary.bin", Uint8Array.from([0xff, 0xfe, 0xfd])));
+		env.mutations = 0;
+		await expect(
+			createEditV2Tool({ dialect: "patch" }).execute(
+				"patch",
+				{ patch: "*** Pi Edit Patch v2\n*** End Pi Edit Patch" },
+				undefined,
+				undefined,
+				{ env },
+			),
+		).rejects.toMatchObject({ code: "PATCH_PARSE_ERROR" });
+		getOrThrow(await env.writeExternal("text.txt", "current"));
+		const missingContextPatch = [
+			"*** Pi Edit Patch v1",
+			JSON.stringify({ kind: "update", path: "text.txt", oldText: "missing", newText: "new" }),
+			"*** End Pi Edit Patch",
+		].join("\n");
+		await expect(
+			createEditV2Tool({ dialect: "patch" }).execute(
+				"patch-context",
+				{ patch: missingContextPatch },
+				undefined,
+				undefined,
+				{ env },
+			),
+		).rejects.toMatchObject({ code: "PATCH_CONTEXT_NOT_FOUND" });
+		getOrThrow(await env.writeExternal("mixed.txt", "one\r\ntwo\n"));
+		await expect(
+			createEditV2Tool().execute(
+				"mixed",
+				{ operations: [{ kind: "update", path: "mixed.txt", oldText: "one", newText: "ONE" }] },
+				undefined,
+				undefined,
+				{ env },
+			),
+		).rejects.toMatchObject({ code: "INVALID_INPUT" });
+		await expect(
+			createEditV2Tool().execute(
+				"binary",
+				{ operations: [{ kind: "update", path: "binary.bin", oldText: "x", newText: "y" }] },
+				undefined,
+				undefined,
+				{ env },
+			),
+		).rejects.toMatchObject({ code: "UNSUPPORTED_BINARY_FILE" });
 		expect(env.mutations).toBe(0);
 	});
 

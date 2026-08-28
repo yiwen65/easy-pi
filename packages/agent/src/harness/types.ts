@@ -244,6 +244,10 @@ export interface FileInfo {
 	size: number;
 	/** Modification time as milliseconds since Unix epoch. */
 	mtimeMs: number;
+	/** Backend-defined stable identity for replacement detection, when available. */
+	identity?: string;
+	/** Platform file mode bits, when available. */
+	mode?: number;
 }
 
 /**

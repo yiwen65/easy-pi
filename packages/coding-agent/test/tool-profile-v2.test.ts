@@ -86,6 +86,19 @@ describe("v2 tool profile", () => {
 		v2.dispose();
 	});
 
+	it("advertises exactly one explicitly selected edit dialect", async () => {
+		const replacement = await createSession({
+			toolProfile: "v2",
+			toolsV2: { edit: { dialect: "replacement" } },
+		});
+		expect(replacement.getToolDefinition("edit")?.parameters).toMatchObject({ required: ["path", "edits"] });
+		replacement.dispose();
+
+		const patch = await createSession({ toolProfile: "v2", toolsV2: { edit: { dialect: "patch" } } });
+		expect(patch.getToolDefinition("edit")?.parameters).toMatchObject({ required: ["patch"] });
+		patch.dispose();
+	});
+
 	it("accepts a host-owned opt-in FFF provider without changing the default profile", async () => {
 		writeFileSync(join(cwd, "AuthenticationService.ts"), "export const auth = true;\n");
 		const provider = new FffSearchProvider(new NodeExecutionEnv({ cwd }));
