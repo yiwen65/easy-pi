@@ -10,9 +10,12 @@ import {
 import { allowNetwork } from "./test-network-env.ts";
 
 const originalSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
+const originalEasyPiUpdateUrl = process.env.EASY_PI_UPDATE_URL;
+const easyPiUpdateUrl = "https://updates.easy-pi.invalid/api/latest-version";
 
 beforeEach(() => {
 	allowNetwork();
+	process.env.EASY_PI_UPDATE_URL = easyPiUpdateUrl;
 });
 
 afterEach(() => {
@@ -21,6 +24,11 @@ afterEach(() => {
 		delete process.env.PI_SKIP_VERSION_CHECK;
 	} else {
 		process.env.PI_SKIP_VERSION_CHECK = originalSkipVersionCheck;
+	}
+	if (originalEasyPiUpdateUrl === undefined) {
+		delete process.env.EASY_PI_UPDATE_URL;
+	} else {
+		process.env.EASY_PI_UPDATE_URL = originalEasyPiUpdateUrl;
 	}
 });
 
@@ -34,21 +42,32 @@ describe("version checks", () => {
 		expect(isNewerPackageVersion("0.70.6", "0.70.5")).toBe(true);
 	});
 
-	it("returns only newer versions", async () => {
+	it("returns only newer versions from the Easy Pi update source", async () => {
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.3" }));
 		vi.stubGlobal("fetch", fetchMock);
 
 		await expect(checkForNewPiVersion("1.2.3")).resolves.toBeUndefined();
 		await expect(checkForNewPiVersion("1.2.2")).resolves.toEqual({ version: "1.2.3" });
+		expect(fetchMock).toHaveBeenCalledWith(easyPiUpdateUrl, expect.any(Object));
 	});
 
-	it("uses the pi.dev version check api with a pi user agent", async () => {
+	it("disables update checks when no Easy Pi update source is configured", async () => {
+		delete process.env.EASY_PI_UPDATE_URL;
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(checkForNewPiVersion("1.2.3")).resolves.toBeUndefined();
+		await expect(getLatestPiRelease("1.2.3")).resolves.toBeUndefined();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("uses the configured Easy Pi version API with a pi user agent", async () => {
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 
 		await expect(getLatestPiVersion("1.2.3")).resolves.toBe("1.2.4");
 		expect(fetchMock).toHaveBeenCalledWith(
-			"https://pi.dev/api/latest-version",
+			easyPiUpdateUrl,
 			expect.objectContaining({
 				headers: expect.objectContaining({
 					"User-Agent": expect.stringMatching(/^pi\/1\.2\.3 /),
@@ -104,11 +123,21 @@ describe("version checks", () => {
 		});
 	});
 
-	it("returns update notes from the version check api", async () => {
-		const fetchMock = vi.fn(async () => Response.json({ note: " **Read this** ", version: "1.2.4" }));
+	it("returns Easy Pi update metadata from the version check api", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				changelogUrl: " https://easy-pi.example/changelog ",
+				note: " **Read this** ",
+				version: "1.2.4",
+			}),
+		);
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({ note: "**Read this**", version: "1.2.4" });
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			changelogUrl: "https://easy-pi.example/changelog",
+			note: "**Read this**",
+			version: "1.2.4",
+		});
 	});
 
 	it("skips automatic api calls when version checks are disabled", async () => {
