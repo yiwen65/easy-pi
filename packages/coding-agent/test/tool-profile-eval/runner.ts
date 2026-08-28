@@ -21,6 +21,10 @@ export interface EvalExecutionOutput {
 	success: boolean;
 	score: number;
 	turns: number;
+	inputTokens?: number;
+	outputTokens?: number;
+	costUsd?: number;
+	elapsedMs?: number;
 	systemPrompt: string;
 	tools: Array<{ name: string; description: string; parameters: unknown }>;
 }
@@ -37,12 +41,28 @@ export interface ToolProfileEvalRecord {
 	success: boolean;
 	score: number;
 	turns: number;
+	inputTokens: number;
+	outputTokens: number;
+	costUsd: number;
+	elapsedMs: number;
 }
 
 export interface ToolProfileEvalSummary {
 	manifestVersion: number;
 	records: ToolProfileEvalRecord[];
-	profiles: Record<ToolProfile, { runs: number; successes: number; meanScore: number }>;
+	profiles: Record<
+		ToolProfile,
+		{
+			runs: number;
+			successes: number;
+			meanScore: number;
+			meanTurns: number;
+			meanElapsedMs: number;
+			totalInputTokens: number;
+			totalOutputTokens: number;
+			totalCostUsd: number;
+		}
+	>;
 	pairedScoreDeltaV2MinusLegacy: number;
 	clusteredBootstrap95: [number, number];
 }
@@ -90,6 +110,11 @@ function summarizeProfile(records: ToolProfileEvalRecord[], profile: ToolProfile
 		runs: selected.length,
 		successes: selected.filter((record) => record.success).length,
 		meanScore: mean(selected.map((record) => record.score)),
+		meanTurns: mean(selected.map((record) => record.turns)),
+		meanElapsedMs: mean(selected.map((record) => record.elapsedMs)),
+		totalInputTokens: selected.reduce((sum, record) => sum + record.inputTokens, 0),
+		totalOutputTokens: selected.reduce((sum, record) => sum + record.outputTokens, 0),
+		totalCostUsd: selected.reduce((sum, record) => sum + record.costUsd, 0),
 	};
 }
 
@@ -119,6 +144,10 @@ export async function runToolProfileEvaluation(
 					success: output.success,
 					score: output.score,
 					turns: output.turns,
+					inputTokens: output.inputTokens ?? 0,
+					outputTokens: output.outputTokens ?? 0,
+					costUsd: output.costUsd ?? 0,
+					elapsedMs: output.elapsedMs ?? 0,
 				});
 			}
 		}
