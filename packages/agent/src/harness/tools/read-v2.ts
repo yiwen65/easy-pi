@@ -89,6 +89,7 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 			"Read a file or list a directory. Text reads are bounded; use offset or byteOffset returned by a previous result to continue.",
 		parameters: readV2Schema,
 		executionMode: "parallel",
+		replay: "safe",
 		async execute(_toolCallId, input, signal, _onUpdate, context) {
 			validatePositiveInteger(input.offset, "offset");
 			validatePositiveInteger(input.limit, "limit");

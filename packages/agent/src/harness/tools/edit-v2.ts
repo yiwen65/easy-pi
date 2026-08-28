@@ -40,7 +40,12 @@ export interface EditV2PartialCommitDetails {
 }
 
 type VirtualFile = { content: string; initialContent?: string; exists: boolean; initialExists: boolean };
-type PlannedOperation = EditV2Operation & { path: string; to?: string; content?: string };
+type PlannedOperation = EditV2Operation & {
+	path: string;
+	to?: string;
+	content?: string;
+	parentDirectories?: string[];
+};
 
 function countOccurrences(content: string, needle: string): number {
 	let count = 0;
@@ -57,6 +62,36 @@ async function pathExists(env: ExecutionEnv, path: string, signal?: AbortSignal)
 	const result = await env.exists(path, signal);
 	if (!result.ok) throw new V2ToolError("PERMISSION_DENIED", `Could not inspect ${path}: ${result.error.message}`);
 	return result.value;
+}
+
+async function missingParentDirectories(env: ExecutionEnv, path: string, signal?: AbortSignal): Promise<string[]> {
+	const initialParent = await env.joinPath([path, ".."], signal);
+	if (!initialParent.ok) throw new V2ToolError("PERMISSION_DENIED", `Could not resolve the parent of ${path}.`);
+	const missing: string[] = [];
+	let parent = initialParent.value;
+	while (true) {
+		const info = await env.fileInfo(parent, signal);
+		if (info.ok) {
+			if (info.value.kind === "directory") return missing.reverse();
+			if (info.value.kind === "symlink") {
+				const canonical = await env.canonicalPath(parent, signal);
+				if (canonical.ok) {
+					const target = await env.fileInfo(canonical.value, signal);
+					if (target.ok && target.value.kind === "directory") return missing.reverse();
+				}
+			}
+			throw new V2ToolError("NOT_A_DIRECTORY", `${parent} is not a directory.`);
+		}
+		if (info.error.code !== "not_found") {
+			throw new V2ToolError("PERMISSION_DENIED", `Could not inspect ${parent}: ${info.error.message}`);
+		}
+		missing.push(parent);
+		const next = await env.joinPath([parent, ".."], signal);
+		if (!next.ok || next.value === parent) {
+			throw new V2ToolError("NOT_FOUND", `No existing parent directory could be found for ${path}.`);
+		}
+		parent = next.value;
+	}
 }
 
 async function loadFile(
@@ -111,7 +146,12 @@ async function planEdit(
 					throw new V2ToolError("EDIT_CONFLICT", `${operation.path} already exists; create never overwrites.`);
 				}
 				files.set(path, { content: operation.content, exists: true, initialExists: false });
-				planned.push({ ...operation, path, content: operation.content });
+				planned.push({
+					...operation,
+					path,
+					content: operation.content,
+					parentDirectories: await missingParentDirectories(context.env, path, signal),
+				});
 				break;
 			}
 			case "update": {
@@ -145,7 +185,12 @@ async function planEdit(
 				}
 				source.exists = false;
 				files.set(to, { ...source, exists: true, initialExists: false });
-				planned.push({ ...operation, path, to });
+				planned.push({
+					...operation,
+					path,
+					to,
+					parentDirectories: await missingParentDirectories(context.env, to, signal),
+				});
 				break;
 			}
 			case "delete": {
@@ -171,14 +216,24 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 		description: "Create, update, move, or delete regular files with one prevalidated operations batch.",
 		parameters: editV2Schema,
 		executionMode: "sequential",
+		replay: "never",
 		async execute(_toolCallId, input, signal, _onUpdate, context) {
 			return withV2MutationCoordinator(context.env, async () => {
 				const { planned, files } = await planEdit(input, context, signal);
 				const completed: number[] = [];
 				const changed = new Set<string>();
+				const createdDirectories = new Set<string>();
 				for (let index = 0; index < planned.length; index++) {
 					const operation = planned[index];
 					try {
+						for (const directory of operation.parentDirectories ?? []) {
+							const exists = await context.env.exists(directory, signal);
+							if (!exists.ok) throw exists.error;
+							if (exists.value) continue;
+							const created = await context.env.createDir(directory, { recursive: false, abortSignal: signal });
+							if (!created.ok) throw created.error;
+							createdDirectories.add(directory);
+						}
 						let result: Result<void, FileError>;
 						switch (operation.kind) {
 							case "create":
@@ -203,7 +258,7 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 							failedOperationIndex: index,
 							pendingOperationIndexes: planned.slice(index + 1).map((_, pending) => index + pending + 1),
 							changedPaths: [...changed],
-							createdDirectories: [],
+							createdDirectories: [...createdDirectories],
 							unknownPaths: endpoints,
 						};
 						throw new V2ToolError(

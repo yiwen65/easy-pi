@@ -115,6 +115,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 			'Search workspace text or file paths. Text search is literal by default; use kind="files" for path substrings and regex=true only when regex is required.',
 		parameters: searchV2Schema,
 		executionMode: "parallel",
+		replay: "safe",
 		async execute(_toolCallId, rawInput, signal, _onUpdate, context) {
 			const input = validateInput(rawInput);
 			if (!context.searchProvider) {

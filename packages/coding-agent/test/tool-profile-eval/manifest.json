@@ -1,7 +1,7 @@
 {
   "version": 1,
   "profiles": ["legacy", "v2"],
-  "seeds": [17, 41],
+  "seeds": [17, 41, 73, 101, 137],
   "budgets": {
     "maxTurns": 4,
     "timeoutMs": 30000
