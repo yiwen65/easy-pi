@@ -28,6 +28,9 @@ type Snapshot = {
 	approximate: boolean;
 	partial: boolean;
 	generation: string;
+	matchedCount?: number;
+	matchedCountRelation?: "exact" | "at_least" | "unknown";
+	truncatedBy?: SearchPage["truncatedBy"];
 };
 
 type RgEvent = {
@@ -36,6 +39,7 @@ type RgEvent = {
 		path?: { text?: string };
 		lines?: { text?: string };
 		line_number?: number;
+		absolute_offset?: number;
 		submatches?: Array<{ start?: number; end?: number }>;
 	};
 };
@@ -45,6 +49,7 @@ type RgRow = {
 	line: number;
 	text: string;
 	ranges: Array<[number, number]>;
+	absoluteOffset?: number;
 };
 
 function normalizePath(value: string): string {
@@ -68,6 +73,26 @@ function relativeResultPath(resultPath: string, searchPath: string, scopeIsDirec
 	return path.basename(resultPath);
 }
 
+function matchesRequestPath(candidate: string, request: SearchRequest): boolean {
+	const matches = (glob: string): boolean =>
+		minimatch(candidate, glob, { dot: request.includeHidden === true, matchBase: !glob.includes("/") });
+	if (request.fileGlob && !matches(request.fileGlob)) return false;
+	if (request.include && request.include.length > 0 && !request.include.some(matches)) return false;
+	return !request.exclude?.some(matches);
+}
+
+function limitHitFiles(hits: SearchHit[], maxFiles: number | undefined): { hits: SearchHit[]; truncated: boolean } {
+	if (maxFiles === undefined) return { hits, truncated: false };
+	const files = new Set<string>();
+	const selected: SearchHit[] = [];
+	for (const hit of hits) {
+		if (!files.has(hit.path) && files.size >= maxFiles) continue;
+		files.add(hit.path);
+		selected.push(hit);
+	}
+	return { hits: selected, truncated: selected.length < hits.length };
+}
+
 /** Direct structured rg/fd provider. It never invokes or parses another ToolDefinition. */
 export class LocalSearchProviderV2 implements SearchProvider {
 	readonly id = "local-rg-fd";
@@ -79,6 +104,8 @@ export class LocalSearchProviderV2 implements SearchProvider {
 		glob: true,
 		stableCursor: true,
 		globalRanking: true,
+		scopeFilters: true,
+		wordBoundary: true,
 	};
 	private readonly fallback: ExecutionEnvSearchProvider;
 	private readonly snapshots = new Map<string, Snapshot>();
@@ -101,13 +128,19 @@ export class LocalSearchProviderV2 implements SearchProvider {
 	private async searchText(request: SearchRequest, signal?: AbortSignal): Promise<SearchPage> {
 		const rgPath = await ensureTool("rg");
 		if (!rgPath) throw new SearchProviderError("unavailable", "ripgrep is unavailable.");
-		const args = ["--json", "--line-number", "--column", "--color=never", "--hidden"];
+		const args = ["--json", "--line-number", "--column", "--color=never"];
+		if (request.includeHidden) args.push("--hidden");
+		if (request.honorIgnore === false) args.push("--no-ignore");
+		if (request.followSymlinks) args.push("--follow");
 		if (request.case === "sensitive") args.push("--case-sensitive");
 		else if (request.case === "insensitive") args.push("--ignore-case");
 		else args.push("--smart-case");
 		if (!request.regex) args.push("--fixed-strings");
+		if (request.wordBoundary) args.push("--word-regexp");
 		if (request.context > 0) args.push("--context", String(request.context));
 		if (request.fileGlob) args.push("--glob", request.fileGlob);
+		for (const glob of request.include ?? []) args.push("--glob", glob);
+		for (const glob of request.exclude ?? []) args.push("--glob", `!${glob}`);
 		args.push("--", request.query, request.path);
 
 		const scopeIsDirectory = (await stat(request.path)).isDirectory();
@@ -134,7 +167,17 @@ export class LocalSearchProviderV2 implements SearchProvider {
 							return [[byteIndexToStringIndex(text, range.start), byteIndexToStringIndex(text, range.end)]];
 						})
 					: [];
-			const row = { path: eventPath, line: lineNumber, text, ranges };
+			const firstByteRange = event.data?.submatches?.[0];
+			const row = {
+				path: eventPath,
+				line: lineNumber,
+				text,
+				ranges,
+				absoluteOffset:
+					event.data?.absolute_offset !== undefined && firstByteRange?.start !== undefined
+						? event.data.absolute_offset + firstByteRange.start
+						: undefined,
+			};
 			if (event.type === "match") {
 				rows.push(row);
 				if (rows.length > MAX_BUFFERED_HITS) {
@@ -151,6 +194,7 @@ export class LocalSearchProviderV2 implements SearchProvider {
 		const hits: SearchHit[] = [];
 		for (const row of rows.slice(0, MAX_BUFFERED_HITS)) {
 			const relativePath = relativeResultPath(row.path, request.path, scopeIsDirectory);
+			if (!matchesRequestPath(relativePath, request)) continue;
 			const before: Array<{ line: number; text: string }> = [];
 			const after: Array<{ line: number; text: string }> = [];
 			for (let distance = request.context; distance > 0; distance--) {
@@ -168,6 +212,7 @@ export class LocalSearchProviderV2 implements SearchProvider {
 				column: (row.ranges[0]?.[0] ?? 0) + 1,
 				text: row.text,
 				ranges: row.ranges,
+				byteOffset: row.absoluteOffset,
 				before: before.length > 0 ? before : undefined,
 				after: after.length > 0 ? after : undefined,
 			});
@@ -177,14 +222,24 @@ export class LocalSearchProviderV2 implements SearchProvider {
 			if (left.kind !== "text" || right.kind !== "text") return 0;
 			return left.line - right.line || left.column - right.column;
 		});
-		return this.createPage(hits, request.limit, !partial, false, partial);
+		const matchedCount = hits.length;
+		const limited = limitHitFiles(hits, request.maxFiles);
+		return this.createPage(limited.hits, request.limit, !partial, false, partial, undefined, {
+			matchedCount,
+			matchedCountRelation: partial ? "at_least" : "exact",
+			truncatedBy: limited.truncated ? "max_files" : undefined,
+		});
 	}
 
 	private async searchPaths(fdPath: string, request: SearchRequest, signal?: AbortSignal): Promise<SearchPage> {
 		const scopeIsDirectory = (await stat(request.path)).isDirectory();
 		const fastLimit = Math.max(request.limit * 50, 1000);
 		const processLimit = request.kind === "files" && request.ranking === "fast" ? fastLimit : MAX_SCANNED_PATHS + 1;
-		const args = ["--print0", "--color=never", "--hidden", "--type", "f", "--type", "d"];
+		const args = ["--print0", "--color=never", "--type", "f", "--type", "d"];
+		if (request.includeHidden) args.push("--hidden");
+		if (request.honorIgnore === false) args.push("--no-ignore");
+		if (request.followSymlinks) args.push("--follow");
+		for (const glob of request.exclude ?? []) args.push("--exclude", glob);
 		if (request.kind === "glob") {
 			args.push("--glob");
 			let pattern = request.query;
@@ -217,17 +272,20 @@ export class LocalSearchProviderV2 implements SearchProvider {
 
 		let hits: SearchHit[];
 		if (request.kind === "glob") {
-			hits = paths.slice(0, MAX_BUFFERED_HITS).map((candidate) => ({
-				kind: "file",
-				path: candidate.path,
-				pathKind: candidate.pathKind,
-				exact: true,
-			}));
+			hits = paths
+				.slice(0, MAX_BUFFERED_HITS)
+				.filter((candidate) => matchesRequestPath(candidate.path, request))
+				.map((candidate) => ({
+					kind: "file",
+					path: candidate.path,
+					pathKind: candidate.pathKind,
+					exact: true,
+				}));
 			hits.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
 			if (paths.length > MAX_BUFFERED_HITS) partial = true;
 		} else {
 			hits = paths.flatMap((candidate): SearchHit[] => {
-				if (request.fileGlob && !minimatch(candidate.path, request.fileGlob, { dot: true })) return [];
+				if (!matchesRequestPath(candidate.path, request)) return [];
 				const score = scoreSearchPath(candidate.path, request.query, request.case);
 				return score === undefined
 					? []
@@ -247,8 +305,14 @@ export class LocalSearchProviderV2 implements SearchProvider {
 				partial = true;
 			}
 		}
+		const matchedCount = hits.length;
+		const limited = limitHitFiles(hits, request.maxFiles);
 		const approximate = request.kind === "files" && request.ranking === "fast" && partial;
-		return this.createPage(hits, request.limit, !partial, approximate, partial);
+		return this.createPage(limited.hits, request.limit, !partial, approximate, partial, undefined, {
+			matchedCount,
+			matchedCountRelation: partial ? "at_least" : "exact",
+			truncatedBy: limited.truncated ? "max_files" : undefined,
+		});
 	}
 
 	private consumeLines(
@@ -333,20 +397,30 @@ export class LocalSearchProviderV2 implements SearchProvider {
 		approximate: boolean,
 		partial: boolean,
 		generation = `local-${this.sequence++}`,
+		coverage: Pick<SearchPage, "matchedCount" | "matchedCountRelation" | "truncatedBy"> = {},
 	): SearchPage {
 		const page = hits.slice(0, limit);
 		const remaining = hits.slice(limit);
 		let nextCursor: string | undefined;
 		if (remaining.length > 0) {
 			nextCursor = `local-cursor-${this.sequence++}`;
-			this.snapshots.set(nextCursor, { hits: remaining, complete, approximate, partial, generation });
+			this.snapshots.set(nextCursor, { hits: remaining, complete, approximate, partial, generation, ...coverage });
 			while (this.snapshots.size > MAX_SNAPSHOTS) {
 				const oldest = this.snapshots.keys().next().value;
 				if (oldest === undefined) break;
 				this.snapshots.delete(oldest);
 			}
 		}
-		return { hits: page, nextCursor, complete, approximate, partial, generation };
+		return {
+			hits: page,
+			nextCursor,
+			complete,
+			approximate,
+			partial,
+			generation,
+			...coverage,
+			truncatedBy: coverage.truncatedBy ?? (remaining.length > 0 ? "max_results_global" : undefined),
+		};
 	}
 
 	private continueSnapshot(
@@ -365,6 +439,11 @@ export class LocalSearchProviderV2 implements SearchProvider {
 			snapshot.approximate,
 			snapshot.partial,
 			snapshot.generation,
+			{
+				matchedCount: snapshot.matchedCount,
+				matchedCountRelation: snapshot.matchedCountRelation,
+				truncatedBy: snapshot.truncatedBy,
+			},
 		);
 	}
 

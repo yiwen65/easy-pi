@@ -8,6 +8,8 @@ import {
 	HookedMutationBackend,
 	type MutationBackend,
 } from "../../src/harness/tools/mutation-core.ts";
+import { createReadV2Tool } from "../../src/harness/tools/read-v2.ts";
+import { ToolStateLedger } from "../../src/harness/tools/tool-state.ts";
 import { V2ToolError } from "../../src/harness/tools/v2-errors.ts";
 import { err, FileError, getOrThrow, type Result } from "../../src/harness/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
@@ -191,6 +193,242 @@ describe("v2 edit", () => {
 		);
 		expect(getOrThrow(await env.readTextFile("created/nested/file.txt"))).toBe("created");
 		expect(getOrThrow(await env.readTextFile("moved/nested/source.txt"))).toBe("source");
+	});
+
+	it("prepares and commits a view-bound range without changing another identical line", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "same\nmiddle\nsame\n"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "a.txt", startLine: 3, maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
+		const edit = createEditV2Tool();
+		env.mutations = 0;
+		const prepared = await edit.execute(
+			"prepare",
+			{
+				action: "prepare",
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "same",
+						newText: "changed",
+						viewId: view.details.viewId,
+						expectedFileHash: view.details.fileHash,
+						range: { startLine: 3, endLine: 3 },
+						matchPolicy: "exactly_one_in_range",
+						replaceAll: false,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(env.mutations).toBe(0);
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("same\nmiddle\nsame\n");
+		expect(prepared.details).toMatchObject({
+			status: "prepared",
+			patchId: expect.stringMatching(/^patch_/),
+			files: [{ status: "updated", firstChangedLine: 3 }],
+		});
+		expect((prepared.content[0] as { text: string }).text).toContain("-3 same\n+3 changed");
+
+		const committed = await edit.execute(
+			"commit",
+			{ action: "commit", patchId: prepared.details.patchId },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(committed.details.status).toBe("applied");
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("same\nmiddle\nchanged\n");
+	});
+
+	it("rejects ambiguous, mismatched, and out-of-view preimages before mutation", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "same same\nother\n"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "a.txt", startLine: 1, maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
+		const edit = createEditV2Tool();
+		const operation = {
+			kind: "update" as const,
+			path: "a.txt",
+			oldText: "same",
+			newText: "changed",
+			viewId: view.details.viewId,
+			expectedFileHash: view.details.fileHash,
+			range: { startLine: 1, endLine: 1 },
+			matchPolicy: "exactly_one_in_range" as const,
+		};
+		env.mutations = 0;
+		await expect(
+			edit.execute("ambiguous", { action: "prepare", operations: [operation] }, undefined, undefined, context),
+		).rejects.toMatchObject({ code: "AMBIGUOUS_MATCH", details: { matchCount: 2 } });
+		await expect(
+			edit.execute(
+				"preimage",
+				{ action: "prepare", operations: [{ ...operation, oldText: "missing" }] },
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toMatchObject({ code: "PREIMAGE_MISMATCH" });
+		await expect(
+			edit.execute(
+				"range",
+				{ action: "prepare", operations: [{ ...operation, range: { startLine: 2, endLine: 2 } }] },
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toMatchObject({ code: "RANGE_MISMATCH" });
+		await expect(
+			edit.execute(
+				"unbound-range",
+				{
+					action: "prepare",
+					operations: [{ ...operation, viewId: undefined, expectedFileHash: undefined }],
+				},
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toMatchObject({ code: "INVALID_INPUT" });
+		expect(env.mutations).toBe(0);
+	});
+
+	it("rejects changed views and changed prepared preimages without mutation", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "old\n"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const read = async () =>
+			createReadV2Tool().execute(
+				"read",
+				{ path: "a.txt", startLine: 1, maxLines: 1 },
+				undefined,
+				undefined,
+				context,
+			);
+		const edit = createEditV2Tool();
+		const staleView = await read();
+		getOrThrow(await env.writeExternal("a.txt", "external before prepare\n"));
+		env.mutations = 0;
+		await expect(
+			edit.execute(
+				"stale-view",
+				{
+					action: "prepare",
+					operations: [
+						{
+							kind: "update",
+							path: "a.txt",
+							oldText: "old",
+							newText: "new",
+							viewId: staleView.details.viewId,
+							range: { startLine: 1, endLine: 1 },
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toMatchObject({ code: "STALE_VIEW" });
+		expect(env.mutations).toBe(0);
+
+		getOrThrow(await env.writeExternal("a.txt", "old\n"));
+		const freshView = await read();
+		const prepared = await edit.execute(
+			"prepare",
+			{
+				action: "prepare",
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "old",
+						newText: "new",
+						viewId: freshView.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		getOrThrow(await env.writeExternal("a.txt", "external before commit\n"));
+		env.mutations = 0;
+		await expect(
+			edit.execute("commit", { action: "commit", patchId: prepared.details.patchId }, undefined, undefined, context),
+		).rejects.toMatchObject({ code: "STALE_PATCH" });
+		expect(env.mutations).toBe(0);
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("external before commit\n");
+		await expect(
+			edit.execute("replay", { action: "commit", patchId: prepared.details.patchId }, undefined, undefined, context),
+		).rejects.toMatchObject({ code: "STALE_PATCH" });
+	});
+
+	it("prevalidates every prepared file before a multi-file commit", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "a-old\n"));
+		getOrThrow(await env.writeFile("b.txt", "b-old\n"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const read = createReadV2Tool();
+		const a = await read.execute("a", { path: "a.txt", maxLines: 1 }, undefined, undefined, context);
+		const b = await read.execute("b", { path: "b.txt", maxLines: 1 }, undefined, undefined, context);
+		const edit = createEditV2Tool();
+		const prepared = await edit.execute(
+			"prepare",
+			{
+				action: "prepare",
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "a-old",
+						newText: "a-new",
+						viewId: a.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+					{
+						kind: "update",
+						path: "b.txt",
+						oldText: "b-old",
+						newText: "b-new",
+						viewId: b.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		getOrThrow(await env.writeExternal("b.txt", "b-external\n"));
+		env.mutations = 0;
+		await expect(
+			edit.execute("commit", { action: "commit", patchId: prepared.details.patchId }, undefined, undefined, context),
+		).rejects.toMatchObject({ code: "STALE_PATCH" });
+		expect(env.mutations).toBe(0);
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("a-old\n");
+		expect(getOrThrow(await env.readTextFile("b.txt"))).toBe("b-external\n");
 	});
 
 	it("performs zero mutations when prevalidation fails", async () => {

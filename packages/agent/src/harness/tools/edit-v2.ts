@@ -15,36 +15,64 @@ import {
 	ExecutionEnvMutationBackend,
 	type FileObservation,
 	type MutationBackend,
+	type MutationCommitResult,
 	type MutationLimits,
 	observeMutationPath,
 	validateEditPlan,
 } from "./mutation-core.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
+import { resolveToolState, type ToolView } from "./tool-state.ts";
 import { V2ToolError } from "./v2-errors.ts";
 import { withV2MutationCoordinator } from "./v2-mutation-coordinator.ts";
 import { resolveWorkspacePath } from "./workspace-policy.ts";
 
+const lineRangeSchema = Type.Object({ startLine: Type.Number(), endLine: Type.Number() });
+const viewBindingSchema = {
+	viewId: Type.Optional(Type.String({ description: "Fresh view returned by read" })),
+	expectedFileHash: Type.Optional(Type.String({ description: "file_hash returned by read" })),
+	range: Type.Optional(lineRangeSchema),
+	matchPolicy: Type.Optional(Type.Union([Type.Literal("exactly_one_in_range"), Type.Literal("exactly_one_in_file")])),
+	replaceAll: Type.Optional(Type.Literal(false)),
+};
 const createOperation = Type.Object({ kind: Type.Literal("create"), path: Type.String(), content: Type.String() });
 const updateOperation = Type.Object({
 	kind: Type.Literal("update"),
 	path: Type.String(),
 	oldText: Type.String(),
 	newText: Type.String(),
+	...viewBindingSchema,
 });
 const moveOperation = Type.Object({ kind: Type.Literal("move"), path: Type.String(), to: Type.String() });
 const deleteOperation = Type.Object({ kind: Type.Literal("delete"), path: Type.String() });
 const operationSchema = Type.Union([createOperation, updateOperation, moveOperation, deleteOperation]);
-const operationsEditSchema = Type.Object({ operations: Type.Array(operationSchema, { minItems: 1 }) });
-const replacementEditSchema = Type.Object({
-	path: Type.String(),
-	edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
-});
-const patchEditSchema = Type.Object({
-	patch: Type.String({
-		description:
-			'A Pi Edit Patch v1 string: header "*** Pi Edit Patch v1", one JSON operation per line, and footer "*** End Pi Edit Patch".',
+const editActionSchema = {
+	action: Type.Optional(Type.Union([Type.Literal("apply"), Type.Literal("prepare")])),
+	dryRun: Type.Optional(Type.Boolean({ description: "Compatibility alias for action=prepare" })),
+};
+const commitEditSchema = Type.Object({ action: Type.Literal("commit"), patchId: Type.String() });
+const operationsEditSchema = Type.Union([
+	Type.Object({ ...editActionSchema, operations: Type.Array(operationSchema, { minItems: 1 }) }),
+	commitEditSchema,
+]);
+const replacementEditSchema = Type.Union([
+	Type.Object({
+		...editActionSchema,
+		path: Type.String(),
+		edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
+		...viewBindingSchema,
 	}),
-});
+	commitEditSchema,
+]);
+const patchEditSchema = Type.Union([
+	Type.Object({
+		...editActionSchema,
+		patch: Type.String({
+			description:
+				'A Pi Edit Patch v1 string: header "*** Pi Edit Patch v1", one JSON operation per line, and footer "*** End Pi Edit Patch".',
+		}),
+	}),
+	commitEditSchema,
+]);
 
 export type EditV2Operation = Static<typeof operationSchema>;
 export type EditV2OperationsInput = Static<typeof operationsEditSchema>;
@@ -62,11 +90,13 @@ export interface EditV2FileChange {
 }
 
 export interface EditV2Details {
+	status: "prepared" | "applied" | "pending_acceptance";
 	dialect: EditV2Dialect;
 	operations: Array<{ index: number; kind: EditPlanOperation["kind"]; path: string; to?: string }>;
 	changedPaths: string[];
 	files: EditV2FileChange[];
 	patch: string;
+	patchId?: string;
 	pendingAcceptance?: { id: string; workspacePath: string };
 }
 
@@ -93,9 +123,17 @@ type VirtualFile = {
 };
 
 type Replacement = { oldText: string; newText: string };
+type LineRange = { startLine: number; endLine: number };
+type EditAction = "apply" | "prepare" | "commit";
+type PreparedEditData = {
+	dialect: EditV2Dialect;
+	operations: Array<{ index: number; kind: EditPlanOperation["kind"]; path: string; to?: string }>;
+	files: EditV2FileChange[];
+};
 
 const PATCH_HEADER = "*** Pi Edit Patch v1";
 const PATCH_FOOTER = "*** End Pi Edit Patch";
+const MAX_EDIT_FEEDBACK_BYTES = 32 * 1024;
 const textEncoder = new TextEncoder();
 
 function planTooLarge(message: string): V2ToolError {
@@ -167,8 +205,188 @@ function applyExactReplacements(
 	return bom + restoreLineEndings(output, ending);
 }
 
+function applyRangeReplacement(content: string, replacement: Replacement, path: string, range: LineRange): string {
+	const { bom, text } = stripBom(content);
+	const withoutCrlf = text.replaceAll("\r\n", "");
+	if ((text.includes("\r\n") && withoutCrlf.includes("\n")) || withoutCrlf.includes("\r")) {
+		throw new V2ToolError("INVALID_INPUT", `${path} uses mixed or unsupported line endings.`);
+	}
+	const ending = detectLineEnding(text);
+	const base = normalizeToLF(text);
+	const lineStarts = [0];
+	for (let index = 0; index < base.length; index++) {
+		if (base[index] === "\n" && index + 1 < base.length) lineStarts.push(index + 1);
+	}
+	if (range.startLine > lineStarts.length || range.endLine > lineStarts.length) {
+		throw new V2ToolError(
+			"RANGE_MISMATCH",
+			`Range ${range.startLine}-${range.endLine} is outside ${path}. Read the current range and retry.`,
+			{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
+		);
+	}
+	const start = lineStarts[range.startLine - 1];
+	const endLineStart = lineStarts[range.endLine - 1];
+	const newline = base.indexOf("\n", endLineStart);
+	const end = newline < 0 ? base.length : newline;
+	const oldText = normalizeToLF(replacement.oldText);
+	const newText = normalizeToLF(replacement.newText);
+	if (oldText.length === 0) throw new V2ToolError("INVALID_INPUT", `The expected text for ${path} is empty.`);
+	const segment = base.slice(start, end);
+	const matches = countOccurrences(segment, oldText);
+	if (matches.length === 0) {
+		throw new V2ToolError(
+			"PREIMAGE_MISMATCH",
+			`The expected text is not present in ${path} within lines ${range.startLine}-${range.endLine}.`,
+			{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
+		);
+	}
+	if (matches.length > 1) {
+		throw new V2ToolError(
+			"AMBIGUOUS_MATCH",
+			`The expected text occurs ${matches.length} times in ${path} within the permitted range.`,
+			{ paths: [path], matchCount: matches.length, recovery: { kind: "read_again", paths: [path] } },
+		);
+	}
+	const absolute = start + matches[0];
+	const output = base.slice(0, absolute) + newText + base.slice(absolute + oldText.length);
+	if (output === base) throw new V2ToolError("INVALID_INPUT", `The replacement makes no change to ${path}.`);
+	return bom + restoreLineEndings(output, ending);
+}
+
+function observedHash(observation: FileObservation): string | undefined {
+	return observation.contentHash ? `sha256:${observation.contentHash}` : undefined;
+}
+
+function validateViewBinding(
+	operation: Extract<EditV2Operation, { kind: "update" }>,
+	path: string,
+	canonicalPath: string,
+	observation: FileObservation,
+	context: ExecutionToolContext,
+): { range?: LineRange; view?: ToolView } {
+	if (operation.replaceAll !== undefined && operation.replaceAll !== false) {
+		throw new V2ToolError("INVALID_INPUT", "replaceAll must remain false; replace-all is never implicit.");
+	}
+	const scopeId = context.read?.scopeId ?? context.search?.scopeId ?? context.env.cwd;
+	const view = operation.viewId ? resolveToolState(context).getView(operation.viewId, scopeId) : undefined;
+	if (operation.viewId && !view) {
+		throw new V2ToolError(
+			"STALE_VIEW",
+			"The view expired or belongs to another tool scope. Read the target range again.",
+			{ recovery: { kind: "read_again" as const, paths: [operation.path] } },
+		);
+	}
+	if (view && view.path !== path && view.path !== canonicalPath) {
+		throw new V2ToolError("RANGE_MISMATCH", "The update path does not match the supplied view.");
+	}
+	if (view && (!view.editable || !view.fileHash)) {
+		throw new V2ToolError("STALE_VIEW", "The supplied view has no safe full-file hash and cannot authorize editing.");
+	}
+	if (view && operation.expectedFileHash && operation.expectedFileHash !== view.fileHash) {
+		throw new V2ToolError("STALE_VIEW", "expectedFileHash does not match the supplied view.");
+	}
+	const expectedHash = operation.expectedFileHash ?? view?.fileHash;
+	if (expectedHash && observedHash(observation) !== expectedHash) {
+		throw new V2ToolError(
+			"STALE_VIEW",
+			"The file hash changed after read. Read the target range again before editing.",
+			{ paths: [operation.path], recovery: { kind: "read_again" as const, paths: [operation.path] } },
+		);
+	}
+	const range = operation.range ?? (view ? { startLine: view.range[0], endLine: view.range[1] } : undefined);
+	if (view && range && (range.startLine < view.range[0] || range.endLine > view.range[1])) {
+		throw new V2ToolError(
+			"RANGE_MISMATCH",
+			`The requested range ${range.startLine}-${range.endLine} is outside view ${view.range[0]}-${view.range[1]}.`,
+		);
+	}
+	if (operation.matchPolicy === "exactly_one_in_range" && !range) {
+		throw new V2ToolError("INVALID_INPUT", "exactly_one_in_range requires a viewId or explicit range.");
+	}
+	if (range && operation.matchPolicy === "exactly_one_in_file") {
+		throw new V2ToolError("RANGE_MISMATCH", "An update with an explicit range must remain exactly_one_in_range.");
+	}
+	if (operation.range && !view && !operation.expectedFileHash) {
+		throw new V2ToolError(
+			"INVALID_INPUT",
+			"An explicit line range must be bound to a fresh viewId or expectedFileHash.",
+		);
+	}
+	return { range, view };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseLineRange(value: unknown, label: string): LineRange | undefined {
+	if (value === undefined) return undefined;
+	if (
+		!isRecord(value) ||
+		!Number.isSafeInteger(value.startLine) ||
+		!Number.isSafeInteger(value.endLine) ||
+		(value.startLine as number) <= 0 ||
+		(value.endLine as number) < (value.startLine as number)
+	) {
+		throw new V2ToolError("INVALID_INPUT", `${label} must contain positive startLine/endLine values in order.`);
+	}
+	return { startLine: value.startLine as number, endLine: value.endLine as number };
+}
+
+function updateBinding(value: Record<string, unknown>, label: string) {
+	if (value.viewId !== undefined && typeof value.viewId !== "string") {
+		throw new V2ToolError("INVALID_INPUT", `${label}.viewId must be a string.`);
+	}
+	if (value.expectedFileHash !== undefined && typeof value.expectedFileHash !== "string") {
+		throw new V2ToolError("INVALID_INPUT", `${label}.expectedFileHash must be a string.`);
+	}
+	if (
+		value.matchPolicy !== undefined &&
+		value.matchPolicy !== "exactly_one_in_range" &&
+		value.matchPolicy !== "exactly_one_in_file"
+	) {
+		throw new V2ToolError("INVALID_INPUT", `${label}.matchPolicy is unsupported.`);
+	}
+	if (value.replaceAll !== undefined && value.replaceAll !== false) {
+		throw new V2ToolError("INVALID_INPUT", `${label}.replaceAll must remain false; replace-all is not implicit.`);
+	}
+	return {
+		viewId: value.viewId as string | undefined,
+		expectedFileHash: value.expectedFileHash as string | undefined,
+		range: parseLineRange(value.range, `${label}.range`),
+		matchPolicy: value.matchPolicy as "exactly_one_in_range" | "exactly_one_in_file" | undefined,
+		replaceAll: value.replaceAll as false | undefined,
+	};
+}
+
+function editAction(input: unknown): { action: EditAction; patchId?: string } {
+	if (!isRecord(input)) throw new V2ToolError("INVALID_INPUT", "Edit input must be an object.");
+	if (input.action === "commit") {
+		if (typeof input.patchId !== "string" || input.patchId.length === 0) {
+			throw new V2ToolError("INVALID_INPUT", "action=commit requires patchId.");
+		}
+		if (
+			input.operations !== undefined ||
+			input.path !== undefined ||
+			input.edits !== undefined ||
+			input.patch !== undefined ||
+			input.dryRun !== undefined
+		) {
+			throw new V2ToolError("INVALID_INPUT", "action=commit accepts only patchId.");
+		}
+		return { action: "commit", patchId: input.patchId };
+	}
+	if (input.patchId !== undefined) throw new V2ToolError("INVALID_INPUT", "patchId is only valid with action=commit.");
+	if (input.action !== undefined && input.action !== "apply" && input.action !== "prepare") {
+		throw new V2ToolError("INVALID_INPUT", "action must be apply, prepare, or commit.");
+	}
+	if (input.dryRun !== undefined && typeof input.dryRun !== "boolean") {
+		throw new V2ToolError("INVALID_INPUT", "dryRun must be boolean.");
+	}
+	if (input.action === "apply" && input.dryRun === true) {
+		throw new V2ToolError("INVALID_INPUT", "action=apply conflicts with dryRun=true.");
+	}
+	return { action: input.action === "prepare" || input.dryRun === true ? "prepare" : "apply" };
 }
 
 function parseOperation(value: unknown, line: number): EditV2Operation {
@@ -181,7 +399,13 @@ function parseOperation(value: unknown, line: number): EditV2Operation {
 			break;
 		case "update":
 			if (typeof value.oldText === "string" && typeof value.newText === "string") {
-				return { kind: "update", path: value.path, oldText: value.oldText, newText: value.newText };
+				return {
+					kind: "update",
+					path: value.path,
+					oldText: value.oldText,
+					newText: value.newText,
+					...updateBinding(value, `Patch line ${line}`),
+				};
 			}
 			break;
 		case "move":
@@ -225,7 +449,7 @@ function normalizeInput(input: unknown, dialect: EditV2Dialect, limits: Mutation
 		if (!isRecord(input) || !Array.isArray(input.operations)) {
 			throw new V2ToolError("INVALID_INPUT", "operations must contain at least one file operation.");
 		}
-		return input.operations as EditV2Operation[];
+		return input.operations.map((operation, index) => parseOperation(operation, index + 1));
 	}
 	if (dialect === "patch") {
 		if (!isRecord(input) || typeof input.patch !== "string") {
@@ -237,11 +461,12 @@ function normalizeInput(input: unknown, dialect: EditV2Dialect, limits: Mutation
 		throw new V2ToolError("INVALID_INPUT", "replacement input requires path and at least one edit.");
 	}
 	const path = input.path;
+	const binding = updateBinding(input, "replacement");
 	return input.edits.map((edit): EditV2Operation => {
 		if (!isRecord(edit) || typeof edit.oldText !== "string" || typeof edit.newText !== "string") {
 			throw new V2ToolError("INVALID_INPUT", "Every replacement requires string oldText and newText fields.");
 		}
-		return { kind: "update", path, oldText: edit.oldText, newText: edit.newText };
+		return { kind: "update", path, oldText: edit.oldText, newText: edit.newText, ...binding };
 	});
 }
 
@@ -281,7 +506,9 @@ async function buildEditPlan(
 	const files = new Map<string, VirtualFile>();
 	const observations = new Map<string, FileObservation>();
 	const identities = new Map<string, string>();
+	const canonicalPaths = new Map<string, string>();
 	const planned: EditPlanOperation[] = [];
+	const boundUpdatePaths = new Set<string>();
 	const resolve = async (inputPath: string): Promise<string> => {
 		const result = await resolveWorkspacePath(context.env, inputPath, "write", context.workspacePolicy, signal);
 		const previous = identities.get(result.canonicalPath);
@@ -289,6 +516,7 @@ async function buildEditPlan(
 			throw new V2ToolError("EDIT_CONFLICT", `${inputPath} aliases another path in this edit batch.`);
 		}
 		identities.set(result.canonicalPath, result.absolutePath);
+		canonicalPaths.set(result.absolutePath, result.canonicalPath);
 		return result.absolutePath;
 	};
 	const observe = async (path: string) => {
@@ -318,15 +546,33 @@ async function buildEditPlan(
 	if (dialect === "replacement") {
 		const path = await resolve(operations[0].path);
 		const file = await loadFile(path);
-		file.content = applyExactReplacements(
-			file.content,
-			operations.map((operation) => {
-				if (operation.kind !== "update")
-					throw new V2ToolError("INVALID_INPUT", "Replacement dialect only updates files.");
-				return { oldText: operation.oldText, newText: operation.newText };
-			}),
-			path,
+		const updates = operations.map((operation) => {
+			if (operation.kind !== "update")
+				throw new V2ToolError("INVALID_INPUT", "Replacement dialect only updates files.");
+			return operation;
+		});
+		const bound = updates.filter(
+			(operation) => operation.viewId || operation.expectedFileHash || operation.range || operation.matchPolicy,
 		);
+		if (bound.length > 0) {
+			if (updates.length !== 1) {
+				throw new V2ToolError("EDIT_CONFLICT", "A view-bound replacement request must contain exactly one edit.");
+			}
+			const binding = validateViewBinding(
+				updates[0],
+				path,
+				canonicalPaths.get(path) ?? path,
+				observations.get(path)!,
+				context,
+			);
+			const policy = updates[0].matchPolicy ?? (binding.range ? "exactly_one_in_range" : "exactly_one_in_file");
+			file.content =
+				policy === "exactly_one_in_range" && binding.range
+					? applyRangeReplacement(file.content, updates[0], path, binding.range)
+					: applyExactReplacements(file.content, [updates[0]], path);
+		} else {
+			file.content = applyExactReplacements(file.content, updates, path);
+		}
 		planned.push({ kind: "update", path, content: file.content });
 	} else {
 		for (const operation of operations) {
@@ -352,12 +598,35 @@ async function buildEditPlan(
 					const file = await loadFile(path);
 					if (!file.exists)
 						throw new V2ToolError("NOT_FOUND", `${operation.path} was deleted earlier in this batch.`);
-					file.content = applyExactReplacements(
-						file.content,
-						[{ oldText: operation.oldText, newText: operation.newText }],
+					const bound =
+						operation.viewId !== undefined ||
+						operation.expectedFileHash !== undefined ||
+						operation.range !== undefined ||
+						operation.matchPolicy !== undefined;
+					if (bound && boundUpdatePaths.has(path)) {
+						throw new V2ToolError(
+							"EDIT_CONFLICT",
+							`Only one view-bound update is allowed for ${operation.path}.`,
+						);
+					}
+					const binding = validateViewBinding(
+						operation,
 						path,
-						dialect === "patch",
+						canonicalPaths.get(path) ?? path,
+						observations.get(path)!,
+						context,
 					);
+					const policy = operation.matchPolicy ?? (binding.range ? "exactly_one_in_range" : "exactly_one_in_file");
+					file.content =
+						policy === "exactly_one_in_range" && binding.range
+							? applyRangeReplacement(file.content, operation, path, binding.range)
+							: applyExactReplacements(
+									file.content,
+									[{ oldText: operation.oldText, newText: operation.newText }],
+									path,
+									dialect === "patch",
+								);
+					if (bound) boundUpdatePaths.add(path);
 					planned.push({ kind: "update", path, content: file.content });
 					break;
 				}
@@ -423,6 +692,45 @@ function changesFromFiles(files: Map<string, VirtualFile>): EditV2FileChange[] {
 	return changes;
 }
 
+function planOperations(plan: EditPlan): PreparedEditData["operations"] {
+	return plan.operations.map((operation, index) => ({
+		index,
+		kind: operation.kind,
+		path: operation.path,
+		to: operation.kind === "move" ? operation.to : undefined,
+	}));
+}
+
+function preparedData(value: unknown): PreparedEditData | undefined {
+	if (!isRecord(value) || !Array.isArray(value.operations) || !Array.isArray(value.files)) return undefined;
+	if (value.dialect !== "operations" && value.dialect !== "replacement" && value.dialect !== "patch") return undefined;
+	return value as unknown as PreparedEditData;
+}
+
+function operationSummary(operations: PreparedEditData["operations"]): string {
+	return operations
+		.map((operation) => `${operation.kind}: ${operation.path}${operation.to ? ` -> ${operation.to}` : ""}`)
+		.join("\n");
+}
+
+function preparedFeedback(
+	patchId: string,
+	operations: PreparedEditData["operations"],
+	files: EditV2FileChange[],
+): string {
+	const header = `Prepared ${operations.length} file operation(s). patch_id=${patchId}`;
+	const diffs = files.map((file) => `${file.status}: ${file.path}\n${file.diff}`).join("\n");
+	let output = `${header}\n\n${operationSummary(operations)}${diffs ? `\n\n${diffs}` : ""}`;
+	if (textEncoder.encode(output).byteLength <= MAX_EDIT_FEEDBACK_BYTES) return output;
+	while (
+		output.length > 0 &&
+		textEncoder.encode(`${output}\n[Diff feedback truncated.]`).byteLength > MAX_EDIT_FEEDBACK_BYTES
+	) {
+		output = output.slice(0, Math.max(0, output.length - 1024));
+	}
+	return `${output}\n[Diff feedback truncated.]`;
+}
+
 export function createEditV2Tool<TContext extends ExecutionToolContext = ExecutionToolContext>(
 	options: CreateEditV2ToolOptions = {},
 ): AgentHarnessTool<TContext, TSchema, EditV2Details> {
@@ -447,34 +755,99 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 		label: "edit",
 		description:
 			dialect === "replacement"
-				? "Edit one regular UTF-8 file with unique, non-overlapping exact replacements."
+				? "Prepare or apply one-file exact replacements. Bind updates to a fresh view/hash/range; commit prepared patch IDs only after reviewing the diff."
 				: dialect === "patch"
-					? "Apply a versioned Pi Edit Patch v1 containing create, update, move, or delete operations."
-					: "Create, update, move, or delete regular UTF-8 files with one observed, prevalidated operations batch.",
+					? "Prepare or apply a versioned Pi Edit Patch v1; commit prepared patch IDs only after reviewing the diff."
+					: "Prepare or apply observed file operations. Bind updates to a fresh view/hash/range; commit prepared patch IDs only after reviewing the diff.",
 		parameters,
 		executionMode: "sequential",
 		replay: "never",
 		async execute(_toolCallId, input, signal, _onUpdate, context) {
 			return withV2MutationCoordinator(context.env, async () => {
+				const requested = editAction(input);
+				const scopeId = context.read?.scopeId ?? context.search?.scopeId ?? context.env.cwd;
+				const ledger = resolveToolState(context);
+				if (requested.action === "commit") {
+					const prepared = ledger.takePatch(requested.patchId ?? "", scopeId);
+					const data = preparedData(prepared?.data);
+					if (!prepared || !data || data.dialect !== dialect) {
+						throw new V2ToolError(
+							"STALE_PATCH",
+							"The prepared patch expired, was already consumed, or belongs to another tool scope. Prepare it again.",
+							{ recovery: { kind: "prepare_edit" as const } },
+						);
+					}
+					let result: MutationCommitResult;
+					try {
+						result = await getBackend(context).commit(prepared.plan, signal);
+					} catch (error) {
+						if (error instanceof V2ToolError && error.code === "STALE_FILE") {
+							throw new V2ToolError(
+								"STALE_PATCH",
+								"A prepared preimage changed before commit. No files were changed by this commit; read and prepare again.",
+								{
+									recovery: {
+										kind: "read_again" as const,
+										paths: prepared.plan.observations.map((item) => item.path),
+									},
+								},
+								error,
+							);
+						}
+						throw error;
+					}
+					const status = result.pendingAcceptance ? "pending_acceptance" : "applied";
+					const message = result.pendingAcceptance
+						? `Committed patch ${prepared.id} to overlay ${result.pendingAcceptance.id}; the base workspace awaits host acceptance.`
+						: `Applied prepared patch ${prepared.id}.`;
+					return {
+						content: [{ type: "text", text: `${message}\n\n${operationSummary(data.operations)}` }],
+						details: {
+							status,
+							dialect,
+							operations: data.operations,
+							changedPaths: result.changedPaths,
+							files: data.files,
+							patch: data.files.map((change) => change.patch).join("\n"),
+							patchId: prepared.id,
+							pendingAcceptance: result.pendingAcceptance,
+						},
+					};
+				}
+
 				const normalized = normalizeInput(input, dialect, limits);
 				const { plan, files } = await buildEditPlan(normalized, dialect, context, limits, signal);
-				const result = await getBackend(context).commit(plan, signal);
 				const changes = changesFromFiles(files);
-				const operations = plan.operations.map((operation, index) => ({
-					index,
-					kind: operation.kind,
-					path: operation.path,
-					to: operation.kind === "move" ? operation.to : undefined,
-				}));
-				const summary = operations
-					.map((operation) => `${operation.kind}: ${operation.path}${operation.to ? ` -> ${operation.to}` : ""}`)
-					.join("\n");
-				const status = result.pendingAcceptance
+				const operations = planOperations(plan);
+				if (requested.action === "prepare") {
+					const prepared = ledger.addPatch({
+						scopeId,
+						plan,
+						data: { dialect, operations, files: changes } satisfies PreparedEditData,
+					});
+					return {
+						content: [{ type: "text", text: preparedFeedback(prepared.id, operations, changes) }],
+						details: {
+							status: "prepared",
+							dialect,
+							operations,
+							changedPaths: changes.map((change) => change.path),
+							files: changes,
+							patch: changes.map((change) => change.patch).join("\n"),
+							patchId: prepared.id,
+						},
+					};
+				}
+
+				const result = await getBackend(context).commit(plan, signal);
+				const status = result.pendingAcceptance ? "pending_acceptance" : "applied";
+				const message = result.pendingAcceptance
 					? `Prepared ${operations.length} file operation(s) in overlay ${result.pendingAcceptance.id}; the base workspace is unchanged until host acceptance.`
 					: `Applied ${operations.length} file operation(s).`;
 				return {
-					content: [{ type: "text", text: `${status}\n\n${summary}` }],
+					content: [{ type: "text", text: `${message}\n\n${operationSummary(operations)}` }],
 					details: {
+						status,
 						dialect,
 						operations,
 						changedPaths: result.changedPaths,

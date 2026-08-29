@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { ExecutionEnvReadProvider, type ResourceReader } from "../../src/harness/tools/read-provider.ts";
 import { createReadV2Tool } from "../../src/harness/tools/read-v2.ts";
+import { fileVersion, ToolStateLedger } from "../../src/harness/tools/tool-state.ts";
 import { getOrThrow } from "../../src/harness/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
@@ -25,9 +26,156 @@ describe("v2 read", () => {
 			undefined,
 			{ env },
 		);
-		expect(env.binaryReads).toBe(0);
-		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("two") });
-		expect(result.details.nextOffset).toBe(3);
+		expect(env.binaryReads).toBe(1);
+		expect(result.content[0]).toMatchObject({
+			text: expect.stringMatching(
+				/^\[view_id=view_[^ ]+ snapshot_id=snap_[^ ]+ file_hash=sha256:[a-f0-9]{64}\]\n2\ttwo/,
+			),
+		});
+		expect(result.details).toMatchObject({
+			range: [2, 2],
+			viewId: expect.stringMatching(/^view_/),
+			fileHash: expect.stringMatching(/^sha256:/),
+			editable: true,
+			nextOffset: 3,
+		});
+	});
+
+	it("reads a locator into a bounded versioned view", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("file.txt", "one\ntwo\ntarget\nfour\nfive\n"));
+		const info = getOrThrow(await env.fileInfo("file.txt"));
+		const toolState = new ToolStateLedger();
+		const locator = toolState.addLocator({
+			scopeId: env.cwd,
+			snapshotId: "snap_search",
+			path: info.path,
+			kind: "text",
+			startLine: 3,
+			endLine: 3,
+			startColumn: 1,
+			endColumn: 7,
+			match: "target",
+			fileVersion: fileVersion(info),
+		});
+		const result = await createReadV2Tool().execute(
+			"id",
+			{ locatorId: locator.id, beforeLines: 1, afterLines: 1, maxBytes: 1024 },
+			undefined,
+			undefined,
+			{ env, toolState },
+		);
+		expect(result.details).toMatchObject({
+			locatorId: locator.id,
+			snapshotId: "snap_search",
+			range: [2, 4],
+			lines: ["two", "target", "four"],
+			hasMoreBefore: true,
+		});
+		expect((result.content[0] as { text: string }).text).toContain("3\ttarget");
+		expect(toolState.getView(result.details.viewId ?? "", env.cwd)).toMatchObject({
+			locatorId: locator.id,
+			range: [2, 4],
+			editable: true,
+		});
+	});
+
+	it("uses a locator byte offset to expose a match in an overlong line", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		const text = `${"a".repeat(2_000)}TARGET${"b".repeat(2_000)}\n`;
+		getOrThrow(await env.writeFile("generated.txt", text));
+		const info = getOrThrow(await env.fileInfo("generated.txt"));
+		const toolState = new ToolStateLedger();
+		const locator = toolState.addLocator({
+			scopeId: env.cwd,
+			snapshotId: "snap_search",
+			path: info.path,
+			kind: "text",
+			startLine: 1,
+			endLine: 1,
+			startColumn: 2_001,
+			endColumn: 2_007,
+			byteOffset: 2_000,
+			lineLengthBytes: 4_006,
+			match: "TARGET",
+			fileVersion: fileVersion(info),
+		});
+		const result = await createReadV2Tool().execute(
+			"id",
+			{ locatorId: locator.id, maxBytes: 512 },
+			undefined,
+			undefined,
+			{ env, toolState },
+		);
+		const output = (result.content[0] as { text: string }).text;
+		expect(output).toContain("@byte:2000\tTARGET");
+		expect(output).not.toContain("a".repeat(100));
+		expect(new TextEncoder().encode(output).byteLength).toBeLessThanOrEqual(512);
+	});
+
+	it("rejects stale and cross-scope locators", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("file.txt", "target\n"));
+		const info = getOrThrow(await env.fileInfo("file.txt"));
+		const toolState = new ToolStateLedger();
+		const locator = toolState.addLocator({
+			scopeId: "scope-a",
+			snapshotId: "snap_search",
+			path: info.path,
+			kind: "text",
+			startLine: 1,
+			fileVersion: fileVersion(info),
+		});
+		await expect(
+			createReadV2Tool().execute("scope", { locatorId: locator.id }, undefined, undefined, {
+				env,
+				toolState,
+				read: { scopeId: "scope-b" },
+			}),
+		).rejects.toMatchObject({ code: "STALE_LOCATOR" });
+
+		getOrThrow(await env.writeFile("file.txt", "changed target\n"));
+		await expect(
+			createReadV2Tool().execute("stale", { locatorId: locator.id }, undefined, undefined, {
+				env,
+				toolState,
+				read: { scopeId: "scope-a" },
+			}),
+		).rejects.toMatchObject({ code: "STALE_LOCATOR" });
+	});
+
+	it("enforces byte and token output budgets with numbered content", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("long.txt", `${"x".repeat(2_000)}\nsecond\n`));
+		const result = await createReadV2Tool().execute(
+			"id",
+			{ path: "long.txt", maxBytes: 512, maxOutputTokens: 128 },
+			undefined,
+			undefined,
+			{ env },
+		);
+		const text = (result.content[0] as { text: string }).text;
+		expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(512);
+		expect(text).toContain("1\t");
+		expect(result.details).toMatchObject({
+			outputBytes: expect.any(Number),
+			estimatedOutputTokens: expect.any(Number),
+			truncation: { reason: "bytes" },
+		});
+	});
+
+	it("labels byte-offset fragments without inventing line numbers", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("bytes.txt", "prefix TARGET suffix\n"));
+		const result = await createReadV2Tool().execute(
+			"id",
+			{ path: "bytes.txt", byteOffset: 7, maxBytes: 512 },
+			undefined,
+			undefined,
+			{ env },
+		);
+		expect((result.content[0] as { text: string }).text).toContain("@byte:7\tTARGET suffix");
+		expect(result.details.byteRange?.[0]).toBe(7);
 	});
 
 	it("returns stable directory cursors and page-only metadata", async () => {
@@ -54,6 +202,22 @@ describe("v2 read", () => {
 		);
 		expect(second.details.entries).toMatchObject([{ name: "link", kind: "symlink" }]);
 		expect(second.details.stable).toBe(true);
+	});
+
+	it("keeps oversized files bounded and marks views without a safe full-file hash as non-editable", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("huge.txt", `first\n${"x".repeat(5 * 1024 * 1024)}\n`));
+		env.binaryReads = 0;
+		const result = await createReadV2Tool().execute(
+			"id",
+			{ path: "huge.txt", maxLines: 1, maxBytes: 512 },
+			undefined,
+			undefined,
+			{ env },
+		);
+		expect(env.binaryReads).toBe(0);
+		expect(result.details).toMatchObject({ editable: false, fileHash: undefined, range: [1, 1] });
+		expect((result.content[0] as { text: string }).text).toContain("editable=false");
 	});
 
 	it("reports out-of-range text offsets without misclassifying the file as binary", async () => {

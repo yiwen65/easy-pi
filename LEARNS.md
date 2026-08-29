@@ -244,3 +244,12 @@
 - Correct approach: 在共享 Vitest alias 中为每个被 source 测试引用的精确 package subpath 添加 source 映射，并用跨包行为测试实际执行该能力，而非只检查类型或 tool registry。
 - Prevention: 新增或使用 workspace package subpath 时，同时检查 package exports、root tsconfig paths、共享 Vitest aliases 和 source CLI resolver；回归应在消费包中调用新能力。
 - Verified by: 2026-08-29 v2 read 回归修复前稳定报 `This execution environment does not support bounded text reads`；补充 agent-core `/node` alias 后回归通过，五种子真实诊断从至少 8 次该错误降至 0。
+
+## v2 mutation plan 路径——canonical 只用于同一性比较，不能替换 backend 地址
+
+- Wrong approach: `edit-v2` 解析路径后把 mutation plan 的目标从 addressed absolute path 改成 `canonicalPath`，试图让 Read view 与 Edit 路径直接相等。
+- Why it failed: macOS 临时目录的 addressed path 可为 `/var/...`，canonical path 为 `/private/var/...`；journal/overlay backend 的 workspace root 按 addressed namespace 配置，收到 canonical target 后将其判为 `OUTSIDE_WORKSPACE`。
+- Recognition signal: 普通 ExecutionEnv mutation 测试通过，但 journal/overlay 集成测试批量在 `mapBasePath`/`assertTargetPath` 报 workspace 外路径，且差异集中在 `/var` 与 `/private/var`。
+- Correct approach: mutation plan 和 backend I/O 保留 `absolutePath`；另存 `canonicalPath` 只做 alias 检测以及 view/path 同一性比较。
+- Prevention: 修改 workspace path normalization 或 view-bound edit 后，除 Agent edit 测试外必须目标运行 journal 与 overlay backend 测试，特别覆盖含 symlink/canonical alias 的平台路径。
+- Verified by: 2026-08-29 locator-safe edit 任务中该改动使 journal/overlay 7 个测试失败；恢复 addressed plan path、仅保留 canonical 比较后相关 3 files / 29 tests 全部通过。

@@ -21,6 +21,7 @@ import {
 	type RunV2Details,
 	type SearchProvider,
 	type SearchV2Details,
+	ToolStateLedger,
 	type WorkspacePolicy,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
@@ -82,17 +83,24 @@ export interface V2ToolRuntimeHandle {
 
 const promptContributions = {
 	search: {
-		snippet: "Search workspace text or file paths (literal by default)",
-		guidelines: ["Use search instead of run for text and file discovery."],
+		snippet: "Locate code as bounded locators with explicit scope and coverage",
+		guidelines: [
+			"Use search instead of run for discovery. Start with the narrowest justified path, literal/regex mode, include/exclude scope, and locator-only defaults.",
+			"Never infer absence from partial, overflow, truncated, skipped, or unsupported search results; narrow one query dimension and search again.",
+		],
 	},
 	read: {
-		snippet: "Read bounded file ranges, directories, and images",
-		guidelines: ["Continue bounded reads with the returned offset or byteOffset."],
+		snippet: "Read a locator or bounded range into a numbered, versioned view",
+		guidelines: [
+			"Read a selected locator with a small window first, then expand progressively; do not page from the start of a large file.",
+			"Use the returned view_id, file_hash, true line range, and continuation metadata for editing or further reads.",
+		],
 	},
 	edit: {
-		snippet: "Create, update, move, or delete files in one structured batch",
+		snippet: "Prepare and commit view/hash/range-bound file changes",
 		guidelines: [
-			"Use edit for file mutations; make exact updates from freshly read content.",
+			"For updates, use freshly read view_id/file_hash evidence, an exact range, and exactly_one_in_range; never choose the first of multiple matches or imply replace-all.",
+			"Use edit action=prepare, inspect the bounded diff, commit its patchId, then read the changed range and run the smallest relevant verification.",
 			"When moving and updating the same file, use one edit batch with move first and update on the destination second.",
 		],
 	},
@@ -131,20 +139,37 @@ const READ_PREVIEW_LINES = 12;
 const READ_PREVIEW_ENTRIES = 12;
 
 function renderReadCall(
-	args: { path?: unknown; offset?: unknown; limit?: unknown; byteOffset?: unknown; cursor?: unknown },
+	args: {
+		path?: unknown;
+		locatorId?: unknown;
+		startLine?: unknown;
+		endLine?: unknown;
+		offset?: unknown;
+		limit?: unknown;
+		maxLines?: unknown;
+		maxBytes?: unknown;
+		byteOffset?: unknown;
+		cursor?: unknown;
+	},
 	theme: Theme,
 	context: ToolRenderContext,
 ): Text {
-	const path = typeof args.path === "string" ? args.path : "...";
+	const target =
+		typeof args.locatorId === "string" ? args.locatorId : typeof args.path === "string" ? args.path : "...";
 	const metadata: string[] = [];
-	if (typeof args.offset === "number") metadata.push(`offset ${args.offset}`);
-	if (typeof args.limit === "number") metadata.push(`limit ${args.limit}`);
+	const startLine = typeof args.startLine === "number" ? args.startLine : args.offset;
+	if (typeof startLine === "number") {
+		metadata.push(typeof args.endLine === "number" ? `lines ${startLine}-${args.endLine}` : `line ${startLine}`);
+	}
+	const maxLines = typeof args.maxLines === "number" ? args.maxLines : args.limit;
+	if (typeof maxLines === "number") metadata.push(`max ${maxLines} lines`);
+	if (typeof args.maxBytes === "number") metadata.push(`${formatSize(args.maxBytes)} output`);
 	if (typeof args.byteOffset === "number") metadata.push(`byte ${args.byteOffset}`);
 	if (typeof args.cursor === "string") metadata.push("snapshot continuation");
 	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 	component.setText(
 		theme.fg("toolTitle", theme.bold("read")) +
-			theme.fg("accent", ` ${path}`) +
+			theme.fg("accent", ` ${safeInlineDisplay(target)}`) +
 			(metadata.length > 0 ? theme.fg("muted", ` · ${metadata.join(" · ")}`) : ""),
 	);
 	return component;
@@ -168,15 +193,28 @@ class ReadResultRenderComponent extends Container {
 		if (!details || !theme) return [];
 		const lines: string[] = [""];
 		if (details.kind === "text") {
+			if (details.viewId) {
+				const evidence = details.fileHash
+					? `${details.viewId} · ${details.fileHash.slice(0, 19)}…`
+					: `${details.viewId} · non-editable`;
+				lines.push(theme.fg(details.editable ? "muted" : "warning", `[${evidence}]`));
+			}
 			const sourceLines = details.lines ?? [];
 			const visible = this.options.expanded ? sourceLines : sourceLines.slice(0, READ_PREVIEW_LINES);
+			const safeVisible = visible.map(safeLineDisplay);
 			const language = getLanguageFromPath(details.path);
-			const highlighted = language ? highlightCode(replaceTabs(visible.join("\n")), language) : visible;
+			const highlighted = language ? highlightCode(replaceTabs(safeVisible.join("\n")), language) : safeVisible;
 			const startLine = details.range?.[0] ?? 1;
 			const gutterWidth = String(startLine + Math.max(0, visible.length - 1)).length;
 			for (let index = 0; index < visible.length; index++) {
-				const code = language ? (highlighted[index] ?? "") : theme.fg("toolOutput", replaceTabs(visible[index]));
-				lines.push(`${theme.fg("muted", String(startLine + index).padStart(gutterWidth, " "))} ${code}`);
+				const code = language
+					? (highlighted[index] ?? "")
+					: theme.fg("toolOutput", replaceTabs(safeVisible[index]));
+				const location =
+					details.byteRange && index === 0
+						? `@${details.byteRange[0]}`
+						: String(startLine + index).padStart(gutterWidth, " ");
+				lines.push(`${theme.fg("muted", location)} ${code}`);
 			}
 			const remaining = sourceLines.length - visible.length;
 			if (remaining > 0) lines.push(theme.fg("muted", `... (${remaining} more lines in this page)`));
@@ -187,7 +225,7 @@ class ReadResultRenderComponent extends Container {
 				const suffix = entry.kind === "directory" ? "/" : "";
 				const metadata = entry.size === undefined ? "" : ` ${formatSize(entry.size)}`;
 				lines.push(
-					`${theme.fg("accent", `${entry.name}${suffix}`)}${theme.fg("muted", ` · ${entry.kind}${metadata}`)}`,
+					`${theme.fg("accent", `${safeInlineDisplay(entry.name)}${suffix}`)}${theme.fg("muted", ` · ${entry.kind}${metadata}`)}`,
 				);
 			}
 			if (entries.length > visible.length) {
@@ -201,12 +239,13 @@ class ReadResultRenderComponent extends Container {
 			const metadata = [details.mediaType, details.size === undefined ? undefined : formatSize(details.size)]
 				.filter((value): value is string => value !== undefined)
 				.join(" · ");
-			lines.push(theme.fg("muted", `[${label}${metadata ? ` · ${metadata}` : ""}]`));
+			lines.push(theme.fg("muted", `[${label}${metadata ? ` · ${safeInlineDisplay(metadata)}` : ""}]`));
 		}
 		if (details.nextOffset !== undefined) lines.push(theme.fg("muted", `Continue with offset ${details.nextOffset}`));
 		if (details.nextByteOffset !== undefined)
 			lines.push(theme.fg("muted", `Continue with byteOffset ${details.nextByteOffset}`));
 		if (details.nextCursor) lines.push(theme.fg("muted", `Continue with cursor ${details.nextCursor}`));
+		if (details.truncation) lines.push(theme.fg("warning", `[truncated by ${details.truncation.reason}]`));
 		if (details.partial) lines.push(theme.fg("warning", "[partial directory page]"));
 		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "..."));
 	}
@@ -244,12 +283,22 @@ const EDIT_MAX_EXPANDED_DIFF_LINES = 200;
 const EDIT_MAX_RENDER_LINES = 2000;
 
 function renderEditCall(
-	args: { operations?: unknown; path?: unknown; edits?: unknown; patch?: unknown },
+	args: {
+		action?: unknown;
+		dryRun?: unknown;
+		patchId?: unknown;
+		operations?: unknown;
+		path?: unknown;
+		edits?: unknown;
+		patch?: unknown;
+	},
 	theme: Theme,
 	context: ToolRenderContext,
 ): Text {
 	let summary = "structured edit";
-	if (Array.isArray(args.operations)) {
+	if (args.action === "commit" && typeof args.patchId === "string") {
+		summary = `commit ${safeInlineDisplay(args.patchId)}`;
+	} else if (Array.isArray(args.operations)) {
 		const paths = args.operations
 			.flatMap((operation) =>
 				typeof operation === "object" && operation !== null && "path" in operation
@@ -263,8 +312,10 @@ function renderEditCall(
 	} else if (typeof args.patch === "string") {
 		summary = "Pi Edit Patch v1";
 	}
+	const phase =
+		args.action === "prepare" || args.dryRun === true ? "prepare" : args.action === "commit" ? "commit" : "apply";
 	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-	component.setText(theme.fg("toolTitle", theme.bold("edit")) + theme.fg("muted", ` · ${summary}`));
+	component.setText(theme.fg("toolTitle", theme.bold("edit")) + theme.fg("muted", ` · ${phase} · ${summary}`));
 	return component;
 }
 
@@ -321,6 +372,7 @@ function renderStructuredEditError(
 				: undefined;
 		if (recovery?.kind === "split_edit") lines.push(theme.fg("error", "[edit plan too large · split the edit]"));
 		else if (recovery?.kind === "read_again") lines.push(theme.fg("error", "[stale edit · no files changed]"));
+		else if (recovery?.kind === "prepare_edit") lines.push(theme.fg("error", "[stale patch · prepare again]"));
 		else return undefined;
 		if (Array.isArray(record.paths) && record.paths.length > 0) {
 			lines.push(theme.fg("warning", `Read again: ${record.paths.map(String).map(safeInlineDisplay).join(", ")}`));
@@ -351,6 +403,11 @@ class EditResultRenderComponent extends Container {
 		const theme = this.renderTheme;
 		if (!details || !theme) return [];
 		const lines: string[] = [""];
+		if (details.status === "prepared") {
+			lines.push(theme.fg("warning", `[prepared ${details.patchId ?? "patch"} · workspace unchanged]`));
+		} else if (details.status === "applied") {
+			lines.push(theme.fg("success", "[applied]"));
+		}
 		const visibleFiles = this.options.expanded ? details.files : details.files.slice(0, EDIT_PREVIEW_FILES);
 		for (const file of visibleFiles) {
 			const location = file.firstChangedLine === undefined ? "" : ` · line ${file.firstChangedLine}`;
@@ -382,7 +439,8 @@ class EditResultRenderComponent extends Container {
 				),
 			);
 		}
-		lines.push(theme.fg("muted", `[${details.dialect} · ${details.changedPaths.length} changed path(s)]`));
+		const pathLabel = details.status === "prepared" ? "planned path(s)" : "changed path(s)";
+		lines.push(theme.fg("muted", `[${details.dialect} · ${details.changedPaths.length} ${pathLabel}]`));
 		if (lines.length > EDIT_MAX_RENDER_LINES) {
 			lines.length = EDIT_MAX_RENDER_LINES;
 			lines.push(theme.fg("warning", "[render truncated at 2000 lines]"));
@@ -423,12 +481,17 @@ function renderSearchCall(
 	args: {
 		query?: unknown;
 		kind?: unknown;
+		mode?: unknown;
+		targetKind?: unknown;
 		path?: unknown;
 		fileGlob?: unknown;
 		case?: unknown;
 		regex?: unknown;
 		context?: unknown;
 		ranking?: unknown;
+		maxResultsGlobal?: unknown;
+		maxResultsPerFile?: unknown;
+		maxFiles?: unknown;
 	},
 	theme: Theme,
 	context: ToolRenderContext,
@@ -437,17 +500,23 @@ function renderSearchCall(
 	const kind = args.kind === "files" || args.kind === "glob" ? args.kind : "text";
 	const mode =
 		kind === "text"
-			? args.regex === true
-				? "regex"
-				: "literal"
+			? typeof args.mode === "string"
+				? args.mode
+				: args.regex === true
+					? "regex"
+					: "literal"
 			: kind === "files"
 				? (args.ranking ?? "fast")
 				: "exact";
 	const metadata = [kind, String(mode)];
+	if (typeof args.targetKind === "string") metadata.push(args.targetKind);
 	if (kind === "text") metadata.push(typeof args.case === "string" ? args.case : "smart");
 	if (typeof args.context === "number" && args.context > 0) metadata.push(`context ${args.context}`);
-	if (typeof args.path === "string" && args.path.length > 0) metadata.push(args.path);
-	if (typeof args.fileGlob === "string" && args.fileGlob.length > 0) metadata.push(args.fileGlob);
+	if (typeof args.path === "string" && args.path.length > 0) metadata.push(safeInlineDisplay(args.path));
+	if (typeof args.fileGlob === "string" && args.fileGlob.length > 0) metadata.push(safeInlineDisplay(args.fileGlob));
+	if (typeof args.maxResultsGlobal === "number") metadata.push(`max ${args.maxResultsGlobal}`);
+	if (typeof args.maxResultsPerFile === "number") metadata.push(`${args.maxResultsPerFile}/file`);
+	if (typeof args.maxFiles === "number") metadata.push(`${args.maxFiles} files`);
 	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 	component.setText(
 		theme.fg("toolTitle", theme.bold("search")) +
@@ -455,26 +524,6 @@ function renderSearchCall(
 			theme.fg("muted", ` · ${metadata.join(" · ")}`),
 	);
 	return component;
-}
-
-function highlightSearchRanges(text: string, ranges: Array<[number, number]>, theme: Theme): string {
-	const normalized = ranges
-		.map(
-			([start, end]) =>
-				[Math.max(0, Math.min(text.length, start)), Math.max(0, Math.min(text.length, end))] as const,
-		)
-		.filter(([start, end]) => end > start)
-		.sort(([left], [right]) => left - right);
-	let cursor = 0;
-	let output = "";
-	for (const [start, end] of normalized) {
-		if (start < cursor) continue;
-		output += theme.fg("toolOutput", text.slice(cursor, start));
-		output += theme.fg("accent", theme.bold(text.slice(start, end)));
-		cursor = end;
-	}
-	output += theme.fg("toolOutput", text.slice(cursor));
-	return output;
 }
 
 class SearchResultRenderComponent extends Container {
@@ -493,41 +542,44 @@ class SearchResultRenderComponent extends Container {
 		const details = this.details;
 		const theme = this.renderTheme;
 		if (!details || !theme) return [];
-		const visibleHits = this.options.expanded ? details.hits : details.hits.slice(0, SEARCH_PREVIEW_HITS);
+		const visibleLocators = this.options.expanded ? details.locators : details.locators.slice(0, SEARCH_PREVIEW_HITS);
 		const lines: string[] = [""];
-		const status = [details.approximate ? "approximate" : "exact", details.partial ? "partial" : "complete"];
-		lines.push(theme.fg(details.partial ? "warning" : "muted", `[${status.join(" · ")}]`));
-		let currentPath: string | undefined;
-		for (const hit of visibleHits) {
-			if (hit.kind === "file") {
-				const marker = hit.exact ? "=" : details.approximate ? "~" : "•";
-				const kind = hit.pathKind === "directory" ? "/" : "";
-				lines.push(`${theme.fg("muted", `${marker} `)}${theme.fg("accent", `${hit.path}${kind}`)}`);
-				continue;
-			}
-			if (hit.path !== currentPath) {
-				currentPath = hit.path;
-				lines.push(theme.fg("accent", hit.path));
-			}
-			for (const contextLine of hit.before ?? []) {
-				lines.push(`${theme.fg("muted", `  ${contextLine.line}- `)}${theme.fg("muted", contextLine.text)}`);
-			}
+		const count =
+			details.coverage.matchedCount === undefined
+				? `${details.coverage.returnedCount} returned`
+				: `${details.coverage.returnedCount}/${details.coverage.matchedCount} ${details.coverage.matchedCountRelation}`;
+		const status = [details.status, count];
+		if (details.approximate) status.push("approximate");
+		if (details.coverage.truncatedBy) status.push(`truncated: ${details.coverage.truncatedBy}`);
+		if (details.coverage.skipped.length > 0) status.push(`${details.coverage.skipped.length} skipped`);
+		lines.push(theme.fg(details.status === "complete" ? "muted" : "warning", `[${status.join(" · ")}]`));
+		for (const locator of visibleLocators) {
+			const position = locator.startLine
+				? `${safeInlineDisplay(locator.path)}:${locator.startLine}:${locator.startColumn ?? 1}`
+				: safeInlineDisplay(locator.path);
+			const match = locator.match ? ` · ${JSON.stringify(safeInlineDisplay(locator.match))}` : "";
 			lines.push(
-				`${theme.fg("muted", `  ${hit.line}:${hit.column} `)}${highlightSearchRanges(hit.text, hit.ranges, theme)}`,
+				`${theme.fg("muted", safeInlineDisplay(locator.locatorId))} ${theme.fg("accent", position)}${theme.fg("toolOutput", match)}`,
 			);
-			for (const contextLine of hit.after ?? []) {
-				lines.push(`${theme.fg("muted", `  ${contextLine.line}- `)}${theme.fg("muted", contextLine.text)}`);
-			}
 		}
-		const remaining = details.hits.length - visibleHits.length;
+		const remaining = details.locators.length - visibleLocators.length;
 		if (remaining > 0) {
 			lines.push(
-				theme.fg("muted", `... (${remaining} more hits,`) +
+				theme.fg("muted", `... (${remaining} more locators,`) +
 					` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
 			);
 		}
 		if (details.nextCursor) lines.push(theme.fg("muted", `Continue with cursor ${details.nextCursor}`));
-		if (details.hits.length === 0) lines.push(theme.fg("muted", "No matches found."));
+		if (details.locators.length === 0) {
+			lines.push(
+				theme.fg(
+					details.status === "complete" ? "muted" : "warning",
+					details.status === "complete"
+						? "No matches in the fully covered scope."
+						: "No returned locator; coverage is incomplete.",
+				),
+			);
+		}
 		return lines.map((line) => truncateToWidth(line, Math.max(1, width), "..."));
 	}
 }
@@ -538,7 +590,7 @@ function renderSearchResult(
 	theme: Theme,
 	context: ToolRenderContext,
 ): SearchResultRenderComponent | Text {
-	if (!result.details || !Array.isArray(result.details.hits)) return renderResult(result, options, theme);
+	if (!result.details || !Array.isArray(result.details.locators)) return renderResult(result, options, theme);
 	const component =
 		context.lastComponent instanceof SearchResultRenderComponent
 			? context.lastComponent
@@ -833,9 +885,12 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 			if (resolved.owned) this.resources.add(resolved.value);
 			return resolved.value;
 		});
+		const toolState = new ToolStateLedger();
+		this.resources.add(toolState);
 		const context: ExecutionToolContext = {
 			env,
 			searchProvider,
+			toolState,
 			readProvider,
 			resourceReaders,
 			mutationBackend,

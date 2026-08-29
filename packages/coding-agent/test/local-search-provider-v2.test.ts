@@ -51,6 +51,7 @@ describe("LocalSearchProviderV2", () => {
 				path: "src/literal:a.ts",
 				line: 2,
 				column: 16,
+				byteOffset: 22,
 				text: "const value = 'a+b';",
 				ranges: [[15, 18]],
 				before: [{ line: 1, text: "before" }],

@@ -18,10 +18,13 @@ node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run \
   test/tool-profile-eval/runner.test.ts \
   test/tool-profile-eval/trace.test.ts \
   test/tool-profile-eval/prompt-ablation.test.ts \
-  test/tool-profile-eval/search-evidence.test.ts
+  test/tool-profile-eval/search-evidence.test.ts \
+  test/tool-profile-eval/locator-safe-chain-evidence.test.ts
 ```
 
 `search-evidence.test.ts` compares actual model-visible Search outputs from `LocalSearchProviderV2` and `FffSearchProvider` without calling a model. Its paired typo/noise fixture reports Recall@5, reciprocal/first rank, scripted search and candidate-read effort, output bytes plus a chars/4 token estimate, irrelevant/duplicate hits, and retained/cumulative result-context estimates. A separate stress fixture covers a 3,000-file noisy index, a 12,000-line text file, bounded continuation, incomplete-scan approximation, and exact-semantics fallback. Wall-clock values are descriptive only.
+
+`locator-safe-chain-evidence.test.ts` executes the actual v2 definitions through locator Search, versioned Read, view/hash/range-bound prepare, patch-ID commit, and focused verification. It compares locator bytes with the prior full-line Search format and asserts deterministic ambiguity, stale-preimage, truncation, and unsupported-structure disclosure with zero wrong-location writes. It uses no provider or model API.
 
 The real executor is pinned to `openai-codex/gpt-5.6-luna` with `thinkingLevel: "max"`. It remains skipped unless the exact opt-in is set:
 

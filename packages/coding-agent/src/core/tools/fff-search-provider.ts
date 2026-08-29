@@ -98,7 +98,18 @@ export class FffSearchProvider implements SearchProvider {
 	}
 
 	private supportsNativeRequest(request: SearchRequest): boolean {
-		if (request.fileGlob !== undefined || request.case !== "smart") return false;
+		if (
+			request.fileGlob !== undefined ||
+			request.include?.length ||
+			request.exclude?.length ||
+			request.case !== "smart" ||
+			request.wordBoundary ||
+			request.honorIgnore === false ||
+			request.includeHidden ||
+			request.followSymlinks
+		) {
+			return false;
+		}
 		return request.kind === "files" || request.kind === "text" || request.kind === "glob";
 	}
 
@@ -176,6 +187,9 @@ export class FffSearchProvider implements SearchProvider {
 			approximate: !handle.scanComplete,
 			partial: !handle.scanComplete,
 			generation: generation(handle),
+			matchedCount: result.totalMatched,
+			matchedCountRelation: handle.scanComplete ? "exact" : "at_least",
+			truncatedBy: nextCursor ? "max_results_global" : undefined,
 		};
 	}
 
@@ -208,13 +222,18 @@ export class FffSearchProvider implements SearchProvider {
 				cursor: result.nextCursor,
 			});
 		}
+		const skippedCount = Math.max(0, result.totalFiles - result.filteredFileCount);
 		return {
 			hits,
 			nextCursor,
 			complete: handle.scanComplete,
 			approximate: !handle.scanComplete,
-			partial: !handle.scanComplete,
+			partial: !handle.scanComplete || skippedCount > 0,
 			generation: generation(handle),
+			matchedCount: result.totalMatched,
+			matchedCountRelation: result.nextCursor ? "at_least" : "exact",
+			truncatedBy: nextCursor ? "max_results_global" : undefined,
+			skipped: skippedCount > 0 ? [{ reason: "FFF_FILTERED_FILE", count: skippedCount }] : undefined,
 		};
 	}
 
@@ -233,6 +252,7 @@ export class FffSearchProvider implements SearchProvider {
 			column: (ranges[0]?.[0] ?? byteIndexToStringIndex(text, match.col)) + 1,
 			text,
 			ranges,
+			byteOffset: match.byteOffset + match.col,
 			before: contextBefore.map((line, index) => ({
 				line: match.lineNumber - contextBefore.length + index,
 				text: line,

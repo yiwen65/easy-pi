@@ -71,20 +71,36 @@ export {
 	type SearchExecutionContext,
 	type SearchHit,
 	type SearchKind,
+	type SearchMatchedCountRelation,
 	type SearchPage,
 	type SearchProvider,
 	SearchProviderError,
 	type SearchProviderErrorCode,
 	type SearchRanking,
 	type SearchRequest,
+	type SearchSkipped,
+	type SearchTruncationReason,
 	scoreSearchPath,
 } from "./search-provider.ts";
 export {
 	createSearchV2Tool,
+	type SearchV2Coverage,
 	type SearchV2Details,
 	type SearchV2Input,
+	type SearchV2Locator,
+	type SearchV2Status,
 } from "./search-v2.ts";
 export type { ExecutionToolContext } from "./tool-context.ts";
+export {
+	fileVersion,
+	resolveToolState,
+	sameFileVersion,
+	type ToolFileVersion,
+	type ToolLocator,
+	type ToolPatch,
+	ToolStateLedger,
+	type ToolView,
+} from "./tool-state.ts";
 export { type V2RecoveryAction, V2ToolError, type V2ToolErrorCode } from "./v2-errors.ts";
 export {
 	type ResolvedWorkspacePath,

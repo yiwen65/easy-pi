@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -9,12 +9,14 @@ import type {
 	MutationBackend,
 	MutationCommitResult,
 	ReadProvider,
+	ReadV2Details,
 	ResourceReader,
 	ResourceReadResult,
 	SearchExecutionContext,
 	SearchPage,
 	SearchProvider,
 	SearchRequest,
+	SearchV2Details,
 	TextRangeReadOptions,
 	TextRangeReadResult,
 } from "@earendil-works/pi-agent-core";
@@ -28,6 +30,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { FffSearchProvider } from "../src/core/tools/fff-search-provider.ts";
 import { createV2ToolRuntime } from "../src/core/tools/tool-profile.ts";
+import { getThemeByName } from "../src/modes/interactive/theme/theme.ts";
 
 const V2_NAMES = ["search", "read", "edit", "run"];
 
@@ -299,11 +302,24 @@ describe("v2 tool profile", () => {
 		expect(v2.systemPrompt).toContain("- run:");
 		expect(v2.systemPrompt).not.toContain("- bash:");
 		expect(v2.getToolDefinition("search")?.parameters).toMatchObject({ required: ["query"] });
-		expect(v2.getToolDefinition("read")?.parameters).toMatchObject({ required: ["path"] });
-		expect(v2.getToolDefinition("edit")?.parameters).toMatchObject({ required: ["operations"] });
+		expect(v2.getToolDefinition("read")?.parameters).toMatchObject({
+			anyOf: expect.arrayContaining([
+				expect.objectContaining({ required: ["path"] }),
+				expect.objectContaining({ required: ["locatorId"] }),
+			]),
+		});
+		expect(v2.getToolDefinition("edit")?.parameters).toMatchObject({
+			anyOf: expect.arrayContaining([
+				expect.objectContaining({ required: ["operations"] }),
+				expect.objectContaining({ required: ["action", "patchId"] }),
+			]),
+		});
 		expect(v2.getToolDefinition("run")?.parameters).toMatchObject({ required: ["command"] });
 		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
 		expect(v2.systemPrompt).toContain("use one edit batch with move first");
+		expect(v2.systemPrompt).toContain("Never infer absence from partial");
+		expect(v2.systemPrompt).toContain("view_id/file_hash");
+		expect(v2.systemPrompt).toContain("action=prepare");
 		v2.dispose();
 	});
 
@@ -330,16 +346,121 @@ describe("v2 tool profile", () => {
 		session.dispose();
 	});
 
+	it("renders compact locator, view, and prepared-patch evidence", async () => {
+		writeFileSync(join(cwd, "sample.txt"), "old\n");
+		const session = await createSession({ toolProfile: "v2" });
+		const search = session.getToolDefinition("search");
+		const read = session.getToolDefinition("read");
+		const edit = session.getToolDefinition("edit");
+		const renderTheme = getThemeByName("dark");
+		if (!search?.renderResult || !read?.renderResult || !edit?.renderResult || !renderTheme) {
+			throw new Error("v2 renderers are unavailable");
+		}
+		const renderContext = {
+			args: {},
+			toolCallId: "render",
+			invalidate: () => {},
+			lastComponent: undefined,
+			state: {},
+			cwd,
+			executionStarted: true,
+			argsComplete: true,
+			isPartial: false,
+			expanded: false,
+			showImages: false,
+			isError: false,
+		};
+		const searchResult = await search.execute(
+			"search",
+			{ query: "old", path: "sample.txt" },
+			undefined,
+			undefined,
+			{} as Parameters<typeof search.execute>[4],
+		);
+		const searchDetails = searchResult.details as SearchV2Details;
+		searchDetails.locators[0].match = "\x1b[?1049h old";
+		const searchComponent = search.renderResult(
+			searchResult,
+			{ expanded: false, isPartial: false },
+			renderTheme,
+			renderContext as Parameters<typeof search.renderResult>[3],
+		);
+		const renderedSearch = searchComponent.render(120).join("\n");
+		expect(renderedSearch).toContain("loc_");
+		expect(renderedSearch).not.toContain("\x1b[?1049h");
+
+		const readResult = await read.execute(
+			"read",
+			{ locatorId: searchDetails.locators[0].locatorId, maxLines: 1 },
+			undefined,
+			undefined,
+			{} as Parameters<typeof read.execute>[4],
+		);
+		const readDetails = readResult.details as ReadV2Details;
+		if (readDetails.lines) readDetails.lines[0] = "\x1b[?1049h old";
+		const readComponent = read.renderResult(
+			readResult,
+			{ expanded: false, isPartial: false },
+			renderTheme,
+			renderContext as Parameters<typeof read.renderResult>[3],
+		);
+		const renderedRead = readComponent.render(120).join("\n");
+		expect(renderedRead).toContain("view_");
+		expect(renderedRead).not.toContain("\x1b[?1049h");
+
+		const prepared = await edit.execute(
+			"prepare",
+			{
+				action: "prepare",
+				operations: [
+					{
+						kind: "update",
+						path: "sample.txt",
+						oldText: "old",
+						newText: "new",
+						viewId: readDetails.viewId,
+						expectedFileHash: readDetails.fileHash,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			{} as Parameters<typeof edit.execute>[4],
+		);
+		const editComponent = edit.renderResult(
+			prepared,
+			{ expanded: false, isPartial: false },
+			renderTheme,
+			renderContext as Parameters<typeof edit.renderResult>[3],
+		);
+		const renderedEdit = editComponent.render(120).join("\n");
+		expect(renderedEdit).toContain("prepared patch_");
+		expect(renderedEdit).toContain("workspace unchanged");
+		expect(readFileSync(join(cwd, "sample.txt"), "utf8")).toBe("old\n");
+		session.dispose();
+	});
+
 	it("advertises exactly one explicitly selected edit dialect", async () => {
 		const replacement = await createSession({
 			toolProfile: "v2",
 			toolsV2: { edit: { dialect: "replacement" } },
 		});
-		expect(replacement.getToolDefinition("edit")?.parameters).toMatchObject({ required: ["path", "edits"] });
+		expect(replacement.getToolDefinition("edit")?.parameters).toMatchObject({
+			anyOf: expect.arrayContaining([
+				expect.objectContaining({ required: ["path", "edits"] }),
+				expect.objectContaining({ required: ["action", "patchId"] }),
+			]),
+		});
 		replacement.dispose();
 
 		const patch = await createSession({ toolProfile: "v2", toolsV2: { edit: { dialect: "patch" } } });
-		expect(patch.getToolDefinition("edit")?.parameters).toMatchObject({ required: ["patch"] });
+		expect(patch.getToolDefinition("edit")?.parameters).toMatchObject({
+			anyOf: expect.arrayContaining([
+				expect.objectContaining({ required: ["patch"] }),
+				expect.objectContaining({ required: ["action", "patchId"] }),
+			]),
+		});
 		patch.dispose();
 	});
 
@@ -380,7 +501,17 @@ describe("v2 tool profile", () => {
 			{} as Parameters<typeof read.execute>[4],
 		);
 
-		expect(result.content).toContainEqual({ type: "text", text: "second\n\n[More lines. Continue with offset=3.]" });
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringMatching(
+				/^\[view_id=view_[^ ]+ snapshot_id=snap_[^ ]+ file_hash=sha256:[a-f0-9]{64}\]\n2\tsecond\n\n\[Truncated: continue with startLine=3\.\]$/,
+			),
+		});
+		expect(result.details).toMatchObject({
+			viewId: expect.stringMatching(/^view_/),
+			range: [2, 2],
+			nextOffset: 3,
+		});
 		session.dispose();
 	});
 

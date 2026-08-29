@@ -220,7 +220,7 @@ describe("FFF Search evidence", () => {
 			);
 			const firstDetails = first.details as SearchV2Details;
 			expect(firstDetails).toMatchObject({ returnedCount: 3, nextCursor: expect.any(String) });
-			expect(resultText(first)).toContain("More results. Continue with cursor=");
+			expect(resultText(first)).toContain("truncated by max_results_global; continue with cursor=");
 			const second = await search.execute(
 				"page-second",
 				{ query: "SHARED_PAGE_TARGET", kind: "text", limit: 3, cursor: firstDetails.nextCursor },

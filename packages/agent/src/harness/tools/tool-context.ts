@@ -2,6 +2,7 @@ import type { ExecutionEnv } from "../types.ts";
 import type { MutationBackend } from "./mutation-core.ts";
 import type { ReadProvider, ResourceReader } from "./read-provider.ts";
 import type { SearchProvider } from "./search-provider.ts";
+import type { ToolStateLedger } from "./tool-state.ts";
 import type { WorkspacePolicy } from "./workspace-policy.ts";
 
 /** Filesystem, shell, and optional v2 service context required by built-in execution tools. */
@@ -17,6 +18,7 @@ export interface ExecutionToolContext {
 		scopeId?: string;
 	};
 	mutationBackend?: MutationBackend;
+	toolState?: ToolStateLedger;
 	workspacePolicy?: WorkspacePolicy;
 	run?: {
 		commandPrefix?: string;
