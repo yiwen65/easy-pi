@@ -1,6 +1,17 @@
 export type SearchKind = "text" | "files" | "glob";
 export type SearchCaseMode = "smart" | "sensitive" | "insensitive";
-export type SearchRanking = "fast" | "global";
+export type SearchRanking = "fast" | "global" | "task";
+export type SearchQueryTemplate = "definition" | "references" | "assignment" | "calls" | "concept";
+export type SearchStructuredMode =
+	| "symbol_definition"
+	| "symbol_reference"
+	| "implementation"
+	| "assignment"
+	| "call"
+	| "string_literal"
+	| "comment"
+	| "semantic_candidate";
+export type SearchQueryMode = "literal" | "regex" | SearchStructuredMode;
 export type SearchMatchedCountRelation = "exact" | "at_least" | "unknown";
 export type SearchTruncationReason =
 	| "max_results_global"
@@ -17,8 +28,11 @@ export interface SearchCapabilities {
 	glob: boolean;
 	stableCursor: boolean;
 	globalRanking: boolean;
+	taskRanking?: boolean;
 	scopeFilters?: boolean;
 	wordBoundary?: boolean;
+	/** Structured modes verified by this provider. Omitted means text/path search only. */
+	structuredModes?: SearchStructuredMode[];
 }
 
 export interface SearchRequest {
@@ -28,9 +42,13 @@ export interface SearchRequest {
 	fileGlob?: string;
 	case: SearchCaseMode;
 	regex: boolean;
+	mode?: SearchQueryMode;
+	targetKind?: string;
 	context: number;
 	limit: number;
 	ranking: SearchRanking;
+	queryTemplate?: SearchQueryTemplate;
+	preferredPaths?: string[];
 	wordBoundary?: boolean;
 	include?: string[];
 	exclude?: string[];
@@ -97,6 +115,15 @@ export type SearchHit =
 			ranges: Array<[number, number]>;
 			/** Absolute byte offset of the first match when the provider exposes it. */
 			byteOffset?: number;
+			endLine?: number;
+			endColumn?: number;
+			matchKind?: string;
+			enclosingSymbol?: string;
+			nodeKind?: string;
+			nodeId?: string;
+			fileClass?: string;
+			score?: number;
+			rankReasons?: string[];
 			before?: SearchContextLine[];
 			after?: SearchContextLine[];
 	  }
@@ -132,7 +159,12 @@ export interface SearchExecutionContext {
 	scopeId: string;
 }
 
-export type SearchProviderErrorCode = "invalid_regex" | "stale_cursor" | "unsupported" | "unavailable";
+export type SearchProviderErrorCode =
+	| "invalid_regex"
+	| "stale_cursor"
+	| "unsupported"
+	| "budget_exceeded"
+	| "unavailable";
 
 export class SearchProviderError extends Error {
 	readonly code: SearchProviderErrorCode;

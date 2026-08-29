@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
 	createEditV2Tool,
+	createReadV2Tool,
 	type EditPlan,
 	type MutationBackend,
 	type MutationCapabilities,
+	ToolStateLedger,
 	V2ToolError,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
@@ -50,12 +52,32 @@ describe("NodeOverlayMutationBackend", () => {
 	});
 
 	async function prepare(backend: NodeOverlayMutationBackend, content = "new") {
+		const toolState = new ToolStateLedger();
+		const context = { env, mutationBackend: backend, toolState };
+		const view = await createReadV2Tool().execute(
+			"overlay-read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		return createEditV2Tool().execute(
 			"overlay-edit",
-			{ operations: [{ kind: "update", path: "a.txt", oldText: "old", newText: content }] },
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "old",
+						newText: content,
+						viewId: view.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
 			undefined,
 			undefined,
-			{ env, mutationBackend: backend },
+			context,
 		);
 	}
 
@@ -113,14 +135,35 @@ describe("NodeOverlayMutationBackend", () => {
 		await expect(prepare(quotaBackend)).rejects.toMatchObject({ code: "EDIT_ROLLED_BACK" });
 		expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("old");
 
+		const cancelledBackend = new NodeOverlayMutationBackend({ workspaceRoot: workspace, overlayRoot });
+		const toolState = new ToolStateLedger();
+		const context = { env, mutationBackend: cancelledBackend, toolState };
+		const view = await createReadV2Tool().execute(
+			"cancel-read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		const controller = new AbortController();
 		controller.abort();
 		const cancelled = createEditV2Tool().execute(
 			"cancel-overlay",
-			{ operations: [{ kind: "update", path: "a.txt", oldText: "old", newText: "new" }] },
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "old",
+						newText: "new",
+						viewId: view.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
 			controller.signal,
 			undefined,
-			{ env, mutationBackend: new NodeOverlayMutationBackend({ workspaceRoot: workspace, overlayRoot }) },
+			context,
 		);
 		await expect(cancelled).rejects.toMatchObject({ code: "ABORTED" });
 		expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("old");

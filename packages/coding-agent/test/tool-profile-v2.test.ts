@@ -12,6 +12,7 @@ import type {
 	ReadV2Details,
 	ResourceReader,
 	ResourceReadResult,
+	SearchCapabilities,
 	SearchExecutionContext,
 	SearchPage,
 	SearchProvider,
@@ -36,7 +37,7 @@ const V2_NAMES = ["search", "read", "edit", "run"];
 
 class TrackingSearchProvider implements SearchProvider {
 	readonly id = "tracking-search";
-	readonly capabilities = {
+	readonly capabilities: SearchCapabilities = {
 		textLiteral: false,
 		textRegex: false,
 		context: false,
@@ -47,8 +48,10 @@ class TrackingSearchProvider implements SearchProvider {
 	};
 	closeCalls = 0;
 	throwOnClose = false;
+	requests: SearchRequest[] = [];
 
-	async search(_request: SearchRequest, _context: SearchExecutionContext): Promise<SearchPage> {
+	async search(request: SearchRequest, _context: SearchExecutionContext): Promise<SearchPage> {
+		this.requests.push(request);
 		return { hits: [], complete: true, approximate: false, partial: false };
 	}
 
@@ -172,6 +175,7 @@ describe("v2 tool profile", () => {
 
 	it("owns factory resources across reload and keeps direct instances host-owned", async () => {
 		const searches: TrackingSearchProvider[] = [];
+		const semantics: TrackingSearchProvider[] = [];
 		const reads: TrackingReadProvider[] = [];
 		const backends: TrackingMutationBackend[] = [];
 		const readers: TrackingResourceReader[] = [];
@@ -179,6 +183,11 @@ describe("v2 tool profile", () => {
 			searchProvider: () => {
 				const provider = new TrackingSearchProvider();
 				searches.push(provider);
+				return provider;
+			},
+			semanticSearchProvider: () => {
+				const provider = new TrackingSearchProvider();
+				semantics.push(provider);
 				return provider;
 			},
 			readProvider: () => {
@@ -199,18 +208,30 @@ describe("v2 tool profile", () => {
 				},
 			],
 		});
-		expect([searches.length, reads.length, backends.length, readers.length]).toEqual([1, 1, 1, 1]);
+		expect([searches.length, semantics.length, reads.length, backends.length, readers.length]).toEqual([
+			1, 1, 1, 1, 1,
+		]);
 
 		await runtime.reload();
-		expect([searches.length, reads.length, backends.length, readers.length]).toEqual([2, 2, 2, 2]);
-		expect([searches[0].closeCalls, reads[0].closeCalls, backends[0].closeCalls, readers[0].closeCalls]).toEqual([
-			1, 1, 1, 1,
+		expect([searches.length, semantics.length, reads.length, backends.length, readers.length]).toEqual([
+			2, 2, 2, 2, 2,
 		]);
+		expect([
+			searches[0].closeCalls,
+			semantics[0].closeCalls,
+			reads[0].closeCalls,
+			backends[0].closeCalls,
+			readers[0].closeCalls,
+		]).toEqual([1, 1, 1, 1, 1]);
 		await runtime.close();
 		await runtime.close();
-		expect([searches[1].closeCalls, reads[1].closeCalls, backends[1].closeCalls, readers[1].closeCalls]).toEqual([
-			1, 1, 1, 1,
-		]);
+		expect([
+			searches[1].closeCalls,
+			semantics[1].closeCalls,
+			reads[1].closeCalls,
+			backends[1].closeCalls,
+			readers[1].closeCalls,
+		]).toEqual([1, 1, 1, 1, 1]);
 
 		const hostSearch = new TrackingSearchProvider();
 		const hostRead = new TrackingReadProvider();
@@ -318,9 +339,27 @@ describe("v2 tool profile", () => {
 		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
 		expect(v2.systemPrompt).toContain("use one edit batch with move first");
 		expect(v2.systemPrompt).toContain("Never infer absence from partial");
+		expect(v2.systemPrompt).toContain("concept/semantic candidates");
+		expect(v2.systemPrompt).toContain("verify candidates with structured/literal Search and Read before Edit");
+		expect(v2.systemPrompt).toContain("Choose either mode or queryTemplate, not both");
+		expect(v2.systemPrompt).toContain("Structured/semantic Search requires kind=text and context=0");
+		expect(v2.systemPrompt).toContain("partial or indeterminate commit");
 		expect(v2.systemPrompt).toContain("view_id/file_hash");
 		expect(v2.systemPrompt).toContain("action=prepare");
 		v2.dispose();
+	});
+
+	it("advertises exact text-only capabilities when structured and semantic providers are absent", async () => {
+		const session = await createSession({
+			toolProfile: "v2",
+			toolsV2: { executionEnv: () => new NodeExecutionEnv({ cwd }) },
+		});
+		expect(session.systemPrompt).toContain("This session supports text/path Search only");
+		expect(session.systemPrompt).toContain(
+			"Do not use structured modes, query templates, targetKind, or task ranking",
+		);
+		expect(session.systemPrompt).toContain("Symbol and AST reads are unavailable in this session");
+		session.dispose();
 	});
 
 	it("uses FFF as the default local v2 Search backend", async () => {
@@ -344,6 +383,102 @@ describe("v2 tool profile", () => {
 		});
 		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("AuthenticationService.ts") });
 		session.dispose();
+	});
+
+	it("uses the default JS/TS index for structured Search and AST-bounded Read", async () => {
+		writeFileSync(join(cwd, "service.ts"), "export class Service {\n  configure() {\n    return 42;\n  }\n}\n");
+		const session = await createSession({ toolProfile: "v2" });
+		const search = session.getToolDefinition("search");
+		const read = session.getToolDefinition("read");
+		if (!search || !read) throw new Error("v2 definitions are missing");
+		const found = await search.execute(
+			"structured-search",
+			{ query: "Service.configure", mode: "symbol_definition", targetKind: "definition" },
+			undefined,
+			undefined,
+			{} as Parameters<typeof search.execute>[4],
+		);
+		expect(found.details).toMatchObject({
+			mode: "symbol_definition",
+			returnedCount: 1,
+			locators: [
+				expect.objectContaining({
+					startLine: 2,
+					endLine: 4,
+					matchKind: "definition",
+					nodeKind: "MethodDeclaration",
+				}),
+			],
+		});
+		const details = found.details as SearchV2Details;
+		const locatorView = await read.execute(
+			"structured-locator-read",
+			{ locatorId: details.locators[0].locatorId, beforeLines: 0, afterLines: 0 },
+			undefined,
+			undefined,
+			{} as Parameters<typeof read.execute>[4],
+		);
+		expect(locatorView.details).toMatchObject({ range: [2, 4], lines: ["  configure() {", "    return 42;", "  }"] });
+		const symbolView = await read.execute(
+			"structured-symbol-read",
+			{ path: "service.ts", mode: "symbol_body", symbol: "Service.configure" },
+			undefined,
+			undefined,
+			{} as Parameters<typeof read.execute>[4],
+		);
+		expect(symbolView.details).toMatchObject({
+			range: [2, 4],
+			symbol: "Service.configure",
+			nodeKind: "MethodDeclaration",
+		});
+		await expect(
+			search.execute(
+				"implicit-semantic",
+				{ query: "service setup", queryTemplate: "concept" },
+				undefined,
+				undefined,
+				{} as Parameters<typeof search.execute>[4],
+			),
+		).rejects.toMatchObject({ code: "SYMBOL_INDEX_UNAVAILABLE" });
+		session.dispose();
+	});
+
+	it("routes concept templates only through an explicitly configured semantic provider", async () => {
+		const semantic = new TrackingSearchProvider();
+		Object.assign(semantic.capabilities, {
+			stableCursor: true,
+			taskRanking: true,
+			scopeFilters: true,
+			structuredModes: ["semantic_candidate"],
+		});
+		const session = await createSession({
+			toolProfile: "v2",
+			toolsV2: { search: { semanticProvider: semantic } },
+		});
+		const search = session.getToolDefinition("search");
+		if (!search) throw new Error("v2 search definition is missing");
+		const result = await search.execute(
+			"semantic-search",
+			{ query: "payment reconciliation", queryTemplate: "concept", preferredPaths: ["src/billing/**"] },
+			undefined,
+			undefined,
+			{} as Parameters<typeof search.execute>[4],
+		);
+		expect(result.details).toMatchObject({
+			mode: "semantic_candidate",
+			queryTemplate: "concept",
+			effectiveScope: { preferredPaths: ["src/billing/**"] },
+		});
+		expect(semantic.requests).toEqual([
+			expect.objectContaining({
+				mode: "semantic_candidate",
+				queryTemplate: "concept",
+				ranking: "task",
+				preferredPaths: ["src/billing/**"],
+			}),
+		]);
+		session.dispose();
+		expect(semantic.closeCalls).toBe(0);
 	});
 
 	it("renders compact locator, view, and prepared-patch evidence", async () => {
@@ -439,6 +574,64 @@ describe("v2 tool profile", () => {
 		expect(renderedEdit).toContain("workspace unchanged");
 		expect(readFileSync(join(cwd, "sample.txt"), "utf8")).toBe("old\n");
 		session.dispose();
+	});
+
+	it("projects bounded handle-only evidence and retires it after commit", async () => {
+		writeFileSync(join(cwd, "sample.txt"), "old source payload\n");
+		const runtime = createV2ToolRuntime(cwd);
+		const { search, read, edit } = runtime.definitions;
+		const found = await search.execute(
+			"evidence-search",
+			{ query: "old source payload", path: "sample.txt" },
+			undefined,
+			undefined,
+			{} as Parameters<typeof search.execute>[4],
+		);
+		const searchDetails = found.details as SearchV2Details;
+		const viewed = await read.execute(
+			"evidence-read",
+			{ locatorId: searchDetails.locators[0].locatorId, beforeLines: 0, afterLines: 0 },
+			undefined,
+			undefined,
+			{} as Parameters<typeof read.execute>[4],
+		);
+		const readDetails = viewed.details as ReadV2Details;
+		const prepared = await edit.execute(
+			"evidence-prepare",
+			{
+				action: "prepare",
+				operations: [
+					{
+						kind: "update",
+						path: "sample.txt",
+						oldText: "old source payload",
+						newText: "new source payload",
+						viewId: readDetails.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			{} as Parameters<typeof edit.execute>[4],
+		);
+		const evidence = runtime.toolEvidenceSummary();
+		expect(evidence).toContain(searchDetails.locators[0].locatorId);
+		expect(evidence).toContain(readDetails.viewId);
+		expect(evidence).toContain(prepared.details.patchId);
+		expect(evidence).not.toContain("old source payload");
+		expect(evidence).not.toContain("new source payload");
+		expect(Buffer.byteLength(evidence ?? "")).toBeLessThanOrEqual(4_096);
+
+		await edit.execute(
+			"evidence-commit",
+			{ action: "commit", patchId: prepared.details.patchId },
+			undefined,
+			undefined,
+			{} as Parameters<typeof edit.execute>[4],
+		);
+		expect(runtime.toolEvidenceSummary()).toBeUndefined();
+		await runtime.close();
 	});
 
 	it("advertises exactly one explicitly selected edit dialect", async () => {

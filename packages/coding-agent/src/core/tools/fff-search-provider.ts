@@ -57,6 +57,12 @@ function generation(handle: FinderHandle): string {
 	return `fff-${handle.generation}`;
 }
 
+function hasUnlocatedTextHit(page: SearchPage): boolean {
+	return page.hits.some(
+		(hit) => hit.kind === "text" && (hit.byteOffset === undefined || !hit.ranges || hit.ranges.length === 0),
+	);
+}
+
 /** FFF-first local Search provider with a direct rg/fd fallback for unsupported or unavailable requests. */
 export class FffSearchProvider implements SearchProvider {
 	readonly id = "fff-local";
@@ -75,7 +81,14 @@ export class FffSearchProvider implements SearchProvider {
 
 	async search(request: SearchRequest, context: SearchExecutionContext, signal?: AbortSignal): Promise<SearchPage> {
 		if (request.cursor?.startsWith("fff:")) {
-			return this.continueNative(request, request.cursor.slice(4), signal);
+			const page = await this.continueNative(request, request.cursor.slice(4), signal);
+			if (hasUnlocatedTextHit(page)) {
+				throw new SearchProviderError(
+					"unavailable",
+					"FFF omitted match coordinates on a truncated line; repeat with a narrower path.",
+				);
+			}
+			return page;
 		}
 		if (request.cursor?.startsWith("local:")) {
 			return this.wrapFallback(
@@ -90,7 +103,11 @@ export class FffSearchProvider implements SearchProvider {
 		if (!handle || signal?.aborted) return this.wrapFallback(await this.fallback.search(request, context, signal));
 		this.refreshScanState(handle);
 		try {
-			return this.searchNative(handle, request, signal);
+			const page = this.searchNative(handle, request, signal);
+			if (hasUnlocatedTextHit(page)) {
+				return this.wrapFallback(await this.fallback.search(request, context, signal));
+			}
+			return page;
 		} catch (error) {
 			if (error instanceof SearchProviderError && error.code === "invalid_regex") throw error;
 			return this.wrapFallback(await this.fallback.search(request, context, signal));

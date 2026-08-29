@@ -64,6 +64,12 @@ export {
 } from "./node-overlay-mutation-backend.ts";
 export { type NodeReadProviderOptions, NodeReadProviderV2 } from "./node-read-provider-v2.ts";
 export {
+	createOpenAICompatibleEmbeddingSearchProviderFromEnv,
+	type EmbeddingSearchUsage,
+	type OpenAICompatibleEmbeddingSearchOptions,
+	OpenAICompatibleEmbeddingSearchProvider,
+} from "./openai-compatible-embedding-search-provider.ts";
+export {
 	createReadTool,
 	createReadToolDefinition,
 	type ReadOperations,
@@ -78,6 +84,7 @@ export {
 	createV2ToolRuntime,
 	type ToolProfile,
 	V2_TOOL_NAMES,
+	type V2CodeIndexProvider,
 	type V2SessionResourceSource,
 	type V2ToolRuntimeHandle,
 } from "./tool-profile.ts";
@@ -91,6 +98,12 @@ export {
 	truncateLine,
 	truncateTail,
 } from "./truncate.ts";
+export {
+	type SemanticCandidateDocument,
+	type SemanticDocumentPage,
+	type TypeScriptCodeIndexOptions,
+	TypeScriptCodeIndexProvider,
+} from "./typescript-code-index-provider.ts";
 export {
 	createWriteTool,
 	createWriteToolDefinition,

@@ -1,7 +1,11 @@
 import { symlink } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { ExecutionEnvReadProvider, type ResourceReader } from "../../src/harness/tools/read-provider.ts";
+import {
+	ExecutionEnvReadProvider,
+	type ResourceReader,
+	type SymbolReadProvider,
+} from "../../src/harness/tools/read-provider.ts";
 import { createReadV2Tool } from "../../src/harness/tools/read-v2.ts";
 import { fileVersion, ToolStateLedger } from "../../src/harness/tools/tool-state.ts";
 import { getOrThrow } from "../../src/harness/types.ts";
@@ -16,6 +20,16 @@ class TrackingEnv extends NodeExecutionEnv {
 }
 
 describe("v2 read", () => {
+	it("makes path and locator input branches schema-exclusive", () => {
+		const parameters = createReadV2Tool().parameters as unknown as {
+			anyOf: Array<{ required?: string[]; properties: Record<string, unknown> }>;
+		};
+		const pathBranch = parameters.anyOf.find((branch) => branch.required?.includes("path"));
+		const locatorBranch = parameters.anyOf.find((branch) => branch.required?.includes("locatorId"));
+		expect(pathBranch?.properties).not.toHaveProperty("locatorId");
+		expect(locatorBranch?.properties).not.toHaveProperty("path");
+	});
+
 	it("uses bounded text reads and exposes line continuation", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("file.txt", "one\ntwo\nthree\n"));
@@ -78,6 +92,45 @@ describe("v2 read", () => {
 			range: [2, 4],
 			editable: true,
 		});
+	});
+
+	it("resolves a JS/TS symbol body into a bounded versioned view", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		getOrThrow(
+			await env.writeFile(
+				"service.ts",
+				"const before = true;\nexport function configure() {\n  return 42;\n}\nconst after = true;\n",
+			),
+		);
+		const symbolReadProvider: SymbolReadProvider = {
+			id: "symbols",
+			languages: ["javascript", "typescript"],
+			resolve: async (request) => ({
+				path: request.path,
+				startLine: 2,
+				endLine: 4,
+				symbol: "configure",
+				nodeKind: "FunctionDeclaration",
+				generation: "ts-1",
+			}),
+			close: async () => {},
+		};
+		const result = await createReadV2Tool().execute(
+			"symbol",
+			{ path: "service.ts", mode: "symbol_body", symbol: "configure", maxLines: 10, maxBytes: 1024 },
+			undefined,
+			undefined,
+			{ env, symbolReadProvider },
+		);
+		expect(result.details).toMatchObject({
+			range: [2, 4],
+			symbol: "configure",
+			nodeKind: "FunctionDeclaration",
+			symbolGeneration: "ts-1",
+			lines: ["export function configure() {", "  return 42;", "}"],
+			editable: true,
+		});
+		expect((result.content[0] as { text: string }).text).toContain("2\texport function configure()");
 	});
 
 	it("uses a locator byte offset to expose a match in an overlong line", async () => {

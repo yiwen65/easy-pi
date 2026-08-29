@@ -9,6 +9,7 @@ import {
 	ExecutionEnvReadProvider,
 	ReadProviderError,
 	type ResourceReader,
+	type SymbolReadTarget,
 } from "./read-provider.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
 import {
@@ -39,6 +40,9 @@ const MAX_CURSORS = 100;
 const textEncoder = new TextEncoder();
 
 const readV2Properties = {
+	mode: Type.Optional(Type.Union([Type.Literal("symbol_body"), Type.Literal("ast_node")])),
+	symbol: Type.Optional(Type.String({ description: "JS/TS symbol name to resolve inside path" })),
+	nodeId: Type.Optional(Type.String({ description: "Opaque AST node ID returned by structured search" })),
 	startLine: Type.Optional(Type.Number({ description: "First text line, 1-indexed" })),
 	endLine: Type.Optional(Type.Number({ description: "Last requested text line, inclusive" })),
 	offset: Type.Optional(Type.Number({ description: "Compatibility alias for startLine or directory entry offset" })),
@@ -57,19 +61,24 @@ const readV2Properties = {
 };
 
 const readV2Schema = Type.Union([
-	Type.Object({
-		...readV2Properties,
-		path: Type.String({ description: "File, directory, or configured resource to read" }),
-		locatorId: Type.Optional(Type.String()),
-	}),
-	Type.Object({
-		...readV2Properties,
-		path: Type.Optional(Type.String()),
-		locatorId: Type.String({ description: "Opaque locator returned by search" }),
-	}),
+	Type.Object(
+		{
+			...readV2Properties,
+			path: Type.String({ description: "File, directory, or configured resource to read" }),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			...readV2Properties,
+			locatorId: Type.String({ description: "Opaque locator returned by search" }),
+		},
+		{ additionalProperties: false },
+	),
 ]);
 
-export type ReadV2Input = Static<typeof readV2Schema>;
+type ReadV2SchemaInput = Static<typeof readV2Schema>;
+export type ReadV2Input = ReadV2SchemaInput & { path?: string; locatorId?: string };
 
 export interface ReadV2Details {
 	path: string;
@@ -81,6 +90,9 @@ export interface ReadV2Details {
 	viewId?: string;
 	locatorId?: string;
 	snapshotId?: string;
+	symbol?: string;
+	nodeKind?: string;
+	symbolGeneration?: string | number;
 	fileHash?: string;
 	fileVersion?: ToolFileVersion;
 	editable?: boolean;
@@ -336,13 +348,47 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 		name: "read",
 		label: "read",
 		description:
-			"Read an opaque search locator or a bounded file range with numbered lines, view/hash evidence, and explicit continuation. Also reads stable directory pages, images, and configured resources.",
+			"Read an opaque search locator, a JS/TS symbol/AST node, or a bounded file range with numbered lines, view/hash evidence, and explicit continuation. Also reads stable directory pages, images, and configured resources.",
 		parameters: readV2Schema,
 		executionMode: "parallel",
 		replay: "safe",
-		async execute(_toolCallId, input, signal, _onUpdate, context) {
+		async execute(_toolCallId, schemaInput, signal, _onUpdate, context) {
+			const input = schemaInput as ReadV2Input;
 			if ((input.path === undefined) === (input.locatorId === undefined)) {
 				throw new V2ToolError("INVALID_INPUT", "Provide exactly one of path or locatorId.");
+			}
+			const symbolMode = input.mode !== undefined || input.symbol !== undefined || input.nodeId !== undefined;
+			if (symbolMode && input.locatorId) {
+				throw new V2ToolError("INVALID_INPUT", "Symbol/AST reads require path and cannot use locatorId.");
+			}
+			if (input.symbol !== undefined && input.nodeId !== undefined) {
+				throw new V2ToolError("INVALID_INPUT", "Provide symbol or nodeId, not both.");
+			}
+			if (
+				symbolMode &&
+				(input.mode ?? (input.nodeId ? "ast_node" : "symbol_body")) === "symbol_body" &&
+				!input.symbol
+			) {
+				throw new V2ToolError("INVALID_INPUT", "mode=symbol_body requires symbol.");
+			}
+			if (
+				symbolMode &&
+				(input.mode ?? (input.nodeId ? "ast_node" : "symbol_body")) === "ast_node" &&
+				!input.nodeId
+			) {
+				throw new V2ToolError("INVALID_INPUT", "mode=ast_node requires nodeId.");
+			}
+			if (
+				symbolMode &&
+				(input.startLine !== undefined ||
+					input.endLine !== undefined ||
+					input.offset !== undefined ||
+					input.byteOffset !== undefined ||
+					input.cursor !== undefined ||
+					input.beforeLines !== undefined ||
+					input.afterLines !== undefined)
+			) {
+				throw new V2ToolError("INVALID_INPUT", "Symbol/AST reads select their own range; use only output budgets.");
 			}
 			validatePositiveInteger(input.offset, "offset");
 			validatePositiveInteger(input.startLine, "startLine");
@@ -429,15 +475,55 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 					);
 				}
 			}
-			const requestedPath = locator?.path ?? input.path;
+			let requestedPath = locator?.path ?? input.path;
 			if (!requestedPath) throw new V2ToolError("INVALID_INPUT", "A path or locatorId is required.");
-			const resolved = await resolveWorkspacePath(
-				context.env,
-				requestedPath,
-				"read",
-				context.workspacePolicy,
-				signal,
-			);
+			let resolved = await resolveWorkspacePath(context.env, requestedPath, "read", context.workspacePolicy, signal);
+			let symbolTarget: SymbolReadTarget | undefined;
+			if (symbolMode) {
+				const symbolProvider = context.symbolReadProvider;
+				if (!symbolProvider) {
+					throw new V2ToolError(
+						"SYMBOL_INDEX_UNAVAILABLE",
+						"A configured JS/TS symbol provider is required for symbol/AST reads.",
+						{ fallbackAllowed: true, recovery: { kind: "use_text_fallback" as const } },
+					);
+				}
+				try {
+					symbolTarget = await symbolProvider.resolve(
+						{
+							path: resolved.canonicalPath,
+							mode: input.mode ?? (input.nodeId ? "ast_node" : "symbol_body"),
+							symbol: input.symbol,
+							nodeId: input.nodeId,
+						},
+						signal,
+					);
+				} catch (error) {
+					if (signal?.aborted) throw new V2ToolError("ABORTED", "Symbol read was aborted.");
+					if (error instanceof ReadProviderError) {
+						if (error.code === "not_found") throw new V2ToolError("NOT_FOUND", error.message);
+						if (error.code === "unsupported") {
+							throw new V2ToolError("SYMBOL_INDEX_UNAVAILABLE", error.message);
+						}
+						if (error.code === "stale_cursor") {
+							throw new V2ToolError("STALE_SNAPSHOT", error.message, {
+								recovery: { kind: "read_again" as const, paths: [requestedPath] },
+							});
+						}
+						if (error.code === "invalid") throw new V2ToolError("AMBIGUOUS_MATCH", error.message);
+						throw mapProviderError(error, requestedPath);
+					}
+					throw error;
+				}
+				requestedPath = symbolTarget.path;
+				resolved = await resolveWorkspacePath(
+					context.env,
+					symbolTarget.path,
+					"read",
+					context.workspacePolicy,
+					signal,
+				);
+			}
 			const provider = getProvider(context);
 			let info: FileInfo;
 			try {
@@ -569,9 +655,11 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 
 			const beforeLines = input.beforeLines ?? DEFAULT_LOCATOR_CONTEXT;
 			const afterLines = input.afterLines ?? DEFAULT_LOCATOR_CONTEXT;
-			let startLine = input.startLine ?? input.offset ?? 1;
+			let startLine = symbolTarget?.startLine ?? input.startLine ?? input.offset ?? 1;
 			let maxLines = requestedMaxLines;
-			if (locator) {
+			if (symbolTarget) {
+				maxLines = Math.min(maxLines, symbolTarget.endLine - symbolTarget.startLine + 1);
+			} else if (locator) {
 				startLine = Math.max(1, (locator.startLine ?? 1) - beforeLines);
 				const desiredEnd = (locator.endLine ?? locator.startLine ?? startLine) + afterLines;
 				maxLines = Math.min(maxLines, desiredEnd - startLine + 1);
@@ -668,6 +756,9 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 						viewId: view.id,
 						locatorId: locator?.id,
 						snapshotId,
+						symbol: symbolTarget?.symbol,
+						nodeKind: symbolTarget?.nodeKind,
+						symbolGeneration: symbolTarget?.generation,
 						fileHash,
 						fileVersion: finalVersion,
 						editable: fileHash !== undefined,

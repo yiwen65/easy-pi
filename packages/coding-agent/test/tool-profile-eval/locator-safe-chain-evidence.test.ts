@@ -47,6 +47,7 @@ describe("locator-safe toolchain evidence", () => {
 		writeFileSync(join(cwd, "generated", "payment.ts"), generatedCopy);
 		writeFileSync(join(cwd, "src", "ambiguous.ts"), "same same\n");
 		writeFileSync(join(cwd, "src", "stale.ts"), "old\n");
+		writeFileSync(join(cwd, "src", "unsupported.py"), "def configure():\n    return 1\n");
 
 		const runtime = createV2ToolRuntime(cwd, {
 			searchProvider: () => new LocalSearchProviderV2(new NodeExecutionEnv({ cwd })),
@@ -233,7 +234,9 @@ describe("locator-safe toolchain evidence", () => {
 				coverage: { truncated: true, truncatedBy: "max_results_global" },
 			});
 			expect(resultText(overflow)).toContain("truncated by max_results_global");
-			const generatedLocator = broadDetails.locators.find((locator) => locator.path === "generated/payment.ts");
+			const generatedLocator = [...(overflow.details as SearchV2Details).locators, ...broadDetails.locators].find(
+				(locator) => locator.path === "generated/payment.ts",
+			);
 			if (!generatedLocator) throw new Error("generated locator is missing");
 			const longLine = await read.execute(
 				"long-line",
@@ -249,13 +252,13 @@ describe("locator-safe toolchain evidence", () => {
 			const unsupportedCode = await errorCode(
 				search.execute(
 					"unsupported",
-					{ query: "PaymentGateway", mode: "symbol_definition" },
+					{ query: "configure", path: "src/unsupported.py", mode: "symbol_definition" },
 					undefined,
 					undefined,
 					extensionContext,
 				),
 			);
-			expect(unsupportedCode).toBe("SYMBOL_INDEX_UNAVAILABLE");
+			expect(unsupportedCode).toBe("SEARCH_CAPABILITY_UNSUPPORTED");
 
 			const chainOutputs = [located, viewResult, preparedResult, committed, verified].map(resultText);
 			const chainVisibleBytes = chainOutputs.reduce((total, output) => total + bytes(output), 0);
@@ -274,7 +277,7 @@ describe("locator-safe toolchain evidence", () => {
 				ambiguityRejectionRate: ambiguousCode === "AMBIGUOUS_MATCH" ? 1 : 0,
 				staleRejectionRate: staleCode === "STALE_PATCH" ? 1 : 0,
 				truncationDisclosureRate: (overflow.details as SearchV2Details).coverage.truncated ? 1 : 0,
-				unsupportedDisclosureRate: unsupportedCode === "SYMBOL_INDEX_UNAVAILABLE" ? 1 : 0,
+				unsupportedDisclosureRate: unsupportedCode === "SEARCH_CAPABILITY_UNSUPPORTED" ? 1 : 0,
 				wrongLocationWrites: 0,
 			};
 			expect(metrics.locatorReductionRate).toBeGreaterThan(0.9);

@@ -69,7 +69,11 @@ Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. T
 
 The v2 mutation workflow is `search locator → read view → edit prepare → edit commit → read/run verify`. Search returns bounded locator IDs and explicit complete/partial/overflow coverage; Read returns numbered content plus short-lived `view_id`, snapshot, and a full-file hash only when the file is within the editable hash limit. A view without a hash is intentionally non-editable. View-bound updates require an exact range and unique preimage. `action: "prepare"` performs no mutation and returns a short-lived `patchId`; `action: "commit"` consumes that ID and rechecks every prepared file observation before any write. Locator, view, cursor, and patch handles are runtime-local, scope-bound, quota-bound, and expire after ten minutes by default; repeat the preceding stage after a stale-handle error.
 
-Structured symbol/definition/reference/assignment/call and semantic modes are not implemented by the current `SearchProvider` contract. The v2 tool reports `SYMBOL_INDEX_UNAVAILABLE`; it never silently relabels text search as structured search. The opt-in journal and overlay mutation backends retain their existing guarantees. The default backend prevalidates all files but can still report explicit partial commit after an I/O failure; v2 does not claim cross-file atomic visibility or an OS sandbox.
+The default local Node v2 host uses the TypeScript compiler for JS/TS definition, reference, implementation, assignment, call, string, and comment searches plus symbol/AST-bounded reads. Other languages fail closed with `SYMBOL_INDEX_UNAVAILABLE`; text hits are never silently relabeled as structured. Search query templates (`definition`, `references`, `assignment`, `calls`, and `concept`) map to explicit modes, while `preferredPaths` supplies a deterministic task-ranking prior.
+
+Semantic candidate search is remote and never enabled automatically. Configure a `semanticProvider` explicitly; semantic results are candidates that must be verified with structured/literal search and Read before Edit. `createOpenAICompatibleEmbeddingSearchProviderFromEnv()` requires `PI_SEMANTIC_SEARCH=1` plus the endpoint, model, API key, token price, and a positive cost budget. It filters and bounds JS/TS declaration documents before sending them, but selected paths, symbols, comments, and source excerpts still leave the process. Do not enable it for workspaces whose content may not be sent to that endpoint.
+
+The opt-in journal and overlay mutation backends retain their existing guarantees. The default backend prevalidates all files but can still report explicit partial commit after an I/O failure; v2 does not claim cross-file atomic visibility or an OS sandbox.
 
 ```typescript
 import { createAgentSession, MemoryExecutionEnv } from "@earendil-works/pi-coding-agent";
@@ -86,6 +90,30 @@ const { session } = await createAgentSession({
     },
   },
 });
+```
+
+Explicit OpenAI-compatible semantic provider:
+
+```typescript
+import {
+  createAgentSession,
+  createOpenAICompatibleEmbeddingSearchProviderFromEnv,
+  TypeScriptCodeIndexProvider,
+} from "@earendil-works/pi-coding-agent";
+
+const codeIndex = new TypeScriptCodeIndexProvider();
+const semanticProvider = createOpenAICompatibleEmbeddingSearchProviderFromEnv(codeIndex);
+const { session } = await createAgentSession({
+  toolProfile: "v2",
+  toolsV2: {
+    search: { codeIndexProvider: codeIndex, semanticProvider },
+  },
+});
+
+// Direct instances are host-owned.
+session.dispose();
+await semanticProvider?.close();
+await codeIndex.close();
 ```
 
 Lifecycle rules:

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import type {
+	SearchCapabilities,
 	SearchExecutionContext,
 	SearchPage,
 	SearchProvider,
@@ -11,7 +12,7 @@ import { createTempDir } from "./session-test-utils.ts";
 
 class FakeProvider implements SearchProvider {
 	readonly id = "fake";
-	readonly capabilities = {
+	readonly capabilities: SearchCapabilities = {
 		textLiteral: true,
 		textRegex: true,
 		context: true,
@@ -42,6 +43,17 @@ function context(provider: SearchProvider, cwd = createTempDir(), scopeId = "ses
 }
 
 describe("v2 search", () => {
+	it("advertises structured selector constraints in the model-visible schema", () => {
+		const parameters = createSearchV2Tool().parameters as unknown as {
+			properties: Record<string, { description?: string }>;
+		};
+		expect(parameters.properties.mode?.description).toContain("do not combine with queryTemplate");
+		expect(parameters.properties.queryTemplate?.description).toContain("do not combine with mode");
+		expect(parameters.properties.targetKind?.description).toContain("omit for semantic candidates");
+		expect(parameters.properties.context?.description).toContain("structured/semantic modes require 0");
+		expect(parameters.properties.ranking?.description).toContain("file or structured search");
+	});
+
 	it("forwards structured literal smart-case requests and preserves hit ranges", async () => {
 		const provider = new FakeProvider({
 			hits: [
@@ -83,10 +95,38 @@ describe("v2 search", () => {
 			match: "a[b].c",
 		});
 		expect(result.content[0]).toMatchObject({
-			text: expect.stringMatching(/^loc_[^\t]+\tsrc\/a\.ts:2:4\ttext\t"a\[b\]\.c"$/),
+			text: expect.stringMatching(/^src\/a\.ts\n {2}loc_[^\t]+\t2:4\ttext\t"a\[b\]\.c"$/),
 		});
+		expect(result.details.groups).toEqual([{ path: "src/a.ts", locatorIds: [result.details.locators[0].locatorId] }]);
 		expect((result.content[0] as { text: string }).text).not.toContain("before");
 		expect((result.content[0] as { text: string }).text).not.toContain("xx ");
+	});
+
+	it("groups same-file locators without repeating paths", async () => {
+		const provider = new FakeProvider({
+			hits: [
+				{ kind: "text", path: "src/a.ts", line: 1, column: 1, text: "target", ranges: [[0, 6]] },
+				{ kind: "text", path: "src/a.ts", line: 4, column: 3, text: "  target", ranges: [[2, 8]] },
+				{ kind: "text", path: "src/b.ts", line: 2, column: 1, text: "target", ranges: [[0, 6]] },
+			],
+			complete: true,
+			approximate: false,
+			partial: false,
+		});
+		const result = await createSearchV2Tool().execute(
+			"grouped",
+			{ query: "target" },
+			undefined,
+			undefined,
+			context(provider),
+		);
+		expect(result.details.groups).toEqual([
+			{ path: "src/a.ts", locatorIds: result.details.locators.slice(0, 2).map((locator) => locator.locatorId) },
+			{ path: "src/b.ts", locatorIds: [result.details.locators[2].locatorId] },
+		]);
+		const text = (result.content[0] as { text: string }).text;
+		expect(text.match(/src\/a\.ts/g)).toHaveLength(1);
+		expect(text.match(/src\/b\.ts/g)).toHaveLength(1);
 	});
 
 	it("binds opaque cursors to the request, provider, generation, and session scope", async () => {
@@ -162,6 +202,108 @@ describe("v2 search", () => {
 			partial: true,
 		});
 		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("[partial: approximate ranking.]") });
+	});
+
+	it("dispatches verified structured modes and preserves provider metadata", async () => {
+		const provider = new FakeProvider({
+			hits: [
+				{
+					kind: "text",
+					path: "src/service.ts",
+					line: 4,
+					endLine: 6,
+					column: 17,
+					endColumn: 26,
+					text: "export function configure() {",
+					ranges: [[16, 25]],
+					matchKind: "definition",
+					enclosingSymbol: "configure",
+					nodeKind: "FunctionDeclaration",
+					rankReasons: ["exact_symbol", "definition_match"],
+				},
+			],
+			complete: true,
+			approximate: false,
+			partial: false,
+			generation: "ts-1",
+		});
+		provider.capabilities.structuredModes = ["symbol_definition"];
+		provider.capabilities.taskRanking = true;
+		const result = await createSearchV2Tool().execute(
+			"structured",
+			{ query: "configure", mode: "symbol_definition", targetKind: "definition" },
+			undefined,
+			undefined,
+			{ ...context(provider), structuredSearchProvider: provider },
+		);
+		expect(provider.requests[0]).toMatchObject({
+			query: "configure",
+			kind: "text",
+			mode: "symbol_definition",
+			targetKind: "definition",
+			regex: false,
+			context: 0,
+			ranking: "task",
+		});
+		expect(result.details).toMatchObject({ mode: "symbol_definition", targetKind: "definition" });
+		expect(result.details.locators[0]).toMatchObject({
+			startLine: 4,
+			endLine: 6,
+			startColumn: 17,
+			endColumn: 26,
+			matchKind: "definition",
+			enclosingSymbol: "configure",
+			nodeKind: "FunctionDeclaration",
+			rankReasons: ["exact_symbol", "definition_match"],
+		});
+	});
+
+	it("routes semantic query templates with task ranking and path priors", async () => {
+		const provider = new FakeProvider({
+			hits: [
+				{
+					kind: "text",
+					path: "src/billing/reconcile.ts",
+					line: 8,
+					column: 17,
+					text: "export function settleInvoice() {",
+					ranges: [[16, 29]],
+					matchKind: "semantic_candidate",
+					score: 0.98,
+					rankReasons: ["semantic_similarity", "preferred_path"],
+				},
+			],
+			complete: true,
+			approximate: true,
+			partial: false,
+		});
+		provider.capabilities.structuredModes = ["semantic_candidate"];
+		provider.capabilities.taskRanking = true;
+		const result = await createSearchV2Tool().execute(
+			"semantic",
+			{
+				query: "payment reconciliation",
+				queryTemplate: "concept",
+				preferredPaths: ["src/billing/**"],
+			},
+			undefined,
+			undefined,
+			{ ...context(provider), semanticSearchProvider: provider },
+		);
+		expect(provider.requests[0]).toMatchObject({
+			kind: "text",
+			mode: "semantic_candidate",
+			targetKind: undefined,
+			context: 0,
+			queryTemplate: "concept",
+			ranking: "task",
+			preferredPaths: ["src/billing/**"],
+		});
+		expect(result.details).toMatchObject({ mode: "semantic_candidate", queryTemplate: "concept", approximate: true });
+		expect(result.details.locators[0]).toMatchObject({
+			matchKind: "semantic_candidate",
+			rankReasons: ["semantic_similarity", "preferred_path"],
+		});
 	});
 
 	it("fails closed for unsupported structured search modes", async () => {
@@ -360,10 +502,85 @@ describe("v2 search", () => {
 			tool.execute("id", { query: "x", kind: "glob", regex: true }, undefined, undefined, context(provider)),
 		).rejects.toMatchObject({ code: "INVALID_INPUT" });
 		await expect(
+			tool.execute(
+				"template-regex-conflict",
+				{ query: "x", queryTemplate: "definition", regex: true },
+				undefined,
+				undefined,
+				context(provider),
+			),
+		).rejects.toMatchObject({ code: "INVALID_INPUT" });
+		await expect(
+			tool.execute(
+				"target-kind-conflict",
+				{ query: "x", mode: "symbol_definition", targetKind: "assignment" },
+				undefined,
+				undefined,
+				{ ...context(provider), structuredSearchProvider: provider },
+			),
+		).rejects.toMatchObject({ code: "INVALID_INPUT" });
+		await expect(
 			tool.execute("id", { query: "x", context: 1 }, undefined, undefined, context(provider)),
 		).rejects.toMatchObject({
 			code: "SEARCH_CAPABILITY_UNSUPPORTED",
 		});
 		expect(provider.requests).toHaveLength(0);
+	});
+
+	it("enforces ranking, scope, and continuation capabilities for structured providers", async () => {
+		const provider = new FakeProvider({
+			hits: [],
+			complete: true,
+			approximate: false,
+			partial: false,
+		});
+		provider.capabilities.structuredModes = ["symbol_definition"];
+		const tool = createSearchV2Tool();
+		await expect(
+			tool.execute("task-ranking", { query: "x", mode: "symbol_definition" }, undefined, undefined, {
+				...context(provider),
+				structuredSearchProvider: provider,
+			}),
+		).rejects.toMatchObject({ code: "SEARCH_CAPABILITY_UNSUPPORTED" });
+		provider.capabilities.taskRanking = true;
+		provider.capabilities.scopeFilters = false;
+		await expect(
+			tool.execute(
+				"scope-filter",
+				{ query: "x", mode: "symbol_definition", include: ["src/**"] },
+				undefined,
+				undefined,
+				{ ...context(provider), structuredSearchProvider: provider },
+			),
+		).rejects.toMatchObject({ code: "SEARCH_CAPABILITY_UNSUPPORTED" });
+		expect(provider.requests).toHaveLength(0);
+
+		const cursorProvider = new FakeProvider({
+			hits: [{ kind: "file", path: "a.ts" }],
+			nextCursor: "private-cursor",
+			complete: true,
+			approximate: false,
+			partial: false,
+			generation: "g1",
+		});
+		const cursorTool = createSearchV2Tool();
+		const cursorContext = context(cursorProvider);
+		const first = await cursorTool.execute(
+			"cursor-first",
+			{ query: "a", kind: "files" },
+			undefined,
+			undefined,
+			cursorContext,
+		);
+		cursorProvider.capabilities.stableCursor = false;
+		await expect(
+			cursorTool.execute(
+				"cursor-second",
+				{ query: "a", kind: "files", cursor: first.details.nextCursor },
+				undefined,
+				undefined,
+				cursorContext,
+			),
+		).rejects.toMatchObject({ code: "SEARCH_CAPABILITY_UNSUPPORTED" });
 	});
 });

@@ -4,6 +4,7 @@ import { createEditV2Tool } from "../../src/harness/tools/edit-v2.ts";
 import { createReadV2Tool } from "../../src/harness/tools/read-v2.ts";
 import { createRunV2Tool } from "../../src/harness/tools/run-v2.ts";
 import { createSearchV2Tool } from "../../src/harness/tools/search-v2.ts";
+import { ToolStateLedger } from "../../src/harness/tools/tool-state.ts";
 import { ExecutionError, err, getOrThrow, ok, type Result, type ShellExecOptions } from "../../src/harness/types.ts";
 import { DEFAULT_MAX_LINES } from "../../src/harness/utils/truncate.ts";
 import { createTempDir } from "./session-test-utils.ts";
@@ -146,6 +147,83 @@ describe("v2 run", () => {
 		);
 		const pid = Number(getOrThrow(await env.readTextFile("managed.pid")));
 		expect(() => process.kill(pid, 0)).toThrow();
+	});
+
+	it("makes post-edit syntax failures visible and supports read-edit-run recovery", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("module.js", "function value() { return 1; }\n"));
+		const context = { env, toolState: new ToolStateLedger() };
+		const read = createReadV2Tool();
+		const edit = createEditV2Tool();
+		const run = createRunV2Tool();
+		const initial = await read.execute(
+			"read-valid",
+			{ path: "module.js", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
+		await edit.execute(
+			"break-syntax",
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "module.js",
+						oldText: "function value() { return 1; }",
+						newText: "function value( { return 1; }",
+						viewId: initial.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const failed = await run.execute(
+			"verify-failed",
+			{ command: `${JSON.stringify(process.execPath)} --check module.js` },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(failed.details.exitCode).not.toBe(0);
+		expect(failed.content[0]).toMatchObject({ text: expect.stringContaining("SyntaxError") });
+
+		const broken = await read.execute(
+			"read-broken",
+			{ path: "module.js", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
+		await edit.execute(
+			"repair-syntax",
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "module.js",
+						oldText: "function value( { return 1; }",
+						newText: "function value() { return 2; }",
+						viewId: broken.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const passed = await run.execute(
+			"verify-passed",
+			{ command: `${JSON.stringify(process.execPath)} --check module.js` },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(passed.details).toMatchObject({ exitCode: 0, timedOut: false });
 	});
 
 	it("keeps truncated output bounded and exposes the full output path", async () => {

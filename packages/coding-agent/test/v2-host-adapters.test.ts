@@ -50,7 +50,7 @@ describe("v2 host adapters", () => {
 				undefined,
 				executionContext(),
 			);
-			expect(remoteRead.content[0]).toMatchObject({ text: "hello" });
+			expect(remoteRead.content[0]).toMatchObject({ text: expect.stringContaining("1\thello") });
 		} finally {
 			await Promise.all(runtimes.map((runtime) => runtime.close()));
 			await memory.cleanup();
@@ -84,12 +84,22 @@ describe("v2 host adapters", () => {
 				undefined,
 				executionContext(),
 			);
-			expect(read.content[0]).toMatchObject({ text: "first\nsecond" });
+			expect(read.content[0]).toMatchObject({ text: expect.stringContaining("1\tfirst\n2\tsecond") });
 
 			await runtime.definitions.edit.execute(
 				"edit",
 				{
-					operations: [{ kind: "update", path: "src/sample.txt", oldText: "second", newText: "changed" }],
+					operations: [
+						{
+							kind: "update",
+							path: "src/sample.txt",
+							oldText: "second",
+							newText: "changed",
+							viewId: read.details.viewId,
+							expectedFileHash: read.details.fileHash,
+							range: { startLine: 2, endLine: 2 },
+						},
+					],
 				},
 				undefined,
 				undefined,

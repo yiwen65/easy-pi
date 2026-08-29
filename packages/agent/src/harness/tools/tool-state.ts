@@ -26,6 +26,12 @@ export interface ToolLocator {
 	byteOffset?: number;
 	lineLengthBytes?: number;
 	match?: string;
+	matchKind?: string;
+	enclosingSymbol?: string;
+	nodeKind?: string;
+	nodeId?: string;
+	fileClass?: string;
+	rankReasons?: string[];
 	fileVersion?: ToolFileVersion;
 }
 
@@ -48,6 +54,16 @@ export interface ToolPatch {
 	scopeId: string;
 	plan: EditPlan;
 	data: unknown;
+}
+
+export interface ToolStateEvidence {
+	locators: ToolLocator[];
+	views: Array<Omit<ToolView, "lines">>;
+	patches: Array<{
+		id: string;
+		scopeId: string;
+		operations: Array<{ kind: EditPlan["operations"][number]["kind"]; path: string; to?: string }>;
+	}>;
 }
 
 type Stored<T> = { value: T; expiresAt: number };
@@ -90,6 +106,19 @@ export class ToolStateLedger {
 
 	addLocator(locator: Omit<ToolLocator, "id">): ToolLocator {
 		this.prune();
+		for (const [id, stored] of this.locators) {
+			const previous = stored.value;
+			if (
+				previous.scopeId === locator.scopeId &&
+				previous.path === locator.path &&
+				previous.startLine === locator.startLine &&
+				previous.endLine === locator.endLine &&
+				previous.startColumn === locator.startColumn &&
+				previous.matchKind === locator.matchKind
+			) {
+				this.locators.delete(id);
+			}
+		}
 		const value = { ...locator, id: this.id("loc") };
 		this.locators.set(value.id, { value, expiresAt: Date.now() + this.ttlMs });
 		this.trim(this.locators, this.maxLocators);
@@ -102,8 +131,23 @@ export class ToolStateLedger {
 		return stored?.value.scopeId === scopeId ? stored.value : undefined;
 	}
 
+	removeLocator(id: string): void {
+		this.locators.delete(id);
+	}
+
 	addView(view: Omit<ToolView, "id">): ToolView {
 		this.prune();
+		for (const [id, stored] of this.views) {
+			const previous = stored.value;
+			if (
+				previous.scopeId === view.scopeId &&
+				previous.path === view.path &&
+				previous.range[0] === view.range[0] &&
+				previous.range[1] === view.range[1]
+			) {
+				this.views.delete(id);
+			}
+		}
 		const value = { ...view, id: this.id("view") };
 		this.views.set(value.id, { value, expiresAt: Date.now() + this.ttlMs });
 		this.trim(this.views, this.maxViews);
@@ -130,6 +174,56 @@ export class ToolStateLedger {
 		if (stored?.value.scopeId !== scopeId) return undefined;
 		this.patches.delete(id);
 		return stored.value;
+	}
+
+	invalidatePaths(paths: readonly string[], identities: readonly string[] = []): void {
+		this.prune();
+		const changed = new Set(paths);
+		const changedIdentities = new Set(identities);
+		for (const [id, stored] of this.locators) {
+			if (
+				changed.has(stored.value.path) ||
+				(stored.value.fileVersion?.identity !== undefined &&
+					changedIdentities.has(stored.value.fileVersion.identity))
+			) {
+				this.locators.delete(id);
+			}
+		}
+		for (const [id, stored] of this.views) {
+			if (
+				changed.has(stored.value.path) ||
+				(stored.value.fileVersion.identity !== undefined &&
+					changedIdentities.has(stored.value.fileVersion.identity))
+			) {
+				this.views.delete(id);
+			}
+		}
+		for (const [id, stored] of this.patches) {
+			const touchesChangedPath = stored.value.plan.operations.some(
+				(operation) => changed.has(operation.path) || (operation.kind === "move" && changed.has(operation.to)),
+			);
+			const observesChangedIdentity = stored.value.plan.observations.some(
+				(observation) => observation.identity !== undefined && changedIdentities.has(observation.identity),
+			);
+			if (touchesChangedPath || observesChangedIdentity) this.patches.delete(id);
+		}
+	}
+
+	getEvidence(): ToolStateEvidence {
+		this.prune();
+		return {
+			locators: [...this.locators.values()].map((stored) => ({ ...stored.value })),
+			views: [...this.views.values()].map(({ value: { lines: _lines, ...view } }) => ({ ...view })),
+			patches: [...this.patches.values()].map(({ value }) => ({
+				id: value.id,
+				scopeId: value.scopeId,
+				operations: value.plan.operations.map((operation) => ({
+					kind: operation.kind,
+					path: operation.path,
+					to: operation.kind === "move" ? operation.to : undefined,
+				})),
+			})),
+		};
 	}
 
 	clear(): void {

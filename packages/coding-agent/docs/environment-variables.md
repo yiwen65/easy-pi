@@ -93,3 +93,18 @@ These variables are read by Pi itself:
 | `HTTP_PROXY`, `HTTPS_PROXY` | Proxy outbound HTTP requests |
 
 Provider credentials such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and cloud-provider configuration are listed in [Providers](providers.md#environment-variables-or-auth-file).
+
+## Opt-in v2 Semantic Search
+
+These variables are read only by the exported `createOpenAICompatibleEmbeddingSearchProviderFromEnv()` SDK helper. Pi does not create or enable a remote semantic provider automatically.
+
+| Variable | Description |
+|----------|-------------|
+| `PI_SEMANTIC_SEARCH` | Must equal `1` or the helper returns no provider |
+| `PI_EMBEDDING_BASE_URL` | OpenAI-compatible base URL or `/embeddings` endpoint; HTTP(S) only and no embedded credentials |
+| `PI_EMBEDDING_MODEL` | Embedding model identifier sent to the endpoint |
+| `PI_EMBEDDING_API_KEY` | Bearer credential; required and never persisted by the provider |
+| `PI_EMBEDDING_USD_PER_MILLION_TOKENS` | Non-negative token price used by the local cost breaker |
+| `PI_EMBEDDING_MAX_COST_USD` | Positive provider-instance cost budget; defaults to `5` |
+
+The helper fails closed when enabled without the required variables. See [SDK: Opt-in v2 tool hosts](sdk.md#opt-in-v2-tool-hosts) for the explicit provider wiring and data-egress boundary.

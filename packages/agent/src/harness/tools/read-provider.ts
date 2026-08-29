@@ -61,6 +61,34 @@ export interface ReadProvider {
 	close(): Promise<void>;
 }
 
+export type SymbolReadMode = "symbol_body" | "ast_node";
+
+export interface SymbolReadRequest {
+	path: string;
+	mode: SymbolReadMode;
+	symbol?: string;
+	nodeId?: string;
+}
+
+export interface SymbolReadTarget {
+	path: string;
+	startLine: number;
+	endLine: number;
+	startByte?: number;
+	endByte?: number;
+	symbol?: string;
+	nodeKind?: string;
+	generation?: string | number;
+}
+
+/** Optional language-aware range resolver used by the model-visible read tool. */
+export interface SymbolReadProvider {
+	readonly id: string;
+	readonly languages: string[];
+	resolve(request: SymbolReadRequest, signal?: AbortSignal): Promise<SymbolReadTarget>;
+	close(): Promise<void>;
+}
+
 export interface ResourceReadResult {
 	content: Array<TextContent | ImageContent>;
 	mediaType?: string;

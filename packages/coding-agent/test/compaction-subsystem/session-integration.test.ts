@@ -43,11 +43,12 @@ function fixture() {
 	return manager;
 }
 
-function host() {
+function host(toolEvidence?: string) {
 	return new HfCompactionHost({
 		sessionId: "checkpoint-session",
 		getSystemPrompt: () => "CURRENT SYSTEM",
 		getToolsTokenEstimate: () => 100,
+		...(toolEvidence ? { getToolEvidenceSummary: () => toolEvidence } : {}),
 		config: { mode: "full_pipeline", recentUserTokens: 500 },
 	});
 }
@@ -68,6 +69,21 @@ describe("HfCompactionHost checkpoint pipeline", () => {
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("earlier content omitted");
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("tool payload");
 		expect(outcome.tokensAfter).toBeLessThan(outcome.tokensBefore!);
+	});
+
+	it("appends only the bounded live tool evidence supplied by the runtime", async () => {
+		const manager = fixture();
+		const evidence = [
+			"### Live v2 tool evidence",
+			"Runtime-local handles; revalidate before use.",
+			"- loc_live · src/auth.ts · 4-7",
+		].join("\n");
+		const outcome = await host(evidence).attemptCompaction({ complete, branchEntries: manager.getBranch() });
+		const summary = outcome.checkpoint?.replacementHistory[0];
+		expect(summary).toMatchObject({ role: "compactionSummary" });
+		expect(summary && "summary" in summary ? summary.summary : "").toContain(evidence);
+		expect(JSON.stringify(summary).match(/loc_live/g)).toHaveLength(1);
+		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("tool payload");
 	});
 
 	it("restores the active checkpoint from the main session branch", async () => {

@@ -4,7 +4,7 @@ import { convertToLlm } from "../../messages.ts";
 import { estimateTokens } from "../compaction.ts";
 import type { CompleteFn } from "./types.ts";
 
-export const LOCAL_COMPACTION_PROMPT_VERSION = "remote-v2-local-4";
+export const LOCAL_COMPACTION_PROMPT_VERSION = "remote-v2-local-5";
 
 export interface CompactionItemResult {
 	text: string;
@@ -33,6 +33,8 @@ Preserve exactly when material:
 - edits or external actions already performed;
 - tests, builds, or evaluations actually run and their results;
 - user-granted permissions, prohibitions, and scope boundaries.
+
+Do not copy raw Search, Read, or Edit source snippets into the handoff. Opaque locator, view, and prepared-patch IDs are runtime-local and may be stale; omit IDs copied from history because the host appends a bounded live-evidence section after generation when such state exists. Preserve the causal finding, path, range, edit status, and required revalidation instead.
 
 For continuation, preserve the active primary objective, the current process objective and its parent chain, and unresolved paused or interleaved objectives that may need to resume. Reduce completed process objectives to their durable outcomes. Retain abandoned or superseded objectives only when they explain the current state or prevent repeating rejected work.
 
