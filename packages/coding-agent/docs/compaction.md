@@ -2,6 +2,8 @@
 
 Pi uses a Codex-style replacement checkpoint for long sessions. Compaction is inactive until the predicted complete provider request reaches 95% of the model context window, a provider reports overflow, or the user runs `/compact`.
 
+During a multi-turn agent run, Pi evaluates the completed tool results before starting the next assistant turn. If compaction activates, the same run resumes from the checkpoint, and steering queued while compaction was running is included in that resumed request. No threshold compaction runs after a terminating tool batch when no further assistant turn is needed.
+
 ## Checkpoint contents
 
 Pi uses one local handoff path for every provider. It makes one tool-free model request that mirrors the external boundary of Codex Remote Compaction V2. The request keeps the current canonical system prompt, converts the active Session messages through the normal provider-message converter, includes the current tool schemas, then appends a dedicated `local_compaction_trigger` user item. `toolChoice` is forced to `none`; short cache retention and the active Session routing ID allow the unchanged prefix to reuse provider cache. Only when overflow makes that request impossible are tool-result bodies rewritten to a fixed truncation notice in the compactor request; durable history is not changed. The resulting local replacement history contains:

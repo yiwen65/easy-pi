@@ -7,7 +7,7 @@ import {
 	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
 import { setDefaultStreamFn } from "../src/index.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
@@ -1123,13 +1123,12 @@ describe("agentLoop with AgentMessage", () => {
 			tools: [tool],
 		};
 		let convertedSecondTurnSystemPrompt = "";
-		let prepared = false;
+		let prepareCalls = 0;
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
 			prepareNextTurn: async ({ context: currentContext }) => {
-				if (prepared) return undefined;
-				prepared = true;
+				prepareCalls++;
 				return {
 					context: {
 						systemPrompt: "second prompt",
@@ -1173,6 +1172,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(llmCalls).toBe(2);
+		expect(prepareCalls).toBe(1);
 		expect(convertedSecondTurnSystemPrompt).toBe("second prompt");
 	});
 
@@ -1201,6 +1201,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		let steeringPolls = 0;
 		let followUpPolls = 0;
+		const prepareNextTurn = vi.fn();
 		let callbackToolResultIds: string[] = [];
 		let callbackContextRoles: string[] = [];
 		const config: AgentLoopConfig = {
@@ -1214,6 +1215,7 @@ describe("agentLoop with AgentMessage", () => {
 				followUpPolls++;
 				return [createUserMessage("follow up should stay queued")];
 			},
+			prepareNextTurn,
 			shouldStopAfterTurn: async ({ message, toolResults, context }) => {
 				expect(message.role).toBe("assistant");
 				callbackToolResultIds = toolResults.map((toolResult) => toolResult.toolCallId);
@@ -1254,6 +1256,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executed).toEqual(["hello"]);
 		expect(steeringPolls).toBe(1);
 		expect(followUpPolls).toBe(0);
+		expect(prepareNextTurn).not.toHaveBeenCalled();
 		expect(callbackToolResultIds).toEqual(["tool-1"]);
 		expect(callbackContextRoles).toEqual(["user", "assistant", "toolResult"]);
 		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
@@ -1295,9 +1298,11 @@ describe("agentLoop with AgentMessage", () => {
 			tools: [tool],
 		};
 
+		const prepareNextTurn = vi.fn();
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
+			prepareNextTurn,
 		};
 
 		let llmCalls = 0;
@@ -1321,6 +1326,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		expect(llmCalls).toBe(1);
+		expect(prepareNextTurn).not.toHaveBeenCalled();
 		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
 	});

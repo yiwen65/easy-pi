@@ -6,7 +6,12 @@ import { createInMemoryModelRegistry, createModelRegistry, getModelRuntime } fro
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type {
+	AgentLoopTurnUpdate,
+	AgentMessage,
+	AgentTool,
+	PrepareNextTurnContext,
+} from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type {
 	FauxModelDefinition,
@@ -78,6 +83,10 @@ export interface HarnessOptions {
 	modelsJson?: Record<string, unknown>;
 	/** Subsystem compaction config passthrough (default-on since EPIC-CCTX-001). */
 	hfCompaction?: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] };
+	prepareNextTurnWithContext?: (
+		context: PrepareNextTurnContext,
+		signal?: AbortSignal,
+	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 }
 
 export interface Harness {
@@ -178,6 +187,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (!runner) return messages;
 			return runner.emitContext(messages);
 		},
+		prepareNextTurnWithContext: options.prepareNextTurnWithContext,
 	});
 	const extensionsResult = options.extensionFactories
 		? await createTestExtensionsResult(options.extensionFactories, tempDir)
