@@ -54,7 +54,7 @@ function host(toolEvidence?: string) {
 }
 
 describe("HfCompactionHost checkpoint pipeline", () => {
-	it("installs a compaction item after bounded recent user messages and no tool tail", async () => {
+	it("retains an unanswered latest user message after the compaction item", async () => {
 		const manager = fixture();
 		const h = host();
 		const outcome = await h.attemptCompaction({ complete, branchEntries: manager.getBranch() });
@@ -69,6 +69,33 @@ describe("HfCompactionHost checkpoint pipeline", () => {
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("earlier content omitted");
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("tool payload");
 		expect(outcome.tokensAfter).toBeLessThan(outcome.tokensBefore!);
+	});
+
+	it("does not append an answered latest user message after the compaction item", async () => {
+		const manager = fixture();
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "checkpoint migration completed" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 2_100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2_110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 5,
+		});
+
+		const outcome = await host().attemptCompaction({ complete, branchEntries: manager.getBranch() });
+
+		expect(outcome.activated).toBe(true);
+		expect(outcome.checkpoint?.replacementHistory.map((message) => message.role)).toEqual(["compactionSummary"]);
+		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("current goal: migrate checkpoints");
 	});
 
 	it("appends only the bounded live tool evidence supplied by the runtime", async () => {

@@ -103,6 +103,15 @@
 - Prevention: 修改自动 compact 时必须同时测试 trigger→offload/extract→validator→publish→live projection→restart，并覆盖“已有 snapshot + 旧 directive + 新大工具尾部”的 offload-only、成功但无 legacy entry 及 listener rejection；至少保留 shadow、reject、publish failure、overflow retry、重复 payload、重启未同步 tail 与第 8 次后 rebuild。
 - Verified by: 2026-08-23 T-406/T-407 aggregate 341 passed / 8 skipped；2026-08-24 无 legacy entry 回归先复现同名错误；本轮 offload-only ref 回归先失败后修复，compaction aggregate 368 passed / 8 skipped，根 `npm run check` 通过。
 
+## Replacement checkpoint 语义——只重放未回答 user，临时 transform 必须作用于终态投影
+
+- Wrong approach: handoff 已总结完整 user episode 后仍无条件把最后一条原始 user 放在 summary 后；provider preflight 又先执行 extension `transformContext`，压缩激活后再用 canonical replacement projection 覆盖 transform 结果。
+- Why it failed: 已回答请求被重新放到最新位置会看起来像新的待执行指令；同一 provider boundary 激活 checkpoint 时，provider-only 扩展上下文会静默丢失。
+- Recognition signal: replacement roles 对已完成 turn 仍是 `[compactionSummary, user]`；或请求含新 summary 但缺少 context extension marker，durable checkpoint 本身又不应包含该 marker。
+- Correct approach: 仅当 latest user 后不存在 assistant/toolResult 时按预算逐字保留；provider 顺序固定为 canonical messages → optional compaction activation → extension transform → `convertToLlm`，临时投影不写入 checkpoint。
+- Prevention: 同时覆盖 answered/unanswered latest-user 对照与“provider-boundary activation + provider-only marker”；完整 contract 还应断言 live system/tools/model/thinking、summary、post-checkpoint steering、旧历史排除和 tool-call/result 配对。
+- Verified by: 2026-08-30 两个回归先分别收到多余 user 和丢失 marker，修复后 compaction/extension/queue/active-tool/retry 批次 71 tests passed，根 `npm run check` 通过。
+
 ## Vitest 更新 inline snapshot——目标文件必须放在 `-u` 前
 
 - Wrong approach: 运行 `vitest --run -u test/interactive-mode-status.test.ts` 更新单文件 snapshot。
