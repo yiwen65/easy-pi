@@ -77,6 +77,14 @@ describe("issue #7253: manual compaction during an active response", () => {
 		expect(starts.slice(0, -1).every((event) => event.reason === "threshold")).toBe(true);
 		expect(ends.some((event) => event.reason === "threshold" && event.aborted)).toBe(true);
 		expect(ends.at(-1)).toMatchObject({ reason: "manual", aborted: false });
-		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		const entries = harness.sessionManager.getEntries();
+		const abortedResponseIndex = entries.findIndex(
+			(entry) =>
+				entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "aborted",
+		);
+		const compactionIndex = entries.findIndex((entry) => entry.type === "compaction");
+		expect(abortedResponseIndex).toBeGreaterThan(-1);
+		expect(compactionIndex).toBeGreaterThan(abortedResponseIndex);
+		expect(entries.filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	});
 });

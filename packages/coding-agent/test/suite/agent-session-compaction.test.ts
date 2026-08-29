@@ -1,12 +1,14 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	type Context,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
+	fauxToolCall,
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
@@ -90,6 +92,38 @@ function installCompactorStream(
 		return stream;
 	};
 	return { callCount: () => count, contexts: () => contexts };
+}
+
+function createLargeResultTool(terminate = false): AgentTool {
+	return {
+		name: "large_result",
+		label: "Large result",
+		description: "Returns enough content to cross the compaction threshold",
+		parameters: Type.Object({}),
+		execute: async () => ({
+			content: [{ type: "text", text: `large-tool-result:${"x".repeat(10_000)}` }],
+			details: {},
+			terminate,
+		}),
+	};
+}
+
+function seedPostToolThresholdSession(harness: Harness): void {
+	const model = harness.getModel();
+	const now = Date.now();
+	harness.sessionManager.appendMessage({
+		role: "user",
+		content: `old-history:${"a".repeat(1_000)}`,
+		timestamp: now - 2_000,
+	});
+	harness.sessionManager.appendMessage({
+		...fauxAssistantMessage(`recent-history:${"b".repeat(1_000)}`, { timestamp: now - 1_000 }),
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createUsage(600),
+	});
+	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
 }
 
 function seedCompactableSession(harness: Harness): void {
@@ -631,6 +665,152 @@ describe("AgentSession compaction characterization", () => {
 		expect(compactionErrors).toContain(
 			"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
 		);
+	});
+
+	it("compacts after a tool result before the next assistant request in the same run", async () => {
+		const order: string[] = [];
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 3_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 300, keepRecentTokens: 1 } },
+			tools: [createLargeResultTool()],
+			initialActiveToolNames: ["large_result"],
+			hfCompaction: {
+				mode: "full_pipeline",
+				complete: async () => {
+					order.push("compaction");
+					return { text: "Preserve the post-tool task state.", stopReason: "stop" };
+				},
+			},
+		});
+		harnesses.push(harness);
+		seedPostToolThresholdSession(harness);
+		let resumedRequest = "";
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
+			(context) => {
+				order.push("provider");
+				resumedRequest = JSON.stringify(context.messages);
+				return fauxAssistantMessage("finished after compaction");
+			},
+		]);
+
+		await harness.session.prompt("run the large tool");
+
+		expect(order).toEqual(["compaction", "provider"]);
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_start")).toEqual([{ type: "compaction_start", reason: "threshold" }]);
+		expect(resumedRequest).toContain("Preserve the post-tool task state.");
+		expect(harness.session.getLastAssistantText()).toBe("finished after compaction");
+	});
+
+	it("preserves an existing next-turn context update after post-tool compaction", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 3_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 300, keepRecentTokens: 1 } },
+			tools: [createLargeResultTool()],
+			initialActiveToolNames: ["large_result"],
+			prepareNextTurnWithContext: ({ context }) => ({
+				context: {
+					...context,
+					messages: [
+						...context.messages,
+						{
+							role: "user",
+							content: [{ type: "text", text: "existing prepare callback marker" }],
+							timestamp: Date.now(),
+						},
+					],
+				},
+			}),
+			hfCompaction: {
+				mode: "full_pipeline",
+				complete: async () => ({ text: "Preserve the post-tool task state.", stopReason: "stop" }),
+			},
+		});
+		harnesses.push(harness);
+		seedPostToolThresholdSession(harness);
+		let resumedRequest = "";
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
+			(context) => {
+				resumedRequest = JSON.stringify(context.messages);
+				return fauxAssistantMessage("finished after context update");
+			},
+		]);
+
+		await harness.session.prompt("run the large tool");
+
+		expect(resumedRequest).toContain("Preserve the post-tool task state.");
+		expect(resumedRequest).toContain("existing prepare callback marker");
+	});
+
+	it("includes steering queued during post-tool compaction in the resumed assistant request", async () => {
+		let markCompactionStarted = () => {};
+		const compactionStarted = new Promise<void>((resolve) => {
+			markCompactionStarted = resolve;
+		});
+		let releaseCompaction = () => {};
+		const compactionReleased = new Promise<void>((resolve) => {
+			releaseCompaction = resolve;
+		});
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 3_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 300, keepRecentTokens: 1 } },
+			tools: [createLargeResultTool()],
+			initialActiveToolNames: ["large_result"],
+			hfCompaction: {
+				mode: "full_pipeline",
+				complete: async () => {
+					markCompactionStarted();
+					await compactionReleased;
+					return { text: "Preserve the post-tool task state.", stopReason: "stop" };
+				},
+			},
+		});
+		harnesses.push(harness);
+		seedPostToolThresholdSession(harness);
+		let resumedRequest = "";
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
+			(context) => {
+				resumedRequest = JSON.stringify(context.messages);
+				return fauxAssistantMessage("finished after steering");
+			},
+			fauxAssistantMessage("unexpected delayed steering turn"),
+		]);
+
+		const promptPromise = harness.session.prompt("run the large tool");
+		await compactionStarted;
+		await harness.session.steer("change direction");
+		releaseCompaction();
+		await promptPromise;
+
+		expect(resumedRequest).toContain("change direction");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("does not compact after a terminating tool result", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 3_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 300, keepRecentTokens: 1 } },
+			tools: [createLargeResultTool(true)],
+			initialActiveToolNames: ["large_result"],
+			hfCompaction: {
+				mode: "full_pipeline",
+				complete: async () => ({ text: "unexpected compaction", stopReason: "stop" }),
+			},
+		});
+		harnesses.push(harness);
+		seedPostToolThresholdSession(harness);
+		harness.setResponses([fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" })]);
+
+		await harness.session.prompt("run the terminating large tool");
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("compaction_start")).toEqual([]);
+		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
 	});
 
 	it("defers successful post-response compaction until the next provider request", async () => {

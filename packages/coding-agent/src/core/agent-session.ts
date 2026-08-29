@@ -615,57 +615,61 @@ export class AgentSession {
 		};
 	}
 
+	private async _compactProviderContextIfNeeded(messages: AgentMessage[]): Promise<AgentMessage[]> {
+		const host = this._hfHost;
+		if (!host || this._providerCompactionPreflightActive) return messages;
+
+		let lastAssistant: AssistantMessage | undefined;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message.role === "assistant") {
+				lastAssistant = message as AssistantMessage;
+				break;
+			}
+		}
+		if (!lastAssistant) return messages;
+
+		const compactionSettings = this.settingsManager.getCompactionSettings();
+		const modelContextLimit = this.model?.contextWindow ?? 0;
+		const sameModel =
+			this.model !== undefined &&
+			lastAssistant.provider === this.model.provider &&
+			lastAssistant.model === this.model.id;
+		const preflightEvaluation =
+			compactionSettings.enabled && modelContextLimit > 0
+				? host.evaluateCompactionTrigger({
+						branchEntries: this.sessionManager.getBranch(),
+						modelContextLimit,
+						outputReserveTokens: compactionSettings.reserveTokens,
+						recentProviderContextTokens:
+							sameModel && lastAssistant.usage ? calculateContextTokens(lastAssistant.usage) : undefined,
+					})
+				: undefined;
+		const checkpointBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+		this._providerCompactionPreflightActive = true;
+		try {
+			await this._checkCompaction(lastAssistant, false, "", 0, true);
+		} finally {
+			this._providerCompactionPreflightActive = false;
+		}
+		const checkpointAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+		if (
+			preflightEvaluation &&
+			preflightEvaluation.predictedNextRequestTokens > modelContextLimit &&
+			checkpointAfter === checkpointBefore
+		) {
+			throw new Error(
+				"Provider request blocked: required compaction did not activate. Reduce context, retry /compact, or switch to a larger-context model.",
+			);
+		}
+		return checkpointAfter !== checkpointBefore ? this.agent.state.messages.slice() : messages;
+	}
+
 	private _installAgentNextTurnRefresh(): void {
 		const previousTransformContext = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
 			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
-			const host = this._hfHost;
-			if (!host || this._providerCompactionPreflightActive) return transformed;
-
-			let lastAssistant: AssistantMessage | undefined;
-			for (let index = transformed.length - 1; index >= 0; index--) {
-				const message = transformed[index];
-				if (message.role === "assistant") {
-					lastAssistant = message as AssistantMessage;
-					break;
-				}
-			}
-			if (!lastAssistant) return transformed;
-
-			const compactionSettings = this.settingsManager.getCompactionSettings();
-			const modelContextLimit = this.model?.contextWindow ?? 0;
-			const sameModel =
-				this.model !== undefined &&
-				lastAssistant.provider === this.model.provider &&
-				lastAssistant.model === this.model.id;
-			const preflightEvaluation =
-				compactionSettings.enabled && modelContextLimit > 0
-					? host.evaluateCompactionTrigger({
-							branchEntries: this.sessionManager.getBranch(),
-							modelContextLimit,
-							outputReserveTokens: compactionSettings.reserveTokens,
-							recentProviderContextTokens:
-								sameModel && lastAssistant.usage ? calculateContextTokens(lastAssistant.usage) : undefined,
-						})
-					: undefined;
-			const checkpointBefore = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
-			this._providerCompactionPreflightActive = true;
-			try {
-				await this._checkCompaction(lastAssistant, false, "", 0, true);
-			} finally {
-				this._providerCompactionPreflightActive = false;
-			}
-			const checkpointAfter = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
-			if (
-				preflightEvaluation &&
-				preflightEvaluation.predictedNextRequestTokens > modelContextLimit &&
-				checkpointAfter === checkpointBefore
-			) {
-				throw new Error(
-					"Provider request blocked: required compaction did not activate. Reduce context, retry /compact, or switch to a larger-context model.",
-				);
-			}
-			return checkpointAfter !== checkpointBefore ? this.agent.state.messages.slice() : transformed;
+			return await this._compactProviderContextIfNeeded(transformed);
 		};
 
 		const previousOnProviderContext = this.agent.onProviderContext;
@@ -718,11 +722,21 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
-			const previousContext = previousSnapshot?.context ?? turn.context;
-			const projectionChangedDuringLoop =
+			const preparedMessages = await this._compactProviderContextIfNeeded(turn.context.messages);
+			let preparedContext =
+				preparedMessages === turn.context.messages ? turn.context : { ...turn.context, messages: preparedMessages };
+			if (this._agentLoopProjectionRevision !== this._providerContextProjectionRevision) {
+				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
+				preparedContext = { ...preparedContext, messages: this.agent.state.messages.slice() };
+			}
+			const previousSnapshot = await previousPrepareNextTurnWithContext?.(
+				{ ...turn, context: preparedContext },
+				signal,
+			);
+			const previousContext = previousSnapshot?.context ?? preparedContext;
+			const projectionChangedDuringCallback =
 				this._agentLoopProjectionRevision !== this._providerContextProjectionRevision;
-			if (projectionChangedDuringLoop) {
+			if (projectionChangedDuringCallback) {
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			}
 
@@ -731,7 +745,7 @@ export class AgentSession {
 				...previousSnapshot,
 				context: {
 					...previousContext,
-					messages: projectionChangedDuringLoop ? this.agent.state.messages.slice() : previousContext.messages,
+					messages: projectionChangedDuringCallback ? this.agent.state.messages.slice() : previousContext.messages,
 					systemPrompt: baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 				},
