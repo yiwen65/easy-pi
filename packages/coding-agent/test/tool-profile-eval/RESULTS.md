@@ -48,14 +48,39 @@ After making the local v2 Search backend FFF-first, a no-model paired benchmark 
 | Target ranked first | 0/5 | 5/5 |
 | Mean Search calls | 2.0 | 1.0 |
 | Mean discovery-call proxy | 3.0 | 2.0 |
-| Model-visible result bytes | 945 | 860 |
-| Estimated result tokens (chars/4) | 240 | 215 |
+| Model-visible result bytes | 1,545 | 1,260 |
+| Estimated result tokens (chars/4) | 390 | 315 |
 | Irrelevant-hit rate | 75% | 75% |
 | Duplicate hits | 0 | 0 |
-| Peak retained result tokens | 240 | 215 |
-| Cumulative visible result tokens | 1,237 | 651 |
-| Descriptive mean elapsed ms | 24.09 | 11.16 |
+| Peak retained result tokens | 390 | 315 |
+| Cumulative visible result tokens | 2,037 | 951 |
+| Descriptive mean elapsed ms | 20.16 | 11.19 |
 
-In this synthetic typo workload, FFF removed one retry per query, reduced the discovery-call proxy by 33.3%, model-visible result bytes by 9.0%, estimated retained result tokens by 10.4%, and cumulative result-context exposure by 47.4%. It did not improve the 75% irrelevant-hit ratio within the top five, so the evidence supports typo ranking and retry/context reduction, not a broad relevance claim. Timing is descriptive and has no stability or causal gate.
+In this synthetic typo workload, FFF removed one retry per query, reduced the discovery-call proxy by 33.3%, model-visible result bytes by 18.4%, estimated retained result tokens by 19.2%, and cumulative result-context exposure by 53.3%. It did not improve the 75% irrelevant-hit ratio within the top five, so the evidence supports typo ranking and retry/context reduction, not a broad relevance claim. Timing is descriptive and has no stability or causal gate.
 
 The stress test separately passed native text search in a 12,000-line file inside a 3,000-file noisy index, bounded three-result continuation without duplicates, explicit approximate/partial signaling for an incomplete zero-wait scan, and local fallback for exact case semantics. These are deterministic provider/tool tests, not additional model sessions; actual filesystem files scanned are not exposed by the shared `SearchPage` contract, and the candidate-read count is therefore a documented discovery-effort proxy rather than an OS scan count.
+
+## Deterministic locator-safe chain evidence
+
+A second no-model fixture executed the actual four-tool v2 definitions through `search → read → edit prepare → edit commit → read verify`. The fixture repeats one assignment across source, test, vendor, and a generated 12,000-character line, then separately exercises same-range ambiguity, a changed prepared preimage, search overflow, an overlong-line locator read, and unsupported symbol intent.
+
+| Metric | Result |
+| --- | ---: |
+| Broad matches / duplicate locator IDs | 4 / 0 |
+| Scoped target Precision@1 | 100% |
+| Locator Search bytes | 270 |
+| Prior full-line Search baseline bytes | 12,259 |
+| Search-output reduction | 97.8% |
+| Calls to prepared safe edit | 4 |
+| Calls including focused Read verification | 5 |
+| Full safe-chain model-visible bytes | 1,045 |
+| Estimated full-chain tokens (chars/4) | 262 |
+| Ambiguity rejection | 1/1 |
+| Changed-preimage rejection | 1/1 |
+| Truncation disclosure | 1/1 |
+| Unsupported-structure disclosure | 1/1 |
+| Wrong-location writes | 0 |
+
+The full five-call locator/read/prepare/commit/verify chain remained below the old one-call full-line Search baseline because the generated long line stayed behind a match-centered locator and bounded Read fragment. Prepare performed no mutation; commit consumed the patch handle and rechecked all observations. The source target changed, while test, vendor, generated, and ambiguous fixtures remained unchanged.
+
+Limits: this is a deterministic synthetic fixture, not a new model run or a repository-wide latency study. The 97.8% figure is intentionally driven by the overlong generated-line case and is not a universal expected reduction. Token values use chars/4, structured AST/LSP/semantic modes remain unavailable, files above the editable hash limit return non-editable views, and the default mutation backend still makes no cross-file atomic-visibility or OS-sandbox claim.

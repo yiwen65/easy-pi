@@ -65,7 +65,11 @@ const { session } = await createAgentSession({
 
 ### Opt-in v2 tool hosts
 
-Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. The default remains `legacy` and the profile is not persisted. On the default local Node host, v2 Search is FFF-first for ordinary smart-case file, text, and glob requests. Requests whose exact case or `fileGlob` semantics FFF cannot represent, and hosts where FFF is unavailable, fall back to the structured local rg/fd provider. An injected `toolsV2.search.provider` still replaces this default.
+Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. The default remains `legacy` and the profile is not persisted. On the default local Node host, v2 Search is FFF-first for ordinary smart-case file, text, and glob requests. Requests whose exact case or scope-filter semantics FFF cannot represent, and hosts where FFF is unavailable, fall back to the structured local rg/fd provider. An injected `toolsV2.search.provider` still replaces this default.
+
+The v2 mutation workflow is `search locator → read view → edit prepare → edit commit → read/run verify`. Search returns bounded locator IDs and explicit complete/partial/overflow coverage; Read returns numbered content plus short-lived `view_id`, snapshot, and a full-file hash only when the file is within the editable hash limit. A view without a hash is intentionally non-editable. View-bound updates require an exact range and unique preimage. `action: "prepare"` performs no mutation and returns a short-lived `patchId`; `action: "commit"` consumes that ID and rechecks every prepared file observation before any write. Locator, view, cursor, and patch handles are runtime-local, scope-bound, quota-bound, and expire after ten minutes by default; repeat the preceding stage after a stale-handle error.
+
+Structured symbol/definition/reference/assignment/call and semantic modes are not implemented by the current `SearchProvider` contract. The v2 tool reports `SYMBOL_INDEX_UNAVAILABLE`; it never silently relabels text search as structured search. The opt-in journal and overlay mutation backends retain their existing guarantees. The default backend prevalidates all files but can still report explicit partial commit after an I/O failure; v2 does not claim cross-file atomic visibility or an OS sandbox.
 
 ```typescript
 import { createAgentSession, MemoryExecutionEnv } from "@earendil-works/pi-coding-agent";

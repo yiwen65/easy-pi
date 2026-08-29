@@ -21,6 +21,10 @@ type Snapshot = {
 	approximate: boolean;
 	partial: boolean;
 	generation: string;
+	matchedCount?: number;
+	matchedCountRelation?: "exact" | "at_least" | "unknown";
+	truncatedBy?: SearchPage["truncatedBy"];
+	skipped?: SearchPage["skipped"];
 };
 
 function normalizePath(path: string): string {
@@ -53,8 +57,18 @@ function globRegex(pattern: string): RegExp {
 	return new RegExp(`${source}$`);
 }
 
-function filterByFileGlob(path: string, fileGlob: string | undefined): boolean {
-	return fileGlob === undefined || globRegex(fileGlob).test(path);
+function matchesGlob(path: string, pattern: string): boolean {
+	const candidate = pattern.includes("/") ? path : path.slice(path.lastIndexOf("/") + 1);
+	return globRegex(pattern).test(candidate);
+}
+
+function matchesRequestPath(path: string, request: SearchRequest): boolean {
+	if (!request.includeHidden && path.split("/").some((part) => part.startsWith("."))) return false;
+	if (request.fileGlob !== undefined && !matchesGlob(path, request.fileGlob)) return false;
+	if (request.include && request.include.length > 0 && !request.include.some((glob) => matchesGlob(path, glob))) {
+		return false;
+	}
+	return !request.exclude?.some((glob) => matchesGlob(path, glob));
 }
 
 /** Capability-accurate fallback for ExecutionEnv backends without local rg/fd processes. */
@@ -68,6 +82,8 @@ export class ExecutionEnvSearchProvider implements SearchProvider {
 		glob: true,
 		stableCursor: true,
 		globalRanking: true,
+		scopeFilters: true,
+		wordBoundary: false,
 	};
 	private readonly env: ExecutionEnv;
 	private readonly snapshots = new Map<string, Snapshot>();
@@ -117,12 +133,12 @@ export class ExecutionEnvSearchProvider implements SearchProvider {
 		if (request.kind === "glob") {
 			const matcher = globRegex(request.query);
 			hits = candidates
-				.filter((candidate) => matcher.test(candidate.path))
+				.filter((candidate) => matcher.test(candidate.path) && matchesRequestPath(candidate.path, request))
 				.map((candidate) => ({ kind: "file", path: candidate.path, pathKind: candidate.kind }));
 			hits.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
 		} else {
 			hits = candidates.flatMap((candidate): SearchHit[] => {
-				if (!filterByFileGlob(candidate.path, request.fileGlob)) return [];
+				if (!matchesRequestPath(candidate.path, request)) return [];
 				const score = scoreSearchPath(candidate.path, request.query, request.case);
 				return score === undefined
 					? []
@@ -142,8 +158,23 @@ export class ExecutionEnvSearchProvider implements SearchProvider {
 			hits = hits.slice(0, MAX_BUFFERED_HITS);
 			partial = true;
 		}
+		const matchedCount = hits.length;
+		let truncatedBy: SearchPage["truncatedBy"];
+		if (request.maxFiles !== undefined && hits.length > request.maxFiles) {
+			hits = hits.slice(0, request.maxFiles);
+			truncatedBy = "max_files";
+		}
+		const skipped: Array<{ reason: string }> = [];
+		if (request.honorIgnore) skipped.push({ reason: "IGNORE_RULES_UNAVAILABLE" });
+		if (request.followSymlinks) skipped.push({ reason: "SYMLINK_FOLLOW_UNAVAILABLE" });
+		if (skipped.length > 0) partial = true;
 		const approximate = request.kind === "files" && request.ranking === "fast" && partial;
-		return this.createPage(hits, request.limit, !partial, approximate, partial);
+		return this.createPage(hits, request.limit, !partial, approximate, partial, undefined, {
+			matchedCount,
+			matchedCountRelation: partial ? "unknown" : "exact",
+			truncatedBy,
+			skipped: skipped.length > 0 ? skipped : undefined,
+		});
 	}
 
 	private createPage(
@@ -153,20 +184,30 @@ export class ExecutionEnvSearchProvider implements SearchProvider {
 		approximate: boolean,
 		partial: boolean,
 		generation = `env-${this.sequence++}`,
+		coverage: Pick<SearchPage, "matchedCount" | "matchedCountRelation" | "truncatedBy" | "skipped"> = {},
 	): SearchPage {
 		const page = hits.slice(0, limit);
 		const remaining = hits.slice(limit);
 		let nextCursor: string | undefined;
 		if (remaining.length > 0) {
 			nextCursor = `env-cursor-${this.sequence++}`;
-			this.snapshots.set(nextCursor, { hits: remaining, complete, approximate, partial, generation });
+			this.snapshots.set(nextCursor, { hits: remaining, complete, approximate, partial, generation, ...coverage });
 			while (this.snapshots.size > MAX_SNAPSHOTS) {
 				const oldest = this.snapshots.keys().next().value;
 				if (oldest === undefined) break;
 				this.snapshots.delete(oldest);
 			}
 		}
-		return { hits: page, nextCursor, complete, approximate, partial, generation };
+		return {
+			hits: page,
+			nextCursor,
+			complete,
+			approximate,
+			partial,
+			generation,
+			...coverage,
+			truncatedBy: coverage.truncatedBy ?? (remaining.length > 0 ? "max_results_global" : undefined),
+		};
 	}
 
 	private continueSnapshot(
@@ -185,6 +226,12 @@ export class ExecutionEnvSearchProvider implements SearchProvider {
 			snapshot.approximate,
 			snapshot.partial,
 			snapshot.generation,
+			{
+				matchedCount: snapshot.matchedCount,
+				matchedCountRelation: snapshot.matchedCountRelation,
+				truncatedBy: snapshot.truncatedBy,
+				skipped: snapshot.skipped,
+			},
 		);
 	}
 

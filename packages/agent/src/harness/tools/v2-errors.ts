@@ -13,8 +13,23 @@ export type V2ToolErrorCode =
 	| "SYMLINK_ESCAPE"
 	| "INVALID_REGEX"
 	| "STALE_CURSOR"
+	| "QUERY_TOO_BROAD"
+	| "SEARCH_INCOMPLETE"
+	| "RESULTS_TRUNCATED"
+	| "NO_MATCH_COMPLETE"
+	| "SYMBOL_INDEX_UNAVAILABLE"
+	| "FILE_SKIPPED"
+	| "BUDGET_EXCEEDED"
+	| "STALE_LOCATOR"
+	| "STALE_VIEW"
+	| "STALE_PATCH"
+	| "STALE_SNAPSHOT"
 	| "SEARCH_CAPABILITY_UNSUPPORTED"
 	| "SEARCH_PROVIDER_FAILED"
+	| "AMBIGUOUS_MATCH"
+	| "PREIMAGE_MISMATCH"
+	| "RANGE_MISMATCH"
+	| "VALIDATION_FAILED"
 	| "EDIT_CONTEXT_NOT_FOUND"
 	| "EDIT_CONTEXT_AMBIGUOUS"
 	| "EDIT_CONFLICT"
@@ -38,7 +53,12 @@ export interface V2RecoveryAction {
 		| "read_again"
 		| "split_edit"
 		| "inspect_paths"
-		| "configure_capability";
+		| "configure_capability"
+		| "use_text_fallback"
+		| "read_locator"
+		| "prepare_edit"
+		| "commit_patch"
+		| "verify_change";
 	paths?: string[];
 }
 

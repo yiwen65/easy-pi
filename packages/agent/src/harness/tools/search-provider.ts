@@ -1,6 +1,13 @@
 export type SearchKind = "text" | "files" | "glob";
 export type SearchCaseMode = "smart" | "sensitive" | "insensitive";
 export type SearchRanking = "fast" | "global";
+export type SearchMatchedCountRelation = "exact" | "at_least" | "unknown";
+export type SearchTruncationReason =
+	| "max_results_global"
+	| "max_results_per_file"
+	| "max_files"
+	| "max_output_bytes"
+	| "provider_limit";
 
 export interface SearchCapabilities {
 	textLiteral: boolean;
@@ -10,6 +17,8 @@ export interface SearchCapabilities {
 	glob: boolean;
 	stableCursor: boolean;
 	globalRanking: boolean;
+	scopeFilters?: boolean;
+	wordBoundary?: boolean;
 }
 
 export interface SearchRequest {
@@ -22,6 +31,14 @@ export interface SearchRequest {
 	context: number;
 	limit: number;
 	ranking: SearchRanking;
+	wordBoundary?: boolean;
+	include?: string[];
+	exclude?: string[];
+	honorIgnore?: boolean;
+	includeHidden?: boolean;
+	followSymlinks?: boolean;
+	maxResultsPerFile?: number;
+	maxFiles?: number;
 	/** Provider-private continuation restored from the public opaque cursor. */
 	cursor?: string;
 	/** Generation captured with the provider-private continuation. */
@@ -78,6 +95,8 @@ export type SearchHit =
 			column: number;
 			text: string;
 			ranges: Array<[number, number]>;
+			/** Absolute byte offset of the first match when the provider exposes it. */
+			byteOffset?: number;
 			before?: SearchContextLine[];
 			after?: SearchContextLine[];
 	  }
@@ -89,6 +108,12 @@ export type SearchHit =
 			exact?: boolean;
 	  };
 
+export interface SearchSkipped {
+	path?: string;
+	reason: string;
+	count?: number;
+}
+
 export interface SearchPage {
 	hits: SearchHit[];
 	nextCursor?: string;
@@ -96,6 +121,10 @@ export interface SearchPage {
 	approximate: boolean;
 	partial: boolean;
 	generation?: string | number;
+	matchedCount?: number;
+	matchedCountRelation?: SearchMatchedCountRelation;
+	truncatedBy?: SearchTruncationReason;
+	skipped?: SearchSkipped[];
 }
 
 export interface SearchExecutionContext {
