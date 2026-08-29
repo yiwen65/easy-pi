@@ -235,6 +235,7 @@ describe("InteractiveMode compaction events", () => {
 					role: "compactionSummary",
 					summary: "Persisted handoff details",
 					tokensBefore: 1_000,
+					estimatedTokensAfter: 250,
 					timestamp: 2,
 				},
 			],
@@ -253,28 +254,50 @@ describe("InteractiveMode compaction events", () => {
 					role: "compactionSummary",
 					summary: "Persisted handoff details",
 					tokensBefore: 1_000,
+					estimatedTokensAfter: 250,
 				}),
 			],
 			{},
 		);
 	});
 
-	test("keeps handoff details collapsed until transcript expansion is enabled", () => {
+	test("renders token reduction and toggles handoff details when clicked", () => {
 		initTheme("dark");
 		const component = new CompactionSummaryMessageComponent({
 			role: "compactionSummary",
 			summary: "EXPANDABLE_HANDOFF_DETAILS",
 			tokensBefore: 1_000,
+			estimatedTokensAfter: 250,
 			timestamp: 1,
 		});
+		const width = 100;
+		const scrollView = {};
+		const fakeThis = {
+			transcriptScrollView: scrollView,
+			transcriptContentWidth: () => width,
+			computeChatChildOffsets: () => [{ component, start: 0, height: component.render(width).length }],
+			ui: { requestRender: vi.fn() },
+		};
+		const handleTranscriptContentClick = Reflect.get(InteractiveMode.prototype, "handleTranscriptContentClick") as (
+			this: typeof fakeThis,
+			click: { scrollView: object; row: number; col: number },
+		) => boolean;
 
-		const collapsed = stripAnsi(component.render(100).join("\n"));
-		expect(collapsed).toContain("Compacted from 1,000 tokens");
-		expect(collapsed).toContain("to expand");
+		const collapsed = stripAnsi(component.render(width).join("\n"));
+		expect(collapsed).toContain("Compacted from 1,000 to 250 tokens");
+		expect(collapsed).not.toContain("ctrl+o to expand");
 		expect(collapsed).not.toContain("EXPANDABLE_HANDOFF_DETAILS");
 
-		component.setExpanded(true);
-		expect(stripAnsi(component.render(100).join("\n"))).toContain("EXPANDABLE_HANDOFF_DETAILS");
+		const collapsedHeaderRow = component
+			.render(width)
+			.findIndex((line) => stripAnsi(line).includes("Compacted from"));
+		expect(handleTranscriptContentClick.call(fakeThis, { scrollView, row: collapsedHeaderRow, col: 1 })).toBe(true);
+		expect(stripAnsi(component.render(width).join("\n"))).toContain("EXPANDABLE_HANDOFF_DETAILS");
+
+		const expandedHeaderRow = component.render(width).findIndex((line) => stripAnsi(line).includes("Compacted from"));
+		expect(handleTranscriptContentClick.call(fakeThis, { scrollView, row: expandedHeaderRow, col: 1 })).toBe(true);
+		expect(stripAnsi(component.render(width).join("\n"))).not.toContain("EXPANDABLE_HANDOFF_DETAILS");
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(2);
 	});
 
 	test("renders retained entries and appends the latest summary cost at the bottom", async () => {
@@ -333,7 +356,7 @@ describe("InteractiveMode compaction events", () => {
 			event: {
 				type: "compaction_end";
 				reason: "manual" | "threshold" | "overflow";
-				result: { tokensBefore: number; summary: string; usage?: Usage } | undefined;
+				result: { tokensBefore: number; estimatedTokensAfter?: number; summary: string; usage?: Usage } | undefined;
 				aborted: boolean;
 				willRetry: boolean;
 				errorMessage?: string;
@@ -345,6 +368,7 @@ describe("InteractiveMode compaction events", () => {
 			reason: "manual",
 			result: {
 				tokensBefore: 123,
+				estimatedTokensAfter: 45,
 				summary: "summary",
 				usage,
 			},
@@ -359,6 +383,7 @@ describe("InteractiveMode compaction events", () => {
 			expect.objectContaining({
 				role: "compactionSummary",
 				tokensBefore: 123,
+				estimatedTokensAfter: 45,
 				summary: "summary",
 			}),
 		);

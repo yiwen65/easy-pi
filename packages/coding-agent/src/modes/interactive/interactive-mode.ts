@@ -3555,6 +3555,7 @@ export class InteractiveMode {
 							event.result.summary,
 							event.result.tokensBefore,
 							new Date().toISOString(),
+							event.result.estimatedTokensAfter,
 						),
 					);
 					if (event.result.usage) {
@@ -4323,7 +4324,6 @@ export class InteractiveMode {
 	}
 
 	private handleTranscriptContentClick(click: { scrollView: ScrollView; row: number; col: number }): boolean {
-		if (!this.grokComponentFactory) return false;
 		if (!this.transcriptScrollView || click.scrollView !== this.transcriptScrollView) return false;
 		const width = this.transcriptContentWidth();
 		const target = this.computeChatChildOffsets(width).find(
@@ -4332,7 +4332,9 @@ export class InteractiveMode {
 		if (!target) return false;
 		const localRow = click.row - target.start;
 		let toggled = false;
-		if (target.component instanceof GrokThinkingTurnGroupComponent) {
+		if (target.component instanceof CompactionSummaryMessageComponent) {
+			toggled = target.component.handleContentClick(localRow, width);
+		} else if (target.component instanceof GrokThinkingTurnGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow);
 		} else if (target.component instanceof GrokToolTurnGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow, width);

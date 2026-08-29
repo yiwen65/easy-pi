@@ -64,6 +64,10 @@ describe("HfCompactionHost checkpoint pipeline", () => {
 			"compactionSummary",
 			"user",
 		]);
+		expect(outcome.checkpoint?.replacementHistory[0]).toMatchObject({
+			role: "compactionSummary",
+			estimatedTokensAfter: outcome.tokensAfter,
+		});
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).toContain("current goal: migrate checkpoints");
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("old goal");
 		expect(JSON.stringify(outcome.checkpoint?.replacementHistory)).not.toContain("earlier content omitted");

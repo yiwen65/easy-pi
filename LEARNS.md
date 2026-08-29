@@ -262,3 +262,12 @@
 - Correct approach: mutation plan 和 backend I/O 保留 `absolutePath`；另存 `canonicalPath` 只做 alias 检测以及 view/path 同一性比较。
 - Prevention: 修改 workspace path normalization 或 view-bound edit 后，除 Agent edit 测试外必须目标运行 journal 与 overlay backend 测试，特别覆盖含 symlink/canonical alias 的平台路径。
 - Verified by: 2026-08-29 locator-safe edit 任务中该改动使 journal/overlay 7 个测试失败；恢复 addressed plan path、仅保留 canonical 比较后相关 3 files / 29 tests 全部通过。
+
+## CompactionSummaryMessage 类型——跨包 declaration merging 必须同步
+
+- Wrong approach: 只在 `packages/coding-agent/src/core/messages.ts` 给 `CompactionSummaryMessage` 增加字段。
+- Why it failed: `packages/agent/src/harness/messages.ts` 对同一个 `CustomAgentMessages.compactionSummary` 也有声明；两边结构不同会触发 TS2717。
+- Recognition signal: 根 `npm run check` 报 `Subsequent property declarations must have the same type`，且错误同时指向两个同名 `CompactionSummaryMessage`。
+- Correct approach: 修改该消息结构时同步更新 agent-core 与 coding-agent 两处声明，再跑根类型检查。
+- Prevention: 改 `CustomAgentMessages` 的扩展角色前先用 `rg "interface <Message>|<role>:" packages/agent packages/coding-agent` 找出所有 declaration merging 定义。
+- Verified by: 2026-08-30 compaction token-after UI 任务先稳定触发 TS2717；同步两处 optional 字段后根 `npm run check` 通过。

@@ -1,7 +1,6 @@
 import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
-import { keyText } from "./keybinding-hints.ts";
 
 /**
  * Component that renders a compaction message with collapsed/expanded state.
@@ -24,6 +23,14 @@ export class CompactionSummaryMessageComponent extends Box {
 		this.updateDisplay();
 	}
 
+	/** Toggle when the visible compaction label or token summary is clicked. */
+	handleContentClick(localRow: number, width: number): boolean {
+		const line = this.render(width)[localRow];
+		if (!line?.includes("[compaction]") && !line?.includes("Compacted")) return false;
+		this.setExpanded(!this.expanded);
+		return true;
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
@@ -32,28 +39,24 @@ export class CompactionSummaryMessageComponent extends Box {
 	private updateDisplay(): void {
 		this.clear();
 
-		const tokenStr = this.message.tokensBefore.toLocaleString();
+		const tokensBefore = this.message.tokensBefore.toLocaleString();
+		const tokensAfter = this.message.estimatedTokensAfter?.toLocaleString();
+		const tokenSummary =
+			tokensAfter === undefined
+				? `Compacted from ${tokensBefore} tokens`
+				: `Compacted from ${tokensBefore} to ${tokensAfter} tokens`;
 		const label = theme.fg("customMessageLabel", `\x1b[1m[compaction]\x1b[22m`);
 		this.addChild(new Text(label, 0, 0));
 		this.addChild(new Spacer(1));
 
 		if (this.expanded) {
-			const header = `**Compacted from ${tokenStr} tokens**\n\n`;
 			this.addChild(
-				new Markdown(header + this.message.summary, 0, 0, this.markdownTheme, {
+				new Markdown(`**${tokenSummary}**\n\n${this.message.summary}`, 0, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
 				}),
 			);
 		} else {
-			this.addChild(
-				new Text(
-					theme.fg("customMessageText", `Compacted from ${tokenStr} tokens (`) +
-						theme.fg("dim", keyText("app.tools.expand")) +
-						theme.fg("customMessageText", " to expand)"),
-					0,
-					0,
-				),
-			);
+			this.addChild(new Text(theme.fg("customMessageText", tokenSummary), 0, 0));
 		}
 	}
 }
