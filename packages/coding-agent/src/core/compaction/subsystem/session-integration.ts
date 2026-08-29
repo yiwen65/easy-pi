@@ -434,6 +434,7 @@ export function createPiAiCompleteFn(options: {
 	streamFn?: StreamFn;
 	retry?: RetryPolicy;
 	callbacks?: RetryCallbacks;
+	promptCacheKey?: string;
 	sessionId?: string;
 }): CompleteFn {
 	return async (request) => {
@@ -447,6 +448,7 @@ export function createPiAiCompleteFn(options: {
 			{
 				signal: request.signal,
 				cacheRetention: "short",
+				promptCacheKey: options.promptCacheKey,
 				sessionId: options.sessionId,
 				apiKey: options.apiKey,
 				headers: options.headers,
