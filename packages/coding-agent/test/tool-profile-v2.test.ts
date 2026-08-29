@@ -307,6 +307,29 @@ describe("v2 tool profile", () => {
 		v2.dispose();
 	});
 
+	it("uses FFF as the default local v2 Search backend", async () => {
+		writeFileSync(join(cwd, "AuthenticationService.ts"), "export const DEFAULT_FFF_MARKER = true;\n");
+		const session = await createSession({ toolProfile: "v2" });
+		const search = session.getToolDefinition("search");
+		if (!search) throw new Error("v2 search definition is missing");
+
+		const result = await search.execute(
+			"default-fff-search",
+			{ query: "DEFAULT_FFF_MARKER", kind: "text" },
+			undefined,
+			undefined,
+			{} as Parameters<typeof search.execute>[4],
+		);
+
+		expect(result.details).toMatchObject({
+			kind: "text",
+			returnedCount: 1,
+			generation: expect.stringMatching(/^fff-/),
+		});
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("AuthenticationService.ts") });
+		session.dispose();
+	});
+
 	it("advertises exactly one explicitly selected edit dialect", async () => {
 		const replacement = await createSession({
 			toolProfile: "v2",

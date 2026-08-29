@@ -65,7 +65,7 @@ const { session } = await createAgentSession({
 
 ### Opt-in v2 tool hosts
 
-Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. The default remains `legacy` and the profile is not persisted.
+Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. The default remains `legacy` and the profile is not persisted. On the default local Node host, v2 Search is FFF-first for ordinary smart-case file, text, and glob requests. Requests whose exact case or `fileGlob` semantics FFF cannot represent, and hosts where FFF is unavailable, fall back to the structured local rg/fd provider. An injected `toolsV2.search.provider` still replaces this default.
 
 ```typescript
 import { createAgentSession, MemoryExecutionEnv } from "@earendil-works/pi-coding-agent";

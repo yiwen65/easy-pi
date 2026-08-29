@@ -8,15 +8,20 @@ import {
 	type SearchProvider,
 	SearchProviderError,
 	type SearchRequest,
-	scoreSearchPath,
 } from "@earendil-works/pi-agent-core";
-import { type Result as FffResult, FileFinder, type MixedSearchResult, type WatchUnsubscribe } from "@ff-labs/fff-node";
-import { minimatch } from "minimatch";
+import {
+	type Result as FffResult,
+	FileFinder,
+	type GrepCursor,
+	type GrepMatch,
+	type MixedSearchResult,
+	type SearchResult,
+	type WatchUnsubscribe,
+} from "@ff-labs/fff-node";
 import { LocalSearchProviderV2 } from "./local-search-provider-v2.ts";
 
-const MAX_FFF_RESULTS = 10_000;
 const MAX_FINDERS = 4;
-const MAX_SNAPSHOTS = 200;
+const MAX_CURSORS = 200;
 
 type FinderHandle = {
 	finder: FileFinder;
@@ -25,80 +30,243 @@ type FinderHandle = {
 	scanComplete: boolean;
 };
 
-type Snapshot = {
-	hits: SearchHit[];
-	complete: boolean;
-	approximate: boolean;
-	partial: boolean;
-	generation: string;
-};
+type NativeCursor =
+	| {
+			kind: "files" | "glob";
+			basePath: string;
+			generation: string;
+			pageIndex: number;
+	  }
+	| {
+			kind: "text";
+			basePath: string;
+			generation: string;
+			cursor: GrepCursor;
+	  };
 
 function unwrap<T>(result: FffResult<T>, operation: string): T {
 	if (!result.ok) throw new SearchProviderError("unavailable", `FFF ${operation} failed: ${result.error}`);
 	return result.value;
 }
 
-/** Opt-in FFF fuzzy-file route with direct rg/fd fallback for unsupported or unavailable requests. */
+function byteIndexToStringIndex(value: string, byteIndex: number): number {
+	return Buffer.from(value).subarray(0, byteIndex).toString("utf8").length;
+}
+
+function generation(handle: FinderHandle): string {
+	return `fff-${handle.generation}`;
+}
+
+/** FFF-first local Search provider with a direct rg/fd fallback for unsupported or unavailable requests. */
 export class FffSearchProvider implements SearchProvider {
 	readonly id = "fff-local";
 	readonly capabilities: SearchCapabilities;
 	private readonly fallback: LocalSearchProviderV2;
+	private readonly initialScanTimeoutMs: number;
 	private readonly finders = new Map<string, Promise<FinderHandle | undefined>>();
-	private readonly snapshots = new Map<string, Snapshot>();
+	private readonly cursors = new Map<string, NativeCursor>();
 	private sequence = 0;
 
-	constructor(env: ExecutionToolContext["env"]) {
+	constructor(env: ExecutionToolContext["env"], options: { initialScanTimeoutMs?: number } = {}) {
 		this.fallback = new LocalSearchProviderV2(env);
 		this.capabilities = this.fallback.capabilities;
+		this.initialScanTimeoutMs = options.initialScanTimeoutMs ?? 5000;
 	}
 
 	async search(request: SearchRequest, context: SearchExecutionContext, signal?: AbortSignal): Promise<SearchPage> {
 		if (request.cursor?.startsWith("fff:")) {
-			return this.continueSnapshot(request.cursor.slice(4), request.expectedGeneration, request.limit);
+			return this.continueNative(request, request.cursor.slice(4), signal);
 		}
 		if (request.cursor?.startsWith("local:")) {
 			return this.wrapFallback(
 				await this.fallback.search({ ...request, cursor: request.cursor.slice(6) }, context, signal),
 			);
 		}
-		if (request.kind !== "files" || request.ranking !== "fast" || request.case === "sensitive" || signal?.aborted) {
+		if (!this.supportsNativeRequest(request) || signal?.aborted) {
 			return this.wrapFallback(await this.fallback.search(request, context, signal));
 		}
 
 		const handle = await this.getFinder(request.path);
 		if (!handle || signal?.aborted) return this.wrapFallback(await this.fallback.search(request, context, signal));
-		const pageSize = Math.min(MAX_FFF_RESULTS, Math.max(request.limit * 50, 1000));
-		let result: MixedSearchResult;
+		this.refreshScanState(handle);
 		try {
-			result = unwrap(handle.finder.mixedSearch(request.query, { pageSize }), "mixedSearch");
-		} catch {
+			return this.searchNative(handle, request, signal);
+		} catch (error) {
+			if (error instanceof SearchProviderError && error.code === "invalid_regex") throw error;
 			return this.wrapFallback(await this.fallback.search(request, context, signal));
 		}
-		const hits = result.items.flatMap((entry, index): SearchHit[] => {
-			const item = entry.item;
-			const path = item.relativePath.replaceAll("\\", "/").replace(/\/$/, "");
-			if (request.fileGlob && !minimatch(path, request.fileGlob, { dot: true })) return [];
-			const score = -result.scores[index].total;
-			return [
-				{
-					kind: "file",
-					path,
-					pathKind: entry.type,
-					score,
-					exact: scoreSearchPath(path, request.query, request.case) === 0,
-				},
-			];
-		});
-		const complete = handle.scanComplete && result.totalMatched <= result.items.length;
-		const partial = !complete || hits.length < Math.min(request.limit, result.totalMatched);
-		return this.createPage(
-			hits,
-			request.limit,
-			complete,
-			!complete,
-			partial,
-			`fff-${handle.generation}-${this.sequence++}`,
+	}
+
+	private supportsNativeRequest(request: SearchRequest): boolean {
+		if (request.fileGlob !== undefined || request.case !== "smart") return false;
+		return request.kind === "files" || request.kind === "text" || request.kind === "glob";
+	}
+
+	private searchNative(handle: FinderHandle, request: SearchRequest, signal?: AbortSignal): SearchPage {
+		if (signal?.aborted) throw new SearchProviderError("unavailable", "Search aborted.");
+		if (request.kind === "text") return this.searchText(handle, request, undefined, signal);
+		if (request.kind === "glob") return this.searchGlob(handle, request, 0, signal);
+		return this.searchFiles(handle, request, 0, signal);
+	}
+
+	private searchFiles(
+		handle: FinderHandle,
+		request: SearchRequest,
+		pageIndex: number,
+		signal?: AbortSignal,
+	): SearchPage {
+		const result = unwrap(
+			handle.finder.mixedSearch(request.query, { pageIndex, pageSize: request.limit }),
+			"mixedSearch",
 		);
+		if (signal?.aborted) throw new SearchProviderError("unavailable", "Search aborted.");
+		const hits = result.items.map(
+			(entry, index): SearchHit => ({
+				kind: "file",
+				path: entry.item.relativePath.replaceAll("\\", "/").replace(/\/$/, ""),
+				pathKind: entry.type,
+				score: -result.scores[index].total,
+				exact: result.scores[index].exactMatch,
+			}),
+		);
+		return this.pageFromSearchResult(handle, request, hits, result, pageIndex, "files");
+	}
+
+	private searchGlob(
+		handle: FinderHandle,
+		request: SearchRequest,
+		pageIndex: number,
+		signal?: AbortSignal,
+	): SearchPage {
+		const result = unwrap(handle.finder.glob(request.query, { pageIndex, pageSize: request.limit }), "glob");
+		if (signal?.aborted) throw new SearchProviderError("unavailable", "Search aborted.");
+		const hits = result.items.map(
+			(item): SearchHit => ({
+				kind: "file",
+				path: item.relativePath.replaceAll("\\", "/"),
+				pathKind: "file",
+				exact: true,
+			}),
+		);
+		return this.pageFromSearchResult(handle, request, hits, result, pageIndex, "glob");
+	}
+
+	private pageFromSearchResult(
+		handle: FinderHandle,
+		request: SearchRequest,
+		hits: SearchHit[],
+		result: SearchResult | MixedSearchResult,
+		pageIndex: number,
+		kind: "files" | "glob",
+	): SearchPage {
+		let nextCursor: string | undefined;
+		if (pageIndex + hits.length < result.totalMatched) {
+			nextCursor = this.storeCursor({
+				kind,
+				basePath: request.path,
+				generation: generation(handle),
+				// FFF 0.10.5 documents this as a page index but advances it as a result offset.
+				pageIndex: pageIndex + request.limit,
+			});
+		}
+		return {
+			hits,
+			nextCursor,
+			complete: handle.scanComplete,
+			approximate: !handle.scanComplete,
+			partial: !handle.scanComplete,
+			generation: generation(handle),
+		};
+	}
+
+	private searchText(
+		handle: FinderHandle,
+		request: SearchRequest,
+		cursor: GrepCursor | undefined,
+		signal?: AbortSignal,
+	): SearchPage {
+		const result = unwrap(
+			handle.finder.grep(request.query, {
+				mode: request.regex ? "regex" : "plain",
+				smartCase: true,
+				cursor,
+				beforeContext: request.context,
+				afterContext: request.context,
+				pageSize: request.limit,
+			}),
+			"grep",
+		);
+		if (result.regexFallbackError) throw new SearchProviderError("invalid_regex", result.regexFallbackError);
+		if (signal?.aborted) throw new SearchProviderError("unavailable", "Search aborted.");
+		const hits = result.items.map((match) => this.textHit(match));
+		let nextCursor: string | undefined;
+		if (result.nextCursor) {
+			nextCursor = this.storeCursor({
+				kind: "text",
+				basePath: request.path,
+				generation: generation(handle),
+				cursor: result.nextCursor,
+			});
+		}
+		return {
+			hits,
+			nextCursor,
+			complete: handle.scanComplete,
+			approximate: !handle.scanComplete,
+			partial: !handle.scanComplete,
+			generation: generation(handle),
+		};
+	}
+
+	private textHit(match: GrepMatch): SearchHit {
+		const text = match.lineContent.replace(/\r?\n$/, "").replace(/\r$/, "");
+		const ranges = match.matchRanges.map(([start, end]): [number, number] => [
+			byteIndexToStringIndex(text, start),
+			byteIndexToStringIndex(text, end),
+		]);
+		const contextBefore = match.contextBefore ?? [];
+		const contextAfter = match.contextAfter ?? [];
+		return {
+			kind: "text",
+			path: match.relativePath.replaceAll("\\", "/"),
+			line: match.lineNumber,
+			column: (ranges[0]?.[0] ?? byteIndexToStringIndex(text, match.col)) + 1,
+			text,
+			ranges,
+			before: contextBefore.map((line, index) => ({
+				line: match.lineNumber - contextBefore.length + index,
+				text: line,
+			})),
+			after: contextAfter.map((line, index) => ({ line: match.lineNumber + index + 1, text: line })),
+		};
+	}
+
+	private async continueNative(request: SearchRequest, cursorId: string, signal?: AbortSignal): Promise<SearchPage> {
+		const cursor = this.cursors.get(cursorId);
+		if (!cursor || cursor.basePath !== request.path || cursor.kind !== request.kind) {
+			throw new SearchProviderError("stale_cursor", "The FFF search cursor is no longer available.");
+		}
+		const handle = await this.getFinder(request.path);
+		if (!handle) throw new SearchProviderError("stale_cursor", "The FFF search index is no longer available.");
+		this.refreshScanState(handle);
+		if (cursor.generation !== request.expectedGeneration || cursor.generation !== generation(handle)) {
+			throw new SearchProviderError("stale_cursor", "The FFF search index changed after this cursor was created.");
+		}
+		this.cursors.delete(cursorId);
+		if (cursor.kind === "text") return this.searchText(handle, request, cursor.cursor, signal);
+		if (cursor.kind === "glob") return this.searchGlob(handle, request, cursor.pageIndex, signal);
+		return this.searchFiles(handle, request, cursor.pageIndex, signal);
+	}
+
+	private storeCursor(cursor: NativeCursor): string {
+		const id = `fff-cursor-${this.sequence++}`;
+		this.cursors.set(id, cursor);
+		while (this.cursors.size > MAX_CURSORS) {
+			const oldest = this.cursors.keys().next().value;
+			if (oldest === undefined) break;
+			this.cursors.delete(oldest);
+		}
+		return `fff:${id}`;
 	}
 
 	private async getFinder(basePath: string): Promise<FinderHandle | undefined> {
@@ -120,15 +288,10 @@ export class FffSearchProvider implements SearchProvider {
 	private async createFinder(basePath: string): Promise<FinderHandle | undefined> {
 		try {
 			if (!(await stat(basePath)).isDirectory() || !FileFinder.isAvailable()) return undefined;
-			const created = FileFinder.create({
-				basePath,
-				aiMode: true,
-				disableContentIndexing: true,
-				disableMmapCache: true,
-			});
+			const created = FileFinder.create({ basePath, aiMode: true });
 			if (!created.ok) return undefined;
 			const finder = created.value;
-			const waited = await finder.waitForScan(5000);
+			const waited = await finder.waitForScan(this.initialScanTimeoutMs);
 			const handle: FinderHandle = { finder, generation: 0, scanComplete: waited.ok && waited.value };
 			const watched = finder.watch((events) => {
 				handle.generation++;
@@ -141,51 +304,17 @@ export class FffSearchProvider implements SearchProvider {
 		}
 	}
 
+	private refreshScanState(handle: FinderHandle): void {
+		if (handle.scanComplete) return;
+		const progress = handle.finder.getScanProgress();
+		if (progress.ok && !progress.value.isScanning) {
+			handle.scanComplete = true;
+			handle.generation++;
+		}
+	}
+
 	private wrapFallback(page: SearchPage): SearchPage {
 		return { ...page, nextCursor: page.nextCursor ? `local:${page.nextCursor}` : undefined };
-	}
-
-	private createPage(
-		hits: SearchHit[],
-		limit: number,
-		complete: boolean,
-		approximate: boolean,
-		partial: boolean,
-		generation: string,
-	): SearchPage {
-		const page = hits.slice(0, limit);
-		const remaining = hits.slice(limit);
-		let nextCursor: string | undefined;
-		if (remaining.length > 0) {
-			const cursor = `fff-cursor-${this.sequence++}`;
-			nextCursor = `fff:${cursor}`;
-			this.snapshots.set(cursor, { hits: remaining, complete, approximate, partial, generation });
-			while (this.snapshots.size > MAX_SNAPSHOTS) {
-				const oldest = this.snapshots.keys().next().value;
-				if (oldest === undefined) break;
-				this.snapshots.delete(oldest);
-			}
-		}
-		return { hits: page, nextCursor, complete, approximate, partial, generation };
-	}
-
-	private continueSnapshot(
-		cursor: string,
-		expectedGeneration: string | number | undefined,
-		limit: number,
-	): SearchPage {
-		const snapshot = this.snapshots.get(cursor);
-		if (!snapshot || snapshot.generation !== expectedGeneration) {
-			throw new SearchProviderError("stale_cursor", "The FFF search snapshot is no longer available.");
-		}
-		return this.createPage(
-			snapshot.hits,
-			limit,
-			snapshot.complete,
-			snapshot.approximate,
-			snapshot.partial,
-			snapshot.generation,
-		);
 	}
 
 	private destroyFinder(handle: FinderHandle | undefined): void {
@@ -198,7 +327,7 @@ export class FffSearchProvider implements SearchProvider {
 		const finders = [...this.finders.values()];
 		this.finders.clear();
 		for (const finder of finders) this.destroyFinder(await finder);
-		this.snapshots.clear();
+		this.cursors.clear();
 		await this.fallback.close();
 	}
 }

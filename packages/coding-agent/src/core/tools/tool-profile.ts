@@ -40,7 +40,7 @@ import type {
 	ToolRenderResultOptions,
 } from "../extensions/types.ts";
 import { resolveSessionShellEnvironment } from "./bash.ts";
-import { LocalSearchProviderV2 } from "./local-search-provider-v2.ts";
+import { FffSearchProvider } from "./fff-search-provider.ts";
 import { NodeReadProviderV2 } from "./node-read-provider-v2.ts";
 import { replaceTabs } from "./render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "./truncate.ts";
@@ -814,7 +814,7 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 		this.envOwned = resolvedEnv.owned || usesDefaultNodeEnv;
 		const search = resolveSessionResource(this.options.searchProvider);
 		const searchProvider =
-			search.value ?? (usesDefaultNodeEnv ? new LocalSearchProviderV2(env) : new ExecutionEnvSearchProvider(env));
+			search.value ?? (usesDefaultNodeEnv ? new FffSearchProvider(env) : new ExecutionEnvSearchProvider(env));
 		if (search.owned || !search.value) this.resources.add(searchProvider);
 		const read = resolveSessionResource(this.options.readProvider);
 		const readProvider =
