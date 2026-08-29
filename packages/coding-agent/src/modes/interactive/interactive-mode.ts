@@ -2245,6 +2245,23 @@ export class InteractiveMode {
 		}
 	}
 
+	private restoreActiveTurnStatusAfterCompaction(): void {
+		if (!this.session.isStreaming) return;
+
+		// Provider-boundary compaction can finish inside an existing agent-core
+		// run, so no new agent_start event will restore the turn UI afterward.
+		this.startGrokTurnTiming();
+		if (this.workingVisible && !this.activeStatusIndicator) {
+			this.showStatusIndicator(
+				new WorkingStatusIndicator(
+					this.ui,
+					this.workingMessage ?? this.defaultWorkingMessage,
+					this.workingIndicatorOptions,
+				),
+			);
+		}
+	}
+
 	private setWorkingVisible(visible: boolean): void {
 		this.workingVisible = visible;
 		if (!visible) {
@@ -3509,13 +3526,14 @@ export class InteractiveMode {
 
 			case "compaction_end": {
 				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(false);
+					this.ui.terminal.setProgress(this.session.isStreaming);
 				}
 				if (this.autoCompactionEscapeHandler) {
 					this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
 					this.autoCompactionEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("compaction");
+				this.restoreActiveTurnStatusAfterCompaction();
 				if (event.aborted) {
 					if (event.reason === "manual") {
 						this.showError("Compaction cancelled");

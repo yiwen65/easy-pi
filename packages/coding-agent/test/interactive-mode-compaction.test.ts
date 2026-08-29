@@ -5,6 +5,8 @@ import type { SessionEntry } from "../src/core/session-manager.ts";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { GrokTurnDurationComponent } from "../src/modes/interactive-grok/components/grok-turn-duration.ts";
+import { GrokComponentFactory } from "../src/modes/interactive-grok/grok-component-factory.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 describe("InteractiveMode compaction events", () => {
@@ -23,6 +25,102 @@ describe("InteractiveMode compaction events", () => {
 		await vi.waitFor(() => expect(fakeThis.showError).toHaveBeenCalledOnce());
 
 		expect(fakeThis.showError).toHaveBeenCalledWith("Unable to render agent_settled: render failed");
+	});
+
+	test("restores active-turn status and retains timing after in-turn compaction", async () => {
+		initTheme("dark");
+		type Indicator = {
+			kind: "working" | "retry" | "compaction" | "branchSummary";
+			dispose(): void;
+			render(width: number): string[];
+		};
+		const chatContainer = new Container();
+		const session = {
+			isStreaming: true,
+			abortCompaction: vi.fn(),
+		};
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			grokComponentFactory: new GrokComponentFactory(),
+			grokTurnStartedAt: undefined as number | undefined,
+			currentTurnThinkingGroup: undefined,
+			pendingTools: new Map(),
+			workingVisible: true,
+			workingMessage: undefined,
+			defaultWorkingMessage: "Working...",
+			workingIndicatorOptions: undefined,
+			activeStatusIndicator: undefined as Indicator | undefined,
+			retryEscapeHandler: undefined,
+			autoCompactionEscapeHandler: undefined as (() => void) | undefined,
+			defaultEditor: { onEscape: vi.fn() },
+			session,
+			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([]) },
+			chatContainer,
+			streamingComponent: undefined,
+			streamingMessage: undefined,
+			outputPad: 1,
+			settingsManager: { getShowTerminalProgress: () => true },
+			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+			showStatusIndicator(indicator: Indicator) {
+				this.activeStatusIndicator?.dispose();
+				this.activeStatusIndicator = indicator;
+			},
+			clearStatusIndicator(kind?: Indicator["kind"]) {
+				if (kind && this.activeStatusIndicator?.kind !== kind) return;
+				this.activeStatusIndicator?.dispose();
+				this.activeStatusIndicator = undefined;
+			},
+			startGrokTurnTiming: Reflect.get(InteractiveMode.prototype, "startGrokTurnTiming"),
+			restoreActiveTurnStatusAfterCompaction: Reflect.get(
+				InteractiveMode.prototype,
+				"restoreActiveTurnStatusAfterCompaction",
+			),
+			finishGrokTurnTiming: Reflect.get(InteractiveMode.prototype, "finishGrokTurnTiming"),
+			completeCurrentTurnThinking: Reflect.get(InteractiveMode.prototype, "completeCurrentTurnThinking"),
+			addMessageToChat: vi.fn(),
+			addCompactionCostNotice: vi.fn(),
+			showError: vi.fn(),
+			showStatus: vi.fn(),
+			flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
+		};
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event:
+				| { type: "agent_start" }
+				| { type: "compaction_start"; reason: "threshold" }
+				| {
+						type: "compaction_end";
+						reason: "threshold";
+						result: { tokensBefore: number; summary: string };
+						aborted: false;
+						willRetry: false;
+				  }
+				| { type: "agent_end"; messages: []; willRetry: false },
+		) => Promise<void>;
+
+		await handleEvent.call(fakeThis, { type: "agent_start" });
+		const startedAt = fakeThis.grokTurnStartedAt;
+		await handleEvent.call(fakeThis, { type: "compaction_start", reason: "threshold" });
+		await handleEvent.call(fakeThis, {
+			type: "compaction_end",
+			reason: "threshold",
+			result: { tokensBefore: 1_000, summary: "checkpoint" },
+			aborted: false,
+			willRetry: false,
+		});
+		const statusAfterCompaction = fakeThis.activeStatusIndicator?.kind;
+		const statusTextAfterCompaction = stripAnsi(fakeThis.activeStatusIndicator?.render(80).join("\n") ?? "");
+		const timerAfterCompaction = fakeThis.grokTurnStartedAt;
+
+		await handleEvent.call(fakeThis, { type: "agent_end", messages: [], willRetry: false });
+
+		expect(statusAfterCompaction).toBe("working");
+		expect(statusTextAfterCompaction).toContain("Working...");
+		expect(timerAfterCompaction).toBe(startedAt);
+		expect(chatContainer.children.filter((child) => child instanceof GrokTurnDurationComponent)).toHaveLength(1);
+		expect(stripAnsi(chatContainer.render(80).join("\n"))).toContain("worked ");
+		expect(fakeThis.ui.terminal.setProgress).toHaveBeenLastCalledWith(false);
 	});
 
 	test("uses the cache miss notice setting for compaction and branch summary costs", () => {
@@ -216,6 +314,7 @@ describe("InteractiveMode compaction events", () => {
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
+			clearChatContainer: vi.fn(),
 			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]) },
 			renderSessionEntries: vi.fn(),
 			addMessageToChat: vi.fn(),
@@ -223,6 +322,7 @@ describe("InteractiveMode compaction events", () => {
 			showError: vi.fn(),
 			showStatus: vi.fn(),
 			clearStatusIndicator: vi.fn(),
+			restoreActiveTurnStatusAfterCompaction: vi.fn(),
 			flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
 			settingsManager: { getShowTerminalProgress: () => false },
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
@@ -252,7 +352,7 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
+		expect(fakeThis.clearChatContainer).toHaveBeenCalledTimes(1);
 		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction]);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
@@ -301,6 +401,7 @@ describe("InteractiveMode compaction events", () => {
 			showError: vi.fn(),
 			showStatus: vi.fn(),
 			clearStatusIndicator: vi.fn(),
+			restoreActiveTurnStatusAfterCompaction: vi.fn(),
 			flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
 			settingsManager: { getShowTerminalProgress: () => false },
 			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
