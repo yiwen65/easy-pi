@@ -178,10 +178,11 @@ Non-goals:
 - 2026-08-30: 首次 `npm run check` 暴露测试使用不受当前 TS lib 支持的 `Array.findLast`；改用仓库现有 `getLatestCompactionEntry()` 后，目标测试 33 passed，第二次完整 `npm run check` 通过且无自动修复。
 - 2026-08-30: delegated reviewer 因隔离 snapshot 未包含 focus paths 而无法审查；coordinator 逐项检查 activated/rejected/no-host/hard-limit 路径、dynamic runtime 层、role order、durable/transient 边界和 diff，未发现需扩展实现的问题。
 - 2026-08-30: 将已验证的 replacement checkpoint 语义规则写入 `LEARNS.md`；最终目标批次再次 9 files / 71 tests passed，task validator 与 diff check 通过。T-004 完成。
+- 2026-08-30: 显式 stage 本任务 6 个文件并提交 `63997f526 fix(coding-agent): preserve compacted context semantics`；既有未跟踪 harness 文档未包含。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: passed
-- Evidence: T-001 至 T-004 均完成；两个回归在修复前按目标原因失败、修复后通过；integrated provider contract 与邻域批次共 9 files / 71 tests passed；完整 `npm run check`、task validator、`git diff --check` 通过；diff 仅包含本任务实现、测试、task document 与 verified learning。
+- Evidence: T-001 至 T-004 均完成；两个回归在修复前按目标原因失败、修复后通过；integrated provider contract 与邻域批次共 9 files / 71 tests passed；完整 `npm run check`、task validator、`git diff --check` 通过；实现、测试、task document 与 verified learning 已提交为 `63997f526`。
 - Limitations: 未运行真实 provider 语义评测，遵守项目规则不使用未明确授权的 API/token；因此验证的是 provider context 的结构、顺序和 runtime 一致性，不声称真实模型对 handoff 的主观解释质量。
