@@ -368,6 +368,7 @@ export class HfCompactionHost {
 				currentInputExtraTokens,
 				outputReserve,
 			});
+			summaryMessage.estimatedTokensAfter = after.total;
 			const compactedInputTokens = after.total - outputReserve;
 			const fixedInputTokens = after.system + after.tools + after.currentInput;
 			if (

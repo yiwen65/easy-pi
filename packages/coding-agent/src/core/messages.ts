@@ -63,6 +63,7 @@ export interface CompactionSummaryMessage {
 	role: "compactionSummary";
 	summary: string;
 	tokensBefore: number;
+	estimatedTokensAfter?: number;
 	timestamp: number;
 }
 
@@ -110,11 +111,13 @@ export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
 	timestamp: string,
+	estimatedTokensAfter?: number,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
 		summary: summary,
 		tokensBefore,
+		...(estimatedTokensAfter !== undefined ? { estimatedTokensAfter } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
