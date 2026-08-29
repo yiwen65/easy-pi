@@ -185,9 +185,9 @@
 - Wrong approach: JIT preflight 只携带上一条 assistant；已有 snapshot 时沿用“assistant 位于 trigger boundary 之前就跳过”的旧保护，同时手动 `/compact` 遇到自动事务直接报 already in progress。
 - Why it failed: 新 user 已追加到真实下一请求，但旧 assistant 仍被判 stale，hard gate 随后因没有新 activation 阻断本可重新压缩的请求；用户手动压缩又无法接管正在进行的自动 compactor 调用。
 - Recognition signal: active snapshot 后追加 user，provider 调用数不再增长并出现 hard-limit block；或 active response 中 `/compact` 返回 `Compaction or branch summarization is already in progress`。
-- Correct approach: provider-boundary preflight 显式标记 pending request，让 gate 基于 branch 中已追加的新事件重算而不重复计入 input；手动压缩循环 abort 并 await 自动事务 cleanup，再独占进入 host。
-- Prevention: JIT 回归同时覆盖 active snapshot 后的新 user、极小 context 下连续 checkpoint、tool continuation，以及 manual-vs-auto compaction 竞争；断言 provider 调用顺序、activation 次数和 aborted 事件。
-- Verified by: 2026-08-25 `session-integration`/`default-on`/`auto-trigger-runtime` 30/30 与 `7253-manual-compact-during-response` 回归通过；compaction aggregate 294 passed / 8 skipped，根 `npm test` 与完整 build 通过。
+- Correct approach: provider-boundary preflight 显式标记 pending request，让 gate 基于 branch 中已追加的新事件重算而不重复计入 input；手动压缩循环 abort 并 await 自动事务 cleanup，再独占进入 host。若把 continuation preflight 前移到 `prepareNextTurnWithContext`，必须先同步 projection revision、用激活后的 messages 构造 callback 输入，再调用已有 callback；callback 返回后只有新发生的 projection 变化才能覆盖其 messages。
+- Prevention: JIT 回归同时覆盖 active snapshot 后的新 user、极小 context 下连续 checkpoint、tool continuation、compaction 期间 steering、已有 prepare callback 的 context marker，以及 manual-vs-auto compaction 竞争；断言 provider 调用顺序、activation 次数、callback marker 和 aborted 事件。
+- Verified by: 2026-08-25 `session-integration`/`default-on`/`auto-trigger-runtime` 30/30 与 `7253-manual-compact-during-response` 回归通过；compaction aggregate 294 passed / 8 skipped，根 `npm test` 与完整 build 通过。2026-08-30 前移 post-tool preflight 时 marker 红测证明 callback 后同步会丢更新；改为 callback 前同步后 compaction suite 31 tests、目标批次 52 tests 与根 `npm run check` 通过。
 
 ## 统一 compaction 事务——安全 cut 可以是零，不能为追求重放覆盖而吞掉当前工具续接
 
