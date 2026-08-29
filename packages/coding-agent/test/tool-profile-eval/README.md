@@ -10,15 +10,18 @@ The fixed matrix is exactly 1 task × 5 seeds × 3 variants = 15 sessions. `runn
 
 `trace.ts` retains only tool names, status, stable error/reason categories, operation kinds, timings, and derived counts. It compares target paths only in memory to derive target-first-read and search-rank metrics; paths, commands, arguments, file content, tool output, model output, session files, and credentials are never persisted.
 
-Run credential-free faux and grader tests:
+Run credential-free faux, grader, and deterministic FFF evidence tests:
 
 ```bash
 cd packages/coding-agent
 node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run \
   test/tool-profile-eval/runner.test.ts \
   test/tool-profile-eval/trace.test.ts \
-  test/tool-profile-eval/prompt-ablation.test.ts
+  test/tool-profile-eval/prompt-ablation.test.ts \
+  test/tool-profile-eval/search-evidence.test.ts
 ```
+
+`search-evidence.test.ts` compares actual model-visible Search outputs from `LocalSearchProviderV2` and `FffSearchProvider` without calling a model. Its paired typo/noise fixture reports Recall@5, reciprocal/first rank, scripted search and candidate-read effort, output bytes plus a chars/4 token estimate, irrelevant/duplicate hits, and retained/cumulative result-context estimates. A separate stress fixture covers a 3,000-file noisy index, a 12,000-line text file, bounded continuation, incomplete-scan approximation, and exact-semantics fallback. Wall-clock values are descriptive only.
 
 The real executor is pinned to `openai-codex/gpt-5.6-luna` with `thinkingLevel: "max"`. It remains skipped unless the exact opt-in is set:
 
