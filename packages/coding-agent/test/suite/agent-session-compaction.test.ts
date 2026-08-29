@@ -313,15 +313,23 @@ describe("AgentSession compaction characterization", () => {
 
 		const transformContext = vi.fn(async (messages: AgentMessage[]) => messages);
 		harness.session.agent.transformContext = transformContext;
+		harness.session.agent.promptCacheKey = "manual-compaction-prefix";
 		harness.session.agent.sessionId = "active-routing-session";
 		harness.session.agent.transport = "websocket";
+		let compactorOptions: SimpleStreamOptions | undefined;
 
-		const stream = installCompactorStream(harness);
+		const stream = installCompactorStream(harness, "subsystem narrative", (_context, options) => {
+			compactorOptions = options;
+		});
 
 		await harness.session.compact();
 
 		expect(transformContext).not.toHaveBeenCalled();
 		expect(stream.callCount()).toBe(1);
+		expect(compactorOptions).toMatchObject({
+			promptCacheKey: "manual-compaction-prefix",
+			sessionId: harness.session.sessionId,
+		});
 		const compactionContext = stream.contexts()[0];
 		expect(compactionContext?.systemPrompt).toBe(harness.session.agent.state.systemPrompt);
 		expect(compactionContext?.tools?.map((tool) => tool.name)).toEqual(
@@ -360,12 +368,20 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		seedCompactableSession(harness);
-		const stream = installCompactorStream(harness, "auto summary from custom stream");
+		harness.session.agent.promptCacheKey = "auto-compaction-prefix";
+		let compactorOptions: SimpleStreamOptions | undefined;
+		const stream = installCompactorStream(harness, "auto summary from custom stream", (_context, options) => {
+			compactorOptions = options;
+		});
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
 		await sessionInternals._runAutoCompaction("threshold", false, COMPACT_DECISION);
 
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(compactorOptions).toMatchObject({
+			promptCacheKey: "auto-compaction-prefix",
+			sessionId: harness.session.sessionId,
+		});
 		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
 		expect(compactionEnd?.result?.estimatedTokensAfter).toBeGreaterThanOrEqual(0);
 		expect(compactionEnd?.result?.summary).toContain("[compaction checkpoint created]");

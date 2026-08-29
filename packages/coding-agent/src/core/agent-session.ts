@@ -2109,6 +2109,7 @@ export class AgentSession {
 					streamFn: this.agent.streamFunction,
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
+					promptCacheKey: this.agent.promptCacheKey,
 					sessionId: this.sessionId,
 				});
 			const outcome = await this._hfHost.attemptCompaction({
@@ -2403,6 +2404,7 @@ export class AgentSession {
 				streamFn: this.agent.streamFunction,
 				retry: this.settingsManager.getRetrySettings(),
 				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
+				promptCacheKey: this.agent.promptCacheKey,
 				sessionId: this.sessionId,
 			});
 		if (decision.action === "none") return false;
