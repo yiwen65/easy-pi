@@ -5,9 +5,11 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	createEditV2Tool,
+	createReadV2Tool,
 	DEFAULT_MUTATION_LIMITS,
 	type EditPlan,
 	observeMutationPath,
+	ToolStateLedger,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -52,15 +54,35 @@ describe.skipIf(process.platform === "win32")("NodeJournaledMutationBackend", ()
 		await rm(root, { recursive: true, force: true });
 	});
 
-	it("runs as an opt-in backend behind the unchanged v2 edit schema", async () => {
+	it("runs as an opt-in backend behind the v2 edit schema", async () => {
 		await writeFile(path.join(workspace, "a.txt"), "old");
 		const backend = new NodeJournaledMutationBackend({ workspaceRoot: workspace, journalRoot });
+		const toolState = new ToolStateLedger();
+		const context = { env, mutationBackend: backend, toolState };
+		const view = await createReadV2Tool().execute(
+			"journal-read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		const result = await createEditV2Tool().execute(
 			"journal-edit",
-			{ operations: [{ kind: "update", path: "a.txt", oldText: "old", newText: "new" }] },
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "old",
+						newText: "new",
+						viewId: view.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+				],
+			},
 			undefined,
 			undefined,
-			{ env, mutationBackend: backend },
+			context,
 		);
 		expect(result.details).toMatchObject({ dialect: "operations", files: [{ status: "updated" }] });
 		expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("new");

@@ -6,8 +6,10 @@ import {
 	type SearchMatchedCountRelation,
 	type SearchPage,
 	SearchProviderError,
+	type SearchQueryMode,
 	type SearchRequest,
 	type SearchSkipped,
+	type SearchStructuredMode,
 	type SearchTruncationReason,
 } from "./search-provider.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
@@ -30,7 +32,7 @@ const CURSOR_TTL_MS = 10 * 60 * 1000;
 const MAX_CURSORS = 200;
 const textEncoder = new TextEncoder();
 
-const structuredModes = [
+const structuredModes: SearchStructuredMode[] = [
 	"symbol_definition",
 	"symbol_reference",
 	"implementation",
@@ -49,36 +51,62 @@ const structuredTargetKinds = [
 	"string_literal",
 	"comment",
 ] as const;
+const queryTemplateModes = {
+	definition: "symbol_definition",
+	references: "symbol_reference",
+	assignment: "assignment",
+	calls: "call",
+	concept: "semantic_candidate",
+} as const;
+const structuredModeTargetKinds = {
+	symbol_definition: "definition",
+	symbol_reference: "reference",
+	implementation: "implementation",
+	assignment: "assignment",
+	call: "call",
+	string_literal: "string_literal",
+	comment: "comment",
+	semantic_candidate: undefined,
+} as const;
 
 const searchV2Schema = Type.Object({
 	query: Type.String({ description: "Literal text, regex, file name, or glob to locate" }),
 	kind: Type.Optional(Type.Union([Type.Literal("text"), Type.Literal("files"), Type.Literal("glob")])),
 	mode: Type.Optional(
-		Type.Union([
-			Type.Literal("literal"),
-			Type.Literal("regex"),
-			Type.Literal("symbol_definition"),
-			Type.Literal("symbol_reference"),
-			Type.Literal("implementation"),
-			Type.Literal("assignment"),
-			Type.Literal("call"),
-			Type.Literal("string_literal"),
-			Type.Literal("comment"),
-			Type.Literal("semantic_candidate"),
-		]),
+		Type.Union(
+			[
+				Type.Literal("literal"),
+				Type.Literal("regex"),
+				Type.Literal("symbol_definition"),
+				Type.Literal("symbol_reference"),
+				Type.Literal("implementation"),
+				Type.Literal("assignment"),
+				Type.Literal("call"),
+				Type.Literal("string_literal"),
+				Type.Literal("comment"),
+				Type.Literal("semantic_candidate"),
+			],
+			{ description: "Select one query semantic; do not combine with queryTemplate" },
+		),
 	),
 	targetKind: Type.Optional(
-		Type.Union([
-			Type.Literal("exact_line"),
-			Type.Literal("definition"),
-			Type.Literal("reference"),
-			Type.Literal("implementation"),
-			Type.Literal("assignment"),
-			Type.Literal("call"),
-			Type.Literal("string_literal"),
-			Type.Literal("comment"),
-			Type.Literal("path"),
-		]),
+		Type.Union(
+			[
+				Type.Literal("exact_line"),
+				Type.Literal("definition"),
+				Type.Literal("reference"),
+				Type.Literal("implementation"),
+				Type.Literal("assignment"),
+				Type.Literal("call"),
+				Type.Literal("string_literal"),
+				Type.Literal("comment"),
+				Type.Literal("path"),
+			],
+			{
+				description:
+					"Optional verified result kind; omit for semantic candidates and pair exactly with a structured mode",
+			},
+		),
 	),
 	path: Type.Optional(Type.String({ description: "Narrowest justified file or directory root" })),
 	fileGlob: Type.Optional(Type.String({ description: "Compatibility include glob for text/files" })),
@@ -90,7 +118,9 @@ const searchV2Schema = Type.Object({
 	case: Type.Optional(Type.Union([Type.Literal("smart"), Type.Literal("sensitive"), Type.Literal("insensitive")])),
 	regex: Type.Optional(Type.Boolean({ description: "Compatibility alias for mode=regex" })),
 	wordBoundary: Type.Optional(Type.Boolean()),
-	context: Type.Optional(Type.Number({ description: "Optional candidate context lines; default: 0" })),
+	context: Type.Optional(
+		Type.Number({ description: "Literal/regex candidate context lines; structured/semantic modes require 0" }),
+	),
 	limit: Type.Optional(Type.Number({ description: "Compatibility alias for maxResultsGlobal" })),
 	maxResultsGlobal: Type.Optional(
 		Type.Number({ description: `Global result budget (default: ${DEFAULT_SEARCH_LIMIT})` }),
@@ -103,7 +133,24 @@ const searchV2Schema = Type.Object({
 		Type.Number({ description: `Model-visible output budget (default: ${DEFAULT_MAX_OUTPUT_BYTES})` }),
 	),
 	cursor: Type.Optional(Type.String({ description: "Opaque continuation returned by the same search" })),
-	ranking: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("global")])),
+	ranking: Type.Optional(
+		Type.Union([Type.Literal("fast"), Type.Literal("global"), Type.Literal("task")], {
+			description: "Explicit ranking is valid only for file or structured search",
+		}),
+	),
+	queryTemplate: Type.Optional(
+		Type.Union(
+			[
+				Type.Literal("definition"),
+				Type.Literal("references"),
+				Type.Literal("assignment"),
+				Type.Literal("calls"),
+				Type.Literal("concept"),
+			],
+			{ description: "Shortcut for one structured mode; do not combine with mode" },
+		),
+	),
+	preferredPaths: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
 });
 
 export type SearchV2Input = Static<typeof searchV2Schema>;
@@ -121,9 +168,20 @@ export interface SearchV2Locator {
 	matchKind: string;
 	snapshotId: string;
 	lineLengthBytes?: number;
+	enclosingSymbol?: string;
+	nodeKind?: string;
+	nodeId?: string;
+	fileClass?: string;
+	score?: number;
+	rankReasons?: string[];
 	preview?: string;
 	prefixOmitted?: boolean;
 	suffixOmitted?: boolean;
+}
+
+export interface SearchV2Group {
+	path: string;
+	locatorIds: string[];
 }
 
 export interface SearchV2Coverage {
@@ -139,12 +197,14 @@ export interface SearchV2Coverage {
 export interface SearchV2Details {
 	status: SearchV2Status;
 	kind: "text" | "files" | "glob";
-	mode: "literal" | "regex";
+	mode: SearchQueryMode;
 	targetKind?: string;
+	queryTemplate?: "definition" | "references" | "assignment" | "calls" | "concept";
 	query: string;
 	path: string;
 	hits: SearchHit[];
 	locators: SearchV2Locator[];
+	groups: SearchV2Group[];
 	snapshotId: string;
 	coverage: SearchV2Coverage;
 	returnedCount: number;
@@ -160,13 +220,14 @@ export interface SearchV2Details {
 		honorIgnore: boolean;
 		includeHidden: boolean;
 		followSymlinks: boolean;
+		preferredPaths: string[];
 	};
 }
 
 type ValidatedInput = {
 	query: string;
 	kind: "text" | "files" | "glob";
-	mode: "literal" | "regex";
+	mode: SearchQueryMode;
 	targetKind?: string;
 	path?: string;
 	fileGlob?: string;
@@ -183,7 +244,9 @@ type ValidatedInput = {
 	maxFiles: number;
 	maxOutputBytes: number;
 	cursor?: string;
-	ranking: "fast" | "global";
+	ranking: "fast" | "global" | "task";
+	queryTemplate?: "definition" | "references" | "assignment" | "calls" | "concept";
+	preferredPaths: string[];
 };
 
 type CursorRecord = {
@@ -204,38 +267,46 @@ function positiveInteger(value: number | undefined, name: string, maximum: numbe
 function validateInput(input: SearchV2Input): ValidatedInput {
 	if (input.query.trim().length === 0) throw new V2ToolError("INVALID_INPUT", "query must not be empty.");
 	const kind = input.kind ?? "text";
-	const requestedMode = input.mode ?? (input.regex ? "regex" : "literal");
-	if (input.mode && input.regex !== undefined && (input.mode === "regex") !== input.regex) {
-		throw new V2ToolError("INVALID_INPUT", "mode and regex describe conflicting query semantics.");
+	const templateMode = input.queryTemplate ? queryTemplateModes[input.queryTemplate] : undefined;
+	if (input.mode && templateMode && input.mode !== templateMode) {
+		throw new V2ToolError("INVALID_INPUT", "mode conflicts with queryTemplate.");
 	}
-	if ((structuredModes as readonly string[]).includes(requestedMode)) {
-		throw new V2ToolError(
-			"SYMBOL_INDEX_UNAVAILABLE",
-			`${requestedMode} requires a configured AST/LSP/semantic index. No structured index is available for this host.`,
-			{ fallbackAllowed: true, recovery: { kind: "use_text_fallback" as const } },
-		);
+	const requestedMode = input.mode ?? templateMode ?? (input.regex ? "regex" : "literal");
+	if (input.regex !== undefined && (requestedMode === "regex") !== input.regex) {
+		throw new V2ToolError("INVALID_INPUT", "mode, queryTemplate, and regex describe conflicting query semantics.");
 	}
+	const structured = (structuredModes as readonly string[]).includes(requestedMode);
 	if (input.targetKind && (structuredTargetKinds as readonly string[]).includes(input.targetKind)) {
-		throw new V2ToolError(
-			"SYMBOL_INDEX_UNAVAILABLE",
-			`${input.targetKind} intent cannot be verified by the configured text/path providers. Use an explicitly anchored literal or regex fallback without a structured targetKind.`,
-			{ fallbackAllowed: true, recovery: { kind: "use_text_fallback" as const } },
-		);
+		if (!structured) {
+			throw new V2ToolError(
+				"SYMBOL_INDEX_UNAVAILABLE",
+				`${input.targetKind} intent cannot be verified by a text/path provider. Use a structured mode or an explicitly anchored literal/regex fallback without targetKind.`,
+				{ fallbackAllowed: true, recovery: { kind: "use_text_fallback" as const } },
+			);
+		}
+		const expectedTargetKind = structuredModeTargetKinds[requestedMode as keyof typeof structuredModeTargetKinds];
+		if (input.targetKind !== expectedTargetKind) {
+			throw new V2ToolError("INVALID_INPUT", "targetKind conflicts with the structured search mode.");
+		}
 	}
 	if (input.targetKind === "path" && kind === "text") {
 		throw new V2ToolError("INVALID_INPUT", 'targetKind="path" requires kind="files" or kind="glob".');
 	}
-	const mode = requestedMode as "literal" | "regex";
+	const mode = requestedMode as SearchQueryMode;
 	const context = input.context ?? 0;
-	const ranking = input.ranking ?? "fast";
+	const ranking = input.ranking ?? (structured ? "task" : "fast");
+	if (structured && kind !== "text")
+		throw new V2ToolError("INVALID_INPUT", "Structured search modes require kind=text.");
 	if (kind !== "text" && mode === "regex")
 		throw new V2ToolError("INVALID_INPUT", 'mode="regex" is only valid for kind="text".');
 	if (kind !== "text" && context !== 0)
 		throw new V2ToolError("INVALID_INPUT", 'context is only valid for kind="text".');
+	if (structured && context !== 0)
+		throw new V2ToolError("INVALID_INPUT", "Structured search returns AST-backed locators and requires context=0.");
 	if (kind === "glob" && input.fileGlob !== undefined)
 		throw new V2ToolError("INVALID_INPUT", 'fileGlob is invalid for kind="glob"; use query as the glob.');
-	if (kind !== "files" && input.ranking !== undefined)
-		throw new V2ToolError("INVALID_INPUT", 'ranking is only valid for kind="files".');
+	if (kind !== "files" && input.ranking !== undefined && !structured)
+		throw new V2ToolError("INVALID_INPUT", "ranking is only valid for file or structured search.");
 	if (input.limit !== undefined && input.maxResultsGlobal !== undefined && input.limit !== input.maxResultsGlobal) {
 		throw new V2ToolError("INVALID_INPUT", "limit and maxResultsGlobal must match when both are provided.");
 	}
@@ -278,21 +349,33 @@ function validateInput(input: SearchV2Input): ValidatedInput {
 		maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
 		cursor: input.cursor,
 		ranking,
+		queryTemplate: input.queryTemplate,
+		preferredPaths: input.preferredPaths ?? [],
 	};
 }
 
 function requireCapabilities(request: SearchRequest, capabilities: SearchCapabilities): void {
+	const structured = request.mode && (structuredModes as readonly string[]).includes(request.mode);
+	if (structured && !capabilities.structuredModes?.includes(request.mode as SearchStructuredMode)) {
+		throw new V2ToolError(
+			"SYMBOL_INDEX_UNAVAILABLE",
+			`${request.mode} requires a configured AST/LSP/semantic provider.`,
+			{ fallbackAllowed: true, recovery: { kind: "use_text_fallback" as const } },
+		);
+	}
 	let missing: string | undefined;
-	if (request.kind === "text" && request.regex && !capabilities.textRegex) missing = "regex text search";
-	else if (request.kind === "text" && !request.regex && !capabilities.textLiteral) missing = "literal text search";
-	else if (request.kind === "text" && request.context > 0 && !capabilities.context) missing = "text context";
-	else if (request.kind === "files" && !capabilities.fuzzyFiles) missing = "fuzzy file search";
-	else if (request.kind === "files" && request.ranking === "global" && !capabilities.globalRanking)
-		missing = "global file ranking";
-	else if (request.kind === "glob" && !capabilities.glob) missing = "glob search";
+	if (request.ranking === "task" && !capabilities.taskRanking) missing = "task-aware ranking";
+	else if (request.ranking === "global" && !capabilities.globalRanking) missing = "global ranking";
 	else if ((request.include?.length || request.exclude?.length) && !capabilities.scopeFilters)
 		missing = "scope filters";
 	else if (request.wordBoundary && !capabilities.wordBoundary) missing = "word-boundary search";
+	if (!structured && !missing) {
+		if (request.kind === "text" && request.regex && !capabilities.textRegex) missing = "regex text search";
+		else if (request.kind === "text" && !request.regex && !capabilities.textLiteral) missing = "literal text search";
+		else if (request.kind === "text" && request.context > 0 && !capabilities.context) missing = "text context";
+		else if (request.kind === "files" && !capabilities.fuzzyFiles) missing = "fuzzy file search";
+		else if (request.kind === "glob" && !capabilities.glob) missing = "glob search";
+	}
 	if (request.cursor && !capabilities.stableCursor) missing = "stable continuation";
 	if (missing) {
 		throw new V2ToolError(
@@ -316,6 +399,7 @@ function requestSignature(request: SearchRequest, input: ValidatedInput): string
 		followSymlinks: request.followSymlinks,
 		case: request.case,
 		regex: request.regex,
+		mode: request.mode,
 		wordBoundary: request.wordBoundary,
 		context: request.context,
 		limit: request.limit,
@@ -324,6 +408,8 @@ function requestSignature(request: SearchRequest, input: ValidatedInput): string
 		maxOutputBytes: input.maxOutputBytes,
 		targetKind: input.targetKind,
 		ranking: request.ranking,
+		queryTemplate: request.queryTemplate,
+		preferredPaths: request.preferredPaths,
 	});
 }
 
@@ -366,12 +452,30 @@ function compactTextHit(hit: Extract<SearchHit, { kind: "text" }>): {
 	};
 }
 
-function formatLocator(locator: SearchV2Locator): string {
-	const position = locator.startLine
-		? `${locator.path}:${locator.startLine}:${locator.startColumn ?? 1}`
-		: locator.path;
-	const match = locator.match ? `\t${JSON.stringify(locator.match)}` : "";
-	return `${locator.locatorId}\t${position}\t${locator.matchKind}${match}`;
+function groupLocators(locators: readonly SearchV2Locator[]): SearchV2Group[] {
+	const groups = new Map<string, string[]>();
+	for (const locator of locators) {
+		const locatorIds = groups.get(locator.path) ?? [];
+		locatorIds.push(locator.locatorId);
+		groups.set(locator.path, locatorIds);
+	}
+	return [...groups].map(([path, locatorIds]) => ({ path, locatorIds }));
+}
+
+function formatGroupedLocators(locators: readonly SearchV2Locator[]): string {
+	const byId = new Map(locators.map((locator) => [locator.locatorId, locator]));
+	return groupLocators(locators)
+		.map((group) => {
+			const entries = group.locatorIds.flatMap((id) => {
+				const locator = byId.get(id);
+				if (!locator) return [];
+				const position = locator.startLine ? `${locator.startLine}:${locator.startColumn ?? 1}` : "file";
+				const match = locator.match ? `\t${JSON.stringify(locator.match)}` : "";
+				return [`  ${locator.locatorId}\t${position}\t${locator.matchKind}${match}`];
+			});
+			return `${group.path}\n${entries.join("\n")}`;
+		})
+		.join("\n");
 }
 
 async function resolvedHitInfo(
@@ -410,14 +514,27 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 		name: "search",
 		label: "search",
 		description:
-			"Locate workspace text or paths with explicit semantics, scope, budgets, coverage, and opaque locator IDs. Read a locator to inspect code.",
+			"Locate workspace text, paths, verified JS/TS structures, or explicitly configured semantic candidates with scope, budgets, ranking, coverage, grouped paths, and opaque locator IDs. Read a locator before editing.",
 		parameters: searchV2Schema,
 		executionMode: "parallel",
 		replay: "safe",
 		async execute(_toolCallId, rawInput, signal, _onUpdate, context) {
 			const input = validateInput(rawInput);
-			const provider = context.searchProvider;
+			const structuredMode = (structuredModes as readonly string[]).includes(input.mode);
+			const provider =
+				input.mode === "semantic_candidate"
+					? context.semanticSearchProvider
+					: structuredMode
+						? context.structuredSearchProvider
+						: context.searchProvider;
 			if (!provider) {
+				if (structuredMode) {
+					throw new V2ToolError(
+						"SYMBOL_INDEX_UNAVAILABLE",
+						`${input.mode} requires a configured AST/LSP/semantic provider.`,
+						{ fallbackAllowed: true, recovery: { kind: "use_text_fallback" as const } },
+					);
+				}
 				throw new V2ToolError("SEARCH_PROVIDER_FAILED", "No search provider is configured for this v2 profile.");
 			}
 			const scope = await resolveWorkspacePath(
@@ -444,12 +561,16 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 				followSymlinks: input.followSymlinks,
 				case: input.case,
 				regex: input.mode === "regex",
+				mode: input.mode,
+				targetKind: input.targetKind,
 				wordBoundary: input.wordBoundary,
 				context: input.context,
 				limit: input.limit,
 				maxResultsPerFile: input.maxResultsPerFile,
 				maxFiles: input.maxFiles,
 				ranking: input.ranking,
+				queryTemplate: input.queryTemplate,
+				preferredPaths: input.preferredPaths,
 			};
 			const signature = requestSignature(request, input);
 			if (input.cursor) {
@@ -481,6 +602,8 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					throw new V2ToolError("STALE_CURSOR", `${error.message} Repeat the same search without cursor.`);
 				if (error instanceof SearchProviderError && error.code === "unsupported")
 					throw new V2ToolError("SEARCH_CAPABILITY_UNSUPPORTED", error.message);
+				if (error instanceof SearchProviderError && error.code === "budget_exceeded")
+					throw new V2ToolError("BUDGET_EXCEEDED", error.message);
 				throw new V2ToolError(
 					"SEARCH_PROVIDER_FAILED",
 					`Search failed. Refine the scope or retry. ${error instanceof Error ? error.message : String(error)}`,
@@ -514,7 +637,6 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 			const seen = new Set<string>();
 			const perFile = new Map<string, number>();
 			const files = new Set<string>();
-			let outputBytes = 0;
 			let toolTruncation: SearchTruncationReason | undefined;
 
 			for (const hit of page.hits) {
@@ -541,19 +663,26 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					signal,
 				);
 				const compact = hit.kind === "text" ? compactTextHit(hit) : undefined;
-				const matchKind = input.targetKind ?? (hit.kind === "file" ? "path" : "text");
+				const matchKind =
+					hit.kind === "text" ? (hit.matchKind ?? input.targetKind ?? "text") : (input.targetKind ?? "path");
 				const stateLocator = ledger.addLocator({
 					scopeId,
 					snapshotId,
 					path: resolved.path,
 					kind: hit.kind,
 					startLine: hit.kind === "text" ? hit.line : undefined,
-					endLine: hit.kind === "text" ? hit.line : undefined,
+					endLine: hit.kind === "text" ? (hit.endLine ?? hit.line) : undefined,
 					startColumn: hit.kind === "text" ? hit.column : undefined,
-					endColumn: compact?.endColumn,
+					endColumn: hit.kind === "text" ? (hit.endColumn ?? compact?.endColumn) : undefined,
 					byteOffset: hit.kind === "text" ? hit.byteOffset : undefined,
 					lineLengthBytes: compact?.lineLengthBytes,
 					match: compact?.match,
+					matchKind,
+					enclosingSymbol: hit.kind === "text" ? hit.enclosingSymbol : undefined,
+					nodeKind: hit.kind === "text" ? hit.nodeKind : undefined,
+					nodeId: hit.kind === "text" ? hit.nodeId : undefined,
+					fileClass: hit.kind === "text" ? hit.fileClass : undefined,
+					rankReasons: hit.kind === "text" ? hit.rankReasons : undefined,
 					fileVersion: resolved.info ? fileVersion(resolved.info) : undefined,
 				});
 				const locator: SearchV2Locator = {
@@ -568,17 +697,22 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					matchKind,
 					snapshotId,
 					lineLengthBytes: compact?.lineLengthBytes,
+					enclosingSymbol: stateLocator.enclosingSymbol,
+					nodeKind: stateLocator.nodeKind,
+					nodeId: stateLocator.nodeId,
+					fileClass: stateLocator.fileClass,
+					score: hit.kind === "text" ? hit.score : hit.score,
+					rankReasons: stateLocator.rankReasons,
 					preview: compact?.preview,
 					prefixOmitted: compact?.prefixOmitted,
 					suffixOmitted: compact?.suffixOmitted,
 				};
-				const line = formatLocator(locator);
-				const lineBytes = new TextEncoder().encode(`${locators.length > 0 ? "\n" : ""}${line}`).byteLength;
-				if (outputBytes + lineBytes > input.maxOutputBytes) {
+				const candidateBytes = textEncoder.encode(formatGroupedLocators([...locators, locator])).byteLength;
+				if (candidateBytes > input.maxOutputBytes) {
+					ledger.removeLocator(stateLocator.id);
 					toolTruncation = "max_output_bytes";
 					break;
 				}
-				outputBytes += lineBytes;
 				locators.push(locator);
 				compactHits.push(compact?.hit ?? hit);
 				perFile.set(hit.path, currentPerFile + 1);
@@ -609,7 +743,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					skipped,
 				};
 				let text: string;
-				if (locators.length > 0) text = locators.map(formatLocator).join("\n");
+				if (locators.length > 0) text = formatGroupedLocators(locators);
 				else if (status === "complete") text = "NO_MATCH_COMPLETE: no matches in the fully covered scope.";
 				else text = "SEARCH_INCOMPLETE: no returned locator proves absence; narrow or change the query.";
 				const notices: string[] = [];
@@ -623,7 +757,8 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 
 			let rendered = renderText();
 			while (textEncoder.encode(rendered.text).byteLength > input.maxOutputBytes && locators.length > 0) {
-				locators.pop();
+				const removed = locators.pop();
+				if (removed) ledger.removeLocator(removed.locatorId);
 				compactHits.pop();
 				toolTruncation = "max_output_bytes";
 				rendered = renderText();
@@ -642,10 +777,12 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					kind: input.kind,
 					mode: input.mode,
 					targetKind: input.targetKind,
+					queryTemplate: input.queryTemplate,
 					query: input.query,
 					path: scope.absolutePath,
 					hits: compactHits,
 					locators,
+					groups: groupLocators(locators),
 					snapshotId,
 					coverage,
 					returnedCount: locators.length,
@@ -661,6 +798,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 						honorIgnore: input.honorIgnore,
 						includeHidden: input.includeHidden,
 						followSymlinks: input.followSymlinks,
+						preferredPaths: input.preferredPaths,
 					},
 				},
 			};

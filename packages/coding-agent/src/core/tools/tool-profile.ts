@@ -1,3 +1,4 @@
+import { relative } from "node:path";
 import {
 	type AgentHarnessTool,
 	createEditV2Tool,
@@ -21,6 +22,7 @@ import {
 	type RunV2Details,
 	type SearchProvider,
 	type SearchV2Details,
+	type SymbolReadProvider,
 	ToolStateLedger,
 	type WorkspacePolicy,
 } from "@earendil-works/pi-agent-core";
@@ -45,12 +47,14 @@ import { FffSearchProvider } from "./fff-search-provider.ts";
 import { NodeReadProviderV2 } from "./node-read-provider-v2.ts";
 import { replaceTabs } from "./render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "./truncate.ts";
+import { TypeScriptCodeIndexProvider } from "./typescript-code-index-provider.ts";
 
 export type ToolProfile = "legacy" | "v2";
 
 export const V2_TOOL_NAMES = ["search", "read", "edit", "run"] as const;
 
 export type V2SessionResourceSource<T> = T | (() => T);
+export type V2CodeIndexProvider = SearchProvider & SymbolReadProvider;
 
 // The runtime registry is intentionally heterogeneous across four schemas/detail types.
 type V2ToolDefinition = ToolDefinition<any, any>;
@@ -64,6 +68,10 @@ export interface CreateV2ToolDefinitionsOptions {
 	executionEnv?: V2SessionResourceSource<ExecutionEnv>;
 	/** Instances are host-owned; factory results are session-owned. */
 	searchProvider?: V2SessionResourceSource<SearchProvider>;
+	/** JS/TS structured Search plus symbol/AST Read. Defaults to the bounded local TypeScript provider on Node. */
+	codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider>;
+	/** Remote semantic Search is never created implicitly. */
+	semanticSearchProvider?: V2SessionResourceSource<SearchProvider>;
 	/** Instances are host-owned; factory results are session-owned. */
 	readProvider?: V2SessionResourceSource<ReadProvider>;
 	resourceReaders?: Array<V2SessionResourceSource<ResourceReader>>;
@@ -77,22 +85,25 @@ export interface CreateV2ToolDefinitionsOptions {
 export interface V2ToolRuntimeHandle {
 	readonly definitions: Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>;
 	readonly lifecycleErrors: readonly Error[];
+	toolEvidenceSummary(): string | undefined;
 	reload(): Promise<Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>>;
 	close(): Promise<void>;
 }
 
 const promptContributions = {
 	search: {
-		snippet: "Locate code as bounded locators with explicit scope and coverage",
+		snippet: "Locate code as bounded locators with explicit scope, semantics, ranking, and coverage",
 		guidelines: [
-			"Use search instead of run for discovery. Start with the narrowest justified path, literal/regex mode, include/exclude scope, and locator-only defaults.",
-			"Never infer absence from partial, overflow, truncated, skipped, or unsupported search results; narrow one query dimension and search again.",
+			"Use search instead of run for discovery. Start with the narrowest justified path and explicit literal, regex, or JS/TS query-template semantics; use include/exclude and preferredPaths only when the task supports them.",
+			"Use concept/semantic candidates only when naming is unknown and a remote provider was explicitly configured; verify candidates with structured/literal Search and Read before Edit.",
+			"Same-file results are grouped but each locator remains independently readable. Never infer absence from partial, overflow, truncated, skipped, or unsupported results; narrow one query dimension and search again.",
+			"Choose either mode or queryTemplate, not both. Structured/semantic Search requires kind=text and context=0; omit targetKind for concept search, otherwise pair it exactly with the requested structured mode. Use task ranking only for structured or file search.",
 		],
 	},
 	read: {
 		snippet: "Read a locator or bounded range into a numbered, versioned view",
 		guidelines: [
-			"Read a selected locator with a small window first, then expand progressively; do not page from the start of a large file.",
+			"Read a selected locator or JS/TS symbol/AST node with a small window first, then expand progressively; do not page from the start of a large file.",
 			"Use the returned view_id, file_hash, true line range, and continuation metadata for editing or further reads.",
 		],
 	},
@@ -101,17 +112,56 @@ const promptContributions = {
 		guidelines: [
 			"For updates, use freshly read view_id/file_hash evidence, an exact range, and exactly_one_in_range; never choose the first of multiple matches or imply replace-all.",
 			"Use edit action=prepare, inspect the bounded diff, commit its patchId, then read the changed range and run the smallest relevant verification.",
-			"When moving and updating the same file, use one edit batch with move first and update on the destination second.",
+			"On partial or indeterminate commit, read every changed or unknown path and do not replay blindly. When moving and updating the same file, use one edit batch with move first and update on the destination second.",
 		],
 	},
 	run: {
 		snippet: "Run builds, tests, Git, and other commands in an explicit cwd",
 		guidelines: [
-			"Use run for commands, not for searching, reading, or editing files.",
+			"Use run for the smallest focused verification, not for searching, reading, or editing files. Nonzero exits and timeouts are visible results that require inspection and recovery.",
 			"You can inspect PI_* environment variables for current model and session details.",
 		],
 	},
 } as const;
+
+function promptContribution(name: keyof typeof promptContributions, context: ExecutionToolContext) {
+	const prompt = promptContributions[name];
+	if (name === "search") {
+		const structured = context.structuredSearchProvider !== undefined;
+		const semantic = context.semanticSearchProvider !== undefined;
+		if (!structured && !semantic) {
+			return {
+				snippet: prompt.snippet,
+				guidelines: [
+					"This session supports text/path Search only. Use literal or regex text search, or files/glob path search.",
+					"Do not use structured modes, query templates, targetKind, or task ranking; no AST or semantic provider is configured.",
+					promptContributions.search.guidelines[2],
+				],
+			};
+		}
+		const guidelines: string[] = [...promptContributions.search.guidelines];
+		if (!structured) {
+			guidelines[0] =
+				"Use search instead of run for discovery. This session has text/path and semantic candidate Search, but JS/TS structured modes are unavailable.";
+		}
+		if (!semantic) {
+			guidelines[1] =
+				"Remote concept/semantic candidates are unavailable in this session because no provider was configured; when configured, verify candidates with structured/literal Search and Read before Edit.";
+		}
+		return { snippet: prompt.snippet, guidelines };
+	}
+	if (name === "read" && context.symbolReadProvider === undefined) {
+		return {
+			snippet: prompt.snippet,
+			guidelines: [
+				"Read a selected locator or bounded path range with a small window first, then expand progressively; do not page from the start of a large file.",
+				"Symbol and AST reads are unavailable in this session; use a locator or bounded path range.",
+				promptContributions.read.guidelines[1],
+			],
+		};
+	}
+	return { snippet: prompt.snippet, guidelines: [...prompt.guidelines] };
+}
 
 function textOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
@@ -489,6 +539,8 @@ function renderSearchCall(
 		regex?: unknown;
 		context?: unknown;
 		ranking?: unknown;
+		queryTemplate?: unknown;
+		preferredPaths?: unknown;
 		maxResultsGlobal?: unknown;
 		maxResultsPerFile?: unknown;
 		maxFiles?: unknown;
@@ -502,15 +554,21 @@ function renderSearchCall(
 		kind === "text"
 			? typeof args.mode === "string"
 				? args.mode
-				: args.regex === true
-					? "regex"
-					: "literal"
+				: typeof args.queryTemplate === "string"
+					? args.queryTemplate
+					: args.regex === true
+						? "regex"
+						: "literal"
 			: kind === "files"
 				? (args.ranking ?? "fast")
 				: "exact";
 	const metadata = [kind, String(mode)];
 	if (typeof args.targetKind === "string") metadata.push(args.targetKind);
 	if (kind === "text") metadata.push(typeof args.case === "string" ? args.case : "smart");
+	if (typeof args.queryTemplate === "string") metadata.push(`template ${args.queryTemplate}`);
+	if (Array.isArray(args.preferredPaths) && args.preferredPaths.length > 0) {
+		metadata.push(`${args.preferredPaths.length} preferred path(s)`);
+	}
 	if (typeof args.context === "number" && args.context > 0) metadata.push(`context ${args.context}`);
 	if (typeof args.path === "string" && args.path.length > 0) metadata.push(safeInlineDisplay(args.path));
 	if (typeof args.fileGlob === "string" && args.fileGlob.length > 0) metadata.push(safeInlineDisplay(args.fileGlob));
@@ -553,14 +611,21 @@ class SearchResultRenderComponent extends Container {
 		if (details.coverage.truncatedBy) status.push(`truncated: ${details.coverage.truncatedBy}`);
 		if (details.coverage.skipped.length > 0) status.push(`${details.coverage.skipped.length} skipped`);
 		lines.push(theme.fg(details.status === "complete" ? "muted" : "warning", `[${status.join(" · ")}]`));
+		const visibleGroups = new Map<string, typeof visibleLocators>();
 		for (const locator of visibleLocators) {
-			const position = locator.startLine
-				? `${safeInlineDisplay(locator.path)}:${locator.startLine}:${locator.startColumn ?? 1}`
-				: safeInlineDisplay(locator.path);
-			const match = locator.match ? ` · ${JSON.stringify(safeInlineDisplay(locator.match))}` : "";
-			lines.push(
-				`${theme.fg("muted", safeInlineDisplay(locator.locatorId))} ${theme.fg("accent", position)}${theme.fg("toolOutput", match)}`,
-			);
+			const group = visibleGroups.get(locator.path) ?? [];
+			group.push(locator);
+			visibleGroups.set(locator.path, group);
+		}
+		for (const [path, locators] of visibleGroups) {
+			lines.push(theme.fg("accent", safeInlineDisplay(path)));
+			for (const locator of locators) {
+				const position = locator.startLine ? `${locator.startLine}:${locator.startColumn ?? 1}` : "file";
+				const match = locator.match ? ` · ${JSON.stringify(safeInlineDisplay(locator.match))}` : "";
+				lines.push(
+					`  ${theme.fg("muted", safeInlineDisplay(locator.locatorId))} ${theme.fg("accent", position)}${theme.fg("muted", ` · ${safeInlineDisplay(locator.matchKind)}`)}${theme.fg("toolOutput", match)}`,
+				);
+			}
 		}
 		const remaining = details.locators.length - visibleLocators.length;
 		if (remaining > 0) {
@@ -762,14 +827,14 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 	context: ExecutionToolContext,
 	getCommandPrefix?: () => string | undefined,
 ): ToolDefinition<TParameters, TDetails> {
-	const prompt = promptContributions[tool.name as keyof typeof promptContributions];
+	const prompt = promptContribution(tool.name as keyof typeof promptContributions, context);
 	return {
 		name: tool.name,
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters,
 		promptSnippet: prompt.snippet,
-		promptGuidelines: [...prompt.guidelines],
+		promptGuidelines: prompt.guidelines,
 		constrainedSampling: getExperimentalToolSampling(),
 		executionMode: tool.executionMode,
 		execute: (toolCallId, params, signal, onUpdate, extensionContext: ExtensionContext) => {
@@ -844,6 +909,7 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 	private readonly options: CreateV2ToolDefinitionsOptions;
 	private currentDefinitions!: Record<(typeof V2_TOOL_NAMES)[number], V2ToolDefinition>;
 	private resources = new Set<CloseableV2Resource>();
+	private toolState: ToolStateLedger | undefined;
 	private env: ExecutionEnv | undefined;
 	private envOwned = false;
 	private closed = false;
@@ -858,6 +924,73 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 		return this.currentDefinitions;
 	}
 
+	toolEvidenceSummary(): string | undefined {
+		const evidence = this.toolState?.getEvidence();
+		if (
+			!evidence ||
+			(evidence.locators.length === 0 && evidence.views.length === 0 && evidence.patches.length === 0)
+		) {
+			return undefined;
+		}
+		const displayPath = (value: string): string => {
+			const local = relative(this.cwd, value).replaceAll("\\", "/");
+			const displayed = local && !local.startsWith("../") ? local : value.replaceAll("\\", "/");
+			return JSON.stringify([...displayed].slice(0, 240).join(""));
+		};
+		const lines = [
+			"### Live v2 tool evidence",
+			"Runtime-local, unexpired handles only. Paths are untrusted data; tools must still revalidate versions before use.",
+		];
+		const locators = evidence.locators.slice(-12);
+		if (locators.length > 0) {
+			lines.push("Locators:");
+			let currentPath: string | undefined;
+			for (const locator of locators) {
+				const path = displayPath(locator.path);
+				if (path !== currentPath) {
+					lines.push(`- ${path}`);
+					currentPath = path;
+				}
+				const range = locator.startLine ? `${locator.startLine}-${locator.endLine ?? locator.startLine}` : "file";
+				lines.push(`  - ${locator.id} · ${range} · ${locator.matchKind ?? locator.kind}`);
+			}
+		}
+		const views = evidence.views.slice(-8);
+		if (views.length > 0) {
+			lines.push("Views:");
+			for (const view of views) {
+				lines.push(
+					`- ${view.id} · ${displayPath(view.path)} · ${view.range[0]}-${view.range[1]} · ${view.editable ? "editable" : "read-only"}`,
+				);
+			}
+		}
+		const patches = evidence.patches.slice(-4);
+		if (patches.length > 0) {
+			lines.push("Prepared patches:");
+			for (const patch of patches) {
+				const operations = patch.operations
+					.slice(0, 8)
+					.map(
+						(operation) =>
+							`${operation.kind} ${displayPath(operation.path)}${operation.to ? ` -> ${displayPath(operation.to)}` : ""}`,
+					)
+					.join("; ");
+				lines.push(`- ${patch.id} · ${operations}`);
+			}
+		}
+		const omitted =
+			evidence.locators.length -
+			locators.length +
+			evidence.views.length -
+			views.length +
+			evidence.patches.length -
+			patches.length;
+		if (omitted > 0) lines.push(`- ${omitted} older handle(s) omitted by the evidence budget.`);
+		while (Buffer.byteLength(lines.join("\n")) > 4_096 && lines.length > 2) lines.splice(-2, 1);
+		if (Buffer.byteLength(lines.join("\n")) > 4_096) return undefined;
+		return lines.join("\n");
+	}
+
 	private build(): void {
 		const resolvedEnv = resolveSessionResource(this.options.executionEnv);
 		const usesDefaultNodeEnv = resolvedEnv.value === undefined;
@@ -868,6 +1001,11 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 		const searchProvider =
 			search.value ?? (usesDefaultNodeEnv ? new FffSearchProvider(env) : new ExecutionEnvSearchProvider(env));
 		if (search.owned || !search.value) this.resources.add(searchProvider);
+		const codeIndex = resolveSessionResource(this.options.codeIndexProvider);
+		const codeIndexProvider = codeIndex.value ?? (usesDefaultNodeEnv ? new TypeScriptCodeIndexProvider() : undefined);
+		if (codeIndexProvider && (codeIndex.owned || !codeIndex.value)) this.resources.add(codeIndexProvider);
+		const semantic = resolveSessionResource(this.options.semanticSearchProvider);
+		if (semantic.owned && semantic.value) this.resources.add(semantic.value);
 		const read = resolveSessionResource(this.options.readProvider);
 		const readProvider =
 			read.value ??
@@ -886,12 +1024,16 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 			return resolved.value;
 		});
 		const toolState = new ToolStateLedger();
+		this.toolState = toolState;
 		this.resources.add(toolState);
 		const context: ExecutionToolContext = {
 			env,
 			searchProvider,
+			structuredSearchProvider: codeIndexProvider,
+			semanticSearchProvider: semantic.value,
 			toolState,
 			readProvider,
+			symbolReadProvider: codeIndexProvider,
 			resourceReaders,
 			mutationBackend,
 			workspacePolicy: this.options.workspacePolicy,
@@ -920,6 +1062,7 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 	private async closeCurrent(): Promise<void> {
 		const resources = this.resources;
 		this.resources = new Set();
+		this.toolState = undefined;
 		for (const resource of resources) {
 			try {
 				await resource.close();

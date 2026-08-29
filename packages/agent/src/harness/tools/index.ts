@@ -60,6 +60,10 @@ export {
 	type ReadProviderErrorCode,
 	type ResourceReader,
 	type ResourceReadResult,
+	type SymbolReadMode,
+	type SymbolReadProvider,
+	type SymbolReadRequest,
+	type SymbolReadTarget,
 } from "./read-provider.ts";
 export { createReadV2Tool, type ReadV2Details, type ReadV2Input } from "./read-v2.ts";
 export { createRunV2Tool, type RunV2Details, type RunV2Input } from "./run-v2.ts";
@@ -76,9 +80,12 @@ export {
 	type SearchProvider,
 	SearchProviderError,
 	type SearchProviderErrorCode,
+	type SearchQueryMode,
+	type SearchQueryTemplate,
 	type SearchRanking,
 	type SearchRequest,
 	type SearchSkipped,
+	type SearchStructuredMode,
 	type SearchTruncationReason,
 	scoreSearchPath,
 } from "./search-provider.ts";

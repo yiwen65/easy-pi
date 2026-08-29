@@ -82,6 +82,25 @@ describe("FffSearchProvider", () => {
 		expect(unicode.hits[0]).toMatchObject({ kind: "text", column: 22 });
 	});
 
+	it("falls back when native grep truncates away long-line match coordinates", async () => {
+		await provider.close();
+		writeFileSync(join(cwd, "src", "long.ts"), `${"x".repeat(16_000)}LONG_LINE_TARGET${"y".repeat(8_000)}\n`);
+		provider = new FffSearchProvider(new NodeExecutionEnv({ cwd }));
+		const page = await provider.search(request({ kind: "text", query: "LONG_LINE_TARGET", path: cwd }), {
+			workspaceRoot: cwd,
+			scopeId: "fff-test",
+		});
+		expect(page.generation).toMatch(/^local-/);
+		expect(page.hits[0]).toMatchObject({
+			kind: "text",
+			path: "src/long.ts",
+			line: 1,
+			column: 16_001,
+			byteOffset: 16_000,
+			ranges: [[16_000, 16_016]],
+		});
+	});
+
 	it("uses native glob search with bounded continuation", async () => {
 		const first = await provider.search(request({ kind: "glob", query: "src/**/*.ts", path: cwd, limit: 1 }), {
 			workspaceRoot: cwd,

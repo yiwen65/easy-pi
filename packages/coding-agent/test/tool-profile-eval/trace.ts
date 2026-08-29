@@ -11,7 +11,25 @@ const V2_ERROR_CODES = new Set([
 	"OUTSIDE_WORKSPACE",
 	"SYMLINK_ESCAPE",
 	"INVALID_REGEX",
+	"STALE_CURSOR",
+	"QUERY_TOO_BROAD",
+	"SEARCH_INCOMPLETE",
+	"RESULTS_TRUNCATED",
+	"NO_MATCH_COMPLETE",
+	"SYMBOL_INDEX_UNAVAILABLE",
+	"FILE_SKIPPED",
+	"BUDGET_EXCEEDED",
+	"STALE_LOCATOR",
+	"STALE_VIEW",
+	"STALE_PATCH",
+	"STALE_SNAPSHOT",
+	"SEARCH_CAPABILITY_UNSUPPORTED",
 	"SEARCH_PROVIDER_FAILED",
+	"AMBIGUOUS_MATCH",
+	"PREIMAGE_MISMATCH",
+	"RANGE_MISMATCH",
+	"VALIDATION_FAILED",
+	"READ_PROVIDER_FAILED",
 	"EDIT_CONTEXT_NOT_FOUND",
 	"EDIT_CONTEXT_AMBIGUOUS",
 	"EDIT_CONFLICT",
@@ -22,7 +40,6 @@ const V2_ERROR_CODES = new Set([
 	"EDIT_INDETERMINATE",
 	"RANGE_READ_UNSUPPORTED",
 	"DIRECTORY_TOO_LARGE",
-	"STALE_CURSOR",
 	"STALE_FILE",
 	"STALE_DIRECTORY",
 	"PATCH_PARSE_ERROR",
@@ -117,6 +134,16 @@ function classifyError(result: unknown): { errorCode?: string; errorReason?: str
 		errorReason = "byte_offset_for_directory";
 	} else if (message.startsWith("offset ") && message.includes(" is beyond ")) {
 		errorReason = "offset_beyond_directory";
+	} else if (message.startsWith("Provide exactly one of path or locatorId")) {
+		errorReason = "path_locator_conflict";
+	} else if (message.startsWith("mode conflicts with queryTemplate")) {
+		errorReason = "mode_template_conflict";
+	} else if (message.startsWith("targetKind conflicts with the structured search mode")) {
+		errorReason = "target_kind_conflict";
+	} else if (message.startsWith("Structured search returns AST-backed locators and requires context=0")) {
+		errorReason = "structured_context_conflict";
+	} else if (message.startsWith("ranking is only valid for file or structured search")) {
+		errorReason = "ranking_mode_conflict";
 	} else if (message.startsWith("This execution environment does not support bounded text reads")) {
 		errorReason = "bounded_read_unsupported";
 	} else if (message.startsWith("offset, limit, and byteOffset are invalid for images")) {
@@ -130,7 +157,9 @@ function resultWasTruncated(result: unknown): boolean {
 	const details = result.details;
 	if (!details || typeof details !== "object") return false;
 	if ("truncated" in details && details.truncated === true) return true;
-	return "truncation" in details && details.truncation !== undefined;
+	if ("truncation" in details && details.truncation !== undefined) return true;
+	if (!("coverage" in details) || !details.coverage || typeof details.coverage !== "object") return false;
+	return "truncated" in details.coverage && details.coverage.truncated === true;
 }
 
 function normalizedPath(value: string): string {

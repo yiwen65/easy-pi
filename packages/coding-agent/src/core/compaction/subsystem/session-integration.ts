@@ -133,6 +133,7 @@ export class HfCompactionHost {
 	private readonly config: HfCompactionConfig;
 	private readonly getToolsTokenEstimate: (() => number) | undefined;
 	private readonly getTools: (() => Tool[]) | undefined;
+	private readonly getToolEvidenceSummary: (() => string | undefined) | undefined;
 	private branchEntries: SessionEntry[] = [];
 	private latestProviderContext?: ProviderContextObservation;
 	private compactionInFlight = false;
@@ -143,12 +144,14 @@ export class HfCompactionHost {
 		config: HfCompactionConfig;
 		getToolsTokenEstimate?: () => number;
 		getTools?: () => Tool[];
+		getToolEvidenceSummary?: () => string | undefined;
 	}) {
 		this.sessionId = options.sessionId;
 		this.getSystemPrompt = options.getSystemPrompt;
 		this.config = options.config;
 		this.getToolsTokenEstimate = options.getToolsTokenEstimate;
 		this.getTools = options.getTools;
+		this.getToolEvidenceSummary = options.getToolEvidenceSummary;
 	}
 
 	get configComplete(): CompleteFn | undefined {
@@ -341,7 +344,9 @@ export class HfCompactionHost {
 				};
 			}
 			const modelUsage = generated.modelUsage;
-			const summaryMessage = createCompactionSummaryMessage(generated.text, before.total, new Date().toISOString());
+			const toolEvidence = this.getToolEvidenceSummary?.()?.trim();
+			const summary = toolEvidence ? `${generated.text}\n\n${toolEvidence}` : generated.text;
+			const summaryMessage = createCompactionSummaryMessage(summary, before.total, new Date().toISOString());
 			const recentUserBudget = Math.min(
 				options.recentUserTokens ?? this.config.recentUserTokens ?? DEFAULT_RECENT_USER_TOKENS,
 				DEFAULT_RECENT_USER_TOKENS,

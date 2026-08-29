@@ -1,4 +1,6 @@
-# A/B/C result — `openai-codex/gpt-5.6-luna`
+# Historical A/B/C result — `openai-codex/gpt-5.6-luna`
+
+This section preserves the completed 15-session happy-path run from the earlier evaluation contract. It is not evidence for the current P0/P1/P2 recovery and structured-retrieval requirements.
 
 Run contract:
 
@@ -36,6 +38,57 @@ Paired completion-score deltas were all zero (`B−A=0`, `C−B=0`, `C−A=0`); 
 B and C exposed the same four model schemas; A exposed the separate seven-tool native schema. C used 41.5% fewer tool calls than A and 16.2% fewer than B in this sample. C's mean elapsed time was 16.5% below A and 11.7% below B, but five sessions per variant are insufficient to attribute latency differences causally.
 
 No run produced tool errors, recovery, partial/approximate search, or truncation, so this run validates the happy-path composite workflow but does not estimate those rare-path rates. The candidate remains opt-in; the default profile remains legacy and the v2 edit dialect remains operations.
+
+## Current deterministic P0/P1/P2 evidence
+
+The current no-model matrix executes all 16 declared requirement scenarios through actual legacy/v2 definitions over generated temporary fixtures. It activates legacy text, v2 text, production JS/TS structured Search/Read, deterministic semantic candidates, query templates, preferred-path ranking, partial coverage, overflow, versioned Edit recovery, and focused Run repair. It persists only counts and numeric metrics.
+
+| Safety oracle | Result |
+| --- | ---: |
+| Scenarios passed | 16/16 |
+| Ambiguity rejection | 1/1 |
+| Stale view/patch/preimage rejection | 3/3 |
+| Truncation disclosure | 3/3 |
+| Wrong-location protection | 3/3 |
+| Silent replace-all prevention | 1/1 |
+| Unversioned write prevention | 3/3 |
+| Syntax-failure state disclosure | 1/1 |
+
+| Retrieval variant | Queries | Precision@5 | Hit@5 | Mean target rank | Complete / partial / overflow |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| legacy | 1 | 0.250 | 1.000 | 1.000 | 1 / 0 / 0 |
+| text-v2 | 3 | 0.750 | 1.000 | 1.333 | 2 / 0 / 1 |
+| structured-v2 | 5 | 0.567 | 0.800 | 1.000 | 4 / 1 / 0 |
+| structured without path prior | 1 | 0.333 | 1.000 | 3.000 | 1 / 0 / 0 |
+| semantic-v2 | 1 | 0.500 | 1.000 | 1.000 | 1 / 0 / 0 |
+
+The path-prior ablation improved target rank from 3 to 1. The three workflow samples averaged 1.33 locate calls, 3.67 safe-edit calls, and 5.67 verification calls; they returned 3,094 bytes / 777 estimated tokens at $0. Host-local workflow latency was p50 17.26 ms and p95 82.73 ms. These mixed fixtures intentionally do not support a universal structured Precision@5 advantage; they verify capability activation, truthful coverage, bounded context, ranking effects, and exact safety behavior.
+
+## Current real-run status
+
+The replacement evaluator freezes 6 calibration and 42 held-out sessions across legacy, text-v2, and structured/semantic-v2 with 18-turn/session, 48-session, and $5 combined breakers. Calibration completed 6/6 hidden-oracle workflows with 100% wrong-location protection and external-change preservation. It consumed $0.03481999, made 4 guarded embedding requests for 277 synthetic-fixture tokens, and observed at most 16/18 turns. Calibration remains excluded from held-out aggregates.
+
+| Calibration variant | Success | Mean turns | Mean tool calls | Tool errors | Schema errors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| legacy | 2/2 | 8.5 | 11.5 | 2 | 0 |
+| text-v2 | 2/2 | 15.5 | 19.5 | 16 | 6 |
+| structured/semantic-v2 | 2/2 | 12.5 | 16.0 | 8 | 6 |
+
+Deterministic diagnosis found that Read's model-visible union branches each advertised both `path` and `locatorId` although runtime required exactly one, while custom text-only sessions advertised unavailable structured/semantic capabilities. Regressions now prove exclusive Read branches and provider-capability-aware Search/Read guidance. Search schema descriptions and prompt guidance also state the selector, `kind`, `context`, `targetKind`, and `ranking` constraints; faux structured and semantic executions prove valid normalized requests. The exact arguments of three historical Search `INVALID_INPUT` calls were intentionally not persisted, so no individual historical conflict class is claimed. Intentional stale locator/view/patch rejection remains covered by the deterministic safety matrix.
+
+The held-out stage was invoked exactly once. Four sessions completed successfully, then the fifth attempt (legacy variant) crossed the reactive assistant-turn guard and stopped the sequential matrix with `model_turn_budget_exceeded`; the remaining 37 sessions were not started. The held-out opt-in was disabled immediately and this stage will not be rerun.
+
+| Partial held-out variant | Attempts | Completed / successful | Mean turns | Mean tool calls | Tool errors | Schema errors | Known cost USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| legacy | 2 | 1 / 1 | 8.0 | 9.0 | 0 | 0 | 0.00518636 |
+| text-v2 | 1 | 1 / 1 | 8.0 | 12.0 | 2 | 0 | 0.00354192 |
+| structured/semantic-v2 | 2 | 2 / 2 | 7.5 | 7.0 | 0 | 0 | 0.00651546 |
+
+All four completed records scored 1 and preserved every wrong location and external change. The structured/semantic records made 4 guarded embedding requests for 554 synthetic-fixture tokens. Their mean first-target rank was 1; the text-v2 record's was 4. The text-v2 record recovered from two capability errors without a schema error. Completed-record token totals were 35,008 input, 5,724 output, and 64,512 cache-read tokens; the aborted record has no finalized usage.
+
+Known completed held-out cost is $0.01524374, making the known calibration-plus-completed total $0.05006373. The aborted legacy attempt's final chat usage was unavailable because the breaker threw before record finalization, so exact total cost is not claimed; it made no embedding request. Six calibration sessions plus five held-out attempts consumed 11 of the 48 authorized session starts.
+
+The captured failure also proved the evaluator enforced the 18-turn cap one turn late: it aborted after observing turn 19. A deterministic red/green regression now drives `Agent.shouldStopAfterTurn` after turn 18 when tool results would otherwise trigger another provider request, while still allowing a final answer on turn 18. No held-out rerun was performed after this evaluator fix. Therefore the real comparison is partial and cannot support seven-family or 14-runs-per-variant conclusions.
 
 ## Deterministic FFF Search evidence
 
@@ -83,4 +136,4 @@ A second no-model fixture executed the actual four-tool v2 definitions through `
 
 The full five-call locator/read/prepare/commit/verify chain remained below the old one-call full-line Search baseline because the generated long line stayed behind a match-centered locator and bounded Read fragment. Prepare performed no mutation; commit consumed the patch handle and rechecked all observations. The source target changed, while test, vendor, generated, and ambiguous fixtures remained unchanged.
 
-Limits: this is a deterministic synthetic fixture, not a new model run or a repository-wide latency study. The 97.8% figure is intentionally driven by the overlong generated-line case and is not a universal expected reduction. Token values use chars/4, structured AST/LSP/semantic modes remain unavailable, files above the editable hash limit return non-editable views, and the default mutation backend still makes no cross-file atomic-visibility or OS-sandbox claim.
+Limits: this is a deterministic synthetic fixture, not a new model run or a repository-wide latency study. The 97.8% figure is intentionally driven by the overlong generated-line case and is not a universal expected reduction. Token values use chars/4. Production structured Search/Read is limited to JS/TS; other languages fail closed. Semantic retrieval remains explicit opt-in, and the current semantic evidence uses a local static provider rather than a remote embedding call. Files above the editable hash limit return non-editable views, and the default mutation backend still makes no cross-file atomic-visibility or OS-sandbox claim.

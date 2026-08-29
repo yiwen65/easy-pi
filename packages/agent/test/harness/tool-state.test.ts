@@ -55,6 +55,54 @@ describe("v2 tool state", () => {
 		expect(ledger.takePatch(patch.id, "scope-a")).toBeUndefined();
 	});
 
+	it("deduplicates superseded evidence and invalidates changed paths without retaining source lines", () => {
+		const ledger = new ToolStateLedger();
+		const first = ledger.addLocator(locator("scope", "/repo/a.ts"));
+		const latest = ledger.addLocator(locator("scope", "/repo/a.ts"));
+		expect(ledger.getLocator(first.id, "scope")).toBeUndefined();
+		expect(ledger.getLocator(latest.id, "scope")).toBeDefined();
+		const firstView = ledger.addView({
+			scopeId: "scope",
+			snapshotId: "snapshot-1",
+			locatorId: latest.id,
+			path: "/repo/a.ts",
+			range: [4, 4],
+			lines: ["secret source line"],
+			fileVersion: { size: 20, mtimeMs: 1 },
+			fileHash: "sha256:first",
+			editable: true,
+		});
+		const latestView = ledger.addView({
+			scopeId: firstView.scopeId,
+			snapshotId: firstView.snapshotId,
+			locatorId: firstView.locatorId,
+			path: firstView.path,
+			range: firstView.range,
+			lines: ["new secret source line"],
+			fileVersion: firstView.fileVersion,
+			fileHash: "sha256:latest",
+			editable: true,
+		});
+		expect(ledger.getView(firstView.id, "scope")).toBeUndefined();
+		expect(ledger.getView(latestView.id, "scope")).toBeDefined();
+		ledger.addPatch({
+			scopeId: "scope",
+			plan: {
+				observations: [],
+				operations: [{ kind: "update", path: "/repo/a.ts", content: "changed source" }],
+				limits: { maxOperations: 1, maxFiles: 1, maxFileBytes: 100, maxTotalBytes: 100 },
+			},
+			data: {},
+		});
+		const evidence = ledger.getEvidence();
+		expect(evidence.locators.map((item) => item.id)).toEqual([latest.id]);
+		expect(evidence.views).toHaveLength(1);
+		expect(evidence.views[0]).not.toHaveProperty("lines");
+		expect(JSON.stringify(evidence)).not.toContain("secret source line");
+		ledger.invalidatePaths(["/repo/a.ts"]);
+		expect(ledger.getEvidence()).toEqual({ locators: [], views: [], patches: [] });
+	});
+
 	it("expires and bounds records", () => {
 		vi.useFakeTimers();
 		try {

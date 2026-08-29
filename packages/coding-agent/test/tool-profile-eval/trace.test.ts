@@ -119,6 +119,31 @@ describe("sanitized tool trace collector", () => {
 		expect(serialized).not.toMatch(/8472|secret|positive safe integer/);
 	});
 
+	it("classifies current search/read schema conflicts without retaining messages", () => {
+		const cases = [
+			["Provide exactly one of path or locatorId.", "path_locator_conflict"],
+			["mode conflicts with queryTemplate.", "mode_template_conflict"],
+			["targetKind conflicts with the structured search mode.", "target_kind_conflict"],
+			["Structured search returns AST-backed locators and requires context=0.", "structured_context_conflict"],
+			["ranking is only valid for file or structured search.", "ranking_mode_conflict"],
+		] as const;
+		for (const [message, expected] of cases) {
+			const collector = createSanitizedToolTraceCollector();
+			collector.handle(event({ type: "tool_execution_start", toolCallId: expected, toolName: "read", args: {} }));
+			collector.handle(
+				event({
+					type: "tool_execution_end",
+					toolCallId: expected,
+					toolName: "read",
+					isError: true,
+					result: { content: [{ type: "text", text: `INVALID_INPUT\n\n${message}` }] },
+				}),
+			);
+			expect(collector.snapshot().calls[0]?.errorReason).toBe(expected);
+			expect(JSON.stringify(collector.snapshot())).not.toContain(message);
+		}
+	});
+
 	it("derives target rank, selection, and run-misuse metrics without retaining paths or commands", () => {
 		let time = 0;
 		const collector = createSanitizedToolTraceCollector(() => time++, { targetPath: "src/target.ts" });
@@ -206,6 +231,53 @@ describe("sanitized tool trace collector", () => {
 			approximateEditWithoutTargetReadCount: 1,
 		});
 		expect(JSON.stringify(trace)).not.toMatch(/secret|target\.ts|noise\.ts|cat src/);
+	});
+
+	it("classifies current v2 recovery codes and Search coverage truncation", () => {
+		let time = 0;
+		const collector = createSanitizedToolTraceCollector(() => time++);
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "search-overflow",
+				toolName: "search",
+				args: { query: "private-query" },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "search-overflow",
+				toolName: "search",
+				isError: false,
+				result: { content: [], details: { coverage: { truncated: true } } },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_start",
+				toolCallId: "stale-edit",
+				toolName: "edit",
+				args: { operations: [{ kind: "update", path: "private-path" }] },
+			}),
+		);
+		collector.handle(
+			event({
+				type: "tool_execution_end",
+				toolCallId: "stale-edit",
+				toolName: "edit",
+				isError: true,
+				result: { content: [{ type: "text", text: "STALE_VIEW\n\nprivate stale message" }] },
+			}),
+		);
+
+		const trace = collector.snapshot();
+		expect(trace).toMatchObject({ truncationCount: 1, toolErrorCount: 1 });
+		expect(trace.calls).toMatchObject([
+			{ toolName: "search", status: "success", truncated: true },
+			{ toolName: "edit", status: "error", errorCode: "STALE_VIEW" },
+		]);
+		expect(JSON.stringify(trace)).not.toMatch(/private-query|private-path|private stale message/);
 	});
 
 	it("counts successful edit confirmation reads and peak context without retaining message content", () => {

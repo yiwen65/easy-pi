@@ -42,6 +42,7 @@ import {
 	createV2ToolRuntime,
 	createWriteTool,
 	type ToolProfile,
+	type V2CodeIndexProvider,
 	type V2SessionResourceSource,
 	withFileMutationQueue,
 } from "./tools/index.ts";
@@ -63,6 +64,8 @@ export interface CreateAgentSessionOptions {
 		executionEnv?: V2SessionResourceSource<ExecutionEnv>;
 		search?: {
 			provider?: V2SessionResourceSource<SearchProvider>;
+			codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider>;
+			semanticProvider?: V2SessionResourceSource<SearchProvider>;
 		};
 		read?: {
 			provider?: V2SessionResourceSource<ReadProvider>;
@@ -427,6 +430,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					workspacePolicy: options.workspacePolicy,
 					executionEnv: options.toolsV2?.executionEnv,
 					searchProvider: options.toolsV2?.search?.provider,
+					codeIndexProvider: options.toolsV2?.search?.codeIndexProvider,
+					semanticSearchProvider: options.toolsV2?.search?.semanticProvider,
 					readProvider: options.toolsV2?.read?.provider,
 					resourceReaders: options.toolsV2?.read?.resourceReaders,
 					mutationBackend: options.toolsV2?.edit?.backend,

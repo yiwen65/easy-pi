@@ -232,9 +232,9 @@
 - Wrong approach: 把简单任务的模型轮次先验设为 4，首次超限后只按单次已观察值逐级加 spare；后续 prompt ablation 又沿用了已完成基准的 10/12-turn 上界。
 - Why it failed: 每个 search/read/edit/run 反馈都可能触发下一次 assistant turn；多操作任务在 `max` thinking 下既有更长工具链，也有跨运行波动，历史最高 10 轮的同类 control 后来实际达到 14 轮。
 - Recognition signal: 真实评测在功能已完成或接近完成时仍报 `exceeded N model turns`，且复杂 task/variant 总在相同 breaker 处中止。
-- Correct approach: turn cap 按最复杂预期工具链与多次 pilot 的波动加 bounded headroom 设置，global cap 机械派生为 `sessions × perSessionTurns`；breaker 错误必须打印 observed turns。校准失败的 partial records 只作诊断，不能混入最终统计 aggregate。
-- Prevention: 全矩阵前为每种任务形态与实验 variant 跑多个 calibration seed；至少覆盖 discovery→read→edit→run→final 和 discovery→read→move/update→run→recovery→final，再冻结预算。
-- Verified by: 2026-08-28 `tool-profile-eval` 中 4-turn、6-turn breaker 分别在 v2 locate/move 停止；后续诊断和 ablation 的 10/12-turn cap 又观察到 11/14 turns，最终 bounded 18-turn ablation cap 完成 20/20，held-out 18-turn cap再完成 20/20。
+- Correct approach: turn cap 按最复杂预期工具链与多次 pilot 的波动加 bounded headroom 设置，global cap 机械派生为 `sessions × perSessionTurns`；breaker 错误必须打印 observed turns。若 cap 是硬边界，必须在第 N 轮工具执行完成后、下一次 provider request 之前用 `shouldStopAfterTurn` 停止，不能等第 N+1 个 `message_end` 才 abort。校准失败的 partial records 只作诊断，不能混入最终统计 aggregate。
+- Prevention: 全矩阵前为每种任务形态与实验 variant 跑多个 calibration seed；至少覆盖 discovery→read→edit→run→final 和 discovery→read→move/update→run→recovery→final，再冻结预算。为 breaker 加确定性测试：第 N 轮最终回答可完成，第 N 轮工具结果会阻止下一请求，且 provider 永远看不到第 N+1 轮。
+- Verified by: 2026-08-28 `tool-profile-eval` 中 4-turn、6-turn breaker 分别在 v2 locate/move 停止；后续诊断和 ablation 的 10/12-turn cap 又观察到 11/14 turns。2026-08-29 本轮 held-out 的 reactive guard 在 18-turn 合同下实际观察到第 19 轮并中止；改为 `shouldStopAfterTurn` 后确定性边界回归 7/7 通过，真实 held-out 未重跑。
 
 ## Workspace source 测试——package subpath alias 必须与根导出一起覆盖
 

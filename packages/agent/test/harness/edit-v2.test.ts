@@ -155,24 +155,50 @@ describe("v2 edit", () => {
 
 	it("applies ordered create, update, move, update, and delete operations", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("first.txt", "one"));
+		getOrThrow(await env.writeFile("second.txt", "two"));
+		getOrThrow(await env.writeFile("delete.txt", "remove"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const read = createReadV2Tool();
+		const first = await read.execute("first", { path: "first.txt", maxLines: 1 }, undefined, undefined, context);
+		const second = await read.execute("second", { path: "second.txt", maxLines: 1 }, undefined, undefined, context);
 		env.mutations = 0;
 		const result = await createEditV2Tool().execute(
 			"id",
 			{
 				operations: [
-					{ kind: "create", path: "a.txt", content: "one" },
-					{ kind: "update", path: "a.txt", oldText: "one", newText: "two" },
-					{ kind: "move", path: "a.txt", to: "b.txt" },
-					{ kind: "update", path: "b.txt", oldText: "two", newText: "three" },
+					{ kind: "create", path: "created.txt", content: "created" },
+					{
+						kind: "update",
+						path: "first.txt",
+						oldText: "one",
+						newText: "ONE",
+						viewId: first.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+					{ kind: "move", path: "first.txt", to: "moved.txt" },
+					{
+						kind: "update",
+						path: "second.txt",
+						oldText: "two",
+						newText: "TWO",
+						viewId: second.details.viewId,
+						range: { startLine: 1, endLine: 1 },
+					},
+					{ kind: "delete", path: "delete.txt" },
 				],
 			},
 			undefined,
 			undefined,
-			{ env },
+			context,
 		);
-		expect(getOrThrow(await env.readTextFile("b.txt"))).toBe("three");
-		expect(getOrThrow(await env.exists("a.txt"))).toBe(false);
-		expect(result.details.operations).toHaveLength(4);
+		expect(getOrThrow(await env.readTextFile("created.txt"))).toBe("created");
+		expect(getOrThrow(await env.readTextFile("moved.txt"))).toBe("ONE");
+		expect(getOrThrow(await env.readTextFile("second.txt"))).toBe("TWO");
+		expect(getOrThrow(await env.exists("first.txt"))).toBe(false);
+		expect(getOrThrow(await env.exists("delete.txt"))).toBe(false);
+		expect(result.details.operations).toHaveLength(5);
 	});
 
 	it("creates missing destination parents for create and move", async () => {
@@ -249,6 +275,8 @@ describe("v2 edit", () => {
 		);
 		expect(committed.details.status).toBe("applied");
 		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("same\nmiddle\nchanged\n");
+		expect(toolState.getView(view.details.viewId ?? "", env.cwd)).toBeUndefined();
+		expect(toolState.getEvidence()).toEqual({ locators: [], views: [], patches: [] });
 	});
 
 	it("rejects ambiguous, mismatched, and out-of-view preimages before mutation", async () => {
@@ -431,9 +459,82 @@ describe("v2 edit", () => {
 		expect(getOrThrow(await env.readTextFile("b.txt"))).toBe("b-external\n");
 	});
 
+	it("rejects every unversioned update dialect and same-batch update before mutation", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "unique old value\n"));
+		env.mutations = 0;
+		const attempts = [
+			createEditV2Tool().execute(
+				"operations-unversioned",
+				{
+					operations: [{ kind: "update", path: "a.txt", oldText: "unique old value", newText: "unsafe" }],
+				},
+				undefined,
+				undefined,
+				{ env },
+			),
+			createEditV2Tool({ dialect: "replacement" }).execute(
+				"replacement-unversioned",
+				{ path: "a.txt", edits: [{ oldText: "unique old value", newText: "unsafe" }] },
+				undefined,
+				undefined,
+				{ env },
+			),
+			createEditV2Tool({ dialect: "patch" }).execute(
+				"patch-unversioned",
+				{
+					patch: [
+						"*** Pi Edit Patch v1",
+						JSON.stringify({
+							kind: "update",
+							path: "a.txt",
+							oldText: "unique old value",
+							newText: "unsafe",
+						}),
+						"*** End Pi Edit Patch",
+					].join("\n"),
+				},
+				undefined,
+				undefined,
+				{ env },
+			),
+			createEditV2Tool().execute(
+				"same-batch-unversioned",
+				{
+					operations: [
+						{ kind: "create", path: "created.txt", content: "before" },
+						{
+							kind: "update",
+							path: "created.txt",
+							oldText: "before",
+							newText: "unsafe",
+							range: { startLine: 1, endLine: 1 },
+						},
+					],
+				},
+				undefined,
+				undefined,
+				{ env },
+			),
+		];
+		for (const attempt of attempts) await expect(attempt).rejects.toMatchObject({ code: "INVALID_INPUT" });
+		expect(env.mutations).toBe(0);
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("unique old value\n");
+		expect(getOrThrow(await env.exists("created.txt"))).toBe(false);
+	});
+
 	it("performs zero mutations when prevalidation fails", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("a.txt", "same same"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		env.mutations = 0;
 		await expect(
 			createEditV2Tool().execute(
@@ -441,14 +542,21 @@ describe("v2 edit", () => {
 				{
 					operations: [
 						{ kind: "create", path: "new/parent/file.txt", content: "new" },
-						{ kind: "update", path: "a.txt", oldText: "same", newText: "x" },
+						{
+							kind: "update",
+							path: "a.txt",
+							oldText: "same",
+							newText: "x",
+							viewId: view.details.viewId,
+							range: { startLine: 1, endLine: 1 },
+						},
 					],
 				},
 				undefined,
 				undefined,
-				{ env },
+				context,
 			),
-		).rejects.toMatchObject({ code: "EDIT_CONTEXT_AMBIGUOUS" });
+		).rejects.toMatchObject({ code: "AMBIGUOUS_MATCH" });
 		expect(env.mutations).toBe(0);
 	});
 
@@ -471,15 +579,35 @@ describe("v2 edit", () => {
 	it("rejects stale observations before performing any planned mutation", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("a.txt", "original"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		env.mutations = 0;
 		const backend = new StaleBeforeCommitBackend(env, "a.txt");
 		await expect(
 			createEditV2Tool({ backend }).execute(
 				"id",
-				{ operations: [{ kind: "update", path: "a.txt", oldText: "original", newText: "planned" }] },
+				{
+					operations: [
+						{
+							kind: "update",
+							path: "a.txt",
+							oldText: "original",
+							newText: "planned",
+							viewId: view.details.viewId,
+							range: { startLine: 1, endLine: 1 },
+						},
+					],
+				},
 				undefined,
 				undefined,
-				{ env },
+				context,
 			),
 		).rejects.toMatchObject({ code: "STALE_FILE" });
 		expect(env.mutations).toBe(0);
@@ -510,13 +638,33 @@ describe("v2 edit", () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("script.txt", "\uFEFFone\r\ntwo\r\n"));
 		await chmod(`${env.cwd}/script.txt`, 0o755);
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "script.txt", maxLines: 2 },
+			undefined,
+			undefined,
+			context,
+		);
 		env.mutations = 0;
 		await createEditV2Tool().execute(
 			"id",
-			{ operations: [{ kind: "update", path: "script.txt", oldText: "one\ntwo", newText: "ONE\nTWO" }] },
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "script.txt",
+						oldText: "one\ntwo",
+						newText: "ONE\nTWO",
+						viewId: view.details.viewId,
+						range: { startLine: 1, endLine: 2 },
+					},
+				],
+			},
 			undefined,
 			undefined,
-			{ env },
+			context,
 		);
 		expect(getOrThrow(await env.readTextFile("script.txt"))).toBe("\uFEFFONE\r\nTWO\r\n");
 		expect((await stat(`${env.cwd}/script.txt`)).mode & 0o777).toBe(0o755);
@@ -525,6 +673,15 @@ describe("v2 edit", () => {
 	it("normalizes replacement and versioned patch dialects into canonical operations", async () => {
 		const replacementEnv = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await replacementEnv.writeFile("a.txt", "alpha beta gamma"));
+		const toolState = new ToolStateLedger();
+		const context = { env: replacementEnv, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		const replacement = await createEditV2Tool({ dialect: "replacement" }).execute(
 			"replacement",
 			{
@@ -533,10 +690,12 @@ describe("v2 edit", () => {
 					{ oldText: "alpha", newText: "A" },
 					{ oldText: "gamma", newText: "G" },
 				],
+				viewId: view.details.viewId,
+				range: { startLine: 1, endLine: 1 },
 			},
 			undefined,
 			undefined,
-			{ env: replacementEnv },
+			context,
 		);
 		expect(getOrThrow(await replacementEnv.readTextFile("a.txt"))).toBe("A beta G");
 		expect(replacement.details).toMatchObject({ dialect: "replacement", operations: [{ kind: "update" }] });
@@ -557,36 +716,47 @@ describe("v2 edit", () => {
 	});
 
 	it("produces the same update through operations, replacement, and patch dialects", async () => {
-		const cases = [
-			{
-				dialect: "operations" as const,
-				input: { operations: [{ kind: "update" as const, path: "a.txt", oldText: "two", newText: "TWO" }] },
-			},
-			{
-				dialect: "replacement" as const,
-				input: { path: "a.txt", edits: [{ oldText: "two", newText: "TWO" }] },
-			},
-			{
-				dialect: "patch" as const,
-				input: {
-					patch: [
-						"*** Pi Edit Patch v1",
-						JSON.stringify({ kind: "update", path: "a.txt", oldText: "two", newText: "TWO" }),
-						"*** End Pi Edit Patch",
-					].join("\n"),
-				},
-			},
-		];
-		for (const candidate of cases) {
+		for (const dialect of ["operations", "replacement", "patch"] as const) {
 			const env = new TrackingEnv({ cwd: createTempDir() });
 			getOrThrow(await env.writeFile("a.txt", "one\ntwo\nthree\n"));
-			await createEditV2Tool({ dialect: candidate.dialect }).execute(
-				candidate.dialect,
-				candidate.input,
+			const toolState = new ToolStateLedger();
+			const context = { env, toolState };
+			const view = await createReadV2Tool().execute(
+				"read",
+				{ path: "a.txt", startLine: 2, maxLines: 1 },
 				undefined,
 				undefined,
-				{ env },
+				context,
 			);
+			const binding = {
+				viewId: view.details.viewId,
+				expectedFileHash: view.details.fileHash,
+				range: { startLine: 2, endLine: 2 },
+				matchPolicy: "exactly_one_in_range" as const,
+			};
+			const input =
+				dialect === "operations"
+					? {
+							operations: [
+								{ kind: "update" as const, path: "a.txt", oldText: "two", newText: "TWO", ...binding },
+							],
+						}
+					: dialect === "replacement"
+						? { path: "a.txt", edits: [{ oldText: "two", newText: "TWO" }], ...binding }
+						: {
+								patch: [
+									"*** Pi Edit Patch v1",
+									JSON.stringify({
+										kind: "update",
+										path: "a.txt",
+										oldText: "two",
+										newText: "TWO",
+										...binding,
+									}),
+									"*** End Pi Edit Patch",
+								].join("\n"),
+							};
+			await createEditV2Tool({ dialect }).execute(dialect, input, undefined, undefined, context);
 			expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("one\nTWO\nthree\n");
 		}
 	});
@@ -594,6 +764,8 @@ describe("v2 edit", () => {
 	it("rejects malformed patches and non-UTF-8 files before mutation", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("binary.bin", Uint8Array.from([0xff, 0xfe, 0xfd])));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
 		env.mutations = 0;
 		await expect(
 			createEditV2Tool({ dialect: "patch" }).execute(
@@ -601,13 +773,27 @@ describe("v2 edit", () => {
 				{ patch: "*** Pi Edit Patch v2\n*** End Pi Edit Patch" },
 				undefined,
 				undefined,
-				{ env },
+				context,
 			),
 		).rejects.toMatchObject({ code: "PATCH_PARSE_ERROR" });
 		getOrThrow(await env.writeExternal("text.txt", "current"));
+		const textView = await createReadV2Tool().execute(
+			"text-read",
+			{ path: "text.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		const missingContextPatch = [
 			"*** Pi Edit Patch v1",
-			JSON.stringify({ kind: "update", path: "text.txt", oldText: "missing", newText: "new" }),
+			JSON.stringify({
+				kind: "update",
+				path: "text.txt",
+				oldText: "missing",
+				newText: "new",
+				viewId: textView.details.viewId,
+				range: { startLine: 1, endLine: 1 },
+			}),
 			"*** End Pi Edit Patch",
 		].join("\n");
 		await expect(
@@ -616,17 +802,35 @@ describe("v2 edit", () => {
 				{ patch: missingContextPatch },
 				undefined,
 				undefined,
-				{ env },
+				context,
 			),
 		).rejects.toMatchObject({ code: "PATCH_CONTEXT_NOT_FOUND" });
 		getOrThrow(await env.writeExternal("mixed.txt", "one\r\ntwo\n"));
+		const mixedView = await createReadV2Tool().execute(
+			"mixed-read",
+			{ path: "mixed.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
 		await expect(
 			createEditV2Tool().execute(
 				"mixed",
-				{ operations: [{ kind: "update", path: "mixed.txt", oldText: "one", newText: "ONE" }] },
+				{
+					operations: [
+						{
+							kind: "update",
+							path: "mixed.txt",
+							oldText: "one",
+							newText: "ONE",
+							viewId: mixedView.details.viewId,
+							range: { startLine: 1, endLine: 1 },
+						},
+					],
+				},
 				undefined,
 				undefined,
-				{ env },
+				context,
 			),
 		).rejects.toMatchObject({ code: "INVALID_INPUT" });
 		await expect(
@@ -635,7 +839,7 @@ describe("v2 edit", () => {
 				{ operations: [{ kind: "update", path: "binary.bin", oldText: "x", newText: "y" }] },
 				undefined,
 				undefined,
-				{ env },
+				context,
 			),
 		).rejects.toMatchObject({ code: "UNSUPPORTED_BINARY_FILE" });
 		expect(env.mutations).toBe(0);

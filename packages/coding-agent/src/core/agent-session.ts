@@ -456,6 +456,7 @@ export class AgentSession {
 				config: { ...config.hfCompaction, mode: hfMode },
 				getToolsTokenEstimate: () => estimateActiveToolsTokens(this.agent.state.tools),
 				getTools: () => this.agent.state.tools,
+				getToolEvidenceSummary: () => this._v2ToolRuntime?.toolEvidenceSummary(),
 			});
 		}
 

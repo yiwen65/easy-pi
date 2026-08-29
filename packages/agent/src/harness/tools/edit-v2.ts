@@ -21,7 +21,7 @@ import {
 	validateEditPlan,
 } from "./mutation-core.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
-import { resolveToolState, type ToolView } from "./tool-state.ts";
+import { resolveToolState, type ToolStateLedger, type ToolView } from "./tool-state.ts";
 import { V2ToolError } from "./v2-errors.ts";
 import { withV2MutationCoordinator } from "./v2-mutation-coordinator.ts";
 import { resolveWorkspacePath } from "./workspace-policy.ts";
@@ -31,7 +31,7 @@ const viewBindingSchema = {
 	viewId: Type.Optional(Type.String({ description: "Fresh view returned by read" })),
 	expectedFileHash: Type.Optional(Type.String({ description: "file_hash returned by read" })),
 	range: Type.Optional(lineRangeSchema),
-	matchPolicy: Type.Optional(Type.Union([Type.Literal("exactly_one_in_range"), Type.Literal("exactly_one_in_file")])),
+	matchPolicy: Type.Optional(Type.Literal("exactly_one_in_range")),
 	replaceAll: Type.Optional(Type.Literal(false)),
 };
 const createOperation = Type.Object({ kind: Type.Literal("create"), path: Type.String(), content: Type.String() });
@@ -151,61 +151,13 @@ function countOccurrences(content: string, needle: string): number[] {
 	}
 }
 
-function applyExactReplacements(
+function applyRangeReplacements(
 	content: string,
 	replacements: Replacement[],
 	path: string,
+	range: LineRange,
 	patchErrors = false,
 ): string {
-	const { bom, text } = stripBom(content);
-	const withoutCrlf = text.replaceAll("\r\n", "");
-	if ((text.includes("\r\n") && withoutCrlf.includes("\n")) || withoutCrlf.includes("\r")) {
-		throw new V2ToolError("INVALID_INPUT", `${path} uses mixed or unsupported line endings.`);
-	}
-	const ending = detectLineEnding(text);
-	const base = normalizeToLF(text);
-	const matches = replacements.map((replacement, index) => {
-		const oldText = normalizeToLF(replacement.oldText);
-		const newText = normalizeToLF(replacement.newText);
-		if (oldText.length === 0) throw new V2ToolError("INVALID_INPUT", `Replacement ${index} for ${path} is empty.`);
-		const indexes = countOccurrences(base, oldText);
-		if (indexes.length === 0) {
-			throw new V2ToolError(
-				patchErrors ? "PATCH_CONTEXT_NOT_FOUND" : "EDIT_CONTEXT_NOT_FOUND",
-				`Exact text was not found in ${path}. Read it and retry.`,
-				{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
-			);
-		}
-		if (indexes.length > 1) {
-			throw new V2ToolError(
-				patchErrors ? "PATCH_AMBIGUOUS" : "EDIT_CONTEXT_AMBIGUOUS",
-				`Exact text occurs ${indexes.length} times in ${path}. Add context.`,
-				{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
-			);
-		}
-		return { index: indexes[0], length: oldText.length, newText, replacementIndex: index };
-	});
-	matches.sort((left, right) => left.index - right.index);
-	for (let index = 1; index < matches.length; index++) {
-		const previous = matches[index - 1];
-		const current = matches[index];
-		if (previous.index + previous.length > current.index) {
-			throw new V2ToolError(
-				"EDIT_CONFLICT",
-				`Replacements ${previous.replacementIndex} and ${current.replacementIndex} overlap in ${path}.`,
-			);
-		}
-	}
-	let output = base;
-	for (let index = matches.length - 1; index >= 0; index--) {
-		const match = matches[index];
-		output = output.slice(0, match.index) + match.newText + output.slice(match.index + match.length);
-	}
-	if (output === base) throw new V2ToolError("INVALID_INPUT", `The replacements make no changes to ${path}.`);
-	return bom + restoreLineEndings(output, ending);
-}
-
-function applyRangeReplacement(content: string, replacement: Replacement, path: string, range: LineRange): string {
 	const { bom, text } = stripBom(content);
 	const withoutCrlf = text.replaceAll("\r\n", "");
 	if ((text.includes("\r\n") && withoutCrlf.includes("\n")) || withoutCrlf.includes("\r")) {
@@ -228,28 +180,47 @@ function applyRangeReplacement(content: string, replacement: Replacement, path: 
 	const endLineStart = lineStarts[range.endLine - 1];
 	const newline = base.indexOf("\n", endLineStart);
 	const end = newline < 0 ? base.length : newline;
-	const oldText = normalizeToLF(replacement.oldText);
-	const newText = normalizeToLF(replacement.newText);
-	if (oldText.length === 0) throw new V2ToolError("INVALID_INPUT", `The expected text for ${path} is empty.`);
 	const segment = base.slice(start, end);
-	const matches = countOccurrences(segment, oldText);
-	if (matches.length === 0) {
-		throw new V2ToolError(
-			"PREIMAGE_MISMATCH",
-			`The expected text is not present in ${path} within lines ${range.startLine}-${range.endLine}.`,
-			{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
-		);
+	const matches = replacements.map((replacement, index) => {
+		const oldText = normalizeToLF(replacement.oldText);
+		const newText = normalizeToLF(replacement.newText);
+		if (oldText.length === 0) throw new V2ToolError("INVALID_INPUT", `Replacement ${index} for ${path} is empty.`);
+		const indexes = countOccurrences(segment, oldText);
+		if (indexes.length === 0) {
+			throw new V2ToolError(
+				patchErrors ? "PATCH_CONTEXT_NOT_FOUND" : "PREIMAGE_MISMATCH",
+				`The expected text is not present in ${path} within lines ${range.startLine}-${range.endLine}.`,
+				{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
+			);
+		}
+		if (indexes.length > 1) {
+			throw new V2ToolError(
+				patchErrors ? "PATCH_AMBIGUOUS" : "AMBIGUOUS_MATCH",
+				`The expected text occurs ${indexes.length} times in ${path} within the permitted range.`,
+				{ paths: [path], matchCount: indexes.length, recovery: { kind: "read_again", paths: [path] } },
+			);
+		}
+		return { index: indexes[0], length: oldText.length, newText, replacementIndex: index };
+	});
+	matches.sort((left, right) => left.index - right.index);
+	for (let index = 1; index < matches.length; index++) {
+		const previous = matches[index - 1];
+		const current = matches[index];
+		if (previous.index + previous.length > current.index) {
+			throw new V2ToolError(
+				"EDIT_CONFLICT",
+				`Replacements ${previous.replacementIndex} and ${current.replacementIndex} overlap in ${path}.`,
+			);
+		}
 	}
-	if (matches.length > 1) {
-		throw new V2ToolError(
-			"AMBIGUOUS_MATCH",
-			`The expected text occurs ${matches.length} times in ${path} within the permitted range.`,
-			{ paths: [path], matchCount: matches.length, recovery: { kind: "read_again", paths: [path] } },
-		);
+	let updatedSegment = segment;
+	for (let index = matches.length - 1; index >= 0; index--) {
+		const match = matches[index];
+		updatedSegment =
+			updatedSegment.slice(0, match.index) + match.newText + updatedSegment.slice(match.index + match.length);
 	}
-	const absolute = start + matches[0];
-	const output = base.slice(0, absolute) + newText + base.slice(absolute + oldText.length);
-	if (output === base) throw new V2ToolError("INVALID_INPUT", `The replacement makes no change to ${path}.`);
+	const output = base.slice(0, start) + updatedSegment + base.slice(end);
+	if (output === base) throw new V2ToolError("INVALID_INPUT", `The replacements make no changes to ${path}.`);
 	return bom + restoreLineEndings(output, ending);
 }
 
@@ -285,6 +256,13 @@ function validateViewBinding(
 	if (view && operation.expectedFileHash && operation.expectedFileHash !== view.fileHash) {
 		throw new V2ToolError("STALE_VIEW", "expectedFileHash does not match the supplied view.");
 	}
+	if (!view && !operation.expectedFileHash) {
+		throw new V2ToolError(
+			"INVALID_INPUT",
+			"Every update requires a fresh viewId or expectedFileHash plus an exact permitted range.",
+			{ paths: [operation.path], recovery: { kind: "read_again" as const, paths: [operation.path] } },
+		);
+	}
 	const expectedHash = operation.expectedFileHash ?? view?.fileHash;
 	if (expectedHash && observedHash(observation) !== expectedHash) {
 		throw new V2ToolError(
@@ -294,22 +272,16 @@ function validateViewBinding(
 		);
 	}
 	const range = operation.range ?? (view ? { startLine: view.range[0], endLine: view.range[1] } : undefined);
-	if (view && range && (range.startLine < view.range[0] || range.endLine > view.range[1])) {
+	if (!range) {
+		throw new V2ToolError(
+			"INVALID_INPUT",
+			"Every update requires an exact range from a fresh view or an explicit hash-bound range.",
+		);
+	}
+	if (view && (range.startLine < view.range[0] || range.endLine > view.range[1])) {
 		throw new V2ToolError(
 			"RANGE_MISMATCH",
 			`The requested range ${range.startLine}-${range.endLine} is outside view ${view.range[0]}-${view.range[1]}.`,
-		);
-	}
-	if (operation.matchPolicy === "exactly_one_in_range" && !range) {
-		throw new V2ToolError("INVALID_INPUT", "exactly_one_in_range requires a viewId or explicit range.");
-	}
-	if (range && operation.matchPolicy === "exactly_one_in_file") {
-		throw new V2ToolError("RANGE_MISMATCH", "An update with an explicit range must remain exactly_one_in_range.");
-	}
-	if (operation.range && !view && !operation.expectedFileHash) {
-		throw new V2ToolError(
-			"INVALID_INPUT",
-			"An explicit line range must be bound to a fresh viewId or expectedFileHash.",
 		);
 	}
 	return { range, view };
@@ -340,11 +312,7 @@ function updateBinding(value: Record<string, unknown>, label: string) {
 	if (value.expectedFileHash !== undefined && typeof value.expectedFileHash !== "string") {
 		throw new V2ToolError("INVALID_INPUT", `${label}.expectedFileHash must be a string.`);
 	}
-	if (
-		value.matchPolicy !== undefined &&
-		value.matchPolicy !== "exactly_one_in_range" &&
-		value.matchPolicy !== "exactly_one_in_file"
-	) {
+	if (value.matchPolicy !== undefined && value.matchPolicy !== "exactly_one_in_range") {
 		throw new V2ToolError("INVALID_INPUT", `${label}.matchPolicy is unsupported.`);
 	}
 	if (value.replaceAll !== undefined && value.replaceAll !== false) {
@@ -354,7 +322,7 @@ function updateBinding(value: Record<string, unknown>, label: string) {
 		viewId: value.viewId as string | undefined,
 		expectedFileHash: value.expectedFileHash as string | undefined,
 		range: parseLineRange(value.range, `${label}.range`),
-		matchPolicy: value.matchPolicy as "exactly_one_in_range" | "exactly_one_in_file" | undefined,
+		matchPolicy: value.matchPolicy as "exactly_one_in_range" | undefined,
 		replaceAll: value.replaceAll as false | undefined,
 	};
 }
@@ -551,28 +519,14 @@ async function buildEditPlan(
 				throw new V2ToolError("INVALID_INPUT", "Replacement dialect only updates files.");
 			return operation;
 		});
-		const bound = updates.filter(
-			(operation) => operation.viewId || operation.expectedFileHash || operation.range || operation.matchPolicy,
+		const binding = validateViewBinding(
+			updates[0],
+			path,
+			canonicalPaths.get(path) ?? path,
+			observations.get(path)!,
+			context,
 		);
-		if (bound.length > 0) {
-			if (updates.length !== 1) {
-				throw new V2ToolError("EDIT_CONFLICT", "A view-bound replacement request must contain exactly one edit.");
-			}
-			const binding = validateViewBinding(
-				updates[0],
-				path,
-				canonicalPaths.get(path) ?? path,
-				observations.get(path)!,
-				context,
-			);
-			const policy = updates[0].matchPolicy ?? (binding.range ? "exactly_one_in_range" : "exactly_one_in_file");
-			file.content =
-				policy === "exactly_one_in_range" && binding.range
-					? applyRangeReplacement(file.content, updates[0], path, binding.range)
-					: applyExactReplacements(file.content, [updates[0]], path);
-		} else {
-			file.content = applyExactReplacements(file.content, updates, path);
-		}
+		file.content = applyRangeReplacements(file.content, updates, path, binding.range!);
 		planned.push({ kind: "update", path, content: file.content });
 	} else {
 		for (const operation of operations) {
@@ -616,16 +570,13 @@ async function buildEditPlan(
 						observations.get(path)!,
 						context,
 					);
-					const policy = operation.matchPolicy ?? (binding.range ? "exactly_one_in_range" : "exactly_one_in_file");
-					file.content =
-						policy === "exactly_one_in_range" && binding.range
-							? applyRangeReplacement(file.content, operation, path, binding.range)
-							: applyExactReplacements(
-									file.content,
-									[{ oldText: operation.oldText, newText: operation.newText }],
-									path,
-									dialect === "patch",
-								);
+					file.content = applyRangeReplacements(
+						file.content,
+						[{ oldText: operation.oldText, newText: operation.newText }],
+						path,
+						binding.range!,
+						dialect === "patch",
+					);
 					if (bound) boundUpdatePaths.add(path);
 					planned.push({ kind: "update", path, content: file.content });
 					break;
@@ -713,6 +664,15 @@ function operationSummary(operations: PreparedEditData["operations"]): string {
 		.join("\n");
 }
 
+function invalidateCommittedEvidence(ledger: ToolStateLedger, plan: EditPlan, result: MutationCommitResult): void {
+	if (result.pendingAcceptance) return;
+	const changedPaths = new Set(result.changedPaths);
+	const identities = plan.observations.flatMap((observation) =>
+		changedPaths.has(observation.path) && observation.identity ? [observation.identity] : [],
+	);
+	ledger.invalidatePaths(result.changedPaths, identities);
+}
+
 function preparedFeedback(
 	patchId: string,
 	operations: PreparedEditData["operations"],
@@ -796,6 +756,7 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 						}
 						throw error;
 					}
+					invalidateCommittedEvidence(ledger, prepared.plan, result);
 					const status = result.pendingAcceptance ? "pending_acceptance" : "applied";
 					const message = result.pendingAcceptance
 						? `Committed patch ${prepared.id} to overlay ${result.pendingAcceptance.id}; the base workspace awaits host acceptance.`
@@ -840,6 +801,7 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 				}
 
 				const result = await getBackend(context).commit(plan, signal);
+				invalidateCommittedEvidence(ledger, plan, result);
 				const status = result.pendingAcceptance ? "pending_acceptance" : "applied";
 				const message = result.pendingAcceptance
 					? `Prepared ${operations.length} file operation(s) in overlay ${result.pendingAcceptance.id}; the base workspace is unchanged until host acceptance.`

@@ -46,13 +46,17 @@ describe("local Remote V2-style compaction item", () => {
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("user request -> assistant and tool work");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("previous compaction summary");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("file paths, symbols, identifiers");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain(
+			"Do not copy raw Search, Read, or Edit source snippets",
+		);
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("bounded live-evidence section");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("conflicts with it at the same scope");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("fixed handoff length");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Current continuation point");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("machine-readable contract, ledger, JSON");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Do not reproduce the system prompt");
 		expect(JSON.stringify(capturedRequest?.messages)).not.toContain("<untrusted-history>");
-		expect(capturedRequest?.promptVersion).toBe("remote-v2-local-4");
+		expect(capturedRequest?.promptVersion).toBe("remote-v2-local-5");
 	});
 
 	it("does not impose a fixed output ceiling on the handoff", async () => {
