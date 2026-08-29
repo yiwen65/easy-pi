@@ -3,7 +3,7 @@
 - Created: 2026-08-30
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户要求执行对 main 提交 56700d42 的借鉴建议
 
 <!-- task-doc-section:background-goal -->
@@ -154,9 +154,9 @@ Non-goals:
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-005 — 全量静态验证、diff 审核与提交
+### [x] T-005 — 全量静态验证、diff 审核与提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 验证跨包契约，审查只包含授权变更，并按仓库规则提交本会话文件。
 - Inputs and prerequisites: T-001 至 T-004。
@@ -172,7 +172,7 @@ Non-goals:
   - commit 不包含 F-005 的并发文件，除非其所有权已通过独立 commit 解除。
 - Verification method:
   - targeted Vitest commands；`npm run check`；task document validator；`git diff --check`。
-- Validation evidence: Not run.
+- Validation evidence: agent loop 25 tests passed；coding-agent 6 files / 52 tests passed；`npm run check` 通过；`git diff --check` 与 staged diff check 通过；实现以 commit `efdbcf26a` 提交且未包含既有未跟踪 harness 文档。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -204,10 +204,11 @@ Non-goals:
 - 2026-08-30: TUI 并发修改由独立 commit `df54418ad` 落库，interactive compaction 10 tests passed；T-004 完成，T-005 开始。
 - 2026-08-30: 对抗审查发现 compaction 激活后已有 prepare callback 的 context update 会被 revision refresh 覆盖；新增红测并改为 callback 前同步 projection，修复后 compaction suite 31 tests passed。其余报告项为既有边界或 upstream 明确的 one-at-a-time 取舍，未扩展本任务。
 - 2026-08-30: 最终目标测试批次通过：agent 25 tests；coding-agent 6 files / 52 tests。首次 `npm run check` 因新增测试漏导入 `vi` 失败；补齐导入后完整 `npm run check` 通过且无自动修复，`git diff --check` 通过。
+- 2026-08-30: 显式 stage 本任务 11 个文件并提交 `efdbcf26a fix(coding-agent): compact before post-tool requests`；T-005 完成。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: not_run
-- Evidence: Not run.
-- Limitations: T-001 至 T-005 尚未完成。
+- Result: passed
+- Evidence: T-001 至 T-005 均完成并具备目标测试、静态检查、diff 审核和 commit 证据；task document validator 在最终状态通过。
+- Limitations: 未运行仓库完整测试套件，遵循项目规则仅运行目标 Vitest 文件；既有未跟踪 `docs/harness_tools` 文档未触碰。
