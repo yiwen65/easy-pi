@@ -668,8 +668,8 @@ export class AgentSession {
 	private _installAgentNextTurnRefresh(): void {
 		const previousTransformContext = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
-			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
-			return await this._compactProviderContextIfNeeded(transformed);
+			const compacted = await this._compactProviderContextIfNeeded(messages);
+			return previousTransformContext ? await previousTransformContext(compacted, signal) : compacted;
 		};
 
 		const previousOnProviderContext = this.agent.onProviderContext;

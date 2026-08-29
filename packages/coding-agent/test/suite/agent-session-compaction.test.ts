@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getLatestCompactionEntry } from "../../src/core/session-manager.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
 const COMPACT_DECISION = {
@@ -745,6 +746,61 @@ describe("AgentSession compaction characterization", () => {
 		expect(resumedRequest).toContain("existing prepare callback marker");
 	});
 
+	it("applies an extension context transform to a checkpoint activated at the provider boundary", async () => {
+		const providerOnlyMarker = "provider-only context after compaction";
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 3_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 300, keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("context", async (event) => ({
+						messages: [
+							...event.messages,
+							{
+								role: "user",
+								content: [{ type: "text", text: providerOnlyMarker }],
+								timestamp: Date.now(),
+							},
+						],
+					}));
+				},
+			],
+			hfCompaction: {
+				mode: "full_pipeline",
+				complete: async () => ({ text: "Preserve the active task state.", stopReason: "stop" }),
+			},
+		});
+		harnesses.push(harness);
+		const model = harness.getModel();
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: `old-history:${"a".repeat(10_000)}`,
+			timestamp: Date.now() - 2_000,
+		});
+		harness.sessionManager.appendMessage({
+			...fauxAssistantMessage("old answer", { timestamp: Date.now() - 1_000 }),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: createUsage(2_500),
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		let providerRequest = "";
+		harness.setResponses([
+			(context) => {
+				providerRequest = JSON.stringify(context.messages);
+				return fauxAssistantMessage("finished after transformed context");
+			},
+		]);
+
+		await harness.session.prompt("continue the active task");
+
+		expect(providerRequest).toContain("Preserve the active task state.");
+		expect(providerRequest).toContain(providerOnlyMarker);
+		const checkpoint = getLatestCompactionEntry(harness.sessionManager.getBranch());
+		expect(JSON.stringify(checkpoint)).not.toContain(providerOnlyMarker);
+	});
+
 	it("includes steering queued during post-tool compaction in the resumed assistant request", async () => {
 		let markCompactionStarted = () => {};
 		const compactionStarted = new Promise<void>((resolve) => {
@@ -789,6 +845,117 @@ describe("AgentSession compaction characterization", () => {
 		expect(resumedRequest).toContain("change direction");
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("sends the complete live provider context after post-tool compaction", async () => {
+		const runSystemMarker = "CURRENT RUN SYSTEM CONTRACT";
+		const providerOnlyMarker = "CURRENT PROVIDER-ONLY CONTEXT";
+		const steeringText = "steering queued during compaction";
+		let markCompactionStarted = () => {};
+		const compactionStarted = new Promise<void>((resolve) => {
+			markCompactionStarted = resolve;
+		});
+		let releaseCompaction = () => {};
+		const compactionReleased = new Promise<void>((resolve) => {
+			releaseCompaction = resolve;
+		});
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 3_000, maxTokens: 100, reasoning: true }],
+			settings: { compaction: { enabled: true, reserveTokens: 300, keepRecentTokens: 1 } },
+			tools: [createLargeResultTool()],
+			initialActiveToolNames: ["large_result"],
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => ({
+						systemPrompt: `${event.systemPrompt}\n\n${runSystemMarker}`,
+					}));
+					pi.on("context", async (event) => ({
+						messages: [
+							...event.messages,
+							{
+								role: "user",
+								content: [{ type: "text", text: providerOnlyMarker }],
+								timestamp: Date.now(),
+							},
+						],
+					}));
+				},
+			],
+			hfCompaction: {
+				mode: "full_pipeline",
+				complete: async () => {
+					markCompactionStarted();
+					await compactionReleased;
+					return { text: "Integrated checkpoint handoff.", stopReason: "stop" };
+				},
+			},
+		});
+		harnesses.push(harness);
+		seedPostToolThresholdSession(harness);
+		harness.session.setThinkingLevel("high");
+		const expectedModel = harness.getModel();
+		const expectedSystemPrompt = `${harness.session.systemPrompt}\n\n${runSystemMarker}`;
+		const expectedTools = harness.session.agent.state.tools.map((tool) => ({
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.parameters,
+		}));
+		let resumedContext: Context | undefined;
+		let resumedOptions: SimpleStreamOptions | undefined;
+		let resumedModel: Model<string> | undefined;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
+			(context, options, _state, model) => {
+				resumedContext = context;
+				resumedOptions = options;
+				resumedModel = model;
+				return fauxAssistantMessage("finished integrated continuation");
+			},
+		]);
+
+		const promptPromise = harness.session.prompt("run the large tool");
+		await compactionStarted;
+		await harness.session.steer(steeringText);
+		releaseCompaction();
+		await promptPromise;
+
+		expect(resumedModel).toMatchObject({
+			api: expectedModel.api,
+			provider: expectedModel.provider,
+			id: expectedModel.id,
+		});
+		expect(resumedOptions?.reasoning).toBe("high");
+		expect(resumedContext?.systemPrompt).toBe(expectedSystemPrompt);
+		expect(
+			resumedContext?.tools?.map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				parameters: tool.parameters,
+			})),
+		).toEqual(expectedTools);
+
+		const providerMessages = JSON.stringify(resumedContext?.messages);
+		expect(providerMessages).toContain("Integrated checkpoint handoff.");
+		expect(providerMessages).toContain(steeringText);
+		expect(providerMessages).toContain(providerOnlyMarker);
+		expect(providerMessages).not.toContain("old-history:");
+		expect(providerMessages).not.toContain("large-tool-result:");
+		expect(providerMessages).not.toContain("run the large tool");
+		expect(providerMessages.indexOf("Integrated checkpoint handoff.")).toBeLessThan(
+			providerMessages.indexOf(steeringText),
+		);
+		expect(providerMessages.indexOf(steeringText)).toBeLessThan(providerMessages.indexOf(providerOnlyMarker));
+		expect(resumedContext?.messages.some((message) => message.role === "assistant")).toBe(false);
+		expect(resumedContext?.messages.some((message) => message.role === "toolResult")).toBe(false);
+
+		const checkpoint = getLatestCompactionEntry(harness.sessionManager.getBranch());
+		expect(checkpoint?.replacementHistory?.map((message) => message.role)).toEqual(["compactionSummary"]);
+		expect(JSON.stringify(checkpoint)).not.toContain(providerOnlyMarker);
+		expect(harness.sessionManager.buildSessionContext().messages.map((message) => message.role)).toEqual([
+			"compactionSummary",
+			"user",
+			"assistant",
+		]);
 	});
 
 	it("does not compact after a terminating tool result", async () => {

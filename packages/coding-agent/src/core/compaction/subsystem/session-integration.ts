@@ -70,10 +70,14 @@ function estimateText(text: string): number {
 	return Math.ceil(text.length / 4);
 }
 
-function selectLatestUserMessage(messages: readonly AgentMessage[], tokenBudget: number): AgentMessage[] {
+function selectLatestUnansweredUserMessage(messages: readonly AgentMessage[], tokenBudget: number): AgentMessage[] {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message.role !== "user") continue;
+		for (let laterIndex = index + 1; laterIndex < messages.length; laterIndex++) {
+			const laterRole = messages[laterIndex].role;
+			if (laterRole === "assistant" || laterRole === "toolResult") return [];
+		}
 		return estimateTokens(message) <= Math.max(0, tokenBudget) ? [structuredClone(message)] : [];
 	}
 	return [];
@@ -351,7 +355,7 @@ export class HfCompactionHost {
 				options.recentUserTokens ?? this.config.recentUserTokens ?? DEFAULT_RECENT_USER_TOKENS,
 				DEFAULT_RECENT_USER_TOKENS,
 			);
-			const recentUsers = selectLatestUserMessage(activeMessages, recentUserBudget);
+			const recentUsers = selectLatestUnansweredUserMessage(activeMessages, recentUserBudget);
 			const replacementHistory = [summaryMessage, ...recentUsers];
 			if (options.signal?.aborted) {
 				return { activated: false, summaryText: "compaction aborted", result: { status: "rejected" } };
