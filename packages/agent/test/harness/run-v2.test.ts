@@ -101,7 +101,11 @@ describe("v2 run", () => {
 		expect(updates[0]).toBe("");
 		expect(updates).toContain("first\n");
 		expect(env.command).toBe("export PREFIXED=yes\nprintf test");
-		expect(env.options).toMatchObject({ env: { SESSION_VALUE: "current" }, inheritEnv: false });
+		expect(env.options).toMatchObject({
+			env: { SESSION_VALUE: "current" },
+			inheritEnv: false,
+			captureOutput: false,
+		});
 
 		env.finishExecution.resolve();
 		const result = await execution;
@@ -118,7 +122,13 @@ describe("v2 run", () => {
 			undefined,
 			{ env },
 		);
-		expect(result.details).toMatchObject({ exitCode: 1, timedOut: false });
+		expect(result.details).toMatchObject({
+			exitCode: 1,
+			signal: null,
+			terminationReason: "exit",
+			terminationRequested: false,
+			timedOut: false,
+		});
 		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("failure") });
 	});
 
@@ -131,8 +141,30 @@ describe("v2 run", () => {
 			undefined,
 			{ env },
 		);
-		expect(result.details).toMatchObject({ exitCode: null, timedOut: true, managedProcessesTerminated: false });
+		expect(result.details).toMatchObject({
+			exitCode: null,
+			signal: null,
+			terminationReason: "timeout",
+			terminationRequested: true,
+			timedOut: true,
+			managedProcessesTerminated: false,
+		});
 		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("before") });
+	});
+
+	it.skipIf(process.platform === "win32")("reports signal termination instead of exit zero", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		const result = await createRunV2Tool().execute("id", { command: "kill -TERM $$" }, undefined, undefined, { env });
+		expect(result.details).toMatchObject({
+			exitCode: null,
+			signal: "SIGTERM",
+			terminationReason: "signal",
+			terminationRequested: false,
+			timedOut: false,
+			managedProcessesTerminated: true,
+		});
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("signal SIGTERM") });
+		expect(result.content[0]).not.toMatchObject({ text: expect.stringContaining("exit 0") });
 	});
 
 	it("terminates the managed process group before a timeout result on Unix", async () => {

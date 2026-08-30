@@ -16,12 +16,17 @@ const runV2Schema = Type.Object({
 });
 
 export type RunV2Input = Static<typeof runV2Schema>;
+export type RunV2TerminationReason = "exit" | "signal" | "timeout";
 export interface RunV2Details {
 	command: string;
 	cwd: string;
 	exitCode: number | null;
+	signal: string | null;
+	terminationReason: RunV2TerminationReason | null;
+	terminationRequested: boolean;
 	timedOut: boolean;
 	durationMs: number;
+	/** @deprecated Legacy compatibility field. Use terminationReason and terminationRequested. */
 	managedProcessesTerminated: boolean;
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
@@ -88,6 +93,9 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 						command: input.command,
 						cwd: cwd.absolutePath,
 						exitCode: null,
+						signal: null,
+						terminationReason: null,
+						terminationRequested: false,
 						timedOut: false,
 						durationMs: 0,
 						managedProcessesTerminated: false,
@@ -119,6 +127,9 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 						command: input.command,
 						cwd: cwd.absolutePath,
 						exitCode: null,
+						signal: null,
+						terminationReason: null,
+						terminationRequested: false,
 						timedOut: false,
 						durationMs: Date.now() - startedAt,
 						managedProcessesTerminated: false,
@@ -171,19 +182,26 @@ export function createRunV2Tool<TContext extends ExecutionToolContext = Executio
 			if (capture.executionError && !timedOut) {
 				throw executionFailure(capture.executionError.code, capture.executionError.message);
 			}
+			const exitSignal = timedOut ? null : (capture.signal ?? null);
+			const terminationReason: RunV2TerminationReason = timedOut ? "timeout" : exitSignal ? "signal" : "exit";
 			let output = capture.output || "(no output)";
 			if (capture.truncation.truncated) {
 				output += `\n\n[Output truncated to ${formatSize(DEFAULT_MAX_BYTES)} or configured line limit. Full output: ${capture.fullOutputPath ?? "unavailable"}]`;
 			}
 			output += timedOut
 				? `\n\ntimed out${input.timeout ? ` after ${input.timeout}s` : ""}`
-				: `\n\nexit ${capture.exitCode ?? 0}`;
+				: exitSignal
+					? `\n\nsignal ${exitSignal}`
+					: `\n\nexit ${capture.exitCode ?? 0}`;
 			return {
 				content: [{ type: "text", text: output }],
 				details: {
 					command: input.command,
 					cwd: cwd.absolutePath,
-					exitCode: timedOut ? null : (capture.exitCode ?? 0),
+					exitCode: timedOut || exitSignal ? null : (capture.exitCode ?? 0),
+					signal: exitSignal,
+					terminationReason,
+					terminationRequested: timedOut,
 					timedOut,
 					durationMs: Date.now() - startedAt,
 					managedProcessesTerminated: !timedOut,
