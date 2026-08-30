@@ -306,15 +306,20 @@ describe("v2 edit", () => {
 		await expect(
 			edit.execute("ambiguous", { action: "prepare", operations: [operation] }, undefined, undefined, context),
 		).rejects.toMatchObject({ code: "AMBIGUOUS_MATCH", details: { matchCount: 2 } });
-		await expect(
-			edit.execute(
+		const preimageError: unknown = await edit
+			.execute(
 				"preimage",
 				{ action: "prepare", operations: [{ ...operation, oldText: "missing" }] },
 				undefined,
 				undefined,
 				context,
-			),
-		).rejects.toMatchObject({ code: "PREIMAGE_MISMATCH" });
+			)
+			.catch((error: unknown) => error);
+		expect(preimageError).toMatchObject({ code: "PREIMAGE_MISMATCH" });
+		expect(preimageError).toBeInstanceOf(Error);
+		if (!(preimageError instanceof Error)) throw new Error("Expected PREIMAGE_MISMATCH to reject");
+		expect(preimageError.message).toContain("without displayed line-number prefixes");
+		expect(preimageError.message).toContain("retry Edit directly without Search");
 		await expect(
 			edit.execute(
 				"range",

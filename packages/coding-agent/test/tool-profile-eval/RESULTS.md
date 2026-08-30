@@ -137,3 +137,42 @@ A second no-model fixture executed the actual four-tool v2 definitions through `
 The full five-call locator/read/prepare/commit/verify chain remained below the old one-call full-line Search baseline because the generated long line stayed behind a match-centered locator and bounded Read fragment. Prepare performed no mutation; commit consumed the patch handle and rechecked all observations. The source target changed, while test, vendor, generated, and ambiguous fixtures remained unchanged.
 
 Limits: this is a deterministic synthetic fixture, not a new model run or a repository-wide latency study. The 97.8% figure is intentionally driven by the overlong generated-line case and is not a universal expected reduction. Token values use chars/4. Production structured Search/Read is limited to JS/TS; other languages fail closed. Semantic retrieval remains explicit opt-in, and the current semantic evidence uses a local static provider rather than a remote embedding call. Files above the editable hash limit return non-editable views, and the default mutation backend still makes no cross-file atomic-visibility or OS-sandbox claim.
+
+## Bounded public-repository evaluation — PREIMAGE recovery
+
+This evaluation is separate from the historical runs above. It used `openai-codex/gpt-5.6-luna` with max thinking and Google `gemini-embedding-001` against pinned public VS Code and Vitest clones. The sealed contract hash is `01cee1d...94278`; the baseline was HEAD `51a6534c9`, and the frozen candidate changed only the model-visible `PREIMAGE_MISMATCH` recovery instruction plus its regression test (`3a011dab...359b`). The persisted content-free evidence is `v2-bounded-real-eval-results.json`.
+
+D-01 aborted before provider dispatch because the evaluator rejected three static Pi documentation-reference lines in the frozen system prompt. Its zero-request record was preserved and not rerun. D-02 supplied the usable paired development comparison:
+
+| D-02 metric | Baseline | Candidate |
+| --- | ---: | ---: |
+| Task completion / score | no / 0.8667 | yes / 1.0000 |
+| Search / Read / Edit / Run calls | 2 / 4 / 4 / 0 | 1 / 4 / 3 / 1 |
+| `PREIMAGE_MISMATCH` errors | 2 | 1 |
+| Target rank / required Read coverage | 1 / 100% | 1 / 100% |
+| Verifier Run succeeded | no activation | yes, exit 0 |
+| Combined reported tokens | 56,346 | 53,194 |
+| Provider payload bytes | 601,362 | 581,971 |
+| Tool-return bytes | 7,547 | 7,074 |
+| Useful / duplicate / irrelevant / ambiguous active context bytes | 1,005 / 39,920 / 3,208 / 661 | 1,039 / 40,853 / 2,950 / 848 |
+| Peak active tool-result bytes | 6,819 | 7,074 |
+| Elapsed ms | 72,794 | 62,818 |
+| Known cost USD, including embeddings | 0.00766434 | 0.00672958 |
+
+The actionable error saved one Search, one failed Edit, and enough turns to activate the required Run. Combined tokens fell 5.6%, provider payload 3.2%, tool-return bytes 6.3%, elapsed 13.7%, and known cost 12.2% in this single paired sample. Active tool-result context rose 2.0% and its peak rose 3.7% because the retained recovery error was longer. The completion benefit was retained; latency and cost changes are descriptive, not causal estimates.
+
+The one-shot held-out stage was unsuccessful. H-01 stopped before mutation or provider dispatch on an evaluator-only cross-repository prompt-normalization defect; its attempt was preserved and not rerun. H-02 ranked the semantic target first but exhausted its eight-turn cap after 6 Search and 5 Read calls, with three wrong-candidate Reads, one semantic duplicate, one repeated Read, zero Edit, and zero Run. It scored 0.5333, used 39,874 combined reported tokens, took 50,960 ms, and cost $0.00526898. Because H-02 made no Edit call and only the evaluator's target mutation was dirty, it made no wrong-location write; the immutable raw record's `wrongLocationsUnchanged: false` conflates target failure with off-target mutation, and the persisted result carries an explicit correction while retaining the raw record and hash.
+
+| Final bounded budget | Used | Cap |
+| --- | ---: | ---: |
+| Sessions started | 5 | 6 |
+| Chat requests | 28 | 56 |
+| Embedding requests | 6 | 24 |
+| Combined paid requests | 34 | 80 |
+| Embedding tokens | 14,118 | 250,000 |
+| Combined reported tokens | 149,414 | 800,000 |
+| Known cost USD | 0.01966290 | 15.00 |
+
+This is a bounded real evaluation, not a general benchmark. It has one usable paired development case, no completed held-out task, two preserved zero-dispatch evaluator aborts, fixed public commits, stochastic model behavior, and a frozen eight-to-ten-turn session ceiling. No held-out attempt was rerun or used for product tuning. The evidence supports preserving the more actionable PREIMAGE recovery message, but it does not establish broad held-out task-completion improvement.
+
+Final offline validation passed 101 focused Agent tests and 80 focused coding-agent tests; the gated real test was skipped. The 16-scenario deterministic matrix remained 16/16, root `npm run check` passed without rewrites, both public clones were clean at their sealed commits, and candidate, protected-file, and immutable held-out hashes remained exact. Final report preparation completed within the 150-minute evaluation cap and made no additional provider request.
