@@ -28,7 +28,7 @@ describe("v2 host adapters", () => {
 
 	afterEach(() => rmSync(cwd, { recursive: true, force: true }));
 
-	it("keeps all four model schemas identical for local, Memory, and SSH execution environments", async () => {
+	it("keeps non-Search schemas stable and narrows Search for Memory and SSH hosts", async () => {
 		const memory = new MemoryExecutionEnv({ files: { "sample.txt": "hello\n" } });
 		const sshDelegate = new MemoryExecutionEnv({ cwd: "/remote", files: { "sample.txt": "hello\n" } });
 		const ssh = new SshExecutionEnv({ cwd: "/remote", operations: sshDelegate });
@@ -38,11 +38,28 @@ describe("v2 host adapters", () => {
 			createV2ToolRuntime(ssh.cwd, { executionEnv: ssh }),
 		];
 		try {
-			for (const name of V2_TOOL_NAMES) {
+			for (const name of V2_TOOL_NAMES.filter((candidate) => candidate !== "search")) {
 				const schemas = runtimes.map((runtime) => runtime.definitions[name].parameters);
 				expect(schemas[1]).toEqual(schemas[0]);
 				expect(schemas[2]).toEqual(schemas[0]);
 			}
+			const searchSchemas = runtimes.map(
+				(runtime) =>
+					runtime.definitions.search.parameters as unknown as {
+						properties: {
+							kind: { anyOf: Array<{ const: string }> };
+							mode?: { anyOf: Array<{ const: string }> };
+						};
+						required: string[];
+					},
+			);
+			expect(searchSchemas[0].properties.kind.anyOf.map((entry) => entry.const)).toEqual(["text", "files", "glob"]);
+			expect(searchSchemas[0].properties.mode?.anyOf.map((entry) => entry.const)).toContain("symbol_definition");
+			expect(searchSchemas[1]).toEqual(searchSchemas[2]);
+			expect(searchSchemas[1].properties.kind.anyOf.map((entry) => entry.const)).toEqual(["files", "glob"]);
+			expect(searchSchemas[1].properties).not.toHaveProperty("mode");
+			expect(searchSchemas[1].required).toEqual(["query", "kind"]);
+
 			const remoteRead = await runtimes[2].definitions.read.execute(
 				"ssh-read",
 				{ path: "sample.txt" },

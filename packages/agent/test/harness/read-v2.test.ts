@@ -20,14 +20,28 @@ class TrackingEnv extends NodeExecutionEnv {
 }
 
 describe("v2 read", () => {
-	it("makes path and locator input branches schema-exclusive", () => {
+	it("exposes only legal locator, path-range, symbol-body, and AST-node input branches", () => {
 		const parameters = createReadV2Tool().parameters as unknown as {
 			anyOf: Array<{ required?: string[]; properties: Record<string, unknown> }>;
 		};
-		const pathBranch = parameters.anyOf.find((branch) => branch.required?.includes("path"));
+		expect(parameters.anyOf).toHaveLength(4);
 		const locatorBranch = parameters.anyOf.find((branch) => branch.required?.includes("locatorId"));
-		expect(pathBranch?.properties).not.toHaveProperty("locatorId");
+		const pathBranch = parameters.anyOf.find(
+			(branch) => branch.required?.length === 1 && branch.required.includes("path"),
+		);
+		const symbolBranch = parameters.anyOf.find((branch) => branch.required?.includes("symbol"));
+		const nodeBranch = parameters.anyOf.find((branch) => branch.required?.includes("nodeId"));
+
 		expect(locatorBranch?.properties).not.toHaveProperty("path");
+		expect(locatorBranch?.properties).not.toHaveProperty("mode");
+		expect(locatorBranch?.properties).not.toHaveProperty("startLine");
+		expect(pathBranch?.properties).not.toHaveProperty("locatorId");
+		expect(pathBranch?.properties).not.toHaveProperty("symbol");
+		expect(pathBranch?.properties).not.toHaveProperty("beforeLines");
+		expect(symbolBranch?.properties).not.toHaveProperty("startLine");
+		expect(symbolBranch?.properties).not.toHaveProperty("nodeId");
+		expect(nodeBranch?.properties).not.toHaveProperty("symbol");
+		expect(nodeBranch?.properties).not.toHaveProperty("cursor");
 	});
 
 	it("uses bounded text reads and exposes line continuation", async () => {

@@ -39,16 +39,8 @@ const CURSOR_TTL_MS = 10 * 60 * 1000;
 const MAX_CURSORS = 100;
 const textEncoder = new TextEncoder();
 
-const readV2Properties = {
-	mode: Type.Optional(Type.Union([Type.Literal("symbol_body"), Type.Literal("ast_node")])),
-	symbol: Type.Optional(Type.String({ description: "JS/TS symbol name to resolve inside path" })),
-	nodeId: Type.Optional(Type.String({ description: "Opaque AST node ID returned by structured search" })),
-	startLine: Type.Optional(Type.Number({ description: "First text line, 1-indexed" })),
-	endLine: Type.Optional(Type.Number({ description: "Last requested text line, inclusive" })),
-	offset: Type.Optional(Type.Number({ description: "Compatibility alias for startLine or directory entry offset" })),
+const readBudgetProperties = {
 	limit: Type.Optional(Type.Number({ description: "Compatibility alias for maxLines or directory entry count" })),
-	beforeLines: Type.Optional(Type.Number({ description: "Lines before a locator (default: 5)" })),
-	afterLines: Type.Optional(Type.Number({ description: "Lines after a locator (default: 5)" })),
 	maxLines: Type.Optional(Type.Number({ description: `Text line budget (default: ${DEFAULT_TEXT_MAX_LINES})` })),
 	maxBytes: Type.Optional(
 		Type.Number({ description: `Model-visible text byte budget (default: ${DEFAULT_TEXT_MAX_BYTES})` }),
@@ -56,29 +48,73 @@ const readV2Properties = {
 	maxOutputTokens: Type.Optional(
 		Type.Number({ description: `Estimated output token budget (default: ${DEFAULT_OUTPUT_TOKENS})` }),
 	),
-	byteOffset: Type.Optional(Type.Number({ description: "Absolute byte offset for a bounded text read" })),
-	cursor: Type.Optional(Type.String({ description: "Stable directory continuation returned by a previous read" })),
 };
 
 const readV2Schema = Type.Union([
 	Type.Object(
 		{
-			...readV2Properties,
-			path: Type.String({ description: "File, directory, or configured resource to read" }),
+			locatorId: Type.String({ description: "Opaque locator returned by search" }),
+			beforeLines: Type.Optional(Type.Number({ description: "Lines before a locator (default: 5)" })),
+			afterLines: Type.Optional(Type.Number({ description: "Lines after a locator (default: 5)" })),
+			...readBudgetProperties,
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
-			...readV2Properties,
-			locatorId: Type.String({ description: "Opaque locator returned by search" }),
+			path: Type.String({ description: "File, directory, image, or configured resource to read" }),
+			startLine: Type.Optional(Type.Number({ description: "First text line, 1-indexed" })),
+			endLine: Type.Optional(Type.Number({ description: "Last requested text line, inclusive" })),
+			offset: Type.Optional(
+				Type.Number({ description: "Compatibility alias for startLine or directory entry offset" }),
+			),
+			byteOffset: Type.Optional(Type.Number({ description: "Absolute byte offset for a bounded text read" })),
+			cursor: Type.Optional(
+				Type.String({ description: "Stable directory continuation returned by a previous read" }),
+			),
+			...readBudgetProperties,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			path: Type.String({ description: "JS/TS file containing the symbol" }),
+			mode: Type.Literal("symbol_body"),
+			symbol: Type.String({ description: "Qualified JS/TS symbol name to resolve inside path" }),
+			...readBudgetProperties,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			path: Type.String({ description: "JS/TS file owning the AST node" }),
+			mode: Type.Literal("ast_node"),
+			nodeId: Type.String({ description: "Opaque AST node ID returned by structured search" }),
+			...readBudgetProperties,
 		},
 		{ additionalProperties: false },
 	),
 ]);
 
-type ReadV2SchemaInput = Static<typeof readV2Schema>;
-export type ReadV2Input = ReadV2SchemaInput & { path?: string; locatorId?: string };
+export type ReadV2Input = Static<typeof readV2Schema>;
+type NormalizedReadV2Input = {
+	path?: string;
+	locatorId?: string;
+	mode?: "symbol_body" | "ast_node";
+	symbol?: string;
+	nodeId?: string;
+	startLine?: number;
+	endLine?: number;
+	offset?: number;
+	limit?: number;
+	beforeLines?: number;
+	afterLines?: number;
+	maxLines?: number;
+	maxBytes?: number;
+	maxOutputTokens?: number;
+	byteOffset?: number;
+	cursor?: string;
+};
 
 export interface ReadV2Details {
 	path: string;
@@ -353,7 +389,7 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 		executionMode: "parallel",
 		replay: "safe",
 		async execute(_toolCallId, schemaInput, signal, _onUpdate, context) {
-			const input = schemaInput as ReadV2Input;
+			const input = schemaInput as NormalizedReadV2Input;
 			if ((input.path === undefined) === (input.locatorId === undefined)) {
 				throw new V2ToolError("INVALID_INPUT", "Provide exactly one of path or locatorId.");
 			}

@@ -119,6 +119,68 @@ describe("OpenAICompatibleEmbeddingSearchProvider", () => {
 		await provider.close();
 	});
 
+	it("batches the query with documents when they fit one request", async () => {
+		let calls = 0;
+		const provider = new OpenAICompatibleEmbeddingSearchProvider(source, {
+			baseUrl,
+			model: "fixture-embedding",
+			apiKey: "fixture-secret-key",
+			usdPerMillionTokens: 0,
+			maxCostUsd: 1,
+			maxDocuments: 2,
+			batchSize: 3,
+			fetchFn: async (_input, init) => {
+				calls++;
+				const body = JSON.parse(String(init?.body)) as { input: string[] };
+				return new Response(
+					JSON.stringify({ data: body.input.map((_text, index) => ({ index, embedding: [1, 0] })) }),
+					{ status: 200 },
+				);
+			},
+		});
+		await provider.search(request(cwd), { workspaceRoot: cwd, scopeId: "semantic" });
+		expect(calls).toBe(1);
+		expect(provider.getUsage().requests).toBe(1);
+	});
+
+	it("keeps a deterministic diverse candidate outside the lexical prefix", async () => {
+		for (let index = 0; index < 12; index++) {
+			writeFileSync(
+				join(cwd, "src", "misc", `noise-${String(index).padStart(2, "0")}.ts`),
+				`export function noise${index}() { return ${index}; }\n`,
+			);
+		}
+		writeFileSync(join(cwd, "src", "misc", "zz-target.ts"), "export function orchestrateFallback() { return 42; }\n");
+		const query = "supply harmonization";
+		const provider = new OpenAICompatibleEmbeddingSearchProvider(source, {
+			baseUrl,
+			model: "fixture-embedding",
+			apiKey: "fixture-secret-key",
+			usdPerMillionTokens: 0,
+			maxCostUsd: 1,
+			maxDocuments: 4,
+			batchSize: 8,
+			fetchFn: async (_input, init) => {
+				const body = JSON.parse(String(init?.body)) as { input: string[] };
+				return new Response(
+					JSON.stringify({
+						data: body.input.map((text, index) => ({
+							index,
+							embedding: text === query || text.includes("orchestrateFallback") ? [1, 0] : [0, 1],
+						})),
+					}),
+					{ status: 200 },
+				);
+			},
+		});
+		const result = await provider.search(
+			{ ...request(cwd), query, preferredPaths: [] },
+			{ workspaceRoot: cwd, scopeId: "semantic" },
+		);
+		expect(result.hits[0]).toMatchObject({ path: "src/misc/zz-target.ts", matchKind: "semantic_candidate" });
+		expect(result).toMatchObject({ complete: false, partial: true, truncatedBy: "provider_limit" });
+	});
+
 	it("applies deterministic preferred-path priors after semantic scoring", async () => {
 		const provider = new OpenAICompatibleEmbeddingSearchProvider(source, {
 			baseUrl,
@@ -160,6 +222,62 @@ describe("OpenAICompatibleEmbeddingSearchProvider", () => {
 		await provider.search(request(cwd, 1), { workspaceRoot: cwd, scopeId: "semantic" });
 		expect(capturedInputs.length).toBe(requestsAfterFirst + 1);
 		await provider.close();
+	});
+
+	it("does not charge cached documents against new embedding input bytes", async () => {
+		const baseRequest = request(cwd);
+		const billingRequest = { ...baseRequest, include: ["src/billing/**"] };
+		const miscRequest = { ...baseRequest, include: ["src/misc/**"] };
+		const billingDocuments = await source.listSemanticDocuments(billingRequest);
+		const miscDocuments = await source.listSemanticDocuments(miscRequest);
+		const queryBytes = Buffer.byteLength(baseRequest.query);
+		const billingBytes = billingDocuments.documents.reduce(
+			(sum, document) => sum + Buffer.byteLength(document.text),
+			0,
+		);
+		const miscBytes = miscDocuments.documents.reduce((sum, document) => sum + Buffer.byteLength(document.text), 0);
+		const maxInputBytes = queryBytes + Math.max(billingBytes, miscBytes);
+		expect(queryBytes + billingBytes + miscBytes).toBeGreaterThan(maxInputBytes);
+		const provider = new OpenAICompatibleEmbeddingSearchProvider(source, {
+			baseUrl,
+			model: "fixture-embedding",
+			apiKey: "fixture-secret-key",
+			usdPerMillionTokens: 0,
+			maxCostUsd: 1,
+			maxDocuments: 2,
+			maxInputBytes,
+		});
+		const context = { workspaceRoot: cwd, scopeId: "semantic" };
+		await provider.search(billingRequest, context);
+		await provider.search(miscRequest, context);
+		const callsAfterCaching = capturedInputs.length;
+		await expect(provider.search(baseRequest, context)).resolves.toMatchObject({ matchedCount: 2 });
+		expect(capturedInputs).toHaveLength(callsAfterCaching + 1);
+	});
+
+	it("binds semantic cursors to the originating request", async () => {
+		const provider = new OpenAICompatibleEmbeddingSearchProvider(source, {
+			baseUrl,
+			model: "fixture-embedding",
+			apiKey: "fixture-secret-key",
+			usdPerMillionTokens: 0,
+			maxCostUsd: 1,
+		});
+		const context = { workspaceRoot: cwd, scopeId: "semantic" };
+		const firstRequest = request(cwd, 1);
+		const first = await provider.search(firstRequest, context);
+		expect(first.nextCursor).toBeTypeOf("string");
+		await expect(
+			provider.search(
+				{
+					...firstRequest,
+					query: "different concept",
+					cursor: first.nextCursor,
+					expectedGeneration: first.generation,
+				},
+				context,
+			),
+		).rejects.toMatchObject({ code: "stale_cursor" });
 	});
 
 	it("invalidates semantic cursors when source content changes", async () => {
@@ -225,6 +343,7 @@ describe("OpenAICompatibleEmbeddingSearchProvider", () => {
 			usdPerMillionTokens: 0,
 			maxCostUsd: 1,
 			maxRequests: 1,
+			batchSize: 1,
 			fetchFn,
 		});
 		await expect(
@@ -257,7 +376,7 @@ describe("OpenAICompatibleEmbeddingSearchProvider", () => {
 		} catch (error) {
 			message = error instanceof Error ? error.message : String(error);
 		}
-		expect(message).toContain("Embedding vector");
+		expect(message).toContain("Embedding response indexes are incomplete");
 		expect(message).not.toContain("do-not-leak-this-key");
 
 		let calls = 0;
@@ -267,6 +386,7 @@ describe("OpenAICompatibleEmbeddingSearchProvider", () => {
 			apiKey: "do-not-leak-this-key",
 			usdPerMillionTokens: 0,
 			maxCostUsd: 1,
+			batchSize: 2,
 			fetchFn: async (_input, init) => {
 				calls++;
 				const body = JSON.parse(String(init?.body)) as { input: string[] };
