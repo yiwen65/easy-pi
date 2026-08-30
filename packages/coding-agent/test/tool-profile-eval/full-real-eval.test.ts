@@ -1,6 +1,9 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	assertContentFreeRealEvalSummary,
@@ -160,6 +163,8 @@ describe("full real toolchain evaluation contract", () => {
 			costUsd: 0,
 		});
 		expect(calibration.usage).toMatchObject({ stageSessions: 6, totalSessions: 6, maxTurnsPerSession: 18 });
+		expect(calibration.records.every((record) => record.status === "completed")).toBe(true);
+		expect(calibration.stop).toBeUndefined();
 		for (const variant of Object.values(calibration.variants)) expect(variant.runs).toBe(2);
 		const heldOut = await runFullRealEvalStage("held_out", async () => output({ chatCostUsd: 0.001 }), {
 			sessions: calibration.usage.totalSessions,
@@ -175,6 +180,80 @@ describe("full real toolchain evaluation contract", () => {
 		expect(fullRealEvalShouldStopAfterTurn(FULL_REAL_EVAL_MAX_TURNS, 0)).toBe(false);
 		expect(fullRealEvalShouldStopAfterTurn(FULL_REAL_EVAL_MAX_TURNS, 1)).toBe(true);
 		expect(fullRealEvalShouldStopAfterTurn(FULL_REAL_EVAL_MAX_TURNS + 1, 1)).toBe(true);
+	});
+
+	it("prevents a nineteenth faux provider request in the Agent loop", async () => {
+		const faux = registerFauxProvider();
+		try {
+			faux.setResponses(
+				Array.from({ length: FULL_REAL_EVAL_MAX_TURNS + 1 }, (_, index) =>
+					fauxAssistantMessage(fauxToolCall("noop", {}, { id: `noop-${index}` }), {
+						stopReason: "toolUse",
+					}),
+				),
+			);
+			const schema = Type.Object({});
+			let assistantTurns = 0;
+			let toolExecutions = 0;
+			const tool: AgentTool<typeof schema> = {
+				name: "noop",
+				label: "Noop",
+				description: "Return a deterministic tool result",
+				parameters: schema,
+				async execute() {
+					toolExecutions++;
+					return { content: [{ type: "text", text: "ok" }], details: {} };
+				},
+			};
+			const agent = new Agent({
+				initialState: { model: faux.getModel(), tools: [tool] },
+				getApiKey: () => "faux-key",
+				streamFn: streamSimple,
+				shouldStopAfterTurn: ({ toolResults }) =>
+					fullRealEvalShouldStopAfterTurn(assistantTurns, toolResults.length),
+			});
+			agent.subscribe((event) => {
+				if (event.type === "message_end" && event.message.role === "assistant") assistantTurns++;
+			});
+
+			await agent.prompt("continue until stopped");
+
+			expect(faux.state.callCount).toBe(FULL_REAL_EVAL_MAX_TURNS);
+			expect(assistantTurns).toBe(FULL_REAL_EVAL_MAX_TURNS);
+			expect(toolExecutions).toBe(FULL_REAL_EVAL_MAX_TURNS);
+			expect(faux.getPendingResponseCount()).toBe(1);
+		} finally {
+			faux.unregister();
+		}
+	});
+
+	it("returns a content-free partial summary with an aborted attempt before stopping", async () => {
+		let calls = 0;
+		const aborted = output({
+			success: false,
+			score: 0.75,
+			turns: FULL_REAL_EVAL_MAX_TURNS,
+			chatCostUsd: 0.02,
+		});
+		const summary = await runFullRealEvalStage(
+			"calibration",
+			async () => {
+				calls++;
+				throw new SystemicEvaluationError("model_turn_budget_exhausted", aborted);
+			},
+			{ sessions: 0, costUsd: 0 },
+		);
+		expect(calls).toBe(1);
+		expect(summary.records).toHaveLength(1);
+		expect(summary.records[0]).toMatchObject({
+			status: "aborted",
+			stopCategory: "model_turn_budget_exhausted",
+			turns: FULL_REAL_EVAL_MAX_TURNS,
+			totalCostUsd: 0.021,
+		});
+		expect(summary.usage).toMatchObject({ stageSessions: 1, stageCostUsd: 0.021 });
+		expect(summary.stop).toMatchObject({ category: "model_turn_budget_exhausted", attemptedSessions: 1 });
+		expect(() => assertContentFreeRealEvalSummary(summary)).not.toThrow();
 	});
 
 	it("stops before a second session on turn, cost, or systemic failure", async () => {
@@ -225,5 +304,7 @@ describe("full real toolchain evaluation contract", () => {
 		});
 		const unsafe = { ...summary, prompt: "secret" };
 		expect(() => assertContentFreeRealEvalSummary(unsafe)).toThrow("prompt");
+		const unknownField = { ...summary, note: "short secret" };
+		expect(() => assertContentFreeRealEvalSummary(unknownField)).toThrow("note");
 	});
 });

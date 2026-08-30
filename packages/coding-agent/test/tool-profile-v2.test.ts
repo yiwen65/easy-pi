@@ -322,7 +322,13 @@ describe("v2 tool profile", () => {
 		expect(v2.systemPrompt).toContain("- search:");
 		expect(v2.systemPrompt).toContain("- run:");
 		expect(v2.systemPrompt).not.toContain("- bash:");
-		expect(v2.getToolDefinition("search")?.parameters).toMatchObject({ required: ["query"] });
+		expect(v2.getToolDefinition("search")?.parameters).toMatchObject({
+			required: ["query"],
+			properties: {
+				ranking: { const: "fast" },
+				preferredPaths: expect.any(Object),
+			},
+		});
 		expect(v2.getToolDefinition("read")?.parameters).toMatchObject({
 			anyOf: expect.arrayContaining([
 				expect.objectContaining({ required: ["path"] }),
@@ -349,16 +355,53 @@ describe("v2 tool profile", () => {
 		v2.dispose();
 	});
 
-	it("advertises exact text-only capabilities when structured and semantic providers are absent", async () => {
+	it("advertises exact path-only capabilities for generic execution environments", async () => {
 		const session = await createSession({
 			toolProfile: "v2",
 			toolsV2: { executionEnv: () => new NodeExecutionEnv({ cwd }) },
 		});
-		expect(session.systemPrompt).toContain("This session supports text/path Search only");
-		expect(session.systemPrompt).toContain(
-			"Do not use structured modes, query templates, targetKind, or task ranking",
-		);
+		expect(session.systemPrompt).toContain("This session supports path Search only");
+		expect(session.systemPrompt).toContain("Do not use literal, regex, structured, or semantic Search");
 		expect(session.systemPrompt).toContain("Symbol and AST reads are unavailable in this session");
+		const search = session.getToolDefinition("search");
+		const schema = search?.parameters as unknown as {
+			properties: { kind: { anyOf: Array<{ const: string }> }; mode?: unknown };
+		};
+		expect(schema.properties.kind.anyOf.map((entry) => entry.const)).toEqual(["files", "glob"]);
+		expect(schema.properties).not.toHaveProperty("mode");
+		session.dispose();
+	});
+
+	it("keeps local text Search while explicitly disabling structured and semantic providers", async () => {
+		writeFileSync(join(cwd, "text-only.ts"), "export const TEXT_ONLY_MARKER = true;\n");
+		const session = await createSession({
+			toolProfile: "v2",
+			toolsV2: { search: { codeIndexProvider: false } },
+		});
+		expect(session.systemPrompt).toContain("This session supports literal/regex text and path Search");
+		expect(session.systemPrompt).toContain("Symbol and AST reads are unavailable in this session");
+		const search = session.getToolDefinition("search");
+		if (!search) throw new Error("v2 search definition is missing");
+		const schema = search.parameters as unknown as {
+			properties: {
+				mode?: { anyOf?: Array<{ const?: string }> };
+				queryTemplate?: unknown;
+				targetKind?: unknown;
+			};
+		};
+		expect(schema.properties.mode?.anyOf?.map((entry) => entry.const)).toEqual(["literal", "regex"]);
+		expect(schema.properties).not.toHaveProperty("queryTemplate");
+		expect(
+			(schema.properties.targetKind as { anyOf: Array<{ const: string }> }).anyOf.map((entry) => entry.const),
+		).toEqual(["exact_line", "path"]);
+		const result = await search.execute(
+			"text-only-search",
+			{ query: "TEXT_ONLY_MARKER", mode: "literal", path: "." },
+			undefined,
+			undefined,
+			{} as Parameters<typeof search.execute>[4],
+		);
+		expect(result.details).toMatchObject({ returnedCount: 1, mode: "literal" });
 		session.dispose();
 	});
 

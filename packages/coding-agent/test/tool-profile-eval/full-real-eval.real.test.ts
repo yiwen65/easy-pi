@@ -11,7 +11,6 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
@@ -29,6 +28,7 @@ import {
 	FULL_REAL_EVAL_MAX_COST_USD,
 	FULL_REAL_EVAL_MAX_TURNS,
 	type FullRealEvalCase,
+	type FullRealEvalExecutionOutput,
 	type FullRealEvalStage,
 	fullRealEvalShouldStopAfterTurn,
 	runFullRealEvalStage,
@@ -306,7 +306,7 @@ describe.skipIf(!RUN)("real full-toolchain evaluation", () => {
 							input.variant === "legacy" ? ["read", "bash", "edit", "write", "grep", "find", "ls"] : undefined,
 						toolsV2:
 							input.variant === "text_v2"
-								? { executionEnv: () => new NodeExecutionEnv({ cwd }) }
+								? { search: { codeIndexProvider: false } }
 								: input.variant === "structured_semantic_v2"
 									? { search: { codeIndexProvider: codeIndex, semanticProvider } }
 									: undefined,
@@ -359,11 +359,10 @@ describe.skipIf(!RUN)("real full-toolchain evaluation", () => {
 						try {
 							await session.prompt(fixture.prompt);
 						} catch {
-							throw new SystemicEvaluationError(systemicCategory ?? "chat_provider_or_infrastructure");
+							systemicCategory ??= "chat_provider_or_infrastructure";
 						}
-						if (systemicCategory) throw new SystemicEvaluationError(systemicCategory);
 						const stats = session.getSessionStats();
-						if (stats.assistantMessages === 0) throw new SystemicEvaluationError("missing_assistant_turn");
+						if (stats.assistantMessages === 0) systemicCategory ??= "missing_assistant_turn";
 						const trace = traceCollector.snapshot();
 						const embeddingUsage = semanticProvider?.getUsage() ?? {
 							requests: 0,
@@ -374,8 +373,8 @@ describe.skipIf(!RUN)("real full-toolchain evaluation", () => {
 						const grade = fixture.grade();
 						const callCostUsd = stats.cost + embeddingUsage.estimatedCostUsd;
 						completedCostUsd += callCostUsd;
-						const output = {
-							success: grade.success,
+						const output: FullRealEvalExecutionOutput = {
+							success: systemicCategory ? false : grade.success,
 							score: grade.score,
 							turns: stats.assistantMessages,
 							inputTokens: stats.tokens.input,
@@ -406,9 +405,12 @@ describe.skipIf(!RUN)("real full-toolchain evaluation", () => {
 								variant: input.variant,
 								order: input.order,
 								faultApplied: faultController.wasApplied(),
+								status: systemicCategory ? "aborted" : "completed",
+								stopCategory: systemicCategory,
 								...output,
 							}),
 						);
+						if (systemicCategory) throw new SystemicEvaluationError(systemicCategory, output);
 						return output;
 					} finally {
 						clearTimeout(timeout);

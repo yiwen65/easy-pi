@@ -64,7 +64,7 @@ export interface CreateAgentSessionOptions {
 		executionEnv?: V2SessionResourceSource<ExecutionEnv>;
 		search?: {
 			provider?: V2SessionResourceSource<SearchProvider>;
-			codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider>;
+			codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider> | false;
 			semanticProvider?: V2SessionResourceSource<SearchProvider>;
 		};
 		read?: {

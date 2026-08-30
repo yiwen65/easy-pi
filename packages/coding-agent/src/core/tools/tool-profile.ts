@@ -20,6 +20,7 @@ import {
 	type ReadV2Details,
 	type ResourceReader,
 	type RunV2Details,
+	type SearchCapabilities,
 	type SearchProvider,
 	type SearchV2Details,
 	type SymbolReadProvider,
@@ -68,8 +69,8 @@ export interface CreateV2ToolDefinitionsOptions {
 	executionEnv?: V2SessionResourceSource<ExecutionEnv>;
 	/** Instances are host-owned; factory results are session-owned. */
 	searchProvider?: V2SessionResourceSource<SearchProvider>;
-	/** JS/TS structured Search plus symbol/AST Read. Defaults to the bounded local TypeScript provider on Node. */
-	codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider>;
+	/** JS/TS structured Search plus symbol/AST Read. Defaults locally on Node; false explicitly disables it. */
+	codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider> | false;
 	/** Remote semantic Search is never created implicitly. */
 	semanticSearchProvider?: V2SessionResourceSource<SearchProvider>;
 	/** Instances are host-owned; factory results are session-owned. */
@@ -97,7 +98,7 @@ const promptContributions = {
 			"Use search instead of run for discovery. Start with the narrowest justified path and explicit literal, regex, or JS/TS query-template semantics; use include/exclude and preferredPaths only when the task supports them.",
 			"Use concept/semantic candidates only when naming is unknown and a remote provider was explicitly configured; verify candidates with structured/literal Search and Read before Edit.",
 			"Same-file results are grouped but each locator remains independently readable. Never infer absence from partial, overflow, truncated, skipped, or unsupported results; narrow one query dimension and search again.",
-			"Choose either mode or queryTemplate, not both. Structured/semantic Search requires kind=text and context=0; omit targetKind for concept search, otherwise pair it exactly with the requested structured mode. Use task ranking only for structured or file search.",
+			"Choose either mode or queryTemplate, not both. Structured/semantic Search requires kind=text and context=0; omit targetKind for concept search, otherwise pair it exactly with the requested structured mode. Set ranking only when its value is exposed by the session schema.",
 		],
 	},
 	read: {
@@ -127,22 +128,37 @@ const promptContributions = {
 function promptContribution(name: keyof typeof promptContributions, context: ExecutionToolContext) {
 	const prompt = promptContributions[name];
 	if (name === "search") {
-		const structured = context.structuredSearchProvider !== undefined;
-		const semantic = context.semanticSearchProvider !== undefined;
+		const base = context.searchProvider?.capabilities;
+		const structured = (context.structuredSearchProvider?.capabilities.structuredModes?.length ?? 0) > 0;
+		const semantic =
+			context.semanticSearchProvider?.capabilities.structuredModes?.includes("semantic_candidate") === true;
+		const literal = base?.textLiteral === true;
+		const regex = base?.textRegex === true;
+		const paths = base?.fuzzyFiles === true || base?.glob === true;
 		if (!structured && !semantic) {
+			if (!literal && !regex) {
+				return {
+					snippet: prompt.snippet,
+					guidelines: [
+						"This session supports path Search only. Use files or glob with an explicit kind.",
+						"Do not use literal, regex, structured, or semantic Search; no text, AST, or semantic provider is configured.",
+						promptContributions.search.guidelines[2],
+					],
+				};
+			}
+			const textModes = literal && regex ? "literal/regex" : literal ? "literal" : "regex";
 			return {
 				snippet: prompt.snippet,
 				guidelines: [
-					"This session supports text/path Search only. Use literal or regex text search, or files/glob path search.",
-					"Do not use structured modes, query templates, targetKind, or task ranking; no AST or semantic provider is configured.",
+					`This session supports ${textModes} text${paths ? " and path" : ""} Search only.`,
+					"Do not use structured or semantic modes, query templates, structured targetKind values, or task ranking; no AST or semantic provider is configured.",
 					promptContributions.search.guidelines[2],
 				],
 			};
 		}
 		const guidelines: string[] = [...promptContributions.search.guidelines];
 		if (!structured) {
-			guidelines[0] =
-				"Use search instead of run for discovery. This session has text/path and semantic candidate Search, but JS/TS structured modes are unavailable.";
+			guidelines[0] = `Use search instead of run for discovery. This session has ${literal || regex ? "text" : "no text"}${paths ? "/path" : ""} and semantic candidate Search, but JS/TS structured modes are unavailable.`;
 		}
 		if (!semantic) {
 			guidelines[1] =
@@ -161,6 +177,23 @@ function promptContribution(name: keyof typeof promptContributions, context: Exe
 		};
 	}
 	return { snippet: prompt.snippet, guidelines: [...prompt.guidelines] };
+}
+
+function mergeSearchCapabilities(providers: Array<SearchProvider | undefined>): SearchCapabilities {
+	const capabilities = providers.flatMap((provider) => (provider ? [provider.capabilities] : []));
+	return {
+		textLiteral: capabilities.some((entry) => entry.textLiteral),
+		textRegex: capabilities.some((entry) => entry.textRegex),
+		context: capabilities.some((entry) => entry.context),
+		fuzzyFiles: capabilities.some((entry) => entry.fuzzyFiles),
+		glob: capabilities.some((entry) => entry.glob),
+		stableCursor: capabilities.some((entry) => entry.stableCursor),
+		globalRanking: capabilities.length > 0 && capabilities.every((entry) => entry.globalRanking),
+		taskRanking: capabilities.length > 0 && capabilities.every((entry) => entry.taskRanking),
+		scopeFilters: capabilities.some((entry) => entry.scopeFilters),
+		wordBoundary: capabilities.some((entry) => entry.wordBoundary),
+		structuredModes: [...new Set(capabilities.flatMap((entry) => entry.structuredModes ?? []))],
+	};
 }
 
 function textOutput(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -1001,8 +1034,13 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 		const searchProvider =
 			search.value ?? (usesDefaultNodeEnv ? new FffSearchProvider(env) : new ExecutionEnvSearchProvider(env));
 		if (search.owned || !search.value) this.resources.add(searchProvider);
-		const codeIndex = resolveSessionResource(this.options.codeIndexProvider);
-		const codeIndexProvider = codeIndex.value ?? (usesDefaultNodeEnv ? new TypeScriptCodeIndexProvider() : undefined);
+		const codeIndexDisabled = this.options.codeIndexProvider === false;
+		const codeIndex =
+			this.options.codeIndexProvider === false
+				? { value: undefined, owned: false }
+				: resolveSessionResource(this.options.codeIndexProvider);
+		const codeIndexProvider =
+			codeIndex.value ?? (!codeIndexDisabled && usesDefaultNodeEnv ? new TypeScriptCodeIndexProvider() : undefined);
 		if (codeIndexProvider && (codeIndex.owned || !codeIndex.value)) this.resources.add(codeIndexProvider);
 		const semantic = resolveSessionResource(this.options.semanticSearchProvider);
 		if (semantic.owned && semantic.value) this.resources.add(semantic.value);
@@ -1038,8 +1076,15 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 			mutationBackend,
 			workspacePolicy: this.options.workspacePolicy,
 		};
+		const searchProviders = [searchProvider, codeIndexProvider, semantic.value];
 		this.currentDefinitions = {
-			search: bindV2Tool(createSearchV2Tool(), context),
+			search: bindV2Tool(
+				createSearchV2Tool({
+					capabilities: mergeSearchCapabilities(searchProviders),
+					preferredPaths: searchProviders.some((provider) => provider?.capabilities.taskRanking === true),
+				}),
+				context,
+			),
 			read: bindV2Tool(
 				createReadV2Tool({
 					autoResizeImages: this.options.autoResizeImages,

@@ -45,6 +45,7 @@ export interface EmbeddingSearchUsage {
 type EmbeddingCursor = {
 	hits: SearchHit[];
 	generation: string;
+	signature: string;
 	complete: boolean;
 	skipped: SemanticDocumentPage["skipped"];
 	matchedCount: number;
@@ -75,6 +76,32 @@ function tokenize(value: string): string[] {
 		.filter((token) => token.length > 1);
 }
 
+function embeddingCursorSignature(request: SearchRequest, context: SearchExecutionContext): string {
+	return JSON.stringify({
+		scopeId: context.scopeId,
+		workspaceRoot: context.workspaceRoot,
+		query: request.query,
+		kind: request.kind,
+		path: request.path,
+		fileGlob: request.fileGlob,
+		include: request.include ?? [],
+		exclude: request.exclude ?? [],
+		honorIgnore: request.honorIgnore !== false,
+		includeHidden: request.includeHidden === true,
+		followSymlinks: request.followSymlinks === true,
+		case: request.case,
+		regex: request.regex,
+		mode: request.mode,
+		targetKind: request.targetKind,
+		wordBoundary: request.wordBoundary === true,
+		context: request.context,
+		limit: request.limit,
+		ranking: request.ranking,
+		queryTemplate: request.queryTemplate,
+		preferredPaths: request.preferredPaths ?? [],
+	});
+}
+
 function localCandidateScore(
 	document: SemanticCandidateDocument,
 	queryTokens: Set<string>,
@@ -91,6 +118,23 @@ function localCandidateScore(
 		score += 8;
 	}
 	return score;
+}
+
+function selectSemanticCandidates(
+	ranked: Array<{ document: SemanticCandidateDocument; score: number }>,
+	limit: number,
+): SemanticCandidateDocument[] {
+	if (ranked.length <= limit) return ranked.map((entry) => entry.document);
+	const reserve = limit > 1 ? Math.min(Math.floor(limit / 2), Math.max(1, Math.floor(limit / 4))) : 0;
+	const leaderCount = limit - reserve;
+	const selected = ranked.slice(0, leaderCount).map((entry) => entry.document);
+	const remainder = ranked.slice(leaderCount);
+	for (let index = 1; index <= reserve; index++) {
+		const diversityIndex = Math.ceil((index * remainder.length) / reserve) - 1;
+		const entry = remainder[diversityIndex];
+		if (entry) selected.push(entry.document);
+	}
+	return selected;
 }
 
 function cosine(left: number[], right: number[]): number {
@@ -232,11 +276,11 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 		};
 	}
 
-	async search(request: SearchRequest, _context: SearchExecutionContext, signal?: AbortSignal): Promise<SearchPage> {
+	async search(request: SearchRequest, context: SearchExecutionContext, signal?: AbortSignal): Promise<SearchPage> {
 		if (request.mode !== "semantic_candidate") {
 			throw new SearchProviderError("unsupported", "This provider only supports semantic_candidate mode.");
 		}
-		if (request.cursor) return this.continueCursor(request, request.cursor, signal);
+		if (request.cursor) return this.continueCursor(request, request.cursor, context, signal);
 		if (signal?.aborted) throw new SearchProviderError("unavailable", "Semantic search aborted.");
 		const page = await this.source.listSemanticDocuments(request, signal);
 		const queryTokens = new Set(tokenize(request.query));
@@ -248,7 +292,7 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 					(left.document.path < right.document.path ? -1 : left.document.path > right.document.path ? 1 : 0) ||
 					left.document.line - right.document.line,
 			);
-		const selected = rankedLocally.slice(0, this.maxDocuments).map((entry) => entry.document);
+		const selected = selectSemanticCandidates(rankedLocally, this.maxDocuments);
 		const candidateLimited = rankedLocally.length > selected.length;
 		if (selected.length === 0) {
 			return {
@@ -262,15 +306,6 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 				skipped: page.skipped.length > 0 ? page.skipped : undefined,
 			};
 		}
-		const requestBytes =
-			Buffer.byteLength(request.query) +
-			selected.reduce((sum, document) => sum + Buffer.byteLength(document.text), 0);
-		if (requestBytes > this.maxInputBytes) {
-			throw new SearchProviderError(
-				"budget_exceeded",
-				`Semantic candidate input exceeds the ${this.maxInputBytes}-byte request budget. Narrow the scope.`,
-			);
-		}
 		const documentVectors = new Map<string, number[]>();
 		const missing: SemanticCandidateDocument[] = [];
 		for (const document of selected) {
@@ -279,7 +314,17 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 			if (cached) documentVectors.set(document.id, cached);
 			else missing.push(document);
 		}
-		const requiredRequests = 1 + Math.ceil(missing.length / this.batchSize);
+		const operationBytes =
+			Buffer.byteLength(request.query) +
+			missing.reduce((sum, document) => sum + Buffer.byteLength(document.text), 0);
+		if (operationBytes > this.maxInputBytes) {
+			throw new SearchProviderError(
+				"budget_exceeded",
+				`Semantic uncached input exceeds the ${this.maxInputBytes}-byte operation budget. Narrow the scope.`,
+			);
+		}
+		const firstDocumentBatchSize = Math.min(missing.length, Math.max(0, this.batchSize - 1));
+		const requiredRequests = 1 + Math.ceil((missing.length - firstDocumentBatchSize) / this.batchSize);
 		if (this.requestCount + requiredRequests > this.maxRequests) {
 			throw new SearchProviderError("budget_exceeded", "Embedding request budget would be exceeded.");
 		}
@@ -289,9 +334,22 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 		if (this.costUsd + (estimatedOperationTokens / 1_000_000) * this.usdPerMillionTokens > this.maxCostUsd) {
 			throw new SearchProviderError("budget_exceeded", "Embedding cost budget would be exceeded.");
 		}
-		const queryVector = (await this.embed([request.query], signal))[0];
+		const firstDocuments = missing.slice(0, firstDocumentBatchSize);
+		const firstVectors = await this.embed(
+			[request.query, ...firstDocuments.map((document) => document.text)],
+			signal,
+		);
+		const queryVector = firstVectors[0];
 		if (!queryVector) throw new SearchProviderError("unavailable", "Embedding query vector is missing.");
-		for (let offset = 0; offset < missing.length; offset += this.batchSize) {
+		for (let index = 0; index < firstDocuments.length; index++) {
+			const document = firstDocuments[index];
+			const vector = firstVectors[index + 1];
+			if (!document || !vector) throw new SearchProviderError("unavailable", "Embedding batch is incomplete.");
+			documentVectors.set(document.id, vector);
+			this.cache.set(this.cacheKey(document.text), vector);
+			this.trim(this.cache, this.maxCacheEntries);
+		}
+		for (let offset = firstDocumentBatchSize; offset < missing.length; offset += this.batchSize) {
 			const batch = missing.slice(offset, offset + this.batchSize);
 			const vectors = await this.embed(
 				batch.map((document) => document.text),
@@ -370,6 +428,7 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 			this.cursors.set(nextCursor, {
 				hits: remaining,
 				generation: page.generation,
+				signature: embeddingCursorSignature(request, context),
 				complete,
 				skipped,
 				matchedCount: hits.length,
@@ -450,9 +509,18 @@ export class OpenAICompatibleEmbeddingSearchProvider implements SearchProvider {
 		return parsed.data.map((entry) => entry.embedding);
 	}
 
-	private async continueCursor(request: SearchRequest, cursor: string, signal?: AbortSignal): Promise<SearchPage> {
+	private async continueCursor(
+		request: SearchRequest,
+		cursor: string,
+		context: SearchExecutionContext,
+		signal?: AbortSignal,
+	): Promise<SearchPage> {
 		const record = this.cursors.get(cursor);
-		if (!record || record.generation !== request.expectedGeneration) {
+		if (
+			!record ||
+			record.generation !== request.expectedGeneration ||
+			record.signature !== embeddingCursorSignature(request, context)
+		) {
 			throw new SearchProviderError("stale_cursor", "The semantic cursor is no longer available.");
 		}
 		const current = await this.source.listSemanticDocuments(request, signal);

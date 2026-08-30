@@ -1,4 +1,4 @@
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import type { AgentHarnessTool, FileInfo } from "../types.ts";
 import {
 	type SearchCapabilities,
@@ -152,6 +152,85 @@ const searchV2Schema = Type.Object({
 	),
 	preferredPaths: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })),
 });
+
+function literalSchema(values: readonly string[], description?: string): TSchema {
+	const schemas = values.map((value) => Type.Literal(value));
+	if (schemas.length === 0) return Type.Never(description ? { description } : undefined);
+	if (schemas.length === 1) return Type.Literal(values[0], description ? { description } : undefined);
+	return Type.Union(schemas, description ? { description } : undefined);
+}
+
+/** Narrow the model-visible Search contract to capabilities available in this session. */
+export function searchV2SchemaForCapabilities(
+	capabilities: SearchCapabilities,
+	options?: { preferredPaths?: boolean },
+): typeof searchV2Schema {
+	const properties: Record<string, TSchema> = { ...searchV2Schema.properties };
+	const kinds = [
+		...(capabilities.textLiteral || capabilities.textRegex || capabilities.structuredModes?.length ? ["text"] : []),
+		...(capabilities.fuzzyFiles ? ["files"] : []),
+		...(capabilities.glob ? ["glob"] : []),
+	];
+	properties.kind = literalSchema(kinds);
+
+	const modes = [
+		...(capabilities.textLiteral ? ["literal"] : []),
+		...(capabilities.textRegex ? ["regex"] : []),
+		...(capabilities.structuredModes ?? []),
+	];
+	if (modes.length > 0) {
+		properties.mode = literalSchema(modes, "Select one available query semantic; do not combine with queryTemplate");
+	} else delete properties.mode;
+
+	const targetKinds = [
+		...(capabilities.textLiteral || capabilities.textRegex ? ["exact_line"] : []),
+		...(capabilities.fuzzyFiles || capabilities.glob ? ["path"] : []),
+		...(capabilities.structuredModes ?? []).flatMap((mode) => {
+			const targetKind = structuredModeTargetKinds[mode];
+			return targetKind ? [targetKind] : [];
+		}),
+	];
+	if (targetKinds.length > 0) {
+		properties.targetKind = literalSchema(
+			[...new Set(targetKinds)],
+			"Optional verified result kind; omit for semantic candidates and pair exactly with a structured mode",
+		);
+	} else delete properties.targetKind;
+
+	const templates = Object.entries(queryTemplateModes)
+		.filter(([, mode]) => capabilities.structuredModes?.includes(mode))
+		.map(([template]) => template);
+	if (templates.length > 0) {
+		properties.queryTemplate = literalSchema(
+			templates,
+			"Shortcut for one available structured mode; do not combine with mode",
+		);
+	} else delete properties.queryTemplate;
+
+	const rankings = [
+		...(capabilities.fuzzyFiles ? ["fast"] : []),
+		...(capabilities.globalRanking ? ["global"] : []),
+		...(capabilities.taskRanking ? ["task"] : []),
+	];
+	if (rankings.length > 0) {
+		properties.ranking = literalSchema(rankings, "Explicit ranking available for this session");
+	} else delete properties.ranking;
+	if (!(options?.preferredPaths ?? capabilities.taskRanking)) delete properties.preferredPaths;
+	if (!capabilities.context) delete properties.context;
+	if (!capabilities.textRegex) delete properties.regex;
+	if (!capabilities.wordBoundary) delete properties.wordBoundary;
+	if (!capabilities.scopeFilters) {
+		delete properties.include;
+		delete properties.exclude;
+	}
+	if (!capabilities.stableCursor) delete properties.cursor;
+
+	return {
+		...searchV2Schema,
+		properties,
+		required: kinds.includes("text") ? ["query"] : ["query", "kind"],
+	} as typeof searchV2Schema;
+}
 
 export type SearchV2Input = Static<typeof searchV2Schema>;
 export type SearchV2Status = "complete" | "partial" | "overflow";
@@ -492,11 +571,10 @@ async function resolvedHitInfo(
 	return { path: joined.value, info: info.ok ? info.value : undefined };
 }
 
-export function createSearchV2Tool<TContext extends ExecutionToolContext = ExecutionToolContext>(): AgentHarnessTool<
-	TContext,
-	typeof searchV2Schema,
-	SearchV2Details
-> {
+export function createSearchV2Tool<TContext extends ExecutionToolContext = ExecutionToolContext>(options?: {
+	capabilities?: SearchCapabilities;
+	preferredPaths?: boolean;
+}): AgentHarnessTool<TContext, typeof searchV2Schema, SearchV2Details> {
 	const cursors = new Map<string, CursorRecord>();
 	let cursorSequence = 0;
 
@@ -515,7 +593,9 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 		label: "search",
 		description:
 			"Locate workspace text, paths, verified JS/TS structures, or explicitly configured semantic candidates with scope, budgets, ranking, coverage, grouped paths, and opaque locator IDs. Read a locator before editing.",
-		parameters: searchV2Schema,
+		parameters: options?.capabilities
+			? searchV2SchemaForCapabilities(options.capabilities, { preferredPaths: options.preferredPaths })
+			: searchV2Schema,
 		executionMode: "parallel",
 		replay: "safe",
 		async execute(_toolCallId, rawInput, signal, _onUpdate, context) {

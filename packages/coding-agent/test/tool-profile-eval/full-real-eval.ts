@@ -64,6 +64,8 @@ export interface FullRealEvalExecutionOutput {
 }
 
 export interface FullRealEvalRecord extends FullRealEvalCase, FullRealEvalExecutionOutput {
+	status: "completed" | "aborted";
+	stopCategory?: string;
 	totalCostUsd: number;
 }
 
@@ -106,6 +108,10 @@ export interface FullRealEvalSummary {
 	stage: FullRealEvalStage;
 	records: FullRealEvalRecord[];
 	variants: Record<FullRealEvalVariant, FullRealEvalVariantSummary>;
+	stop?: {
+		category: string;
+		attemptedSessions: number;
+	};
 	usage: {
 		priorSessions: number;
 		stageSessions: number;
@@ -174,11 +180,13 @@ export function createSyntheticEmbeddingFetchGuard(
 
 export class SystemicEvaluationError extends Error {
 	readonly category: string;
+	readonly output?: FullRealEvalExecutionOutput;
 
-	constructor(category: string) {
+	constructor(category: string, output?: FullRealEvalExecutionOutput) {
 		super(`Systemic evaluation failure: ${category}`);
 		this.name = "SystemicEvaluationError";
 		this.category = category;
+		this.output = output;
 	}
 }
 
@@ -240,7 +248,7 @@ function summarizeVariant(records: FullRealEvalRecord[], variant: FullRealEvalVa
 	);
 	return {
 		runs: selected.length,
-		successes: selected.filter((record) => record.success).length,
+		successes: selected.filter((record) => record.status === "completed" && record.success).length,
 		meanScore: mean(selected.map((record) => record.score)),
 		meanTurns: mean(selected.map((record) => record.turns)),
 		meanToolCalls: mean(selected.map((record) => record.trace.toolCallCount)),
@@ -302,8 +310,11 @@ function validatePriorUsage(stage: FullRealEvalStage, priorSessions: number, pri
 	}
 }
 
-function validateOutput(output: FullRealEvalExecutionOutput): void {
-	if (!Number.isSafeInteger(output.turns) || output.turns <= 0 || output.turns > FULL_REAL_EVAL_MAX_TURNS) {
+function validateOutput(output: FullRealEvalExecutionOutput, status: FullRealEvalRecord["status"]): void {
+	if (!Number.isSafeInteger(output.turns) || output.turns < 0) {
+		throw new Error("Session turn count must be a non-negative integer");
+	}
+	if (status === "completed" && (output.turns === 0 || output.turns > FULL_REAL_EVAL_MAX_TURNS)) {
 		throw new Error(`Session exceeded ${FULL_REAL_EVAL_MAX_TURNS} model turns (observed ${output.turns})`);
 	}
 	for (const [name, value] of [
@@ -332,6 +343,100 @@ function validateOutput(output: FullRealEvalExecutionOutput): void {
 
 /** Reject accidental content-bearing fields or values before a summary is printed or persisted. */
 export function assertContentFreeRealEvalSummary(summary: FullRealEvalSummary): void {
+	const allowedKeys = new Set([
+		"version",
+		"stage",
+		"records",
+		"variants",
+		"stop",
+		"usage",
+		"legacy",
+		"text_v2",
+		"structured_semantic_v2",
+		"taskId",
+		"seed",
+		"variant",
+		"order",
+		"success",
+		"score",
+		"turns",
+		"inputTokens",
+		"outputTokens",
+		"cacheReadTokens",
+		"cacheWriteTokens",
+		"chatCostUsd",
+		"embeddingCostUsd",
+		"embeddingRequests",
+		"embeddingTokens",
+		"elapsedMs",
+		"modelElapsedMs",
+		"promptHash",
+		"schemaHash",
+		"trace",
+		"oracles",
+		"status",
+		"stopCategory",
+		"totalCostUsd",
+		"mutationCorrect",
+		"wrongLocationsUnchanged",
+		"verificationPassed",
+		"externalChangePreserved",
+		"calls",
+		"toolCallCount",
+		"toolErrorCount",
+		"firstEditSuccess",
+		"postEditReadCount",
+		"recoveryCallCount",
+		"truncationCount",
+		"toolElapsedMs",
+		"peakContextTokens",
+		"schemaErrorCount",
+		"runMisuseCount",
+		"targetFirstRead",
+		"firstSearchTargetRank",
+		"approximateSearchCount",
+		"approximateEditWithoutTargetReadCount",
+		"sequence",
+		"toolName",
+		"errorCode",
+		"errorReason",
+		"operationKinds",
+		"durationMs",
+		"truncated",
+		"recovery",
+		"postEditRead",
+		"runs",
+		"successes",
+		"meanScore",
+		"meanTurns",
+		"meanToolCalls",
+		"meanToolErrors",
+		"meanRecoveryCalls",
+		"targetFirstReadCount",
+		"meanFirstSearchTargetRank",
+		"totalInputTokens",
+		"totalOutputTokens",
+		"totalCacheReadTokens",
+		"totalCacheWriteTokens",
+		"totalEmbeddingRequests",
+		"totalEmbeddingTokens",
+		"p50ElapsedMs",
+		"p95ElapsedMs",
+		"p50CostUsd",
+		"p95CostUsd",
+		"wrongLocationProtectionRate",
+		"externalChangePreservationRate",
+		"category",
+		"attemptedSessions",
+		"priorSessions",
+		"stageSessions",
+		"totalSessions",
+		"priorCostUsd",
+		"stageCostUsd",
+		"maxSessions",
+		"maxTurnsPerSession",
+		"maxCostUsd",
+	]);
 	const forbiddenKeys = new Set([
 		"path",
 		"prompt",
@@ -347,6 +452,7 @@ export function assertContentFreeRealEvalSummary(summary: FullRealEvalSummary): 
 	]);
 	const visit = (value: unknown, key?: string): void => {
 		if (key && forbiddenKeys.has(key)) throw new Error(`Content-bearing evaluation field is forbidden: ${key}`);
+		if (key && !allowedKeys.has(key)) throw new Error(`Unexpected evaluation summary field: ${key}`);
 		if (typeof value === "string") {
 			if (value.includes("\n") || value.includes("/") || value.includes("\\") || value.length > 128) {
 				throw new Error("Evaluation summary contains a content-like string");
@@ -364,7 +470,7 @@ export function assertContentFreeRealEvalSummary(summary: FullRealEvalSummary): 
 	visit(summary);
 }
 
-/** Execute one frozen stage sequentially. Any thrown systemic failure stops before the next case. */
+/** Execute one frozen stage sequentially and retain finalized output from an aborted attempt before stopping. */
 export async function runFullRealEvalStage(
 	stage: FullRealEvalStage,
 	execute: (input: FullRealEvalCase) => Promise<FullRealEvalExecutionOutput>,
@@ -375,18 +481,39 @@ export async function runFullRealEvalStage(
 	validateCount(stage, cases.length);
 	const records: FullRealEvalRecord[] = [];
 	let stageCostUsd = 0;
+	let stop: FullRealEvalSummary["stop"];
 	for (const input of cases) {
 		if (prior.sessions + records.length >= FULL_REAL_EVAL_MAX_SESSIONS) {
 			throw new Error(`Global session budget exhausted at ${prior.sessions + records.length} sessions`);
 		}
-		const output = await execute(input);
-		validateOutput(output);
+		let output: FullRealEvalExecutionOutput;
+		let status: FullRealEvalRecord["status"] = "completed";
+		let stopCategory: string | undefined;
+		try {
+			output = await execute(input);
+		} catch (error) {
+			if (!(error instanceof SystemicEvaluationError) || !error.output) throw error;
+			output = error.output;
+			status = "aborted";
+			stopCategory = error.category;
+		}
+		validateOutput(output, status);
 		const totalCostUsd = output.chatCostUsd + output.embeddingCostUsd;
 		stageCostUsd += totalCostUsd;
-		if (prior.costUsd + stageCostUsd > FULL_REAL_EVAL_MAX_COST_USD) {
+		if (status === "completed" && prior.costUsd + stageCostUsd > FULL_REAL_EVAL_MAX_COST_USD) {
 			throw new Error(`Global cost budget exceeded after ${records.length + 1} stage sessions`);
 		}
-		records.push({ ...input, ...output, totalCostUsd });
+		records.push({
+			...input,
+			...output,
+			status,
+			...(stopCategory ? { stopCategory } : {}),
+			totalCostUsd,
+		});
+		if (status === "aborted" && stopCategory) {
+			stop = { category: stopCategory, attemptedSessions: records.length };
+			break;
+		}
 	}
 	const summary: FullRealEvalSummary = {
 		version: 1,
@@ -397,6 +524,7 @@ export async function runFullRealEvalStage(
 			text_v2: summarizeVariant(records, "text_v2"),
 			structured_semantic_v2: summarizeVariant(records, "structured_semantic_v2"),
 		},
+		...(stop ? { stop } : {}),
 		usage: {
 			priorSessions: prior.sessions,
 			stageSessions: records.length,

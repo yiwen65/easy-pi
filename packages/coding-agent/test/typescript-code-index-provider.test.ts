@@ -81,6 +81,17 @@ describe("TypeScriptCodeIndexProvider", () => {
 		expect(references.hits.map((hit) => (hit.kind === "text" ? hit.line : 0))).toEqual([5, 5, 6]);
 	});
 
+	it("reuses one candidate catalog until the indexed source changes", async () => {
+		const context = { workspaceRoot: cwd, scopeId: "ts-index" };
+		await provider.search(request(cwd, "symbol_definition", "Alpha.configure"), context);
+		await provider.search(request(cwd, "call", "helper"), context);
+		expect(provider.getDiagnostics()).toMatchObject({ candidateCatalogBuilds: 1 });
+
+		writeFileSync(join(cwd, "src", "service.ts"), "export function changed() { return 1; }\n");
+		await provider.search(request(cwd, "symbol_definition", "changed"), context);
+		expect(provider.getDiagnostics()).toMatchObject({ candidateCatalogBuilds: 2 });
+	});
+
 	it("resolves aliases across files and verifies implementation, string, and comment modes", async () => {
 		writeFileSync(
 			join(cwd, "src", "dep.ts"),
@@ -111,6 +122,48 @@ describe("TypeScriptCodeIndexProvider", () => {
 		});
 	});
 
+	it("returns only checker-related implementations for qualified interface methods", async () => {
+		writeFileSync(
+			join(cwd, "src", "implementations.ts"),
+			[
+				"export interface Runner { execute(): number; }",
+				"export class RealRunner implements Runner { execute() { return 1; } }",
+				"export class Unrelated { execute() { return 2; } }",
+			].join("\n"),
+		);
+		const context = { workspaceRoot: cwd, scopeId: "ts-index" };
+		const implementation = await provider.search(request(cwd, "implementation", "Runner.execute"), context);
+		expect(implementation.hits).toHaveLength(1);
+		expect(implementation.hits[0]).toMatchObject({
+			path: "src/implementations.ts",
+			line: 2,
+			matchKind: "implementation",
+			enclosingSymbol: "RealRunner.execute",
+		});
+	});
+
+	it("returns concrete implementations of abstract methods without same-name false positives", async () => {
+		writeFileSync(
+			join(cwd, "src", "abstract-implementations.ts"),
+			[
+				"export abstract class BaseRunner { abstract execute(): number; }",
+				"export class ConcreteRunner extends BaseRunner { execute() { return 1; } }",
+				"export class UnrelatedRunner { execute() { return 2; } }",
+			].join("\n"),
+		);
+		const implementation = await provider.search(request(cwd, "implementation", "BaseRunner.execute"), {
+			workspaceRoot: cwd,
+			scopeId: "ts-index",
+		});
+		expect(implementation.hits).toHaveLength(1);
+		expect(implementation.hits[0]).toMatchObject({
+			path: "src/abstract-implementations.ts",
+			line: 2,
+			matchKind: "implementation",
+			enclosingSymbol: "ConcreteRunner.execute",
+		});
+	});
+
 	it("resolves qualified symbols and opaque AST node IDs for bounded Read", async () => {
 		const context = { workspaceRoot: cwd, scopeId: "ts-index" };
 		const definition = await provider.search(request(cwd, "symbol_definition", "Alpha.configure"), context);
@@ -130,6 +183,27 @@ describe("TypeScriptCodeIndexProvider", () => {
 		expect(
 			await provider.resolve({ path: join(cwd, "src", "service.ts"), mode: "ast_node", nodeId: hit.nodeId }),
 		).toMatchObject({ startLine: 4, endLine: 7, nodeKind: "MethodDeclaration" });
+	});
+
+	it("materializes node handles only when a paged hit is returned", async () => {
+		const declarations = Array.from(
+			{ length: 1_100 },
+			(_, index) => `export function repeated(): number { return ${index}; }`,
+		).join("\n");
+		const targetPath = join(cwd, "src", "many-declarations.ts");
+		writeFileSync(targetPath, declarations);
+		const first = await provider.search(
+			{ ...request(cwd, "symbol_definition", "repeated"), limit: 2_000 },
+			{ workspaceRoot: cwd, scopeId: "ts-index" },
+		);
+		expect(first.hits).toHaveLength(1_000);
+		expect(first.nextCursor).toBeTypeOf("string");
+		const hit = first.hits[0];
+		if (!hit || hit.kind !== "text" || !hit.nodeId) throw new Error("missing structured node handle");
+		expect(await provider.resolve({ path: targetPath, mode: "ast_node", nodeId: hit.nodeId })).toMatchObject({
+			startLine: 1,
+			nodeKind: "FunctionDeclaration",
+		});
 	});
 
 	it("applies deterministic production and preferred-path ranking priors", async () => {
@@ -173,6 +247,30 @@ describe("TypeScriptCodeIndexProvider", () => {
 		);
 	});
 
+	it("distinguishes byte-limit coverage and invalidates cached coverage metadata", async () => {
+		await provider.close();
+		provider = new TypeScriptCodeIndexProvider({ maxFiles: 100, maxSourceBytes: 20 });
+		const context = { workspaceRoot: cwd, scopeId: "ts-index" };
+		const first = await provider.search(request(cwd, "symbol_definition", "helper"), context);
+		expect(first.skipped).toEqual(
+			expect.arrayContaining([expect.objectContaining({ path: "src/service.ts", reason: "INDEX_BYTE_LIMIT" })]),
+		);
+		expect(first.skipped).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ reason: "INDEX_FILE_LIMIT" })]),
+		);
+		expect(provider.getDiagnostics()).toMatchObject({ candidateCatalogBuilds: 1 });
+
+		writeFileSync(join(cwd, "src", "another-large.ts"), "export const anotherLargeValue = 123456789;\n");
+		const second = await provider.search(request(cwd, "symbol_definition", "helper"), context);
+		expect(second.skipped).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ path: "src/another-large.ts", reason: "INDEX_BYTE_LIMIT" }),
+				expect.objectContaining({ path: "src/service.ts", reason: "INDEX_BYTE_LIMIT" }),
+			]),
+		);
+		expect(provider.getDiagnostics()).toMatchObject({ candidateCatalogBuilds: 2 });
+	});
+
 	it("fails closed for unsupported languages and honors cancellation", async () => {
 		writeFileSync(join(cwd, "module.py"), "def configure():\n    return 1\n");
 		await expect(
@@ -193,6 +291,24 @@ describe("TypeScriptCodeIndexProvider", () => {
 				controller.signal,
 			),
 		).rejects.toMatchObject({ code: "unavailable" });
+	});
+
+	it("binds continuation cursors to the originating structured request", async () => {
+		const context = { workspaceRoot: cwd, scopeId: "ts-index" };
+		const firstRequest = { ...request(cwd, "assignment", "timeout"), limit: 1 };
+		const first = await provider.search(firstRequest, context);
+		expect(first.nextCursor).toBeTypeOf("string");
+		await expect(
+			provider.search(
+				{
+					...firstRequest,
+					query: "different",
+					cursor: first.nextCursor,
+					expectedGeneration: first.generation,
+				},
+				context,
+			),
+		).rejects.toMatchObject({ code: "stale_cursor" });
 	});
 
 	it("invalidates continuation cursors after the indexed source changes", async () => {
