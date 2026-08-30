@@ -271,3 +271,12 @@
 - Correct approach: 修改该消息结构时同步更新 agent-core 与 coding-agent 两处声明，再跑根类型检查。
 - Prevention: 改 `CustomAgentMessages` 的扩展角色前先用 `rg "interface <Message>|<role>:" packages/agent packages/coding-agent` 找出所有 declaration merging 定义。
 - Verified by: 2026-08-30 compaction token-after UI 任务先稳定触发 TS2717；同步两处 optional 字段后根 `npm run check` 通过。
+
+## 嵌套仓库 subagent `focusPaths`——相对路径按 harness workspace 解析
+
+- Wrong approach: coordinator 位于父 workspace `easy-pi/`、实际 Git 根在其 `pi/` 子目录时，给 reviewer 传了从 Git 根起算的 `packages/...` 相对 `focusPaths`。
+- Why it failed: subagent 按 harness workspace 根解析相对路径，快照中对应位置不存在；所有目标文件 read 都返回 `ENOENT`，review 虽结束却只能给出 inconclusive 结果。
+- Recognition signal: coordinator 可正常读取目标文件，但同一批 subagent 报所有 focus file 缺失，且路径少了嵌套仓库前缀。
+- Correct approach: 先分别确认 harness workspace 与 `git rev-parse --show-toplevel`；嵌套仓库的 read-only reviewer/analyst 使用绝对 `focusPaths`，或使用含子目录前缀的 workspace-relative 路径。绝对路径重试后 reviewer 成功读取 live 文件并产出可验证 findings。
+- Prevention: 启动 DAG 前比较 `pwd`、Git root 与 task focus path；两者不同时禁止直接使用 Git-root-relative 路径。writer 的 `ownedPaths` 仍须按 subagent workspace 规则填写，不要照搬 reviewer 的绝对路径。
+- Verified by: 2026-08-30 v2 Search 优化任务中 run `0185c593-db62-4bc5-b213-c17837879deb` 因相对路径全部 `ENOENT` 而无结论；改用绝对路径的 run `74d43765-d01c-4697-bcb0-d125ef5c5663` 成功识别并驱动 6 类 bounded closure。
