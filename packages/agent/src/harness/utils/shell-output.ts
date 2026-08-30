@@ -8,7 +8,7 @@ export interface ShellCaptureProgress {
 	lastLineBytes: number;
 }
 
-export interface ShellCaptureOptions extends Omit<ShellExecOptions, "onStdout" | "onStderr"> {
+export interface ShellCaptureOptions extends Omit<ShellExecOptions, "captureOutput" | "onStdout" | "onStderr"> {
 	onChunk?: (chunk: string, getProgress: () => ShellCaptureProgress) => void;
 	/** Return shell execution failures with captured output instead of as a failed Result. */
 	returnExecutionErrors?: boolean;
@@ -16,6 +16,7 @@ export interface ShellCaptureOptions extends Omit<ShellExecOptions, "onStdout" |
 
 export interface ShellCaptureResult extends ShellCaptureProgress {
 	exitCode: number | undefined;
+	signal?: string;
 	cancelled: boolean;
 	truncated: boolean;
 	executionError?: ExecutionError;
@@ -150,6 +151,7 @@ export async function executeShellWithCapture(
 			inheritEnv: options?.inheritEnv,
 			timeout: options?.timeout,
 			abortSignal: options?.abortSignal,
+			captureOutput: false,
 			onStdout: onChunk,
 			onStderr: onChunk,
 		});
@@ -185,6 +187,7 @@ export async function executeShellWithCapture(
 		return ok({
 			...progress,
 			exitCode: cancelled ? undefined : result.value.exitCode,
+			...(result.value.signal ? { signal: result.value.signal } : {}),
 			cancelled,
 			truncated: progress.truncation.truncated,
 		});

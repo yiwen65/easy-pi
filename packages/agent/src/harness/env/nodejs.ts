@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import {
@@ -28,14 +28,15 @@ import {
 	ok,
 	type Result,
 	type ShellExecOptions,
+	type ShellExecResult,
 	type TextRangeReadOptions,
 	type TextRangeReadResult,
 	toError,
 } from "../types.ts";
+import { killNodeProcessTree, NodeProcessExecutor } from "./node-process-executor.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
-const EXIT_STDIO_GRACE_MS = 100;
 
 function resolveTimeoutMs(timeout: number | undefined): Result<number | undefined, ExecutionError> {
 	if (timeout === undefined) return ok(undefined);
@@ -184,7 +185,7 @@ async function runCommand(
 			return;
 		}
 		const timeout = setTimeout(() => {
-			if (child.pid) killProcessTree(child.pid);
+			if (child.pid) killNodeProcessTree(child.pid);
 		}, timeoutMs);
 		child.stdout?.setEncoding("utf8");
 		child.stdout?.on("data", (chunk: string) => {
@@ -283,110 +284,28 @@ function getShellEnv(
 	};
 }
 
-function killProcessTree(pid: number): void {
-	if (process.platform === "win32") {
-		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				detached: true,
-				windowsHide: true,
-			});
-		} catch {
-			// Ignore errors.
-		}
-		return;
-	}
-
-	try {
-		process.kill(-pid, "SIGKILL");
-	} catch {
-		try {
-			process.kill(pid, "SIGKILL");
-		} catch {
-			// Process already dead.
-		}
-	}
-}
-
-function waitForChildProcess(child: ChildProcess): Promise<number | null> {
-	return new Promise((resolvePromise, reject) => {
-		let settled = false;
-		let exited = false;
-		let exitCode: number | null = null;
-		let postExitTimer: ReturnType<typeof setTimeout> | undefined;
-		let stdoutEnded = child.stdout === null;
-		let stderrEnded = child.stderr === null;
-
-		const cleanup = (): void => {
-			if (postExitTimer) clearTimeout(postExitTimer);
-			child.removeListener("error", onError);
-			child.removeListener("exit", onExit);
-			child.removeListener("close", onClose);
-			child.stdout?.removeListener("end", onStdoutEnd);
-			child.stderr?.removeListener("end", onStderrEnd);
-			child.stdout?.removeListener("data", onData);
-			child.stderr?.removeListener("data", onData);
-		};
-		const finalize = (code: number | null): void => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			child.stdout?.destroy();
-			child.stderr?.destroy();
-			resolvePromise(code);
-		};
-		const maybeFinalizeAfterExit = (): void => {
-			if (exited && stdoutEnded && stderrEnded) finalize(exitCode);
-		};
-		const armIdleTimer = (): void => {
-			if (postExitTimer) clearTimeout(postExitTimer);
-			postExitTimer = setTimeout(() => finalize(exitCode), EXIT_STDIO_GRACE_MS);
-		};
-		const onData = (): void => {
-			if (exited && !settled) armIdleTimer();
-		};
-		const onStdoutEnd = (): void => {
-			stdoutEnded = true;
-			maybeFinalizeAfterExit();
-		};
-		const onStderrEnd = (): void => {
-			stderrEnded = true;
-			maybeFinalizeAfterExit();
-		};
-		const onError = (error: Error): void => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			reject(error);
-		};
-		const onExit = (code: number | null): void => {
-			exited = true;
-			exitCode = code;
-			maybeFinalizeAfterExit();
-			if (!settled) armIdleTimer();
-		};
-		const onClose = (code: number | null): void => finalize(code);
-
-		child.stdout?.once("end", onStdoutEnd);
-		child.stderr?.once("end", onStderrEnd);
-		child.stdout?.on("data", onData);
-		child.stderr?.on("data", onData);
-		child.once("error", onError);
-		child.once("exit", onExit);
-		child.once("close", onClose);
-	});
+export interface NodeExecutionEnvOptions {
+	cwd: string;
+	shellPath?: string;
+	shellEnv?: NodeJS.ProcessEnv;
+	onProcessStart?: (pid: number) => void;
+	onProcessEnd?: (pid: number) => void;
 }
 
 export class NodeExecutionEnv implements ExecutionEnv {
 	cwd: string;
 	private shellPath?: string;
 	private shellEnv?: NodeJS.ProcessEnv;
-	private activeChildPids = new Set<number>();
+	private readonly processExecutor: NodeProcessExecutor;
 
-	constructor(options: { cwd: string; shellPath?: string; shellEnv?: NodeJS.ProcessEnv }) {
+	constructor(options: NodeExecutionEnvOptions) {
 		this.cwd = options.cwd;
 		this.shellPath = options.shellPath;
 		this.shellEnv = options.shellEnv;
+		this.processExecutor = new NodeProcessExecutor({
+			onProcessStart: options.onProcessStart,
+			onProcessEnd: options.onProcessEnd,
+		});
 	}
 
 	async absolutePath(path: string): Promise<Result<string, FileError>> {
@@ -397,15 +316,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		return ok(join(...parts));
 	}
 
-	async exec(
-		command: string,
-		options?: ShellExecOptions,
-	): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>> {
+	async exec(command: string, options?: ShellExecOptions): Promise<Result<ShellExecResult, ExecutionError>> {
 		if (options?.abortSignal?.aborted) return err(new ExecutionError("aborted", "aborted"));
 		const timeoutMsResult = resolveTimeoutMs(options?.timeout);
 		if (!timeoutMsResult.ok) return err(timeoutMsResult.error);
-		const timeoutMs = timeoutMsResult.value;
-
 		const cwd = options?.cwd ? resolvePath(this.cwd, options.cwd) : this.cwd;
 		const shellConfig = await getShellConfig(this.shellPath);
 		if (!shellConfig.ok) return shellConfig;
@@ -422,113 +336,55 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			);
 		}
 
-		return await new Promise((resolvePromise) => {
-			let stdout = "";
-			let stderr = "";
-			let settled = false;
-			let timedOut = false;
-			let callbackError: ExecutionError | undefined;
-			let child: ReturnType<typeof spawn> | undefined;
-			let timeoutId: ReturnType<typeof setTimeout> | undefined;
+		const captureOutput = options?.captureOutput !== false;
+		const stdoutDecoder = new TextDecoder();
+		const stderrDecoder = new TextDecoder();
+		let stdout = "";
+		let stderr = "";
+		const forwardStdout = (bytes: Uint8Array): void => {
+			const chunk = stdoutDecoder.decode(bytes, { stream: true });
+			if (captureOutput) stdout += chunk;
+			if (chunk) options?.onStdout?.(chunk);
+		};
+		const forwardStderr = (bytes: Uint8Array): void => {
+			const chunk = stderrDecoder.decode(bytes, { stream: true });
+			if (captureOutput) stderr += chunk;
+			if (chunk) options?.onStderr?.(chunk);
+		};
 
-			const onAbort = () => {
-				if (child?.pid) {
-					killProcessTree(child.pid);
-				}
-			};
-
-			const settle = (result: Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>) => {
-				if (timeoutId) clearTimeout(timeoutId);
-				if (options?.abortSignal) options.abortSignal.removeEventListener("abort", onAbort);
-				if (child?.pid) this.activeChildPids.delete(child.pid);
-				if (settled) return;
-				settled = true;
-				resolvePromise(result);
-			};
-
-			try {
-				const commandFromStdin = shellConfig.value.commandTransport === "stdin";
-				child = spawn(
-					shellConfig.value.shell,
-					commandFromStdin ? shellConfig.value.args : [...shellConfig.value.args, command],
-					{
-						cwd,
-						detached: process.platform !== "win32",
-						env: getShellEnv(this.shellEnv, options?.env, options?.inheritEnv),
-						stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
-						windowsHide: true,
-					},
-				);
-				if (child.pid) this.activeChildPids.add(child.pid);
-				if (commandFromStdin) {
-					child.stdin?.on("error", () => {});
-					child.stdin?.end(command);
-				}
-			} catch (error) {
-				const cause = toError(error);
-				settle(err(new ExecutionError("spawn_error", cause.message, cause)));
-				return;
+		const execution = await this.processExecutor.execute(command, {
+			shell: shellConfig.value,
+			cwd,
+			env: getShellEnv(this.shellEnv, options?.env, options?.inheritEnv),
+			timeoutMs: timeoutMsResult.value,
+			abortSignal: options?.abortSignal,
+			onStdout: forwardStdout,
+			onStderr: forwardStderr,
+		});
+		try {
+			const stdoutTail = stdoutDecoder.decode();
+			const stderrTail = stderrDecoder.decode();
+			if (captureOutput) {
+				stdout += stdoutTail;
+				stderr += stderrTail;
 			}
-
-			timeoutId =
-				timeoutMs !== undefined
-					? setTimeout(() => {
-							timedOut = true;
-							if (child?.pid) {
-								killProcessTree(child.pid);
-							}
-						}, timeoutMs)
-					: undefined;
-
-			if (options?.abortSignal) {
-				if (options.abortSignal.aborted) {
-					onAbort();
-				} else {
-					options.abortSignal.addEventListener("abort", onAbort, { once: true });
-				}
+			if (stdoutTail) options?.onStdout?.(stdoutTail);
+			if (stderrTail) options?.onStderr?.(stderrTail);
+		} catch (error) {
+			const cause = toError(error);
+			return err(new ExecutionError("callback_error", cause.message, cause));
+		}
+		if (!execution.ok) {
+			if (execution.error.code === "timeout") {
+				return err(new ExecutionError("timeout", `timeout:${options?.timeout}`, execution.error));
 			}
-
-			child.stdout?.setEncoding("utf8");
-			child.stderr?.setEncoding("utf8");
-			child.stdout?.on("data", (chunk: string) => {
-				stdout += chunk;
-				try {
-					options?.onStdout?.(chunk);
-				} catch (error) {
-					const cause = toError(error);
-					callbackError = new ExecutionError("callback_error", cause.message, cause);
-					onAbort();
-				}
-			});
-			child.stderr?.on("data", (chunk: string) => {
-				stderr += chunk;
-				try {
-					options?.onStderr?.(chunk);
-				} catch (error) {
-					const cause = toError(error);
-					callbackError = new ExecutionError("callback_error", cause.message, cause);
-					onAbort();
-				}
-			});
-
-			void waitForChildProcess(child).then(
-				(code) => {
-					if (callbackError) {
-						settle(err(callbackError));
-						return;
-					}
-					if (timedOut) {
-						settle(err(new ExecutionError("timeout", `timeout:${options?.timeout}`)));
-						return;
-					}
-					if (options?.abortSignal?.aborted) {
-						settle(err(new ExecutionError("aborted", "aborted")));
-						return;
-					}
-					settle(ok({ stdout, stderr, exitCode: code ?? 0 }));
-				},
-				(error: Error) => settle(err(new ExecutionError("spawn_error", error.message, error))),
-			);
+			return execution;
+		}
+		return ok({
+			stdout,
+			stderr,
+			exitCode: execution.value.exitCode ?? 0,
+			...(execution.value.signal ? { signal: execution.value.signal } : {}),
 		});
 	}
 
@@ -821,7 +677,6 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async cleanup(): Promise<void> {
-		for (const pid of this.activeChildPids) killProcessTree(pid);
-		this.activeChildPids.clear();
+		await this.processExecutor.cleanup();
 	}
 }

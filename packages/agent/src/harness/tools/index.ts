@@ -66,7 +66,12 @@ export {
 	type SymbolReadTarget,
 } from "./read-provider.ts";
 export { createReadV2Tool, type ReadV2Details, type ReadV2Input } from "./read-v2.ts";
-export { createRunV2Tool, type RunV2Details, type RunV2Input } from "./run-v2.ts";
+export {
+	createRunV2Tool,
+	type RunV2Details,
+	type RunV2Input,
+	type RunV2TerminationReason,
+} from "./run-v2.ts";
 export {
 	compareSearchPaths,
 	type SearchCapabilities,

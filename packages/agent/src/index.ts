@@ -131,6 +131,7 @@ export {
 	type PromptTemplate,
 	type Shell,
 	type ShellExecOptions,
+	type ShellExecResult,
 	type Skill,
 	type TextRangeReadOptions,
 	type TextRangeReadResult,

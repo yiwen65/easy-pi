@@ -330,19 +330,26 @@ export interface ShellExecOptions {
 	timeout?: number;
 	/** Abort signal used to terminate the command. Defaults to no abort signal. */
 	abortSignal?: AbortSignal;
+	/** Retain stdout/stderr in the settled result. Defaults to true; streaming capture adapters can disable the duplicate copy. */
+	captureOutput?: boolean;
 	/** Called with stdout chunks as they are produced. */
 	onStdout?: (chunk: string) => void;
 	/** Called with stderr chunks as they are produced. */
 	onStderr?: (chunk: string) => void;
 }
 
+/** Settled foreground shell result. A signal is additive metadata; exitCode remains numeric for existing hosts. */
+export interface ShellExecResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+	signal?: string;
+}
+
 /** Shell execution capability used by the harness. */
 export interface Shell {
 	/** Execute a shell command in {@link FileSystem.cwd} unless `options.cwd` is provided. */
-	exec(
-		command: string,
-		options?: ShellExecOptions,
-	): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>>;
+	exec(command: string, options?: ShellExecOptions): Promise<Result<ShellExecResult, ExecutionError>>;
 	/** Release shell resources. Must be best-effort and must not throw or reject. */
 	cleanup(): Promise<void>;
 }

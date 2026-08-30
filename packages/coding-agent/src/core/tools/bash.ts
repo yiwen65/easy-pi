@@ -1,20 +1,13 @@
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { NodeProcessExecutor } from "@earendil-works/pi-agent-core/node";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
-import { waitForChildProcess } from "../../utils/child-process.ts";
-import {
-	getShellConfig,
-	getShellEnv,
-	killProcessTree,
-	trackDetachedChildPid,
-	untrackDetachedChildPid,
-} from "../../utils/shell.ts";
+import { getShellConfig, getShellEnv, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
@@ -86,6 +79,10 @@ export interface BashOperations {
  * standard local shell behavior while wrapping or rewriting commands.
  */
 export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+	const processExecutor = new NodeProcessExecutor({
+		onProcessStart: trackDetachedChildPid,
+		onProcessEnd: untrackDetachedChildPid,
+	});
 	return {
 		exec: async (command, cwd, { onData, signal, timeout, env }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
@@ -99,56 +96,30 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`);
 			}
 
-			const commandFromStdin = shellConfig.commandTransport === "stdin";
-			const child = spawn(shellConfig.shell, commandFromStdin ? shellConfig.args : [...shellConfig.args, command], {
-				cwd,
-				detached: process.platform !== "win32",
-				env: env ?? getShellEnv(),
-				stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
-				windowsHide: true,
-			});
-			if (commandFromStdin) {
-				child.stdin?.on("error", () => {});
-				child.stdin?.end(command);
-			}
-			if (child.pid) trackDetachedChildPid(child.pid);
-			let timedOut = false;
-			let timeoutHandle: NodeJS.Timeout | undefined;
-			const onAbort = () => {
-				if (child.pid) killProcessTree(child.pid);
+			const forwardData = (chunk: Uint8Array): void => {
+				onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 			};
-
-			try {
-				// Set timeout if provided.
-				if (timeoutMs !== undefined) {
-					timeoutHandle = setTimeout(() => {
-						timedOut = true;
-						if (child.pid) killProcessTree(child.pid);
-					}, timeoutMs);
-				}
-				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
-				if (signal) {
-					if (signal.aborted) onAbort();
-					else signal.addEventListener("abort", onAbort, { once: true });
-				}
-				// Handle shell spawn errors and wait for the process to terminate without hanging
-				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
-				if (signal?.aborted) {
-					throw new Error("aborted");
-				}
-				if (timedOut) {
-					throw new Error(`timeout:${timeout}`);
-				}
-				return { exitCode };
-			} finally {
-				if (child.pid) untrackDetachedChildPid(child.pid);
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (signal) signal.removeEventListener("abort", onAbort);
+			const result = await processExecutor.execute(command, {
+				shell: shellConfig,
+				cwd,
+				env: env ?? getShellEnv(),
+				timeoutMs,
+				abortSignal: signal,
+				onStdout: forwardData,
+				onStderr: forwardData,
+			});
+			if (result.ok) {
+				if (signal?.aborted) throw new Error("aborted");
+				return { exitCode: result.value.exitCode };
 			}
+			if (result.error.code === "aborted" || (result.error.code === "timeout" && signal?.aborted)) {
+				throw new Error("aborted");
+			}
+			if (result.error.code === "timeout") {
+				throw new Error(`timeout:${timeout}`);
+			}
+			if (result.error.cause instanceof Error) throw result.error.cause;
+			throw new Error(result.error.message);
 		},
 	};
 }

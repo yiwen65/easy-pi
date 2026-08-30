@@ -399,16 +399,24 @@ describe("NodeExecutionEnv", () => {
 		},
 	);
 
-	it("cleanup terminates active shell processes", async () => {
+	it("cleanup terminates active shell processes and balances lifecycle notifications", async () => {
 		const root = createTempDir();
-		const env = new NodeExecutionEnv({ cwd: root });
+		const startedPids: number[] = [];
+		const endedPids: number[] = [];
+		const env = new NodeExecutionEnv({
+			cwd: root,
+			onProcessStart: (pid) => startedPids.push(pid),
+			onProcessEnd: (pid) => endedPids.push(pid),
+		});
 		const execution = env.exec("touch started; sleep 60");
 		for (let attempt = 0; attempt < 100 && !getOrThrow(await env.exists("started")); attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
 		expect(getOrThrow(await env.exists("started"))).toBe(true);
+		expect(startedPids).toHaveLength(1);
 		await env.cleanup();
 		await expect(withTimeout(execution, 3000)).resolves.toMatchObject({ ok: true });
+		expect(endedPids).toEqual(startedPids);
 	});
 
 	it("streams stdout and stderr chunks", async () => {
@@ -431,6 +439,27 @@ describe("NodeExecutionEnv", () => {
 		expect(stderr).toBe("err");
 	});
 
+	it("can stream output without retaining a duplicate settled copy", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		let stdout = "";
+		let stderr = "";
+		const result = getOrThrow(
+			await env.exec("printf out; printf err >&2", {
+				captureOutput: false,
+				onStdout: (chunk) => {
+					stdout += chunk;
+				},
+				onStderr: (chunk) => {
+					stderr += chunk;
+				},
+			}),
+		);
+		expect(result).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+		expect(stdout).toBe("out");
+		expect(stderr).toBe("err");
+	});
+
 	it("reports a missing working directory before spawning", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: join(root, "missing") });
@@ -448,6 +477,16 @@ describe("NodeExecutionEnv", () => {
 		const result = getOrThrow(await env.exec("exit 7"));
 		expect(result).toEqual({ stdout: "", stderr: "", exitCode: 7 });
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"reports signal exits without treating null as an ordinary exit",
+		async () => {
+			const root = createTempDir();
+			const env = new NodeExecutionEnv({ cwd: root });
+			const result = getOrThrow(await env.exec("kill -TERM $$"));
+			expect(result).toEqual({ stdout: "", stderr: "", exitCode: 0, signal: "SIGTERM" });
+		},
+	);
 
 	it("returns timeout errors for commands exceeding the timeout", async () => {
 		const root = createTempDir();
