@@ -1,0 +1,340 @@
+{
+  "activationGates": {
+    "allSessions": [
+      "search",
+      "read",
+      "edit",
+      "run"
+    ],
+    "faultRequired": [
+      "D-02"
+    ],
+    "postEditReadRequired": true,
+    "semanticRequired": [
+      "D-01",
+      "D-02",
+      "H-01",
+      "H-02"
+    ],
+    "structuredVerificationRequired": [
+      "D-01",
+      "H-02"
+    ],
+    "verifierRunRequired": true
+  },
+  "allowedRunCommands": {
+    "D-01": "\"$PI_V2_EVAL_VERIFY\" D-01",
+    "D-02": "\"$PI_V2_EVAL_VERIFY\" D-02",
+    "H-01": "\"$PI_V2_EVAL_VERIFY\" H-01",
+    "H-02": "\"$PI_V2_EVAL_VERIFY\" H-02"
+  },
+  "baselineCommit": "51a6534c9",
+  "budgets": {
+    "allocation": {
+      "developmentBaselineSessions": 2,
+      "heldOutSessions": 2,
+      "iteration1TargetedSessions": 1,
+      "iteration2TargetedSessions": 1
+    },
+    "maxChatRequests": 56,
+    "maxChatRequestsPerSession": 10,
+    "maxCombinedReportedTokens": 800000,
+    "maxEmbeddingRequests": 24,
+    "maxEmbeddingRequestsPerSession": 3,
+    "maxEmbeddingTokens": 250000,
+    "maxEvaluationElapsedMs": 9000000,
+    "maxKnownCostUsd": 15,
+    "maxPaidRequests": 80,
+    "maxSessionElapsedMs": 180000,
+    "maxSessions": 6,
+    "worstCaseAllocatedChatRequests": 54,
+    "worstCaseAllocatedEmbeddingRequests": 18
+  },
+  "cases": [
+    {
+      "expectedMode": 420,
+      "expectedSha256": "c1be49b2d565f8b154520f47207da15a94a63a47682c22e8fbc1b11e136545b1",
+      "id": "D-01",
+      "maxChatRequests": 8,
+      "mutatedSha256": "fd455d7a4742c2ef02394890322727002f8f098e8044749c93bc1c6d24d77942",
+      "mutatedText": "return a.id === b.id && a.displayName === b.displayName;",
+      "oldText": "return a.id === b.id;",
+      "order": 0,
+      "originalSha256": "c1be49b2d565f8b154520f47207da15a94a63a47682c22e8fbc1b11e136545b1",
+      "prompt": "Repair the configuration-default source identity regression. Extension-object sources with the same stable id must compare equal even when display names differ; string sources retain exact string equality, and undefined handling must stay unchanged. Begin with semantic candidate Search scoped to `src/vs/platform/configuration` for the exact concept query \"configuration default source identity comparison\", verify the candidate with JS/TS structured Search and a bounded Read, make the smallest safe Edit, reread the changed range, then Run exactly `\"$PI_V2_EVAL_VERIFY\" D-01`. Do not use Run for discovery, reading, or editing. Finish only when that verifier exits 0.",
+      "promptHash": "0d2e0e3532e90d34cffc97b98c197d3a5bf313c03d1779f530011f4e1c564e4d",
+      "repository": "vscode",
+      "requiredRange": {
+        "endByte": 11694,
+        "endLine": 360,
+        "startByte": 11673,
+        "startLine": 360
+      },
+      "requiredSymbol": "isConfigurationDefaultSourceEquals",
+      "seed": 3109,
+      "semanticPath": "src/vs/platform/configuration",
+      "semanticQuery": "configuration default source identity comparison",
+      "stage": "development",
+      "targetPath": "src/vs/platform/configuration/common/configurationRegistry.ts",
+      "taskFamily": "identity-comparison-single-file"
+    },
+    {
+      "expectedMode": 420,
+      "expectedSha256": "557a85ed64f0ad8c4b2a12b4a831b9e95b18fc587b8e2fcada30cc95b8464576",
+      "fault": {
+        "anchor": "\t// Maps new telemetry setting to a telemetry level\n",
+        "kind": "after_target_read",
+        "marker": "// PI_V2_EVAL_EXTERNAL_D02_7f35c0a9"
+      },
+      "id": "D-02",
+      "maxChatRequests": 10,
+      "mutatedSha256": "1ea6247f8071507b303f59428739f54b662ed760d5a169cff4afe68cb5b02ad3",
+      "mutatedText": "case TelemetryConfiguration.ERROR:\n\t\t\treturn TelemetryLevel.NONE;",
+      "oldText": "case TelemetryConfiguration.ERROR:\n\t\t\treturn TelemetryLevel.ERROR;",
+      "order": 1,
+      "originalSha256": "0b9ee3752f0e7c3c2f8e686849fd1f599364adffd24cca66df86df6cecd7553b",
+      "prompt": "Repair the telemetry-level mapping regression. The error-only telemetry setting must resolve to the ERROR level, while crash-only, all, off, and legacy-disable behavior remain unchanged. A harmless concurrent marker will appear after your first target Read; preserve it and recover safely from stale evidence rather than overwriting it. Begin with semantic candidate Search scoped to `src/vs/platform/telemetry` for the exact concept query \"telemetry configuration level mapping\", verify the candidate with a bounded Read before Edit, reread after Edit, then Run exactly `\"$PI_V2_EVAL_VERIFY\" D-02`. Do not use Run for discovery, reading, or editing. Finish only when that verifier exits 0.",
+      "promptHash": "262340c71c37cb254465842b832263f505e9a1d297b696a7c587f1b377f478ef",
+      "repository": "vscode",
+      "requiredRange": {
+        "endByte": 6558,
+        "endLine": 153,
+        "startByte": 6492,
+        "startLine": 152
+      },
+      "requiredSymbol": "getTelemetryLevel",
+      "seed": 3251,
+      "semanticPath": "src/vs/platform/telemetry",
+      "semanticQuery": "telemetry configuration level mapping",
+      "stage": "development",
+      "targetPath": "src/vs/platform/telemetry/common/telemetryUtils.ts",
+      "taskFamily": "enum-mapping-stale-view-recovery"
+    },
+    {
+      "expectedMode": 420,
+      "expectedSha256": "9fdd4e50208dd1b3e0345075d496b27d98850a0abde0a72a000ed9a0114dc551",
+      "id": "H-01",
+      "maxChatRequests": 8,
+      "mutatedSha256": "c342aecda576fc20753d283ba2b825ce739fd67aa487e483f210b945e5b5c17e",
+      "mutatedText": "if (counted + lineLength > offset) {",
+      "oldText": "if (counted + lineLength >= offset) {",
+      "order": 0,
+      "originalSha256": "9fdd4e50208dd1b3e0345075d496b27d98850a0abde0a72a000ed9a0114dc551",
+      "prompt": "Repair the source offset-to-line boundary regression. An offset equal to the cumulative length of a line including its newline remains on that line; only an offset beyond that boundary advances. Preserve CRLF handling and existing out-of-range behavior. Begin with semantic candidate Search scoped to `packages/utils/src` for the exact concept query \"convert character offset to source line number at line boundaries\", verify the candidate with a bounded Read before Edit, reread after Edit, then Run exactly `\"$PI_V2_EVAL_VERIFY\" H-01`. Do not use Run for discovery, reading, or editing. Finish only when that verifier exits 0.",
+      "promptHash": "01c98573fcdbcb4801181ae2074ad92524c59e3589485e4ad097dbdfce0ff13b",
+      "repository": "vitest",
+      "requiredRange": {
+        "endByte": 909,
+        "endLine": 35,
+        "startByte": 872,
+        "startLine": 35
+      },
+      "requiredSymbol": "offsetToLineNumber",
+      "seed": 9103,
+      "semanticPath": "packages/utils/src",
+      "semanticQuery": "convert character offset to source line number at line boundaries",
+      "stage": "held_out",
+      "targetPath": "packages/utils/src/offset.ts",
+      "taskFamily": "offset-boundary-single-file"
+    },
+    {
+      "expectedMode": 420,
+      "expectedSha256": "3d7c5e35d5884b34be368034612aa803f678db94d5889304b7e216ae32825485",
+      "id": "H-02",
+      "maxChatRequests": 8,
+      "mutatedSha256": "83464faf587cc2f8945efd5e6557dad063f85ebbc1720a26f39266c7aeb139a9",
+      "mutatedText": "if (lines.length <= 3) {",
+      "oldText": "if (lines.length <= 2) {",
+      "order": 1,
+      "originalSha256": "3d7c5e35d5884b34be368034612aa803f678db94d5889304b7e216ae32825485",
+      "prompt": "Repair the multiline inline-snapshot indentation regression. A snapshot with blank first and last lines plus one indented content line must have its common indentation removed; inputs with two or fewer lines retain the existing early return. Preserve all other indentation guards. Begin with semantic candidate Search scoped to `packages/snapshot/src` for the exact concept query \"remove common indentation from multiline inline snapshots\", verify the candidate with JS/TS structured Search and a bounded Read, make the smallest safe Edit, reread the changed range, then Run exactly `\"$PI_V2_EVAL_VERIFY\" H-02`. Do not use Run for discovery, reading, or editing. Finish only when that verifier exits 0.",
+      "promptHash": "e577977ffa77bfc2fca15d4cbd08b720f567cef9614c28d8f1374bf07adef41a",
+      "repository": "vitest",
+      "requiredRange": {
+        "endByte": 5731,
+        "endLine": 196,
+        "startByte": 5707,
+        "startLine": 196
+      },
+      "requiredSymbol": "stripSnapshotIndentation",
+      "seed": 9209,
+      "semanticPath": "packages/snapshot/src",
+      "semanticQuery": "remove common indentation from multiline inline snapshots",
+      "stage": "held_out",
+      "targetPath": "packages/snapshot/src/port/inlineSnapshot.ts",
+      "taskFamily": "multiline-indentation-single-file"
+    }
+  ],
+  "claimBoundary": "bounded real evaluation",
+  "dataBoundary": {
+    "chatAllowed": [
+      "frozen evaluator prompts",
+      "v2 tool schemas and guidance",
+      "model-produced assistant text and tool arguments",
+      "bounded public-clone paths/source/tool results",
+      "synthetic external marker",
+      "fixed verifier status output"
+    ],
+    "embeddingAllowed": [
+      "exact per-case semantic query",
+      "TypeScript semantic documents generated from the matching pinned public clone and current approved mutation/fault state"
+    ],
+    "forbidden": [
+      "Pi current-worktree source bodies except v2 schema/guidance",
+      "unrelated untracked files",
+      "private content",
+      "transcripts",
+      "credentials",
+      "secrets"
+    ]
+  },
+  "frozenAt": "2026-08-30T00:00:00.000Z",
+  "metrics": {
+    "ambiguousRule": "generic coverage/safety metadata or mixed lines whose necessity cannot be established independently",
+    "contextLabels": [
+      "useful",
+      "duplicate",
+      "irrelevant",
+      "ambiguous"
+    ],
+    "duplicateFingerprint": "sha256(canonical tool name plus normalized arguments; workspace root and opaque handles normalized)",
+    "duplicateRule": "normalized model-visible lines already present in an earlier active tool result before usefulness adjudication",
+    "providerPayloadBytes": "UTF-8 bytes of stable JSON for each provider context plus schemas",
+    "toolResultBytes": "UTF-8 bytes of model-visible text parts at tool completion",
+    "usefulRule": "line-based conservative classification against frozen target/dependency ranges, next-call-used recovery metadata, and post-edit verifier output",
+    "zeroDenominatorRule": "no capability score or ratio when activation count or denominator is zero"
+  },
+  "provider": {
+    "chat": {
+      "catalogMaxTokens": 128000,
+      "compactionMode": "off",
+      "contextWindow": 272000,
+      "maxOutputTokensPerRequest": 8192,
+      "model": "gpt-5.6-luna",
+      "provider": "openai-codex",
+      "providerRetries": 0,
+      "thinkingLevel": "max",
+      "usdPerMillionTokens": {
+        "cacheRead": 0.02,
+        "cacheWrite": 0.25,
+        "input": 0.2,
+        "output": 1.2
+      }
+    },
+    "embedding": {
+      "batchSize": 32,
+      "maxDocumentsPerSession": 32,
+      "maxInputBytesPerOperation": 131072,
+      "model": "gemini-embedding-001",
+      "provider": "google-openai-compatible",
+      "usdPerMillionTokens": 0.15
+    },
+    "frozenToolContract": {
+      "normalizedSystemPromptBytes": 3829,
+      "normalizedSystemPromptHash": "dee3a9ce6c3f85bfebc2ec38aedc75029df057bcd59fbcb59dbf496752576add",
+      "schemaBytes": 8914,
+      "schemaHash": "95d775325c81a8ca2c02058204cf11a4763accd3636ec5c2209e99d370c6a4a1",
+      "toolNames": [
+        "search",
+        "read",
+        "edit",
+        "run"
+      ]
+    }
+  },
+  "repositories": {
+    "vitest": {
+      "commit": "c666d149a4516761bae92ca56ce1336d2fd352c3",
+      "id": "vitest",
+      "materializedFiles": 322,
+      "materializedSourceBytes": 1160297,
+      "materializedSourceFiles": 292,
+      "sourceBytes": null,
+      "sourceFiles": 1870,
+      "sparsePaths": [
+        "packages/runner/src",
+        "packages/vitest/src",
+        "packages/utils/src",
+        "packages/snapshot/src"
+      ],
+      "trackedFiles": 2327,
+      "url": "https://github.com/vitest-dev/vitest.git"
+    },
+    "vscode": {
+      "commit": "3aa54039a0bec1bd4f9b428cdb202b4271bf22ef",
+      "id": "vscode",
+      "materializedFiles": 625,
+      "materializedSourceBytes": 7276587,
+      "materializedSourceFiles": 579,
+      "sourceBytes": null,
+      "sourceFiles": 13228,
+      "sparsePaths": [
+        "src/vs/platform/configuration",
+        "src/vs/platform/files",
+        "src/vs/platform/storage",
+        "src/vs/platform/telemetry",
+        "src/vs/platform/terminal",
+        "src/vs/platform/userDataSync",
+        "src/vs/platform/extensionManagement",
+        "src/vs/platform/browserView",
+        "src/vs/platform/github",
+        "src/vs/platform/mcp",
+        "src/vs/platform/theme",
+        "src/vs/platform/quickinput",
+        "src/vs/platform/remote",
+        "src/vs/platform/policy",
+        "src/vs/platform/environment",
+        "src/vs/platform/workspace",
+        "src/vs/platform/workspaces",
+        "src/vs/platform/userDataProfile",
+        "src/vs/platform/keybinding",
+        "src/vs/platform/contextkey",
+        "src/vs/platform/instantiation",
+        "src/vs/platform/log",
+        "src/vs/platform/actions",
+        "src/vs/platform/request",
+        "src/vs/platform/extensions",
+        "src/vs/platform/url",
+        "src/vs/platform/sandbox"
+      ],
+      "trackedFiles": 18370,
+      "url": "https://github.com/microsoft/vscode.git"
+    }
+  },
+  "semanticPreselection": {
+    "maxDocuments": 32,
+    "scopedCatalog": {
+      "D-01": {
+        "complete": true,
+        "documents": 1840,
+        "targetLocalRank": 4
+      },
+      "D-02": {
+        "complete": true,
+        "documents": 1707,
+        "targetLocalRank": 4
+      },
+      "H-01": {
+        "complete": true,
+        "documents": 953,
+        "targetLocalRank": 3
+      },
+      "H-02": {
+        "complete": true,
+        "documents": 525,
+        "targetLocalRank": 18
+      }
+    }
+  },
+  "stageOrder": {
+    "development": [
+      "D-01",
+      "D-02"
+    ],
+    "heldOut": [
+      "H-01",
+      "H-02"
+    ]
+  },
+  "version": 1
+}

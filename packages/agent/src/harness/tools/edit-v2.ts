@@ -189,7 +189,7 @@ function applyRangeReplacements(
 		if (indexes.length === 0) {
 			throw new V2ToolError(
 				patchErrors ? "PATCH_CONTEXT_NOT_FOUND" : "PREIMAGE_MISMATCH",
-				`The expected text is not present in ${path} within lines ${range.startLine}-${range.endLine}.`,
+				`The expected text is not present in ${path} within lines ${range.startLine}-${range.endLine}. Read exactly that range again, copy the intended current file text without displayed line-number prefixes into oldText, and retry Edit directly without Search.`,
 				{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
 			);
 		}

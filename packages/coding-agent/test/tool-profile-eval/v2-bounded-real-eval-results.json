@@ -1,0 +1,1122 @@
+{
+  "version": 1,
+  "claimBoundary": "bounded_real_evaluation",
+  "finalStatus": "partial",
+  "developmentComparisonStatus": "passed",
+  "heldOutTaskCompletionStatus": "failed",
+  "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+  "sealedHashes": {
+    "full": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+    "development": "23654990f3d70beb63217e664643a48db9df7090ae61c77cdf4b7a00369aeca5",
+    "heldOut": "31b3d8571bc4a2794684087134b6e53fb53c9f1656a0f8bce142ba3ba5f8ad2e",
+    "verifier": "f7aeef7a39e53ba87af955072068397378c0cccbb2a846c7c22d82d39605f892"
+  },
+  "candidate": {
+    "version": 1,
+    "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+    "phase": "iteration_1",
+    "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+    "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+    "frozenAtMs": 1788101139383
+  },
+  "clock": {
+    "version": 1,
+    "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+    "startedAtMs": 1788099424461
+  },
+  "limits": {
+    "sessions": 6,
+    "chatRequests": 56,
+    "embeddingRequests": 24,
+    "embeddingTokens": 250000,
+    "combinedPaidRequests": 80,
+    "combinedReportedTokens": 800000,
+    "knownCostUsd": 15,
+    "evaluationElapsedMs": 9000000
+  },
+  "finalBudget": {
+    "attemptIds": [
+      "baseline-D-01",
+      "baseline-D-02",
+      "iteration_1-D-02",
+      "held_out-H-01",
+      "held_out-H-02"
+    ],
+    "cacheReadTokens": 89600,
+    "cacheWriteTokens": 0,
+    "chatRequests": 28,
+    "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+    "embeddingRequests": 6,
+    "embeddingTokens": 14118,
+    "inputTokens": 39082,
+    "integrityResolutions": [
+      {
+        "attemptId": "baseline-D-01",
+        "category": "chat_usage_reservation_missing",
+        "resolution": "allowed_static_documentation_lines",
+        "resolvedAtMs": 1788100661911
+      }
+    ],
+    "knownCostUsd": 0.019662899999999994,
+    "outputTokens": 6614,
+    "sessionsStarted": 5,
+    "startedAtMs": 1788099424461,
+    "version": 1,
+    "combinedPaidRequests": 34,
+    "combinedReportedTokens": 149414
+  },
+  "attempts": [
+    {
+      "attemptId": "baseline-D-01",
+      "caseId": "D-01",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "phase": "baseline",
+      "piDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "startedAtMs": 1788100172623,
+      "version": 1
+    },
+    {
+      "attemptId": "baseline-D-02",
+      "caseId": "D-02",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "phase": "baseline",
+      "piDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "startedAtMs": 1788100704187,
+      "version": 1
+    },
+    {
+      "attemptId": "iteration_1-D-02",
+      "caseId": "D-02",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "phase": "iteration_1",
+      "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "startedAtMs": 1788100980976,
+      "version": 1
+    },
+    {
+      "attemptId": "held_out-H-01",
+      "caseId": "H-01",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "phase": "held_out",
+      "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "startedAtMs": 1788101179834,
+      "version": 1
+    },
+    {
+      "attemptId": "held_out-H-02",
+      "caseId": "H-02",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "phase": "held_out",
+      "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "startedAtMs": 1788101520260,
+      "version": 1
+    }
+  ],
+  "records": [
+    {
+      "activation": {
+        "edit": false,
+        "fault": true,
+        "postEditRead": false,
+        "read": false,
+        "run": false,
+        "search": false,
+        "semantic": false,
+        "structured": false,
+        "verifierRun": false
+      },
+      "attemptId": "baseline-D-01",
+      "caseId": "D-01",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "edit": {
+        "firstSuccess": null,
+        "recoveryCalls": 0
+      },
+      "efficiency": {
+        "activeToolResultContextBytes": 0,
+        "ambiguousContextBytes": 0,
+        "ambiguousReturnBytes": 0,
+        "callsByTool": {
+          "edit": 0,
+          "read": 0,
+          "run": 0,
+          "search": 0
+        },
+        "duplicateContextBytes": 0,
+        "duplicateExactRequests": 0,
+        "duplicateSemanticRequests": 0,
+        "elapsedMs": 57,
+        "irrelevantContextBytes": 0,
+        "irrelevantReturnBytes": 0,
+        "modelAndHostElapsedMs": 57,
+        "peakActiveToolResultBytes": 0,
+        "peakContextTokens": 0,
+        "providerPayloadBytes": 0,
+        "providerRequests": 0,
+        "repeatedReadRequests": 0,
+        "repeatedSearchRequests": 0,
+        "toolElapsedMs": 0,
+        "toolErrorCount": 0,
+        "toolReturnBytes": 0,
+        "truncationCount": 0,
+        "turns": 1,
+        "usefulContextBytes": 0,
+        "usefulReturnBytes": 0
+      },
+      "filesystem": {
+        "externalChangePreserved": true,
+        "modeCorrect": true,
+        "targetCorrect": false,
+        "verificationPassed": false,
+        "wrongLocationsUnchanged": false
+      },
+      "phase": "baseline",
+      "piDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "promptHash": "0d2e0e3532e90d34cffc97b98c197d3a5bf313c03d1779f530011f4e1c564e4d",
+      "read": {
+        "postEditReads": 0,
+        "requiredRangeCoverage": 0,
+        "targetFirst": null
+      },
+      "run": {
+        "exitCode": null,
+        "signal": null,
+        "terminationReason": null,
+        "terminationRequested": null,
+        "timedOut": false,
+        "verifierRuns": 0,
+        "verifierSucceeded": false
+      },
+      "schemaHash": "95d775325c81a8ca2c02058204cf11a4763accd3636ec5c2209e99d370c6a4a1",
+      "score": 0.26666666666666666,
+      "search": {
+        "approximateSearches": 0,
+        "firstTargetRank": null,
+        "mrr": null,
+        "partialSearches": 0,
+        "recallAt5": null,
+        "semanticSearches": 0,
+        "structuredSearches": 0,
+        "truncatedSearches": 0,
+        "wrongCandidateReads": 0
+      },
+      "status": "aborted",
+      "stopCategory": "chat_usage_reservation_missing",
+      "success": false,
+      "trace": [],
+      "usage": {
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "costUsd": 0,
+        "embeddingCostUsd": 0,
+        "embeddingRequests": 0,
+        "embeddingTokens": 0,
+        "inputTokens": 0,
+        "knownCostUsd": 0,
+        "outputTokens": 0,
+        "usageReconciled": true
+      },
+      "version": 1
+    },
+    {
+      "activation": {
+        "edit": true,
+        "fault": true,
+        "postEditRead": true,
+        "read": true,
+        "run": false,
+        "search": true,
+        "semantic": true,
+        "structured": true,
+        "verifierRun": false
+      },
+      "attemptId": "baseline-D-02",
+      "caseId": "D-02",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "edit": {
+        "firstSuccess": false,
+        "recoveryCalls": 2
+      },
+      "efficiency": {
+        "activeToolResultContextBytes": 44794,
+        "ambiguousContextBytes": 661,
+        "ambiguousReturnBytes": 1012,
+        "callsByTool": {
+          "edit": 4,
+          "read": 4,
+          "run": 0,
+          "search": 2
+        },
+        "duplicateContextBytes": 39920,
+        "duplicateExactRequests": 0,
+        "duplicateSemanticRequests": 0,
+        "elapsedMs": 72794,
+        "irrelevantContextBytes": 3208,
+        "irrelevantReturnBytes": 4975,
+        "modelAndHostElapsedMs": 67625,
+        "peakActiveToolResultBytes": 6819,
+        "peakContextTokens": 7013,
+        "providerPayloadBytes": 601362,
+        "providerRequests": 10,
+        "repeatedReadRequests": 0,
+        "repeatedSearchRequests": 0,
+        "toolElapsedMs": 5169,
+        "toolErrorCount": 2,
+        "toolReturnBytes": 7547,
+        "truncationCount": 5,
+        "turns": 10,
+        "usefulContextBytes": 1005,
+        "usefulReturnBytes": 1560
+      },
+      "filesystem": {
+        "externalChangePreserved": true,
+        "modeCorrect": true,
+        "targetCorrect": true,
+        "verificationPassed": true,
+        "wrongLocationsUnchanged": true
+      },
+      "phase": "baseline",
+      "piDiffHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "promptHash": "262340c71c37cb254465842b832263f505e9a1d297b696a7c587f1b377f478ef",
+      "read": {
+        "postEditReads": 1,
+        "requiredRangeCoverage": 1,
+        "targetFirst": true
+      },
+      "run": {
+        "exitCode": null,
+        "signal": null,
+        "terminationReason": null,
+        "terminationRequested": null,
+        "timedOut": false,
+        "verifierRuns": 0,
+        "verifierSucceeded": false
+      },
+      "schemaHash": "95d775325c81a8ca2c02058204cf11a4763accd3636ec5c2209e99d370c6a4a1",
+      "score": 0.8666666666666667,
+      "search": {
+        "approximateSearches": 1,
+        "firstTargetRank": 1,
+        "mrr": 1,
+        "partialSearches": 1,
+        "recallAt5": 1,
+        "semanticSearches": 1,
+        "structuredSearches": 0,
+        "truncatedSearches": 1,
+        "wrongCandidateReads": 0
+      },
+      "status": "aborted",
+      "stopCategory": "session_chat_request_budget_exhausted",
+      "success": false,
+      "trace": [
+        {
+          "ambiguousBytes": 131,
+          "durationMs": 5129,
+          "exactFingerprint": "d677192b4ca26473c6e009df53c130ad82560d1bbb5b20f6c79ce67bce4d4b06",
+          "irrelevantBytes": 1309,
+          "mode": "semantic_candidate",
+          "resultBytes": 1465,
+          "semanticFingerprint": "d677192b4ca26473c6e009df53c130ad82560d1bbb5b20f6c79ce67bce4d4b06",
+          "sequence": 0,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 25
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 4,
+          "exactFingerprint": "8a81905fad11ce1fa9ff30725cde093963db4605c3a416e4e3747a43bcdc8fde",
+          "irrelevantBytes": 1273,
+          "resultBytes": 1640,
+          "semanticFingerprint": "c1b3639f425b7bc08a8ff709b7efb8f9268e4a7d50a6d9860d3f91d0f4fa51ff",
+          "sequence": 1,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 180
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 2,
+          "exactFingerprint": "7c5697d32b4b4d1df17128ae8553f68add41b2e6099e6517efa421ce1ec0a183",
+          "irrelevantBytes": 1144,
+          "resultBytes": 1551,
+          "semanticFingerprint": "7c5697d32b4b4d1df17128ae8553f68add41b2e6099e6517efa421ce1ec0a183",
+          "sequence": 2,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 220
+        },
+        {
+          "ambiguousBytes": 18,
+          "durationMs": 3,
+          "errorCode": "PREIMAGE_MISMATCH",
+          "exactFingerprint": "3a1676eee29e02a793a7326c04f863d394e02edd69b21b8875adf6c74861adc8",
+          "irrelevantBytes": 1,
+          "mode": "prepare",
+          "resultBytes": 174,
+          "semanticFingerprint": "d09d4127f7ab959265be350b5f6286103527406c3a5adb1e008e4d8616553aa2",
+          "sequence": 3,
+          "status": "error",
+          "toolName": "edit",
+          "usefulBytes": 155
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 2,
+          "exactFingerprint": "3de2c691a778d545f6bc40dfa10a2a1e03988b22b3e5983a028ea46d6a7b1986",
+          "irrelevantBytes": 339,
+          "resultBytes": 677,
+          "semanticFingerprint": "3de2c691a778d545f6bc40dfa10a2a1e03988b22b3e5983a028ea46d6a7b1986",
+          "sequence": 4,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 151
+        },
+        {
+          "ambiguousBytes": 0,
+          "durationMs": 20,
+          "exactFingerprint": "1e998d5b85b45017d36a88531fdba99949a215d7ef0cf36954600ccc184e2be7",
+          "irrelevantBytes": 258,
+          "mode": "literal",
+          "resultBytes": 276,
+          "semanticFingerprint": "1e998d5b85b45017d36a88531fdba99949a215d7ef0cf36954600ccc184e2be7",
+          "sequence": 5,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 18
+        },
+        {
+          "ambiguousBytes": 18,
+          "durationMs": 1,
+          "errorCode": "PREIMAGE_MISMATCH",
+          "exactFingerprint": "81cecb99a52d18025b41eb960972aafc85d8e173c7cf4feee33c281be0c95caa",
+          "irrelevantBytes": 1,
+          "mode": "prepare",
+          "resultBytes": 174,
+          "semanticFingerprint": "623814ffe401bb813b15d1686482967b4b6f72fd700bf35a3b62b5584e8efa94",
+          "sequence": 6,
+          "status": "error",
+          "toolName": "edit",
+          "usefulBytes": 155
+        },
+        {
+          "ambiguousBytes": 56,
+          "durationMs": 5,
+          "exactFingerprint": "98a1124c72950b9a82f4c19982d1eba25f40ed9a23c14367d2b61b4f616db348",
+          "irrelevantBytes": 295,
+          "mode": "prepare",
+          "resultBytes": 715,
+          "semanticFingerprint": "9bd6bc734f5802e1cb59956e2c57dee5fe9762c8000482c0a34d9d3317497d2f",
+          "sequence": 7,
+          "status": "success",
+          "toolName": "edit",
+          "usefulBytes": 364
+        },
+        {
+          "ambiguousBytes": 41,
+          "durationMs": 2,
+          "exactFingerprint": "a39c0826aac5e136ecdf966545f430833a03ad5d3bbd32e53deec80397d640f0",
+          "irrelevantBytes": 1,
+          "mode": "commit",
+          "resultBytes": 147,
+          "semanticFingerprint": "5cc736fbe7410d8c3b14550817f2339a79b9748ee775807a7b80757a2681a4a5",
+          "sequence": 8,
+          "status": "success",
+          "toolName": "edit",
+          "usefulBytes": 105
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 1,
+          "exactFingerprint": "add07a912320423fbf266655f9b33c949daf45858475737e6d0eb84bdd188741",
+          "irrelevantBytes": 354,
+          "resultBytes": 728,
+          "semanticFingerprint": "add07a912320423fbf266655f9b33c949daf45858475737e6d0eb84bdd188741",
+          "sequence": 9,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 187
+        }
+      ],
+      "usage": {
+        "cacheReadTokens": 33792,
+        "cacheWriteTokens": 0,
+        "costUsd": 0.00690144,
+        "embeddingCostUsd": 0.0007629000000000001,
+        "embeddingRequests": 2,
+        "embeddingTokens": 5086,
+        "inputTokens": 14736,
+        "knownCostUsd": 0.00766434,
+        "outputTokens": 2732,
+        "usageReconciled": true
+      },
+      "version": 1
+    },
+    {
+      "activation": {
+        "edit": true,
+        "fault": true,
+        "postEditRead": true,
+        "read": true,
+        "run": true,
+        "search": true,
+        "semantic": true,
+        "structured": true,
+        "verifierRun": true
+      },
+      "attemptId": "iteration_1-D-02",
+      "caseId": "D-02",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "edit": {
+        "firstSuccess": false,
+        "recoveryCalls": 1
+      },
+      "efficiency": {
+        "activeToolResultContextBytes": 45690,
+        "ambiguousContextBytes": 848,
+        "ambiguousReturnBytes": 994,
+        "callsByTool": {
+          "edit": 3,
+          "read": 4,
+          "run": 1,
+          "search": 1
+        },
+        "duplicateContextBytes": 40853,
+        "duplicateExactRequests": 0,
+        "duplicateSemanticRequests": 0,
+        "elapsedMs": 62818,
+        "irrelevantContextBytes": 2950,
+        "irrelevantReturnBytes": 4563,
+        "modelAndHostElapsedMs": 57694,
+        "peakActiveToolResultBytes": 7074,
+        "peakContextTokens": 6380,
+        "providerPayloadBytes": 581971,
+        "providerRequests": 10,
+        "repeatedReadRequests": 0,
+        "repeatedSearchRequests": 0,
+        "toolElapsedMs": 5124,
+        "toolErrorCount": 1,
+        "toolReturnBytes": 7074,
+        "truncationCount": 5,
+        "turns": 10,
+        "usefulContextBytes": 1039,
+        "usefulReturnBytes": 1517
+      },
+      "filesystem": {
+        "externalChangePreserved": true,
+        "modeCorrect": true,
+        "targetCorrect": true,
+        "verificationPassed": true,
+        "wrongLocationsUnchanged": true
+      },
+      "phase": "iteration_1",
+      "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "promptHash": "262340c71c37cb254465842b832263f505e9a1d297b696a7c587f1b377f478ef",
+      "read": {
+        "postEditReads": 1,
+        "requiredRangeCoverage": 1,
+        "targetFirst": true
+      },
+      "run": {
+        "exitCode": 0,
+        "signal": null,
+        "terminationReason": "exit",
+        "terminationRequested": false,
+        "timedOut": false,
+        "verifierRuns": 1,
+        "verifierSucceeded": true
+      },
+      "schemaHash": "95d775325c81a8ca2c02058204cf11a4763accd3636ec5c2209e99d370c6a4a1",
+      "score": 1,
+      "search": {
+        "approximateSearches": 1,
+        "firstTargetRank": 1,
+        "mrr": 1,
+        "partialSearches": 1,
+        "recallAt5": 1,
+        "semanticSearches": 1,
+        "structuredSearches": 0,
+        "truncatedSearches": 1,
+        "wrongCandidateReads": 0
+      },
+      "status": "completed",
+      "success": true,
+      "trace": [
+        {
+          "ambiguousBytes": 131,
+          "durationMs": 4928,
+          "exactFingerprint": "d677192b4ca26473c6e009df53c130ad82560d1bbb5b20f6c79ce67bce4d4b06",
+          "irrelevantBytes": 1309,
+          "mode": "semantic_candidate",
+          "resultBytes": 1465,
+          "semanticFingerprint": "d677192b4ca26473c6e009df53c130ad82560d1bbb5b20f6c79ce67bce4d4b06",
+          "sequence": 0,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 25
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 4,
+          "exactFingerprint": "27014fa9a83d7a289019ddcf45a69164eca4c35110afef60ec67dc581c31a979",
+          "irrelevantBytes": 1273,
+          "resultBytes": 1640,
+          "semanticFingerprint": "ffe39325466553b97709f705c7eb8ebf5cd0f7f5687ecbae279e65c6225da151",
+          "sequence": 1,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 180
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 4,
+          "exactFingerprint": "7c5697d32b4b4d1df17128ae8553f68add41b2e6099e6517efa421ce1ec0a183",
+          "irrelevantBytes": 1144,
+          "resultBytes": 1551,
+          "semanticFingerprint": "7c5697d32b4b4d1df17128ae8553f68add41b2e6099e6517efa421ce1ec0a183",
+          "sequence": 2,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 220
+        },
+        {
+          "ambiguousBytes": 18,
+          "durationMs": 3,
+          "errorCode": "PREIMAGE_MISMATCH",
+          "exactFingerprint": "480c613986698403a1492013338a0f3fc1394f5aa0f33f5748d23e6cb83f131a",
+          "irrelevantBytes": 1,
+          "mode": "prepare",
+          "resultBytes": 334,
+          "semanticFingerprint": "d09d4127f7ab959265be350b5f6286103527406c3a5adb1e008e4d8616553aa2",
+          "sequence": 3,
+          "status": "error",
+          "toolName": "edit",
+          "usefulBytes": 315
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 2,
+          "exactFingerprint": "50fb13b56758e51ca7c218b773643fb5a1f31c32ab4779bb58fd44d048594a9f",
+          "irrelevantBytes": 1,
+          "resultBytes": 264,
+          "semanticFingerprint": "50fb13b56758e51ca7c218b773643fb5a1f31c32ab4779bb58fd44d048594a9f",
+          "sequence": 4,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 76
+        },
+        {
+          "ambiguousBytes": 56,
+          "durationMs": 6,
+          "exactFingerprint": "760270b05378ccb4ed39ff01135b9daad3c0766e17b058988f535736a1c90352",
+          "irrelevantBytes": 295,
+          "mode": "prepare",
+          "resultBytes": 715,
+          "semanticFingerprint": "9bd6bc734f5802e1cb59956e2c57dee5fe9762c8000482c0a34d9d3317497d2f",
+          "sequence": 5,
+          "status": "success",
+          "toolName": "edit",
+          "usefulBytes": 364
+        },
+        {
+          "ambiguousBytes": 41,
+          "durationMs": 2,
+          "exactFingerprint": "36b34dec8c974fcd742786a08308499ccc20e9bc996db624ceea9222b8be7115",
+          "irrelevantBytes": 1,
+          "mode": "commit",
+          "resultBytes": 147,
+          "semanticFingerprint": "5cc736fbe7410d8c3b14550817f2339a79b9748ee775807a7b80757a2681a4a5",
+          "sequence": 6,
+          "status": "success",
+          "toolName": "edit",
+          "usefulBytes": 105
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 2,
+          "exactFingerprint": "12bd8e5ff3cdce32c2ab27f9264ddb573d5b46582741b8763aa192eced663fb7",
+          "irrelevantBytes": 537,
+          "resultBytes": 945,
+          "semanticFingerprint": "12bd8e5ff3cdce32c2ab27f9264ddb573d5b46582741b8763aa192eced663fb7",
+          "sequence": 7,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 221
+        },
+        {
+          "ambiguousBytes": 0,
+          "durationMs": 172,
+          "exactFingerprint": "66ca965c69cb947ee4acf0386f8c3b194d7e479fcd4c01ab684ceb016d20eee0",
+          "irrelevantBytes": 2,
+          "resultBytes": 13,
+          "semanticFingerprint": "66ca965c69cb947ee4acf0386f8c3b194d7e479fcd4c01ab684ceb016d20eee0",
+          "sequence": 8,
+          "status": "success",
+          "toolName": "run",
+          "usefulBytes": 11
+        }
+      ],
+      "usage": {
+        "cacheReadTokens": 31744,
+        "cacheWriteTokens": 0,
+        "costUsd": 0.005966680000000001,
+        "embeddingCostUsd": 0.0007629000000000001,
+        "embeddingRequests": 2,
+        "embeddingTokens": 5086,
+        "inputTokens": 14305,
+        "knownCostUsd": 0.0067295800000000015,
+        "outputTokens": 2059,
+        "usageReconciled": true
+      },
+      "version": 1
+    },
+    {
+      "attemptId": "held_out-H-01",
+      "caseId": "H-01",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "infrastructureFailure": true,
+      "phase": "held_out",
+      "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "preDispatch": true,
+      "promptHash": "01c98573fcdbcb4801181ae2074ad92524c59e3589485e4ad097dbdfce0ff13b",
+      "schemaHash": "95d775325c81a8ca2c02058204cf11a4763accd3636ec5c2209e99d370c6a4a1",
+      "score": 0,
+      "status": "aborted",
+      "stopCategory": "model_visible_system_prompt_hash_changed",
+      "success": false,
+      "usage": {
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "chatRequests": 0,
+        "embeddingRequests": 0,
+        "embeddingTokens": 0,
+        "inputTokens": 0,
+        "knownCostUsd": 0,
+        "outputTokens": 0
+      },
+      "version": 1
+    },
+    {
+      "activation": {
+        "edit": false,
+        "fault": true,
+        "postEditRead": false,
+        "read": true,
+        "run": false,
+        "search": true,
+        "semantic": true,
+        "structured": true,
+        "verifierRun": false
+      },
+      "attemptId": "held_out-H-02",
+      "caseId": "H-02",
+      "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+      "edit": {
+        "firstSuccess": null,
+        "recoveryCalls": 0
+      },
+      "efficiency": {
+        "activeToolResultContextBytes": 31605,
+        "ambiguousContextBytes": 888,
+        "ambiguousReturnBytes": 1134,
+        "callsByTool": {
+          "edit": 0,
+          "read": 5,
+          "run": 0,
+          "search": 6
+        },
+        "duplicateContextBytes": 24189,
+        "duplicateExactRequests": 0,
+        "duplicateSemanticRequests": 1,
+        "elapsedMs": 50960,
+        "irrelevantContextBytes": 6505,
+        "irrelevantReturnBytes": 7301,
+        "modelAndHostElapsedMs": 46263,
+        "peakActiveToolResultBytes": 8424,
+        "peakContextTokens": 6790,
+        "providerPayloadBytes": 414256,
+        "providerRequests": 8,
+        "repeatedReadRequests": 1,
+        "repeatedSearchRequests": 0,
+        "toolElapsedMs": 4697,
+        "toolErrorCount": 0,
+        "toolReturnBytes": 8481,
+        "truncationCount": 6,
+        "turns": 8,
+        "usefulContextBytes": 23,
+        "usefulReturnBytes": 46
+      },
+      "filesystem": {
+        "externalChangePreserved": true,
+        "modeCorrect": true,
+        "targetCorrect": false,
+        "verificationPassed": false,
+        "wrongLocationsUnchanged": false
+      },
+      "phase": "held_out",
+      "piDiffHash": "3a011dabfea58bfbc9a06a1afe1f96db4a44f141646194ab69b9e3cbebf8359b",
+      "piHead": "51a6534c99341e75289cc9b8f628f75cda1d04f3",
+      "promptHash": "e577977ffa77bfc2fca15d4cbd08b720f567cef9614c28d8f1374bf07adef41a",
+      "read": {
+        "postEditReads": 0,
+        "requiredRangeCoverage": 0,
+        "targetFirst": false
+      },
+      "run": {
+        "exitCode": null,
+        "signal": null,
+        "terminationReason": null,
+        "terminationRequested": null,
+        "timedOut": false,
+        "verifierRuns": 0,
+        "verifierSucceeded": false
+      },
+      "schemaHash": "95d775325c81a8ca2c02058204cf11a4763accd3636ec5c2209e99d370c6a4a1",
+      "score": 0.5333333333333333,
+      "search": {
+        "approximateSearches": 1,
+        "firstTargetRank": 1,
+        "mrr": 1,
+        "partialSearches": 3,
+        "recallAt5": 1,
+        "semanticSearches": 1,
+        "structuredSearches": 1,
+        "truncatedSearches": 2,
+        "wrongCandidateReads": 3
+      },
+      "status": "aborted",
+      "stopCategory": "session_chat_request_budget_exhausted",
+      "success": false,
+      "trace": [
+        {
+          "ambiguousBytes": 131,
+          "durationMs": 4544,
+          "exactFingerprint": "1e4eb62742d28b9e5c94c254682c66cc7e868f41d7cece770549bdab9d0a058e",
+          "irrelevantBytes": 370,
+          "mode": "semantic_candidate",
+          "resultBytes": 524,
+          "semanticFingerprint": "1e4eb62742d28b9e5c94c254682c66cc7e868f41d7cece770549bdab9d0a058e",
+          "sequence": 0,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 23
+        },
+        {
+          "ambiguousBytes": 0,
+          "durationMs": 5,
+          "exactFingerprint": "57a6ead02d809fdad8cc284bcbc5aaff62d2489aa86547bee6e6d834be77263a",
+          "irrelevantBytes": 142,
+          "mode": "symbol_definition",
+          "resultBytes": 142,
+          "semanticFingerprint": "57a6ead02d809fdad8cc284bcbc5aaff62d2489aa86547bee6e6d834be77263a",
+          "sequence": 1,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 4,
+          "exactFingerprint": "2c2a896f9540f7c7d4b95a0b486633aa1d783df3f28cbce465a8037759522186",
+          "irrelevantBytes": 1702,
+          "resultBytes": 1889,
+          "semanticFingerprint": "608f986d45979e959c25bd3d27a986c1a3a0c60a7daf0ce7725f8b4b51c5ca62",
+          "sequence": 2,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 74,
+          "durationMs": 64,
+          "exactFingerprint": "6a8aadd1292632168b5ca4d84482e993ff71b198a3d0c0f0d9a6ae3b47bc9bc0",
+          "irrelevantBytes": 787,
+          "mode": "literal",
+          "resultBytes": 884,
+          "semanticFingerprint": "6a8aadd1292632168b5ca4d84482e993ff71b198a3d0c0f0d9a6ae3b47bc9bc0",
+          "sequence": 3,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 23
+        },
+        {
+          "ambiguousBytes": 0,
+          "durationMs": 12,
+          "exactFingerprint": "c24737f7af845095b1d159b01b4323c0dad8567fa939ffa0c6b3a8789d5a350e",
+          "irrelevantBytes": 129,
+          "mode": "symbol_reference",
+          "resultBytes": 129,
+          "semanticFingerprint": "c24737f7af845095b1d159b01b4323c0dad8567fa939ffa0c6b3a8789d5a350e",
+          "sequence": 4,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 187,
+          "durationMs": 4,
+          "exactFingerprint": "538dab74345f22e039ee3f6350d9fcaf228dd7d5f6ab7f6e93053fab059ad609",
+          "irrelevantBytes": 1949,
+          "resultBytes": 2136,
+          "semanticFingerprint": "fb3433c78fa951b76c7948f769cdd05c02f406d82c3d698243b12d98510d1fb3",
+          "sequence": 5,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 230,
+          "durationMs": 4,
+          "exactFingerprint": "574435b8305c90f88aa10560c44401a953f97553bf3e0ea18d9bba639ac9fee6",
+          "irrelevantBytes": 812,
+          "resultBytes": 1042,
+          "semanticFingerprint": "ee0a2afc6d8b0012f22de66f7a4534478681cd59fb14b9ac9a400a567de6be95",
+          "sequence": 6,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 230,
+          "durationMs": 4,
+          "exactFingerprint": "928f720328e47c3f68ec7dff298cc1a56911f3d60447711545ed5f4e88716d90",
+          "irrelevantBytes": 806,
+          "resultBytes": 1036,
+          "semanticFingerprint": "ee0a2afc6d8b0012f22de66f7a4534478681cd59fb14b9ac9a400a567de6be95",
+          "sequence": 7,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 38,
+          "durationMs": 53,
+          "exactFingerprint": "44e53a5741ad01aa00d1756316b962b7906e37ff0e411a5bd2439d5f90966f25",
+          "irrelevantBytes": 266,
+          "mode": "literal",
+          "resultBytes": 304,
+          "semanticFingerprint": "44e53a5741ad01aa00d1756316b962b7906e37ff0e411a5bd2439d5f90966f25",
+          "sequence": 8,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 0,
+          "durationMs": 3,
+          "exactFingerprint": "e27a919bd7087046b090050326b259ea9590b1c2925ed36f74dd483a60fcc778",
+          "irrelevantBytes": 338,
+          "resultBytes": 338,
+          "semanticFingerprint": "e27a919bd7087046b090050326b259ea9590b1c2925ed36f74dd483a60fcc778",
+          "sequence": 9,
+          "status": "success",
+          "toolName": "read",
+          "usefulBytes": 0
+        },
+        {
+          "ambiguousBytes": 57,
+          "durationMs": 19,
+          "exactFingerprint": "10585b80a62aa7ea79a18eec7afe219dc75692263e3961ffa7cc57a039d1386f",
+          "irrelevantBytes": 0,
+          "mode": "literal",
+          "resultBytes": 57,
+          "semanticFingerprint": "eacfa905c525383b7ce6920a2a44cae0cea4c60750bb12556d519b88f69a988f",
+          "sequence": 10,
+          "status": "success",
+          "toolName": "search",
+          "usefulBytes": 0
+        }
+      ],
+      "usage": {
+        "cacheReadTokens": 24064,
+        "cacheWriteTokens": 0,
+        "costUsd": 0.00467708,
+        "embeddingCostUsd": 0.0005918999999999999,
+        "embeddingRequests": 2,
+        "embeddingTokens": 3946,
+        "inputTokens": 10041,
+        "knownCostUsd": 0.00526898,
+        "outputTokens": 1823,
+        "usageReconciled": true
+      },
+      "version": 1
+    }
+  ],
+  "summaries": [
+    {
+      "attempted": 1,
+      "budget": {
+        "attemptIds": [
+          "baseline-D-01"
+        ],
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "chatRequests": 0,
+        "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+        "embeddingRequests": 0,
+        "embeddingTokens": 0,
+        "inputTokens": 0,
+        "integrityFailure": "chat_usage_reservation_missing",
+        "knownCostUsd": 0,
+        "outputTokens": 0,
+        "sessionsStarted": 1,
+        "startedAtMs": 1788099424461,
+        "version": 1
+      },
+      "completed": 0,
+      "phase": "baseline",
+      "stopCategory": "chat_usage_reservation_missing",
+      "successes": 0,
+      "version": 1
+    },
+    {
+      "attempted": 2,
+      "budget": {
+        "attemptIds": [
+          "baseline-D-01",
+          "baseline-D-02"
+        ],
+        "cacheReadTokens": 33792,
+        "cacheWriteTokens": 0,
+        "chatRequests": 10,
+        "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+        "embeddingRequests": 2,
+        "embeddingTokens": 5086,
+        "inputTokens": 14736,
+        "integrityResolutions": [
+          {
+            "attemptId": "baseline-D-01",
+            "category": "chat_usage_reservation_missing",
+            "resolution": "allowed_static_documentation_lines",
+            "resolvedAtMs": 1788100661911
+          }
+        ],
+        "knownCostUsd": 0.0076643399999999995,
+        "outputTokens": 2732,
+        "sessionsStarted": 2,
+        "startedAtMs": 1788099424461,
+        "version": 1
+      },
+      "completed": 0,
+      "phase": "baseline",
+      "stopCategory": "session_chat_request_budget_exhausted",
+      "successes": 0,
+      "version": 1
+    },
+    {
+      "attempted": 1,
+      "budget": {
+        "attemptIds": [
+          "baseline-D-01",
+          "baseline-D-02",
+          "iteration_1-D-02"
+        ],
+        "cacheReadTokens": 65536,
+        "cacheWriteTokens": 0,
+        "chatRequests": 20,
+        "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+        "embeddingRequests": 4,
+        "embeddingTokens": 10172,
+        "inputTokens": 29041,
+        "integrityResolutions": [
+          {
+            "attemptId": "baseline-D-01",
+            "category": "chat_usage_reservation_missing",
+            "resolution": "allowed_static_documentation_lines",
+            "resolvedAtMs": 1788100661911
+          }
+        ],
+        "knownCostUsd": 0.014393919999999996,
+        "outputTokens": 4791,
+        "sessionsStarted": 3,
+        "startedAtMs": 1788099424461,
+        "version": 1
+      },
+      "completed": 1,
+      "phase": "iteration_1",
+      "successes": 1,
+      "version": 1
+    },
+    {
+      "attempted": 2,
+      "budget": {
+        "attemptIds": [
+          "baseline-D-01",
+          "baseline-D-02",
+          "iteration_1-D-02",
+          "held_out-H-01",
+          "held_out-H-02"
+        ],
+        "cacheReadTokens": 89600,
+        "cacheWriteTokens": 0,
+        "chatRequests": 28,
+        "contractHash": "01cee1dba7256c83c8741da46e5c4d52eebab5a31f91786188bd23f9e5694278",
+        "embeddingRequests": 6,
+        "embeddingTokens": 14118,
+        "inputTokens": 39082,
+        "integrityResolutions": [
+          {
+            "attemptId": "baseline-D-01",
+            "category": "chat_usage_reservation_missing",
+            "resolution": "allowed_static_documentation_lines",
+            "resolvedAtMs": 1788100661911
+          }
+        ],
+        "knownCostUsd": 0.019662899999999994,
+        "outputTokens": 6614,
+        "sessionsStarted": 5,
+        "startedAtMs": 1788099424461,
+        "version": 1
+      },
+      "completed": 0,
+      "phase": "held_out",
+      "stopCategory": "session_chat_request_budget_exhausted",
+      "successes": 0,
+      "version": 1
+    }
+  ],
+  "corrections": [
+    {
+      "recordId": "held_out-H-02",
+      "field": "filesystem.wrongLocationsUnchanged",
+      "rawValue": false,
+      "correctedValue": true,
+      "basis": "zero_edit_calls_and_target_only_setup_mutation",
+      "rawRecordImmutable": true
+    }
+  ],
+  "artifactHashes": {
+    "attempts": {
+      "baseline-D-01": "bc600f3eccae1350a1b14c32968e0c657f34a813be20212cd12386a8cdf0148b",
+      "baseline-D-02": "c4bcd5b1c8a5361656fb03ff45540f49ae5f368e84947adbb2e2b08a8dfbf177",
+      "iteration_1-D-02": "44fbe03ec4067bb9371b6fd3da129ae508a91ef827697b8f165e08fc88ec5a91",
+      "held_out-H-01": "47f5bbedcf8f026fabfddd50a7cc231940d91e3ce8a793bdb664e3518207a24c",
+      "held_out-H-02": "5dd811375f8eb15ec614bdc8a730118bd9dfc6c538e42f2fc07f67acfcea498a"
+    },
+    "records": {
+      "baseline-D-01": "4d537d40fee6f55232e1eca3113dab36a7fb3a40f8bbbed5c72f6eb839df7649",
+      "baseline-D-02": "43aed7febc6098deff4d68d2a3d4e15a8d7b5996ceb5c37fa5832059b3cc8e39",
+      "iteration_1-D-02": "206222597fe57ee5decce53f2f28bad220cb1658ca4ba6e61461fb85a6e796dc",
+      "held_out-H-01": "0005d9a955eb89d9c10e39f8d38553eb6a30de642d7dc22e4ef789e53fdbbe03",
+      "held_out-H-02": "176f3fd2a44410171fb56826ae430f00fb65a73f380b79168f1d5ae88d03e41a"
+    },
+    "summaries": {
+      "baseline": "e432bc2313e1c916a05cd2e058f3397173ed678c73ba84f5cb19186ca58fe9b1",
+      "baseline-continuation-2": "48834a24f80e60ed9824c8e9cd3d337bc878d36f775992ca4e42d83495c3d41f",
+      "iteration_1": "114a4ef7b2724f74b923f3ae8b080ca896d511ffc2f106eab58e8720289e8f5d",
+      "held_out": "af8f2c63f316713dda1eee70e407444a7641c4b1cb0fa9555411b249a69f0d12"
+    },
+    "budget": "d590eb6cb86c2e166e2774ea21d64e6db6cbf2d883923d50a62a8ccaf162ffb1",
+    "candidate": "3414a0de33119b01168b2f46a4e5e4dd798ce4003b640f649f3020b87b4d4213",
+    "clock": "ad6ec1b3486a4bbca9f86b3012ffce04472d469aa36f1ec34f57937061616843"
+  }
+}
