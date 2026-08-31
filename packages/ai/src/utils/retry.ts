@@ -36,6 +36,7 @@ const NETWORK_PROVIDER_ERROR_PATTERNS = [
 	"getaddrinfo",
 	"ENOTFOUND",
 	"EAI_AGAIN",
+	"ECONNRESET",
 	"upstream.?connect",
 	"reset before headers",
 	"socket hang up",
