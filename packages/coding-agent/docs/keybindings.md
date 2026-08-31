@@ -20,7 +20,7 @@ After editing `keybindings.json`, run `/reload` in pi to apply the changes witho
 
 Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `super+k`, `ctrl+super+k`, `ctrl+1`, etc.
 
-`super` bindings require a terminal that reports the modifier separately, typically through the Kitty keyboard protocol. They may not work in terminals without that support.
+`super` is the Command (`Cmd`) key on macOS. `super` bindings require a terminal that reports the modifier separately, typically through the Kitty keyboard protocol. They may not work in terminals without that support.
 
 ## All Actions
 
@@ -152,6 +152,16 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
 | `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
 
+### Prompt Navigation
+
+These actions apply to user-prompt navigation in the Grok TUI. On macOS, the `super` bindings below are displayed as `Cmd`.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.prompt.prev` | `super+up`, `alt+up` | Jump to the previous user prompt |
+| `app.prompt.next` | `super+down`, `alt+down` | Jump to the next user prompt |
+| `app.prompt.list` | `super+g`, `alt+g` | Open the user prompt jump panel |
+
 ### Display and Message Queue
 
 | Keybinding id | Default | Description |
@@ -159,7 +169,7 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
 | `app.message.copy` | `ctrl+x` | Copy the last assistant message, or the selected message in `/tree` |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
-| `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
+| `app.message.dequeue` | `shift+alt+up` | Restore queued messages to editor |
 
 ### Tree Navigation
 

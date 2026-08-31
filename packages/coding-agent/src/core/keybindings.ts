@@ -92,15 +92,15 @@ export const KEYBINDINGS = {
 		description: "Toggle thinking blocks",
 	},
 	"app.prompt.prev": {
-		defaultKeys: "shift+pageUp",
+		defaultKeys: ["super+up", "alt+up"],
 		description: "Jump to previous user prompt",
 	},
 	"app.prompt.next": {
-		defaultKeys: "shift+pageDown",
+		defaultKeys: ["super+down", "alt+down"],
 		description: "Jump to next user prompt",
 	},
 	"app.prompt.list": {
-		defaultKeys: "f6",
+		defaultKeys: ["super+g", "alt+g"],
 		description: "Open user prompt list to jump",
 	},
 	"app.session.toggleNamedFilter": {
@@ -120,7 +120,7 @@ export const KEYBINDINGS = {
 		description: "Queue follow-up message",
 	},
 	"app.message.dequeue": {
-		defaultKeys: "alt+up",
+		defaultKeys: "shift+alt+up",
 		description: "Restore queued messages",
 	},
 	"app.clipboard.pasteImage": {
