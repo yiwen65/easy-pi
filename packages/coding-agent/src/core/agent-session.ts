@@ -13,7 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
 	Agent,
@@ -48,7 +48,6 @@ import {
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
-import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
@@ -108,7 +107,12 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	isSkillPromptMessage,
+	type SkillPromptMessage,
+} from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -121,6 +125,7 @@ import {
 	type SessionHeader,
 } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import { buildSkillPromptExpansion } from "./skill-invocations.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
@@ -129,32 +134,7 @@ import { createAllToolDefinitions, type V2ToolRuntimeHandle } from "./tools/inde
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
-// ============================================================================
-// Skill Block Parsing
-// ============================================================================
-
-/** Parsed skill block from a user message */
-export interface ParsedSkillBlock {
-	name: string;
-	location: string;
-	content: string;
-	userMessage: string | undefined;
-}
-
-/**
- * Parse a skill block from message text.
- * Returns null if the text doesn't contain a skill block.
- */
-export function parseSkillBlock(text: string): ParsedSkillBlock | null {
-	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-	if (!match) return null;
-	return {
-		name: match[1],
-		location: match[2],
-		content: match[3],
-		userMessage: match[4]?.trim() || undefined,
-	};
-}
+export { type ParsedSkillBlock, parseSkillBlock } from "./messages.ts";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -877,6 +857,21 @@ export class AgentSession {
 					}
 				}
 			}
+		} else if (event.type === "message_start" && event.message.role === "custom") {
+			if (isSkillPromptMessage(event.message)) {
+				const token = `/skill:${event.message.details.name}`;
+				const steeringIndex = this._steeringMessages.findIndex((message) => message.includes(token));
+				if (steeringIndex !== -1) {
+					this._steeringMessages.splice(steeringIndex, 1);
+					this._emitQueueUpdate();
+				} else {
+					const followUpIndex = this._followUpMessages.findIndex((message) => message.includes(token));
+					if (followUpIndex !== -1) {
+						this._followUpMessages.splice(followUpIndex, 1);
+						this._emitQueueUpdate();
+					}
+				}
+			}
 		}
 
 		// Emit to extensions first (message_end handlers may transform the message)
@@ -1426,10 +1421,13 @@ export class AgentSession {
 				}
 			}
 
-			// Expand skill commands (/skill:name args) and prompt templates (/template args)
+			// Resolve skill tokens into separate context messages, then expand the remaining prompt.
 			let expandedText = currentText;
+			let skillMessages: SkillPromptMessage[] = [];
 			if (expandPromptTemplates) {
-				expandedText = this._expandSkillCommand(expandedText);
+				const skillExpansion = this._buildSkillPromptExpansion(expandedText);
+				expandedText = skillExpansion.text;
+				skillMessages = skillExpansion.messages;
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
@@ -1441,9 +1439,9 @@ export class AgentSession {
 					);
 				}
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
+					await this._queueFollowUp(expandedText, currentImages, skillMessages);
 				} else {
-					await this._queueSteer(expandedText, currentImages);
+					await this._queueSteer(expandedText, currentImages, skillMessages);
 				}
 				preflightResult?.(true);
 				return;
@@ -1476,19 +1474,20 @@ export class AgentSession {
 			// prediction includes queued/extension messages and system-prompt changes.
 			// The local messages are sent after compaction; never call agent.continue() here.
 
-			// Build messages array (custom message if any, then user message)
-			messages = [];
+			// Skill context fragments precede the remaining user-authored request, as in Codex.
+			messages = [...skillMessages];
 
-			// Add user message
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
+			if (expandedText || currentImages?.length || messages.length === 0) {
+				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+				if (currentImages) {
+					userContent.push(...currentImages);
+				}
+				messages.push({
+					role: "user",
+					content: userContent,
+					timestamp: Date.now(),
+				});
 			}
-			messages.push({
-				role: "user",
-				content: userContent,
-				timestamp: Date.now(),
-			});
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this._pendingNextTurnMessages) {
@@ -1568,35 +1567,15 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Expand skill commands (/skill:name args) to their full content.
-	 * Returns the expanded text, or the original text if not a skill command or skill not found.
-	 * Emits errors via extension runner if file read fails.
-	 */
-	private _expandSkillCommand(text: string): string {
-		if (!text.startsWith("/skill:")) return text;
-
-		const spaceIndex = text.indexOf(" ");
-		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
-		if (!skill) return text; // Unknown skill, pass through
-
-		try {
-			const content = readFileSync(skill.filePath, "utf-8");
-			const body = stripFrontmatter(content).trim();
-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
-		} catch (err) {
-			// Emit error like extension commands do
+	/** Resolve registered skill tokens into separate, model-visible context messages. */
+	private _buildSkillPromptExpansion(text: string) {
+		return buildSkillPromptExpansion(text, this.resourceLoader.getSkills().skills, (skill, error) => {
 			this._extensionRunner.emitError({
 				extensionPath: skill.filePath,
 				event: "skill_expansion",
-				error: err instanceof Error ? err.message : String(err),
+				error: error instanceof Error ? error.message : String(error),
 			});
-			return text; // Return original on error
-		}
+		});
 	}
 
 	/**
@@ -1613,11 +1592,11 @@ export class AgentSession {
 			this._throwIfExtensionCommand(text);
 		}
 
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+		// Resolve skill commands and expand the remaining prompt template.
+		const skillExpansion = this._buildSkillPromptExpansion(text);
+		const expandedText = expandPromptTemplate(skillExpansion.text, [...this.promptTemplates]);
 
-		await this._queueSteer(expandedText, images);
+		await this._queueSteer(expandedText, images, skillExpansion.messages);
 	}
 
 	/**
@@ -1633,45 +1612,55 @@ export class AgentSession {
 			this._throwIfExtensionCommand(text);
 		}
 
-		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+		// Resolve skill commands and expand the remaining prompt template.
+		const skillExpansion = this._buildSkillPromptExpansion(text);
+		const expandedText = expandPromptTemplate(skillExpansion.text, [...this.promptTemplates]);
 
-		await this._queueFollowUp(expandedText, images);
+		await this._queueFollowUp(expandedText, images, skillExpansion.messages);
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		this._steeringMessages.push(text);
+	private async _queueSteer(
+		text: string,
+		images?: ImageContent[],
+		skillMessages: SkillPromptMessage[] = [],
+	): Promise<void> {
+		const queueText = text || skillMessages.map((message) => `/skill:${message.details.name}`).join(" ");
+		this._steeringMessages.push(queueText);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
+		const messages: AgentMessage[] = [...skillMessages];
+		if (text || images?.length || messages.length === 0) {
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+			if (images) {
+				content.push(...images);
+			}
+			messages.push({ role: "user", content, timestamp: Date.now() });
 		}
-		this.agent.steer({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.steer(messages);
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
-		this._followUpMessages.push(text);
+	private async _queueFollowUp(
+		text: string,
+		images?: ImageContent[],
+		skillMessages: SkillPromptMessage[] = [],
+	): Promise<void> {
+		const queueText = text || skillMessages.map((message) => `/skill:${message.details.name}`).join(" ");
+		this._followUpMessages.push(queueText);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
+		const messages: AgentMessage[] = [...skillMessages];
+		if (text || images?.length || messages.length === 0) {
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+			if (images) {
+				content.push(...images);
+			}
+			messages.push({ role: "user", content, timestamp: Date.now() });
 		}
-		this.agent.followUp({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
+		this.agent.followUp(messages);
 	}
 
 	/**

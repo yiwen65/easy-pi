@@ -52,6 +52,83 @@ export interface CustomMessage<T = unknown> {
 	timestamp: number;
 }
 
+export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
+
+export interface SkillPromptDetails {
+	name: string;
+	path: string;
+}
+
+export type SkillPromptMessage = CustomMessage<SkillPromptDetails> & {
+	customType: typeof SKILL_PROMPT_MESSAGE_TYPE;
+	display: true;
+	details: SkillPromptDetails;
+};
+
+/** Parsed model-visible skill instructions, including legacy inline user messages. */
+export interface ParsedSkillBlock {
+	name: string;
+	location: string;
+	content: string;
+	userMessage: string | undefined;
+}
+
+/** Build one Codex-style, model-visible user context fragment for a selected skill. */
+export function createSkillPromptMessage(
+	name: string,
+	path: string,
+	baseDir: string,
+	contents: string,
+	timestamp = Date.now(),
+): SkillPromptMessage {
+	return {
+		role: "custom",
+		customType: SKILL_PROMPT_MESSAGE_TYPE,
+		content: `<skill>\n<name>${name}</name>\n<path>${path}</path>\nReferences are relative to ${baseDir}.\n\n${contents}\n</skill>`,
+		display: true,
+		details: { name, path },
+		timestamp,
+	};
+}
+
+export function isSkillPromptMessage(message: CustomMessage): message is SkillPromptMessage {
+	return (
+		message.customType === SKILL_PROMPT_MESSAGE_TYPE &&
+		typeof message.details === "object" &&
+		message.details !== null &&
+		"name" in message.details &&
+		typeof message.details.name === "string" &&
+		"path" in message.details &&
+		typeof message.details.path === "string"
+	);
+}
+
+/** Parse current Codex-style skill fragments and legacy Pi inline skill blocks. */
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const structuredMatch = text.match(
+		/^<skill>\n<name>([^\n]*)<\/name>\n<path>([^\n]*)<\/path>\n([\s\S]*?)\n<\/skill>$/,
+	);
+	if (structuredMatch) {
+		return {
+			name: structuredMatch[1],
+			location: structuredMatch[2],
+			content: structuredMatch[3],
+			userMessage: undefined,
+		};
+	}
+
+	const legacyMatch = text.match(
+		/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/,
+	);
+	if (!legacyMatch) return null;
+	return {
+		name: legacyMatch[1],
+		location: legacyMatch[2],
+		content: legacyMatch[3],
+		userMessage: legacyMatch[4]?.trim() || undefined,
+	};
+}
+
 export interface BranchSummaryMessage {
 	role: "branchSummary";
 	summary: string;

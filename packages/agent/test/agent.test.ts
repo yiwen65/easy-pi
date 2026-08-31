@@ -776,6 +776,44 @@ describe("Agent", () => {
 		expect(responseCount).toBe(2);
 	});
 
+	it("keeps queued message groups atomic in one-at-a-time mode", async () => {
+		let responseCount = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				const stream = new MockAssistantStream();
+				responseCount++;
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage(`Processed ${responseCount}`),
+					});
+				});
+				return stream;
+			},
+		});
+		agent.state.messages = [createAssistantMessage("Initial response")];
+		const firstGroup: AgentMessage[] = [
+			{ role: "user", content: "skill context", timestamp: 1 },
+			{ role: "user", content: "request", timestamp: 2 },
+		];
+		agent.steer(firstGroup);
+		agent.steer({ role: "user", content: "next request", timestamp: 3 });
+
+		await agent.continue();
+
+		expect(agent.state.messages.slice(1).map((message) => message.role)).toEqual([
+			"user",
+			"user",
+			"assistant",
+			"user",
+			"assistant",
+		]);
+		expect(agent.state.messages[1]).toEqual(firstGroup[0]);
+		expect(agent.state.messages[2]).toEqual(firstGroup[1]);
+		expect(responseCount).toBe(2);
+	});
+
 	it("keeps legacy prepareNextTurn signal callback behavior", async () => {
 		const schema = Type.Object({});
 		const tool: AgentTool<typeof schema> = {

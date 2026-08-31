@@ -174,21 +174,109 @@ describe("AgentSession prompt characterization", () => {
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
-		let expandedPrompt = "";
+		let providerUserTexts: string[] = [];
 
 		harness.setResponses([
 			(context) => {
-				const user = context.messages.find((message) => message.role === "user");
-				expandedPrompt = user ? getMessageText(user) : "";
+				providerUserTexts = context.messages
+					.filter((message) => message.role === "user")
+					.map((message) => getMessageText(message));
 				return fauxAssistantMessage("ok");
 			},
 		]);
 
 		await harness.session.prompt("/skill:test explain this");
 
-		expect(expandedPrompt).toContain('<skill name="test" location="');
-		expect(expandedPrompt).toContain("Use the skill body.");
-		expect(expandedPrompt).toContain("explain this");
+		expect(providerUserTexts).toHaveLength(2);
+		expect(providerUserTexts[0]).toContain("<skill>\n<name>test</name>");
+		expect(providerUserTexts[0]).toContain(`<path>${skillPath}</path>`);
+		expect(providerUserTexts[0]).toContain("Use the skill body.");
+		expect(providerUserTexts[1]).toBe("explain this");
+		expect(harness.session.messages.slice(0, 2).map((message) => message.role)).toEqual(["custom", "user"]);
+	});
+
+	it("expands every registered skill token before sending the prompt", async () => {
+		const tempDir = join(tmpdir(), `pi-skills-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+		tempDirs.push(tempDir);
+		const firstSkillPath = join(tempDir, "first-skill.md");
+		const secondSkillPath = join(tempDir, "second-skill.md");
+		writeFileSync(firstSkillPath, "# First Skill\n\nUse the first skill body.");
+		writeFileSync(secondSkillPath, "# Second Skill\n\nUse the second skill body.");
+
+		const skills = [
+			{
+				name: "first",
+				description: "First skill",
+				filePath: firstSkillPath,
+				disableModelInvocation: false,
+				baseDir: tempDir,
+				sourceInfo: createSyntheticSourceInfo(firstSkillPath, {
+					source: "local" as const,
+					scope: "project" as const,
+					origin: "top-level" as const,
+					baseDir: tempDir,
+				}),
+			},
+			{
+				name: "second",
+				description: "Second skill",
+				filePath: secondSkillPath,
+				disableModelInvocation: false,
+				baseDir: tempDir,
+				sourceInfo: createSyntheticSourceInfo(secondSkillPath, {
+					source: "local" as const,
+					scope: "project" as const,
+					origin: "top-level" as const,
+					baseDir: tempDir,
+				}),
+			},
+		];
+		const resourceLoader = {
+			...createTestResourceLoader(),
+			getSkills: () => ({ skills, diagnostics: [] }),
+		};
+		const harness = await createHarness({ resourceLoader });
+		harnesses.push(harness);
+		let providerUserTexts: string[] = [];
+
+		harness.setResponses([
+			(context) => {
+				providerUserTexts = context.messages
+					.filter((message) => message.role === "user")
+					.map((message) => getMessageText(message));
+				return fauxAssistantMessage("ok");
+			},
+		]);
+
+		await harness.session.prompt("/skill:first /skill:second explain this");
+
+		expect(providerUserTexts).toHaveLength(3);
+		expect(providerUserTexts[0]).toContain("<skill>\n<name>first</name>");
+		expect(providerUserTexts[0]).toContain("Use the first skill body.");
+		expect(providerUserTexts[1]).toContain("<skill>\n<name>second</name>");
+		expect(providerUserTexts[1]).toContain("Use the second skill body.");
+		expect(providerUserTexts[2]).toBe("explain this");
+		expect(providerUserTexts.join("\n")).not.toContain("/skill:");
+		expect(harness.session.messages.slice(0, 3).map((message) => message.role)).toEqual(["custom", "custom", "user"]);
+
+		let queuedUserTexts: string[] = [];
+		harness.setResponses([
+			(context) => {
+				queuedUserTexts = context.messages
+					.filter((message) => message.role === "user")
+					.map((message) => getMessageText(message))
+					.slice(-4);
+				return fauxAssistantMessage("queued ok");
+			},
+		]);
+		await harness.session.steer("/skill:first /skill:second queued request");
+		await harness.session.prompt("start queued turn");
+
+		expect(queuedUserTexts[0]).toBe("start queued turn");
+		expect(queuedUserTexts[1]).toContain("<skill>\n<name>first</name>");
+		expect(queuedUserTexts[2]).toContain("<skill>\n<name>second</name>");
+		expect(queuedUserTexts[3]).toBe("queued request");
 	});
 
 	it("expands prompt templates before sending the prompt", async () => {

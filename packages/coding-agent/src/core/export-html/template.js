@@ -313,19 +313,25 @@
         return '';
       }
 
-      /**
-       * Parse a skill block from message text.
-       * Returns null if the text doesn't contain a skill block.
-       * Matches the format: <skill name="..." location="...">\n...\n</skill>\n\nuser message
-       */
+      /** Parse current structured skill fragments and legacy inline skill blocks. */
       function parseSkillBlock(text) {
-        const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-        if (!match) return null;
+        const structuredMatch = text.match(/^<skill>\n<name>([^\n]*)<\/name>\n<path>([^\n]*)<\/path>\n([\s\S]*?)\n<\/skill>$/);
+        if (structuredMatch) {
+          return {
+            name: structuredMatch[1],
+            location: structuredMatch[2],
+            content: structuredMatch[3],
+            userMessage: undefined,
+          };
+        }
+
+        const legacyMatch = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
+        if (!legacyMatch) return null;
         return {
-          name: match[1],
-          location: match[2],
-          content: match[3],
-          userMessage: match[4]?.trim() || undefined,
+          name: legacyMatch[1],
+          location: legacyMatch[2],
+          content: legacyMatch[3],
+          userMessage: legacyMatch[4]?.trim() || undefined,
         };
       }
 
@@ -690,6 +696,12 @@
           }
           case 'custom_message': {
             const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
+            if (entry.customType === 'skill-prompt') {
+              const skillBlock = parseSkillBlock(content);
+              if (skillBlock) {
+                return labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(skillBlock.name)}`;
+              }
+            }
             return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
           }
           case 'model_change':
@@ -1171,6 +1183,14 @@
         </button>`;
       }
 
+      function renderSkillInvocation(skillBlock) {
+        return `<div class="skill-invocation" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
+          <div class="skill-invocation-label">[skill] ${escapeHtml(skillBlock.name)}</div>
+          <div class="skill-invocation-collapsed">${escapeHtml(skillBlock.name)} (click to expand)</div>
+          <div class="skill-invocation-content markdown-content">${safeMarkedParse(skillBlock.content)}</div>
+        </div>`;
+      }
+
       function renderEntry(entry) {
         const ts = formatTimestamp(entry.timestamp);
         const tsHtml = ts ? `<div class="message-timestamp">${ts}</div>` : '';
@@ -1193,11 +1213,7 @@
               let html = `<div class="skill-user-entry" id="${entryDomId}">${copyBtnHtml}${tsHtml}`;
 
               // Skill invocation (collapsed by default, click to expand)
-              html += `<div class="skill-invocation" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
-                <div class="skill-invocation-label">[skill] ${escapeHtml(skillBlock.name)}</div>
-                <div class="skill-invocation-collapsed">${escapeHtml(skillBlock.name)} (click to expand)</div>
-                <div class="skill-invocation-content markdown-content">${safeMarkedParse(skillBlock.content)}</div>
-              </div>`;
+              html += renderSkillInvocation(skillBlock);
 
               // User message (separate block if present)
               if (hasUserContent) {
@@ -1307,6 +1323,13 @@
         }
 
         if (entry.type === 'custom_message' && entry.display) {
+          const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
+          if (entry.customType === 'skill-prompt') {
+            const skillBlock = parseSkillBlock(content);
+            if (skillBlock) {
+              return `<div class="skill-user-entry" id="${entryDomId}">${copyBtnHtml}${tsHtml}${renderSkillInvocation(skillBlock)}</div>`;
+            }
+          }
           return `<div class="hook-message" id="${entryDomId}">${tsHtml}
             <div class="hook-type">[${escapeHtml(entry.customType)}]</div>
             <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>
