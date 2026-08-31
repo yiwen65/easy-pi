@@ -26,8 +26,8 @@ export interface EditorComponent extends Component {
 	// Callbacks (required)
 	// =========================================================================
 
-	/** Called when user submits (e.g., Enter key) */
-	onSubmit?: (text: string) => void;
+	/** Called when user submits (e.g., Enter key). Attachment payloads are separate from display markers. */
+	onSubmit?: (text: string, attachments?: readonly unknown[]) => void;
 
 	/** Called when text changes */
 	onChange?: (text: string) => void;
@@ -45,6 +45,15 @@ export interface EditorComponent extends Component {
 
 	/** Insert text at current cursor position */
 	insertTextAtCursor?(text: string): void;
+
+	/** Insert an opaque payload represented by a numbered atomic marker. */
+	insertAttachmentAtCursor?(label: string, value: unknown): void;
+
+	/** Return payloads for attachment markers still present in the editor. */
+	getAttachments?(): readonly unknown[];
+
+	/** Associate payloads with existing numbered attachment markers. */
+	setAttachmentPayloads?(label: string, values: readonly unknown[]): void;
 
 	/**
 	 * Get text with any markers expanded (e.g., paste markers).

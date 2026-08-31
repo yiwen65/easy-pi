@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
+type SubmittedInput = {
+	text: string;
+	images?: Array<{ type: "image"; mimeType: string; data: string }>;
+};
+
 type SubmitContext = {
-	defaultEditor: { onSubmit?: (text: string) => void };
+	defaultEditor: { onSubmit?: (text: string, attachments?: readonly unknown[]) => void };
 	editor: {
 		addToHistory?: (text: string) => void;
 		setText: (text: string) => void;
@@ -14,13 +19,15 @@ type SubmitContext = {
 		prompt: (text: string, options?: unknown) => Promise<void>;
 	};
 	flushPendingBashComponents: () => void;
-	onInputCallback?: (text: string) => void;
-	pendingUserInputs: string[];
+	updatePendingMessagesDisplay: () => void;
+	ui: { requestRender: () => void };
+	onInputCallback?: (input: SubmittedInput) => void;
+	pendingUserInputs: SubmittedInput[];
 };
 
 type InputContext = {
-	onInputCallback?: (text: string) => void;
-	pendingUserInputs: string[];
+	onInputCallback?: (input: SubmittedInput) => void;
+	pendingUserInputs: SubmittedInput[];
 };
 
 type StartupSubmitContext = {
@@ -28,10 +35,27 @@ type StartupSubmitContext = {
 	showStatus: (message: string) => void;
 };
 
+type FollowUpContext = {
+	editor: {
+		getText: () => string;
+		getAttachments: () => readonly unknown[];
+		addToHistory: (text: string) => void;
+		setText: (text: string) => void;
+	};
+	session: {
+		isCompacting: boolean;
+		isStreaming: boolean;
+		prompt: (text: string, options?: unknown) => Promise<void>;
+	};
+	updatePendingMessagesDisplay: () => void;
+	ui: { requestRender: () => void };
+};
+
 type InteractiveModePrivate = {
 	handleStartupSubmit(this: StartupSubmitContext, text: string): void;
 	setupEditorSubmitHandler(this: SubmitContext): void;
-	getUserInput(this: InputContext): Promise<string>;
+	getUserInput(this: InputContext): Promise<SubmittedInput>;
+	handleFollowUp(this: FollowUpContext): Promise<void>;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrivate;
@@ -50,6 +74,8 @@ function createSubmitContext(): SubmitContext {
 			prompt: vi.fn(async () => {}),
 		},
 		flushPendingBashComponents: vi.fn(),
+		updatePendingMessagesDisplay: vi.fn(),
+		ui: { requestRender: vi.fn() },
 		pendingUserInputs: [],
 	};
 }
@@ -73,17 +99,67 @@ describe("InteractiveMode startup input", () => {
 
 		await context.defaultEditor.onSubmit?.(" early prompt ");
 
-		expect(context.pendingUserInputs).toEqual(["early prompt"]);
+		expect(context.pendingUserInputs).toEqual([{ text: "early prompt" }]);
 		expect(context.flushPendingBashComponents).toHaveBeenCalledTimes(1);
 		expect(context.editor.addToHistory).toHaveBeenCalledWith("early prompt");
 	});
 
-	it("returns queued startup input before installing a new input callback", async () => {
-		const context: InputContext = {
-			pendingUserInputs: ["queued prompt"],
+	it("queues pasted image attachments separately from their display markers", async () => {
+		const context = createSubmitContext();
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+		const image = { type: "image" as const, mimeType: "image/png", data: "base64-data" };
+
+		await context.defaultEditor.onSubmit?.("[Image #1]", [image]);
+
+		expect(context.pendingUserInputs).toEqual([{ text: "[Image #1]", images: [image] }]);
+	});
+
+	it("passes image attachments to streaming steer submissions", async () => {
+		const context = createSubmitContext();
+		context.session.isStreaming = true;
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+		const image = { type: "image" as const, mimeType: "image/png", data: "base64-data" };
+
+		await context.defaultEditor.onSubmit?.("[Image #1]", [image]);
+
+		expect(context.session.prompt).toHaveBeenCalledWith("[Image #1]", {
+			streamingBehavior: "steer",
+			images: [image],
+		});
+	});
+
+	it("passes image attachments to streaming follow-up submissions", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "base64-data" };
+		const context: FollowUpContext = {
+			editor: {
+				getText: () => "[Image #1]",
+				getAttachments: () => [image],
+				addToHistory: vi.fn(),
+				setText: vi.fn(),
+			},
+			session: {
+				isCompacting: false,
+				isStreaming: true,
+				prompt: vi.fn(async () => {}),
+			},
+			updatePendingMessagesDisplay: vi.fn(),
+			ui: { requestRender: vi.fn() },
 		};
 
-		await expect(interactiveModePrototype.getUserInput.call(context)).resolves.toBe("queued prompt");
+		await interactiveModePrototype.handleFollowUp.call(context);
+
+		expect(context.session.prompt).toHaveBeenCalledWith("[Image #1]", {
+			streamingBehavior: "followUp",
+			images: [image],
+		});
+	});
+
+	it("returns queued startup input before installing a new input callback", async () => {
+		const context: InputContext = {
+			pendingUserInputs: [{ text: "queued prompt" }],
+		};
+
+		await expect(interactiveModePrototype.getUserInput.call(context)).resolves.toEqual({ text: "queued prompt" });
 		expect(context.onInputCallback).toBeUndefined();
 		expect(context.pendingUserInputs).toEqual([]);
 	});

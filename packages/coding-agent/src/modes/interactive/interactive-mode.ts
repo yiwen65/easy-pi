@@ -3,7 +3,6 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -110,7 +109,7 @@ import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
-import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import { readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
@@ -228,8 +227,12 @@ class ExpandableResourceSection implements Component, Expandable {
 	}
 }
 
-type CompactionQueuedMessage = {
+type InteractiveUserInput = {
 	text: string;
+	images?: ImageContent[];
+};
+
+type CompactionQueuedMessage = InteractiveUserInput & {
 	mode: "steer" | "followUp";
 };
 
@@ -262,6 +265,24 @@ function findCheckpointHandoff(
 export const AGENTPORT_STARTUP_READY_SEQUENCE = "\x1b]6973;startup-ready\x07";
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
+
+function isImageContent(value: unknown): value is ImageContent {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"type" in value &&
+		value.type === "image" &&
+		"mimeType" in value &&
+		typeof value.mimeType === "string" &&
+		"data" in value &&
+		typeof value.data === "string"
+	);
+}
+
+function selectSubmittedImages(text: string, attachments: readonly unknown[]): ImageContent[] {
+	const images = attachments.filter(isImageContent);
+	return images.filter((_image, index) => text.includes(`[Image #${index + 1}]`));
+}
 
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
@@ -534,8 +555,8 @@ export class InteractiveMode {
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
-	private onInputCallback?: (text: string) => void;
-	private pendingUserInputs: string[] = [];
+	private onInputCallback?: (input: InteractiveUserInput) => void;
+	private pendingUserInputs: InteractiveUserInput[] = [];
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
@@ -1416,7 +1437,7 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
-				await this.session.prompt(userInput);
+				await this.session.prompt(userInput.text, { images: userInput.images });
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -2791,8 +2812,9 @@ export class InteractiveMode {
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
 		this.editorComponentFactory = factory;
 
-		// Save text from current editor before switching
+		// Save text and attachment payloads from the current editor before switching.
 		const currentText = this.editor.getText();
+		const currentAttachments = this.editor.getAttachments?.() ?? [];
 
 		this.disposeActiveSelector();
 		this.editorContainer.clear();
@@ -2805,8 +2827,9 @@ export class InteractiveMode {
 			newEditor.onSubmit = this.defaultEditor.onSubmit;
 			newEditor.onChange = this.defaultEditor.onChange;
 
-			// Copy text from previous editor
+			// Copy text and attachment payloads from the previous editor.
 			newEditor.setText(currentText);
+			newEditor.setAttachmentPayloads?.("Image", currentAttachments);
 
 			// Copy appearance settings if supported
 			if (newEditor.borderColor !== undefined) {
@@ -2848,8 +2871,9 @@ export class InteractiveMode {
 
 			this.editor = newEditor;
 		} else {
-			// Restore default editor with text from custom editor
+			// Restore default editor with text and attachments from the custom editor.
 			this.defaultEditor.setText(currentText);
+			this.defaultEditor.setAttachmentPayloads("Image", currentAttachments);
 			this.editor = this.defaultEditor;
 		}
 
@@ -3040,8 +3064,8 @@ export class InteractiveMode {
 			}
 		};
 
-		// Handle clipboard paste (triggered on Ctrl+V). Images are attached by path;
-		// otherwise, paste plain text from the system clipboard.
+		// Handle clipboard paste (triggered on Ctrl+V). Images become numbered
+		// attachments; otherwise, paste plain text from the system clipboard.
 		this.defaultEditor.onPasteImage = () => {
 			void this.handleClipboardPaste();
 		};
@@ -3065,13 +3089,16 @@ export class InteractiveMode {
 		try {
 			const image = await readClipboardImage();
 			if (image) {
-				const tmpDir = os.tmpdir();
-				const ext = extensionForImageMimeType(image.mimeType) ?? "png";
-				const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
-				const filePath = path.join(tmpDir, fileName);
-				fs.writeFileSync(filePath, Buffer.from(image.bytes));
-
-				this.editor.insertTextAtCursor?.(filePath);
+				if (!this.editor.insertAttachmentAtCursor) {
+					this.showWarning("The active custom editor does not support image attachments");
+					return;
+				}
+				const attachment: ImageContent = {
+					type: "image",
+					mimeType: image.mimeType,
+					data: Buffer.from(image.bytes).toString("base64"),
+				};
+				this.editor.insertAttachmentAtCursor("Image", attachment);
 				this.ui.requestRender();
 				return;
 			}
@@ -3092,9 +3119,14 @@ export class InteractiveMode {
 	}
 
 	private setupEditorSubmitHandler(): void {
-		this.defaultEditor.onSubmit = async (text: string) => {
+		this.defaultEditor.onSubmit = async (text: string, attachments: readonly unknown[] = []) => {
 			text = text.trim();
 			if (!text) return;
+			const attachmentValues =
+				attachments.length > 0 || this.editor === this.defaultEditor
+					? attachments
+					: (this.defaultEditor.getAttachments?.() ?? []);
+			const images = selectSubmittedImages(text, attachmentValues);
 
 			// Handle commands
 			if (text === "/settings") {
@@ -3254,9 +3286,9 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(text)) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
-					await this.session.prompt(text);
+					await this.session.prompt(text, { images: images.length > 0 ? images : undefined });
 				} else {
-					this.queueCompactionMessage(text, "steer");
+					this.queueCompactionMessage(text, "steer", images);
 				}
 				return;
 			}
@@ -3266,7 +3298,10 @@ export class InteractiveMode {
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer" });
+				await this.session.prompt(text, {
+					streamingBehavior: "steer",
+					images: images.length > 0 ? images : undefined,
+				});
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -3276,10 +3311,11 @@ export class InteractiveMode {
 			// First, move any pending bash components to chat
 			this.flushPendingBashComponents();
 
+			const input: InteractiveUserInput = images.length > 0 ? { text, images } : { text };
 			if (this.onInputCallback) {
-				this.onInputCallback(text);
+				this.onInputCallback(input);
 			} else {
-				this.pendingUserInputs.push(text);
+				this.pendingUserInputs.push(input);
 			}
 			this.editor.addToHistory?.(text);
 		};
@@ -4010,16 +4046,16 @@ export class InteractiveMode {
 		);
 	}
 
-	async getUserInput(): Promise<string> {
+	async getUserInput(): Promise<InteractiveUserInput> {
 		const queuedInput = this.pendingUserInputs.shift();
 		if (queuedInput !== undefined) {
 			return queuedInput;
 		}
 
 		return new Promise((resolve) => {
-			this.onInputCallback = (text: string) => {
+			this.onInputCallback = (input: InteractiveUserInput) => {
 				this.onInputCallback = undefined;
-				resolve(text);
+				resolve(input);
 			};
 		});
 	}
@@ -4230,15 +4266,19 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
+		const attachments =
+			this.editor.getAttachments?.() ??
+			(this.editor === this.defaultEditor ? [] : this.defaultEditor.getAttachments());
+		const images = selectSubmittedImages(text, attachments);
 
 		// Queue input during compaction (extension commands execute immediately)
 		if (this.session.isCompacting) {
 			if (this.isExtensionCommand(text)) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text);
+				await this.session.prompt(text, { images: images.length > 0 ? images : undefined });
 			} else {
-				this.queueCompactionMessage(text, "followUp");
+				this.queueCompactionMessage(text, "followUp", images);
 			}
 			return;
 		}
@@ -4248,14 +4288,17 @@ export class InteractiveMode {
 		if (this.session.isStreaming) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
-			await this.session.prompt(text, { streamingBehavior: "followUp" });
+			await this.session.prompt(text, {
+				streamingBehavior: "followUp",
+				images: images.length > 0 ? images : undefined,
+			});
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
 		// If not streaming, Alt+Enter acts like regular Enter (trigger onSubmit)
 		else if (this.editor.onSubmit) {
 			this.editor.setText("");
-			this.editor.onSubmit(text);
+			this.editor.onSubmit(text, attachments);
 		}
 	}
 
@@ -4633,8 +4676,8 @@ export class InteractiveMode {
 		return allQueued.length;
 	}
 
-	private queueCompactionMessage(text: string, mode: "steer" | "followUp"): void {
-		this.compactionQueuedMessages.push({ text, mode });
+	private queueCompactionMessage(text: string, mode: "steer" | "followUp", images: ImageContent[] = []): void {
+		this.compactionQueuedMessages.push(images.length > 0 ? { text, mode, images } : { text, mode });
 		this.editor.addToHistory?.(text);
 		this.editor.setText("");
 		this.updatePendingMessagesDisplay();
@@ -4678,9 +4721,9 @@ export class InteractiveMode {
 					if (this.isExtensionCommand(message.text)) {
 						await this.session.prompt(message.text);
 					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
+						await this.session.followUp(message.text, message.images);
 					} else {
-						await this.session.steer(message.text);
+						await this.session.steer(message.text, message.images);
 					}
 				}
 				this.updatePendingMessagesDisplay();
@@ -4708,7 +4751,7 @@ export class InteractiveMode {
 
 			// Start a prompt when idle, or queue it into a run still finishing compaction.
 			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
+				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode, images: firstPrompt.images })
 				.catch((error) => {
 					restoreQueue(error);
 				});
@@ -4718,9 +4761,9 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(message.text)) {
 					await this.session.prompt(message.text);
 				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
+					await this.session.followUp(message.text, message.images);
 				} else {
-					await this.session.steer(message.text);
+					await this.session.steer(message.text, message.images);
 				}
 			}
 			this.updatePendingMessagesDisplay();

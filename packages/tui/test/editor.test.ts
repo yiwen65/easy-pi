@@ -3570,6 +3570,88 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Attachment marker behavior", () => {
+		it("displays image attachments as numbered markers and submits their payloads separately", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const firstImage = { type: "image", mimeType: "image/png", data: "first" };
+			const secondImage = { type: "image", mimeType: "image/jpeg", data: "second" };
+			let submittedText = "";
+			let submittedAttachments: readonly unknown[] = [];
+			editor.onSubmit = (text, attachments) => {
+				submittedText = text;
+				submittedAttachments = attachments ?? [];
+			};
+
+			editor.insertAttachmentAtCursor("Image", firstImage);
+			editor.handleInput(" ");
+			editor.insertAttachmentAtCursor("Image", secondImage);
+
+			assert.strictEqual(editor.getText(), "[Image #1] [Image #2]");
+			editor.handleInput("\r");
+			assert.strictEqual(submittedText, "[Image #1] [Image #2]");
+			assert.deepStrictEqual(submittedAttachments, [firstImage, secondImage]);
+		});
+
+		it("deletes an image marker atomically and renumbers the remaining attachments", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const firstImage = { id: "first" };
+			const secondImage = { id: "second" };
+			editor.insertAttachmentAtCursor("Image", firstImage);
+			editor.handleInput(" ");
+			editor.insertAttachmentAtCursor("Image", secondImage);
+
+			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[C"); // move over [Image #1] as one unit
+			editor.handleInput("\x7f");
+
+			assert.strictEqual(editor.getText(), " [Image #1]");
+			assert.deepStrictEqual(editor.getAttachments(), [secondImage]);
+		});
+
+		it("restores image attachment state on undo", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const image = { id: "image" };
+			editor.insertAttachmentAtCursor("Image", image);
+			editor.handleInput("\x7f");
+			assert.strictEqual(editor.getText(), "");
+			assert.deepStrictEqual(editor.getAttachments(), []);
+
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), "[Image #1]");
+			assert.deepStrictEqual(editor.getAttachments(), [image]);
+		});
+
+		it("associates payloads with existing markers when editors are switched", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const image = { id: "image" };
+			let submittedAttachments: readonly unknown[] = [];
+			editor.onSubmit = (_text, attachments) => {
+				submittedAttachments = attachments ?? [];
+			};
+			editor.setText("before [Image #1] after");
+			editor.setAttachmentPayloads("Image", [image]);
+
+			assert.deepStrictEqual(editor.getAttachments(), [image]);
+			editor.handleInput("\r");
+			assert.deepStrictEqual(submittedAttachments, [image]);
+		});
+
+		it("preserves draft attachments while browsing prompt history", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const image = { id: "image" };
+			editor.addToHistory("older prompt");
+			editor.insertAttachmentAtCursor("Image", image);
+
+			editor.handleInput("\x1b[A");
+			editor.handleInput("\x1b[A");
+			assert.strictEqual(editor.getText(), "older prompt");
+			editor.handleInput("\x1b[B");
+
+			assert.strictEqual(editor.getText(), "[Image #1]");
+			assert.deepStrictEqual(editor.getAttachments(), [image]);
+		});
+	});
+
 	describe("Paste marker atomic behavior", () => {
 		/** Helper: simulate a large paste that creates a marker */
 		function pasteWithMarker(editor: Editor): string {
