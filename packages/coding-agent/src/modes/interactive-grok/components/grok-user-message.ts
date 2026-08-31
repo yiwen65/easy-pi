@@ -25,8 +25,9 @@ export class GrokUserMessageComponent extends UserMessageComponent {
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
 		timestamp = Date.now(),
+		skillNames: readonly string[] = [],
 	) {
-		super(text, markdownTheme, outputPad, markdownTransformers);
+		super(text, markdownTheme, outputPad, markdownTransformers, skillNames);
 		this.timestamp = timestamp;
 	}
 
