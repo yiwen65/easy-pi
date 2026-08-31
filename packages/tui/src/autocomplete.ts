@@ -354,10 +354,18 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 					const desc = cmd.description ?? "";
 					const fullDesc = hint ? (desc ? `${hint} — ${desc}` : hint) : desc;
+					const isSkill = name.startsWith("skill:");
+					const label = isSkill
+						? name
+								.slice("skill:".length)
+								.split("-")
+								.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+								.join(" ")
+						: name;
 					return {
 						name,
-						label: name,
-						description: fullDesc || undefined,
+						label,
+						description: isSkill ? `[Skill]${fullDesc ? ` ${fullDesc}` : ""}` : fullDesc || undefined,
 					};
 				});
 

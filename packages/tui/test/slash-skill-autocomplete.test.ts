@@ -45,6 +45,14 @@ describe("slash skill autocomplete", () => {
 				trailing?.items.map((item) => item.value),
 				["skill:alpha", "skill:beta", "skill:code-performance"],
 			);
+			assert.deepStrictEqual(
+				trailing?.items.map((item) => item.label),
+				["Alpha", "Beta", "Code Performance"],
+			);
+			assert.deepStrictEqual(
+				trailing?.items.map((item) => item.description),
+				["[Skill] Alpha skill", "[Skill] Beta skill", "[Skill] Performance skill"],
+			);
 		}
 	});
 
@@ -73,7 +81,8 @@ describe("slash skill autocomplete", () => {
 		await flushAutocomplete();
 		assert.strictEqual(editor.isShowingAutocomplete(), true);
 		const renderedMenu = stripVTControlCharacters(editor.render(100).join("\n"));
-		assert.match(renderedMenu, /skill:alpha/);
+		assert.match(renderedMenu, /Alpha\s+\[Skill] Alpha skill/);
+		assert.doesNotMatch(renderedMenu, /skill:alpha/);
 		assert.doesNotMatch(renderedMenu, /Switch model/);
 
 		editor.handleInput("\r");
