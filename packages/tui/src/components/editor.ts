@@ -24,9 +24,9 @@ const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
 /** Non-global version for single-segment testing. */
 const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
 
-/** Check if a segment is a paste marker (i.e. was merged by segmentWithMarkers). */
-function isPasteMarker(segment: string): boolean {
-	return segment.length >= 10 && PASTE_MARKER_SINGLE.test(segment);
+/** Check if a segment is an atomic editor marker merged by segmentWithMarkers. */
+function isAtomicMarker(segment: string): boolean {
+	return (segment.length >= 10 && PASTE_MARKER_SINGLE.test(segment)) || /^\[.+ #\d+]$/.test(segment);
 }
 
 /**
@@ -39,23 +39,33 @@ function isPasteMarker(segment: string): boolean {
 function segmentWithMarkers(
 	text: string,
 	baseSegmenter: Intl.Segmenter,
-	validIds: Set<number>,
+	validPasteIds: Set<number>,
+	attachmentMarkers: readonly string[],
 ): Iterable<Intl.SegmentData> {
-	// Fast path: no paste markers in the text or no valid IDs.
-	if (validIds.size === 0 || !text.includes("[paste #")) {
+	// Fast path: no registered markers can be present.
+	if (validPasteIds.size === 0 && attachmentMarkers.length === 0) {
 		return baseSegmenter.segment(text);
 	}
 
-	// Find all marker spans with valid IDs.
+	// Find all marker spans registered by the editor. Marker-like text typed by
+	// the user remains ordinary editable text.
 	const markers: Array<{ start: number; end: number }> = [];
 	for (const m of text.matchAll(PASTE_MARKER_REGEX)) {
 		const id = Number.parseInt(m[1]!, 10);
-		if (!validIds.has(id)) continue;
+		if (!validPasteIds.has(id)) continue;
 		markers.push({ start: m.index, end: m.index + m[0].length });
+	}
+	for (const marker of attachmentMarkers) {
+		let start = text.indexOf(marker);
+		while (start !== -1) {
+			markers.push({ start, end: start + marker.length });
+			start = text.indexOf(marker, start + marker.length);
+		}
 	}
 	if (markers.length === 0) {
 		return baseSegmenter.segment(text);
 	}
+	markers.sort((a, b) => a.start - b.start);
 
 	// Build merged segment list.
 	const baseSegments = baseSegmenter.segment(text);
@@ -137,7 +147,7 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 		const grapheme = seg.segment;
 		const gWidth = visibleWidth(grapheme);
 		const charIndex = seg.index;
-		const isWs = !isPasteMarker(grapheme) && isWhitespaceChar(grapheme);
+		const isWs = !isAtomicMarker(grapheme) && isWhitespaceChar(grapheme);
 
 		// Overflow check before advancing.
 		if (currentWidth + gWidth > maxWidth) {
@@ -186,12 +196,12 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 		// or at a boundary where either side is CJK (CJK allows breaking
 		// between any adjacent characters).
 		const next = segments[i + 1];
-		if (isWs && next && (isPasteMarker(next.segment) || !isWhitespaceChar(next.segment))) {
+		if (isWs && next && (isAtomicMarker(next.segment) || !isWhitespaceChar(next.segment))) {
 			wrapOppIndex = next.index;
 			wrapOppWidth = currentWidth;
 		} else if (!isWs && next && !isWhitespaceChar(next.segment)) {
-			const isCjk = !isPasteMarker(grapheme) && cjkBreakRegex.test(grapheme);
-			const nextIsCjk = !isPasteMarker(next.segment) && cjkBreakRegex.test(next.segment);
+			const isCjk = !isAtomicMarker(grapheme) && cjkBreakRegex.test(grapheme);
+			const nextIsCjk = !isAtomicMarker(next.segment) && cjkBreakRegex.test(next.segment);
 			if (isCjk || nextIsCjk) {
 				wrapOppIndex = next.index;
 				wrapOppWidth = currentWidth;
@@ -212,11 +222,17 @@ interface EditorState {
 	cursorCol: number;
 }
 
-/** Undo snapshot: editor text state plus the paste registry. */
+interface EditorAttachment {
+	label: string;
+	value: unknown;
+}
+
+/** Undo snapshot: editor text state plus marker registries. */
 interface EditorSnapshot {
 	state: EditorState;
 	pastes: Map<number, string>;
 	pasteCounter: number;
+	attachments: EditorAttachment[];
 }
 
 interface LayoutLine {
@@ -309,6 +325,9 @@ export class Editor implements Component, Focusable {
 	private pastes: Map<number, string> = new Map();
 	private pasteCounter: number = 0;
 
+	// Opaque attachment payloads represented by numbered atomic markers.
+	private attachments: EditorAttachment[] = [];
+
 	// Bracketed paste mode buffering
 	private pasteBuffer: string = "";
 	private isInPaste: boolean = false;
@@ -316,7 +335,7 @@ export class Editor implements Component, Focusable {
 	// Prompt history for up/down navigation
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
-	private historyDraft: EditorState | null = null;
+	private historyDraft: EditorSnapshot | null = null;
 
 	// Kill ring for Emacs-style kill/yank operations
 	private killRing = new KillRing();
@@ -338,7 +357,7 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 
-	public onSubmit?: (text: string) => void;
+	public onSubmit?: (text: string, attachments?: readonly unknown[]) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
 
@@ -357,9 +376,18 @@ export class Editor implements Component, Focusable {
 		return new Set(this.pastes.keys());
 	}
 
-	/** Segment text with paste-marker awareness, only merging markers with valid IDs. */
+	private attachmentMarker(attachment: EditorAttachment, index: number): string {
+		return `[${attachment.label} #${index + 1}]`;
+	}
+
+	/** Segment text with marker awareness, only merging markers registered by this editor. */
 	private segment(text: string, mode: "word" | "grapheme"): Iterable<Intl.SegmentData> {
-		return segmentWithMarkers(text, mode === "word" ? wordSegmenter : graphemeSegmenter, this.validPasteIds());
+		return segmentWithMarkers(
+			text,
+			mode === "word" ? wordSegmenter : graphemeSegmenter,
+			this.validPasteIds(),
+			this.attachments.map((attachment, index) => this.attachmentMarker(attachment, index)),
+		);
 	}
 
 	getPaddingX(): number {
@@ -434,7 +462,12 @@ export class Editor implements Component, Focusable {
 		// Capture state when first entering history browsing mode
 		if (this.historyIndex === -1 && newIndex >= 0) {
 			this.pushUndoSnapshot();
-			this.historyDraft = structuredClone(this.state);
+			this.historyDraft = structuredClone({
+				state: this.state,
+				pastes: this.pastes,
+				pasteCounter: this.pasteCounter,
+				attachments: this.attachments,
+			});
 		}
 
 		this.historyIndex = newIndex;
@@ -443,11 +476,14 @@ export class Editor implements Component, Focusable {
 			const draft = this.historyDraft;
 			this.historyDraft = null;
 			if (draft) {
-				this.state = draft;
+				this.state = draft.state;
+				this.pastes = draft.pastes;
+				this.pasteCounter = draft.pasteCounter;
+				this.attachments = draft.attachments;
 				this.preferredVisualCol = null;
 				this.snappedFromCursorCol = null;
 				this.scrollOffset = 0;
-				if (this.onChange) this.onChange(this.getText());
+				this.emitChange();
 			} else {
 				this.setTextInternal("");
 			}
@@ -470,9 +506,7 @@ export class Editor implements Component, Focusable {
 		// Reset scroll - render() will adjust to show cursor
 		this.scrollOffset = 0;
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	invalidate(): void {
@@ -689,7 +723,7 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 					this.cancelAutocomplete();
-					if (this.onChange) this.onChange(this.getText());
+					this.emitChange();
 				}
 				return;
 			}
@@ -715,7 +749,7 @@ export class Editor implements Component, Focusable {
 						// Fall through to submit
 					} else {
 						this.cancelAutocomplete();
-						if (this.onChange) this.onChange(this.getText());
+						this.emitChange();
 						return;
 					}
 				}
@@ -1015,6 +1049,19 @@ export class Editor implements Component, Focusable {
 		return [...this.state.lines];
 	}
 
+	/** Return opaque payloads for attachment markers still present in the editor. */
+	getAttachments(): readonly unknown[] {
+		this.reconcileAttachments();
+		return this.attachments.map((attachment) => attachment.value);
+	}
+
+	/** Associate payloads with existing numbered attachment markers. */
+	setAttachmentPayloads(label: string, values: readonly unknown[]): void {
+		const normalizedLabel = this.normalizeAttachmentLabel(label);
+		this.attachments = values.map((value) => ({ label: normalizedLabel, value }));
+		this.reconcileAttachments();
+	}
+
 	getCursor(): { line: number; col: number } {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
@@ -1034,8 +1081,23 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
+	 * Insert an opaque attachment represented by a numbered atomic marker.
+	 * The payload is returned separately from text when the editor is submitted.
+	 */
+	insertAttachmentAtCursor(label: string, value: unknown): void {
+		const normalizedLabel = this.normalizeAttachmentLabel(label);
+		this.cancelAutocomplete();
+		this.pushUndoSnapshot();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		const attachment: EditorAttachment = { label: normalizedLabel, value };
+		this.attachments.push(attachment);
+		this.insertTextAtCursorInternal(this.attachmentMarker(attachment, this.attachments.length - 1));
+	}
+
+	/**
 	 * Insert text at the current cursor position.
-	 * Used for programmatic insertion (e.g., clipboard image markers).
+	 * Used for programmatic insertion.
 	 * This is atomic for undo - single undo restores entire pre-insert state.
 	 */
 	insertTextAtCursor(text: string): void {
@@ -1045,6 +1107,67 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
 		this.insertTextAtCursorInternal(text);
+	}
+
+	private normalizeAttachmentLabel(label: string): string {
+		const normalizedLabel = label.trim();
+		if (!normalizedLabel || /[[\]\r\n]/.test(normalizedLabel)) {
+			throw new Error("Attachment labels must be non-empty single-line text without brackets");
+		}
+		return normalizedLabel;
+	}
+
+	private emitChange(): void {
+		this.reconcileAttachments();
+		this.onChange?.(this.getText());
+	}
+
+	private reconcileAttachments(): void {
+		if (this.attachments.length === 0) return;
+
+		const text = this.getText();
+		const survivors: EditorAttachment[] = [];
+		const replacements = new Map<string, string>();
+		for (let index = 0; index < this.attachments.length; index++) {
+			const attachment = this.attachments[index]!;
+			const oldMarker = this.attachmentMarker(attachment, index);
+			if (!text.includes(oldMarker)) continue;
+			const newMarker = this.attachmentMarker(attachment, survivors.length);
+			survivors.push(attachment);
+			if (oldMarker !== newMarker) replacements.set(oldMarker, newMarker);
+		}
+
+		this.attachments = survivors;
+		if (replacements.size === 0) return;
+
+		this.state.lines = this.state.lines.map((line, lineIndex) => {
+			let sourceIndex = 0;
+			let result = "";
+			let cursorCol = lineIndex === this.state.cursorLine ? this.state.cursorCol : undefined;
+			while (sourceIndex < line.length) {
+				let nextStart = -1;
+				let nextMarker = "";
+				let replacement = "";
+				for (const [marker, candidateReplacement] of replacements) {
+					const candidateStart = line.indexOf(marker, sourceIndex);
+					if (candidateStart !== -1 && (nextStart === -1 || candidateStart < nextStart)) {
+						nextStart = candidateStart;
+						nextMarker = marker;
+						replacement = candidateReplacement;
+					}
+				}
+				if (nextStart === -1) break;
+				result += line.slice(sourceIndex, nextStart) + replacement;
+				if (cursorCol !== undefined && nextStart < cursorCol) {
+					const markerEnd = nextStart + nextMarker.length;
+					cursorCol = cursorCol < markerEnd ? nextStart : cursorCol + replacement.length - nextMarker.length;
+				}
+				sourceIndex = nextStart + nextMarker.length;
+			}
+			result += line.slice(sourceIndex);
+			if (cursorCol !== undefined) this.state.cursorCol = cursorCol;
+			return result;
+		});
 	}
 
 	/**
@@ -1099,9 +1222,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	// All the editor methods from before...
@@ -1128,9 +1249,7 @@ export class Editor implements Component, Focusable {
 		this.state.lines[this.state.cursorLine] = before + char + after;
 		this.setCursorCol(this.state.cursorCol + char.length);
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
@@ -1253,9 +1372,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine++;
 		this.setCursorCol(0);
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	private shouldSubmitOnBackslashEnter(data: string, kb: ReturnType<typeof getKeybindings>): boolean {
@@ -1271,18 +1388,21 @@ export class Editor implements Component, Focusable {
 
 	private submitValue(): void {
 		this.cancelAutocomplete();
+		this.reconcileAttachments();
 		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
+		const attachments = this.attachments.map((attachment) => attachment.value);
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
 		this.pasteCounter = 0;
+		this.attachments = [];
 		this.exitHistoryBrowsing();
 		this.scrollOffset = 0;
 		this.undoStack.clear();
 		this.lastAction = null;
 
 		if (this.onChange) this.onChange("");
-		if (this.onSubmit) this.onSubmit(result);
+		if (this.onSubmit) this.onSubmit(result, attachments);
 	}
 
 	private handleBackspace(): void {
@@ -1348,9 +1468,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(previousLine.length);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 
 		// Update or re-trigger autocomplete after backspace
 		if (this.autocompleteState) {
@@ -1560,9 +1678,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(previousLine.length);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	private deleteToEndOfLine(): void {
@@ -1592,9 +1708,7 @@ export class Editor implements Component, Focusable {
 			this.state.lines.splice(this.state.cursorLine + 1, 1);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	private deleteWordBackwards(): void {
@@ -1637,9 +1751,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(deleteFrom);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	private deleteWordForward(): void {
@@ -1679,9 +1791,7 @@ export class Editor implements Component, Focusable {
 				currentLine.slice(0, this.state.cursorCol) + currentLine.slice(deleteTo);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	private handleForwardDelete(): void {
@@ -1713,9 +1823,7 @@ export class Editor implements Component, Focusable {
 			this.state.lines.splice(this.state.cursorLine + 1, 1);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 
 		// Update or re-trigger autocomplete after forward delete
 		if (this.autocompleteState) {
@@ -1895,7 +2003,7 @@ export class Editor implements Component, Focusable {
 		this.setCursorCol(
 			findWordBackward(currentLine, this.state.cursorCol, {
 				segment: (text) => this.segment(text, "word"),
-				isAtomicSegment: isPasteMarker,
+				isAtomicSegment: isAtomicMarker,
 			}),
 		);
 	}
@@ -1974,9 +2082,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol((lines[lines.length - 1] || "").length);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	/**
@@ -2016,13 +2122,16 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(startCol);
 		}
 
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	private pushUndoSnapshot(): void {
-		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
+		this.undoStack.push({
+			state: this.state,
+			pastes: this.pastes,
+			pasteCounter: this.pasteCounter,
+			attachments: this.attachments,
+		});
 	}
 
 	private undo(): void {
@@ -2032,11 +2141,10 @@ export class Editor implements Component, Focusable {
 		Object.assign(this.state, snapshot.state);
 		this.pastes = snapshot.pastes;
 		this.pasteCounter = snapshot.pasteCounter;
+		this.attachments = snapshot.attachments;
 		this.lastAction = null;
 		this.preferredVisualCol = null;
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		this.emitChange();
 	}
 
 	/**
@@ -2089,7 +2197,7 @@ export class Editor implements Component, Focusable {
 		this.setCursorCol(
 			findWordForward(currentLine, this.state.cursorCol, {
 				segment: (text) => this.segment(text, "word"),
-				isAtomicSegment: isPasteMarker,
+				isAtomicSegment: isAtomicMarker,
 			}),
 		);
 	}
@@ -2294,7 +2402,7 @@ export class Editor implements Component, Focusable {
 			this.state.lines = result.lines;
 			this.state.cursorLine = result.cursorLine;
 			this.setCursorCol(result.cursorCol);
-			if (this.onChange) this.onChange(this.getText());
+			this.emitChange();
 			this.tui.requestRender();
 			return;
 		}

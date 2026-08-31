@@ -17,7 +17,12 @@ const clipboardMocks = vi.hoisted(() => ({
 	readClipboardText: vi.fn<() => Promise<string | null>>(),
 }));
 
+const clipboardImageMocks = vi.hoisted(() => ({
+	readClipboardImage: vi.fn<() => Promise<{ bytes: Uint8Array; mimeType: string } | null>>(),
+}));
+
 vi.mock("../src/utils/clipboard.ts", () => clipboardMocks);
+vi.mock("../src/utils/clipboard-image.ts", () => clipboardImageMocks);
 
 class RecordingTerminal extends VirtualTerminal implements Terminal {
 	readonly writes: string[] = [];
@@ -216,8 +221,39 @@ describe("createInteractiveTui", () => {
 	});
 });
 
-describe("InteractiveMode right-click paste", () => {
-	it("feeds clipboard text to the focused component as a bracketed paste", async () => {
+describe("InteractiveMode clipboard paste", () => {
+	beforeEach(() => {
+		clipboardImageMocks.readClipboardImage.mockReset();
+		clipboardMocks.readClipboardText.mockReset();
+	});
+
+	it("inserts clipboard images as attachments instead of temporary file paths", async () => {
+		clipboardImageMocks.readClipboardImage.mockResolvedValue({
+			bytes: Uint8Array.from([1, 2, 3]),
+			mimeType: "image/png",
+		});
+		const insertAttachmentAtCursor = vi.fn();
+		const requestRender = vi.fn();
+		const context = {
+			editor: { insertAttachmentAtCursor },
+			ui: { requestRender },
+		};
+		const prototype = InteractiveMode.prototype as unknown as {
+			handleClipboardPaste(this: typeof context): Promise<void>;
+		};
+
+		await prototype.handleClipboardPaste.call(context);
+
+		expect(insertAttachmentAtCursor).toHaveBeenCalledWith("Image", {
+			type: "image",
+			mimeType: "image/png",
+			data: "AQID",
+		});
+		expect(requestRender).toHaveBeenCalledOnce();
+		expect(clipboardMocks.readClipboardText).not.toHaveBeenCalled();
+	});
+
+	it("feeds right-click clipboard text to the focused component as a bracketed paste", async () => {
 		clipboardMocks.readClipboardText.mockResolvedValue("clipboard text");
 		const handleInput = vi.fn<(data: string) => void>();
 		const target = { render: () => [], invalidate: () => {}, handleInput } satisfies Component;
