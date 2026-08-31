@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { CombinedAutocompleteProvider, type SlashCommand } from "../src/autocomplete.ts";
 import { Editor } from "../src/components/editor.ts";
+import { encodeSkillMention, findSkillMentions, isSkillMention } from "../src/skill-mentions.ts";
 import type { TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
@@ -29,6 +30,17 @@ async function getSuggestions(provider: CombinedAutocompleteProvider, line: stri
 }
 
 describe("slash skill autocomplete", () => {
+	it("recognizes complete encoded skill mentions without treating ordinary text as metadata", () => {
+		const mention = encodeSkillMention("code-performance");
+		assert.strictEqual(isSkillMention(mention), true);
+		assert.strictEqual(isSkillMention("code-performance"), false);
+		assert.strictEqual(isSkillMention(`${mention} suffix`), false);
+		assert.deepStrictEqual(
+			findSkillMentions(`before ${mention} after`).map(({ name }) => name),
+			["code-performance"],
+		);
+	});
+
 	it("offers commands and skills for the leading slash, then only skills for later slashes", async () => {
 		const provider = new CombinedAutocompleteProvider(commands, "/tmp");
 

@@ -1,6 +1,9 @@
 const SKILL_MENTION_PREFIX = "\u2063\u2063";
 const SKILL_MENTION_SUFFIX = "\u2063";
-const SKILL_MENTION_PATTERN = `${SKILL_MENTION_PREFIX}([^${SKILL_MENTION_SUFFIX}\r\n]+)${SKILL_MENTION_SUFFIX}`;
+const SKILL_MENTION_PATTERN = new RegExp(
+	`${SKILL_MENTION_PREFIX}([^${SKILL_MENTION_SUFFIX}\r\n]+)${SKILL_MENTION_SUFFIX}`,
+	"gu",
+);
 
 export interface SkillMentionSpan {
 	start: number;
@@ -19,8 +22,10 @@ export function encodeSkillMention(name: string): string {
 }
 
 export function findSkillMentions(text: string): SkillMentionSpan[] {
+	if (!text.includes(SKILL_MENTION_PREFIX)) return [];
+
 	const mentions: SkillMentionSpan[] = [];
-	for (const match of text.matchAll(new RegExp(SKILL_MENTION_PATTERN, "gu"))) {
+	for (const match of text.matchAll(SKILL_MENTION_PATTERN)) {
 		const name = match[1]!;
 		const start = match.index;
 		const nameStart = start + SKILL_MENTION_PREFIX.length;
@@ -36,8 +41,9 @@ export function findSkillMentions(text: string): SkillMentionSpan[] {
 }
 
 export function isSkillMention(text: string): boolean {
-	const mentions = findSkillMentions(text);
-	return mentions.length === 1 && mentions[0]!.start === 0 && mentions[0]!.end === text.length;
+	if (!text.startsWith(SKILL_MENTION_PREFIX) || !text.endsWith(SKILL_MENTION_SUFFIX)) return false;
+	const name = text.slice(SKILL_MENTION_PREFIX.length, -SKILL_MENTION_SUFFIX.length);
+	return name.length > 0 && !name.includes(SKILL_MENTION_SUFFIX) && !/[\r\n]/.test(name);
 }
 
 /** Restore backend skill syntax when text re-enters the built-in editor. */
@@ -49,10 +55,12 @@ export function encodeSkillInvocations(text: string): string {
 
 /** Return the text shown to editor consumers without private marker metadata. */
 export function stripSkillMentions(text: string): string {
-	return text.replace(new RegExp(SKILL_MENTION_PATTERN, "gu"), (_match, name: string) => name);
+	if (!text.includes(SKILL_MENTION_PREFIX)) return text;
+	return text.replace(SKILL_MENTION_PATTERN, (_match, name: string) => name);
 }
 
 /** Convert selected mentions back to the syntax understood by the coding-agent parser. */
 export function expandSkillMentions(text: string): string {
-	return text.replace(new RegExp(SKILL_MENTION_PATTERN, "gu"), (_match, name: string) => `/skill:${name}`);
+	if (!text.includes(SKILL_MENTION_PREFIX)) return text;
+	return text.replace(SKILL_MENTION_PATTERN, (_match, name: string) => `/skill:${name}`);
 }
