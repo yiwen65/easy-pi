@@ -1,4 +1,9 @@
-import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import {
+	type AutocompleteProvider,
+	type AutocompleteSuggestions,
+	findLeadingSlashCommandStart,
+	findTrailingSlashCommandStart,
+} from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -731,6 +736,10 @@ export class Editor implements Component, Focusable {
 			if (kb.matches(data, "tui.select.confirm")) {
 				const selected = this.autocompleteList.getSelectedItem();
 				if (selected && this.autocompleteProvider) {
+					const currentLine = this.state.lines[this.state.cursorLine] || "";
+					const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+					const shouldSubmitSlashCommand =
+						this.autocompletePrefix.startsWith("/") && !this.isInMidPromptSkillSlashContext(textBeforeCursor);
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -744,7 +753,7 @@ export class Editor implements Component, Focusable {
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
 
-					if (this.autocompletePrefix.startsWith("/")) {
+					if (shouldSubmitSlashCommand) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {
@@ -1253,8 +1262,8 @@ export class Editor implements Component, Focusable {
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
-			// Auto-trigger for "/" at the start of a line (slash commands)
-			if (char === "/" && this.isAtStartOfMessage()) {
+			// The leading slash offers commands and skills; later slash tokens offer skills only.
+			if (char === "/" && (this.isAtStartOfMessage() || this.isInMidPromptSkillSlashContext())) {
 				this.tryTriggerAutocomplete();
 			}
 			// Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
@@ -2202,7 +2211,7 @@ export class Editor implements Component, Focusable {
 		);
 	}
 
-	// Slash menu only allowed on the first line of the editor
+	// Leading slash commands are only allowed on the first line of the editor.
 	private isSlashMenuAllowed(): boolean {
 		return this.state.cursorLine === 0;
 	}
@@ -2215,8 +2224,25 @@ export class Editor implements Component, Focusable {
 		return beforeCursor.trim() === "" || beforeCursor.trim() === "/";
 	}
 
+	private isInLeadingSlashCommandContext(textBeforeCursor: string): boolean {
+		return this.isSlashMenuAllowed() && findLeadingSlashCommandStart(textBeforeCursor) !== null;
+	}
+
+	private isInMidPromptSkillSlashContext(textBeforeCursor?: string): boolean {
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const beforeCursor = textBeforeCursor ?? currentLine.slice(0, this.state.cursorCol);
+		const slashStart = findTrailingSlashCommandStart(beforeCursor);
+		if (slashStart === null) return false;
+		for (let i = 0; i < this.state.cursorLine; i++) {
+			if ((this.state.lines[i] ?? "").trim() !== "") return true;
+		}
+		return beforeCursor.slice(0, slashStart).trim() !== "";
+	}
+
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
-		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
+		return (
+			this.isInLeadingSlashCommandContext(textBeforeCursor) || this.isInMidPromptSkillSlashContext(textBeforeCursor)
+		);
 	}
 
 	// Autocomplete methods
@@ -2267,7 +2293,10 @@ export class Editor implements Component, Focusable {
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
 
-		if (this.isInSlashCommandContext(beforeCursor) && !beforeCursor.trimStart().includes(" ")) {
+		if (
+			(this.isInLeadingSlashCommandContext(beforeCursor) && !beforeCursor.trimStart().includes(" ")) ||
+			this.isInMidPromptSkillSlashContext(beforeCursor)
+		) {
 			this.handleSlashCommandCompletion();
 		} else {
 			this.forceFileAutocomplete(true);
