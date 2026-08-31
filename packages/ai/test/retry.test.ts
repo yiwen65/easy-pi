@@ -43,12 +43,11 @@ describe("provider retry classification", () => {
 		expect(isNetworkAssistantError(message)).toBe(true);
 	});
 
-	it("classifies Undici connect timeouts as network failures", () => {
-		const message = fauxAssistantMessage("", {
-			stopReason: "error",
-			errorMessage:
-				"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443, timeout: 10000ms))",
-		});
+	it.each([
+		"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443, timeout: 10000ms))",
+		"ECONNRESET: Client network socket disconnected before secure TLS connection was established",
+	])("classifies connection establishment failures as network failures: %s", (errorMessage) => {
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
 		expect(isRetryableAssistantError(message)).toBe(true);
 		expect(isNetworkAssistantError(message)).toBe(true);
 	});

@@ -172,7 +172,8 @@ describe("AgentSession retry", () => {
 		const created = await createSession({
 			failCount: 5,
 			maxRetries: 2,
-			errorMessage: "fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error)",
+			errorMessage:
+				"fetch failed (ECONNRESET: Client network socket disconnected before secure TLS connection was established)",
 		});
 		const retryEvents: Array<{ attempt: number; unlimited?: true }> = [];
 		created.session.subscribe((event) => {
