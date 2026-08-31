@@ -1,25 +1,39 @@
 import { describe, expect, test, vi } from "vitest";
-import { KEYBINDINGS, KeybindingsManager } from "../src/core/keybindings.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { formatKeyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { findPromptJumpTarget } from "../src/modes/interactive-grok/prompt-navigation.ts";
 
 describe("Grok prompt navigation keybindings", () => {
-	test("uses macOS-safe terminal sequences", () => {
+	test("uses Command and Alt shortcuts", () => {
 		const keybindings = new KeybindingsManager();
-		const matchingActions = (data: string) =>
-			(Object.keys(KEYBINDINGS) as Array<keyof typeof KEYBINDINGS>).filter((action) =>
-				keybindings.matches(data, action),
-			);
 
-		expect(matchingActions("\x1b[5$")).toEqual(["app.prompt.prev"]);
-		expect(matchingActions("\x1b[5;2~")).toEqual(["app.prompt.prev"]);
-		expect(matchingActions("\x1b[6$")).toEqual(["app.prompt.next"]);
-		expect(matchingActions("\x1b[6;2~")).toEqual(["app.prompt.next"]);
-		expect(matchingActions("\x1b[17~")).toEqual(["app.prompt.list"]);
+		expect(keybindings.getKeys("app.prompt.prev")).toEqual(["super+up", "alt+up"]);
+		expect(keybindings.getKeys("app.prompt.next")).toEqual(["super+down", "alt+down"]);
+		expect(keybindings.getKeys("app.prompt.list")).toEqual(["super+g", "alt+g"]);
 
-		expect(keybindings.matches("\x1b[1;5A", "app.prompt.prev")).toBe(false);
-		expect(keybindings.matches("\x1b[1;5B", "app.prompt.next")).toBe(false);
-		expect(keybindings.matches("\x1bj", "app.prompt.list")).toBe(false);
+		expect(keybindings.matches("\x1b[1;9A", "app.prompt.prev")).toBe(true);
+		expect(keybindings.matches("\x1b[1;3A", "app.prompt.prev")).toBe(true);
+		expect(keybindings.matches("\x1b[1;9B", "app.prompt.next")).toBe(true);
+		expect(keybindings.matches("\x1b[1;3B", "app.prompt.next")).toBe(true);
+		expect(keybindings.matches("\x1b[103;9u", "app.prompt.list")).toBe(true);
+		expect(keybindings.matches("\x1bg", "app.prompt.list")).toBe(true);
+
+		expect(keybindings.matches("\x1b[5$", "app.prompt.prev")).toBe(false);
+		expect(keybindings.matches("\x1b[6$", "app.prompt.next")).toBe(false);
+		expect(keybindings.matches("\x1b[17~", "app.prompt.list")).toBe(false);
+	});
+
+	test("moves the conflicting dequeue shortcut", () => {
+		const keybindings = new KeybindingsManager();
+
+		expect(keybindings.getKeys("app.message.dequeue")).toEqual(["shift+alt+up"]);
+		expect(keybindings.matches("\x1b[1;3A", "app.message.dequeue")).toBe(false);
+		expect(keybindings.matches("\x1b[1;4A", "app.message.dequeue")).toBe(true);
+	});
+
+	test("labels Super as Cmd on macOS", () => {
+		expect(formatKeyText("super+g", { capitalize: true })).toBe(process.platform === "darwin" ? "Cmd+G" : "Super+G");
 	});
 });
 
