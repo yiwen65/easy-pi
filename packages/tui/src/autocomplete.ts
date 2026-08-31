@@ -71,6 +71,30 @@ function isTokenStart(text: string, index: number): boolean {
 	return index === 0 || PATH_DELIMITERS.has(text[index - 1] ?? "");
 }
 
+export function findLeadingSlashCommandStart(text: string): number | null {
+	const trimmed = text.trimStart();
+	if (!trimmed.startsWith("/")) return null;
+	return text.length - trimmed.length;
+}
+
+export function findTrailingSlashCommandStart(text: string): number | null {
+	const match = /(?:^|\s)\/([^\s/]*)$/.exec(text);
+	if (!match || match.index === undefined) return null;
+	return match.index + match[0].indexOf("/");
+}
+
+function hasPromptTextBeforeSlash(
+	lines: string[],
+	cursorLine: number,
+	textBeforeCursor: string,
+	slashStart: number,
+): boolean {
+	for (let i = 0; i < cursorLine; i++) {
+		if ((lines[i] ?? "").trim() !== "") return true;
+	}
+	return textBeforeCursor.slice(0, slashStart).trim() !== "";
+}
+
 function extractQuotedPrefix(text: string): string | null {
 	const quoteStart = findUnclosedQuoteStart(text);
 	if (quoteStart === null) {
@@ -305,12 +329,26 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			};
 		}
 
-		if (!options.force && textBeforeCursor.startsWith("/")) {
-			const spaceIndex = textBeforeCursor.indexOf(" ");
+		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
+		const trailingSlashStart = findTrailingSlashCommandStart(textBeforeCursor);
+		const isTrailingSkillLookup =
+			trailingSlashStart !== null &&
+			hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, trailingSlashStart);
+		const slashStart = isTrailingSkillLookup ? trailingSlashStart : leadingSlashStart;
+
+		if (!options.force && slashStart !== null) {
+			const commandText = textBeforeCursor.slice(slashStart);
+			const spaceIndex = commandText.indexOf(" ");
 
 			if (spaceIndex === -1) {
-				const prefix = textBeforeCursor.slice(1);
-				const commandItems = this.commands.map((cmd) => {
+				const prefix = commandText.slice(1);
+				const availableCommands = isTrailingSkillLookup
+					? this.commands.filter((cmd) => {
+							const name = "name" in cmd ? cmd.name : cmd.value;
+							return name.startsWith("skill:");
+						})
+					: this.commands;
+				const commandItems = availableCommands.map((cmd) => {
 					const name = "name" in cmd ? cmd.name : cmd.value;
 					const hint = "argumentHint" in cmd && cmd.argumentHint ? cmd.argumentHint : undefined;
 					const desc = cmd.description ?? "";
@@ -328,34 +366,35 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					...(item.description && { description: item.description }),
 				}));
 
-				if (filtered.length === 0) return null;
+				if (filtered.length > 0) {
+					return {
+						items: filtered,
+						prefix: commandText,
+					};
+				}
+				if (!isTrailingSkillLookup) return null;
+			} else if (!isTrailingSkillLookup) {
+				const commandName = commandText.slice(1, spaceIndex);
+				const argumentText = commandText.slice(spaceIndex + 1);
+
+				const command = this.commands.find((cmd) => {
+					const name = "name" in cmd ? cmd.name : cmd.value;
+					return name === commandName;
+				});
+				if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
+					return null;
+				}
+
+				const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+				if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
+					return null;
+				}
 
 				return {
-					items: filtered,
-					prefix: textBeforeCursor,
+					items: argumentSuggestions,
+					prefix: argumentText,
 				};
 			}
-
-			const commandName = textBeforeCursor.slice(1, spaceIndex);
-			const argumentText = textBeforeCursor.slice(spaceIndex + 1);
-
-			const command = this.commands.find((cmd) => {
-				const name = "name" in cmd ? cmd.name : cmd.value;
-				return name === commandName;
-			});
-			if (!command || !("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
-				return null;
-			}
-
-			const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-			if (!Array.isArray(argumentSuggestions) || argumentSuggestions.length === 0) {
-				return null;
-			}
-
-			return {
-				items: argumentSuggestions,
-				prefix: argumentText,
-			};
 		}
 
 		const pathMatch = this.extractPathPrefix(textBeforeCursor, options.force ?? false);
@@ -387,6 +426,22 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const hasTrailingQuoteInItem = item.value.endsWith('"');
 		const adjustedAfterCursor =
 			isQuotedPrefix && hasTrailingQuoteInItem && hasLeadingQuoteAfterCursor ? afterCursor.slice(1) : afterCursor;
+		const slashStart = cursorCol - prefix.length;
+		const isTrailingSkillCompletion =
+			item.value.startsWith("skill:") &&
+			prefix.startsWith("/") &&
+			hasPromptTextBeforeSlash(lines, cursorLine, currentLine.slice(0, cursorCol), slashStart);
+
+		if (isTrailingSkillCompletion) {
+			const insert = `/${item.value} `;
+			const newLines = [...lines];
+			newLines[cursorLine] = `${beforePrefix}${insert}${adjustedAfterCursor}`;
+			return {
+				lines: newLines,
+				cursorLine,
+				cursorCol: beforePrefix.length + insert.length,
+			};
+		}
 
 		// Check if we're completing a slash command (prefix starts with "/" but NOT a file path)
 		// Slash commands are at the start of the line and don't contain path separators after the first /
