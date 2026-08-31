@@ -7,6 +7,13 @@ import {
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
+import {
+	encodeSkillInvocations,
+	expandSkillMentions,
+	findSkillMentions,
+	isSkillMention,
+	stripSkillMentions,
+} from "../skill-mentions.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
@@ -31,7 +38,11 @@ const PASTE_MARKER_SINGLE = /^\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]$/;
 
 /** Check if a segment is an atomic editor marker merged by segmentWithMarkers. */
 function isAtomicMarker(segment: string): boolean {
-	return (segment.length >= 10 && PASTE_MARKER_SINGLE.test(segment)) || /^\[.+ #\d+]$/.test(segment);
+	return (
+		(segment.length >= 10 && PASTE_MARKER_SINGLE.test(segment)) ||
+		/^\[.+ #\d+]$/.test(segment) ||
+		isSkillMention(segment)
+	);
 }
 
 /**
@@ -47,14 +58,15 @@ function segmentWithMarkers(
 	validPasteIds: Set<number>,
 	attachmentMarkers: readonly string[],
 ): Iterable<Intl.SegmentData> {
+	const skillMentions = findSkillMentions(text);
 	// Fast path: no registered markers can be present.
-	if (validPasteIds.size === 0 && attachmentMarkers.length === 0) {
+	if (validPasteIds.size === 0 && attachmentMarkers.length === 0 && skillMentions.length === 0) {
 		return baseSegmenter.segment(text);
 	}
 
 	// Find all marker spans registered by the editor. Marker-like text typed by
 	// the user remains ordinary editable text.
-	const markers: Array<{ start: number; end: number }> = [];
+	const markers: Array<{ start: number; end: number }> = skillMentions.map(({ start, end }) => ({ start, end }));
 	for (const m of text.matchAll(PASTE_MARKER_REGEX)) {
 		const id = Number.parseInt(m[1]!, 10);
 		if (!validPasteIds.has(id)) continue;
@@ -242,6 +254,9 @@ interface EditorSnapshot {
 
 interface LayoutLine {
 	text: string;
+	lineIndex: number;
+	startIndex: number;
+	endIndex: number;
 	hasCursor: boolean;
 	cursorPos?: number;
 }
@@ -249,6 +264,8 @@ interface LayoutLine {
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
+	/** Style selected skill mentions without changing their editable width. */
+	skillMention?: (str: string) => string;
 }
 
 export interface EditorOptions {
@@ -432,9 +449,10 @@ export class Editor implements Component, Focusable {
 	addToHistory(text: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
+		const historyText = encodeSkillInvocations(trimmed);
 		// Don't add consecutive duplicates
-		if (this.history.length > 0 && this.history[0] === trimmed) return;
-		this.history.unshift(trimmed);
+		if (this.history.length > 0 && this.history[0] === historyText) return;
+		this.history.unshift(historyText);
 		// Limit history size
 		if (this.history.length > 100) {
 			this.history.pop();
@@ -576,25 +594,30 @@ export class Editor implements Component, Focusable {
 		const emitCursorMarker = this.focused;
 
 		for (const layoutLine of visibleLines) {
-			let displayText = layoutLine.text;
+			const sourceLine = this.state.lines[layoutLine.lineIndex] ?? "";
+			let displayText: string;
 			let lineVisibleWidth = visibleWidth(layoutLine.text);
 			let cursorInPadding = false;
 
-			// Add cursor if this line has it
+			// Add cursor if this line has it. Style each raw range separately so ANSI
+			// sequences never affect cursor indexes or wrapping calculations.
 			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
-				const before = displayText.slice(0, layoutLine.cursorPos);
-				const after = displayText.slice(layoutLine.cursorPos);
+				const cursorIndex = layoutLine.startIndex + layoutLine.cursorPos;
+				const before = this.styleEditorRange(sourceLine, layoutLine.startIndex, cursorIndex);
 
 				// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
 
-				if (after.length > 0) {
-					// Cursor is on a character (grapheme) - replace it with highlighted version
-					// Get the first grapheme from 'after'
-					const afterGraphemes = [...this.segment(after, "grapheme")];
-					const firstGrapheme = afterGraphemes[0]?.segment || "";
-					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
+				if (cursorIndex < layoutLine.endIndex) {
+					const skillMention = findSkillMentions(sourceLine).find((mention) => mention.start === cursorIndex);
+					const firstEnd = skillMention
+						? Math.min(skillMention.end, layoutLine.endIndex)
+						: cursorIndex +
+							([...this.segment(sourceLine.slice(cursorIndex, layoutLine.endIndex), "grapheme")][0]?.segment
+								.length ?? 1);
+					const cursorText = this.styleEditorRange(sourceLine, cursorIndex, firstEnd);
+					const restAfter = this.styleEditorRange(sourceLine, firstEnd, layoutLine.endIndex);
+					const cursor = `\x1b[7m${cursorText}\x1b[0m`;
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
@@ -607,6 +630,8 @@ export class Editor implements Component, Focusable {
 						cursorInPadding = true;
 					}
 				}
+			} else {
+				displayText = this.styleEditorRange(sourceLine, layoutLine.startIndex, layoutLine.endIndex);
 			}
 
 			// Calculate padding based on actual visible width
@@ -636,6 +661,27 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		return result;
+	}
+
+	private styleEditorRange(sourceLine: string, start: number, end: number): string {
+		let result = "";
+		let cursor = start;
+		for (const mention of findSkillMentions(sourceLine)) {
+			if (mention.end <= start || mention.start >= end) continue;
+
+			const ordinaryEnd = Math.min(end, mention.start);
+			if (cursor < ordinaryEnd) result += sourceLine.slice(cursor, ordinaryEnd);
+
+			const visibleStart = Math.max(start, mention.nameStart);
+			const visibleEnd = Math.min(end, mention.nameEnd);
+			if (visibleStart < visibleEnd) {
+				const visibleText = sourceLine.slice(visibleStart, visibleEnd);
+				result += this.theme.skillMention?.(visibleText) ?? visibleText;
+			}
+			cursor = Math.min(end, mention.end);
+		}
+		if (cursor < end) result += sourceLine.slice(cursor, end);
 		return result;
 	}
 
@@ -739,7 +785,9 @@ export class Editor implements Component, Focusable {
 					const currentLine = this.state.lines[this.state.cursorLine] || "";
 					const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 					const shouldSubmitSlashCommand =
-						this.autocompletePrefix.startsWith("/") && !this.isInMidPromptSkillSlashContext(textBeforeCursor);
+						this.autocompletePrefix.startsWith("/") &&
+						!selected.value.startsWith("skill:") &&
+						!this.isInMidPromptSkillSlashContext(textBeforeCursor);
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -952,6 +1000,9 @@ export class Editor implements Component, Focusable {
 			// Empty editor
 			layoutLines.push({
 				text: "",
+				lineIndex: 0,
+				startIndex: 0,
+				endIndex: 0,
 				hasCursor: true,
 				cursorPos: 0,
 			});
@@ -969,12 +1020,18 @@ export class Editor implements Component, Focusable {
 				if (isCurrentLine) {
 					layoutLines.push({
 						text: line,
+						lineIndex: i,
+						startIndex: 0,
+						endIndex: line.length,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
+						lineIndex: i,
+						startIndex: 0,
+						endIndex: line.length,
 						hasCursor: false,
 					});
 				}
@@ -1017,12 +1074,18 @@ export class Editor implements Component, Focusable {
 					if (hasCursorInChunk) {
 						layoutLines.push({
 							text: chunk.text,
+							lineIndex: i,
+							startIndex: chunk.startIndex,
+							endIndex: chunk.endIndex,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
+							lineIndex: i,
+							startIndex: chunk.startIndex,
+							endIndex: chunk.endIndex,
 							hasCursor: false,
 						});
 					}
@@ -1034,7 +1097,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	getText(): string {
-		return this.state.lines.join("\n");
+		return stripSkillMentions(this.state.lines.join("\n"));
 	}
 
 	private expandPasteMarkers(text: string): string {
@@ -1051,11 +1114,16 @@ export class Editor implements Component, Focusable {
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		return this.expandPasteMarkers(this.state.lines.join("\n"));
+		return expandSkillMentions(this.expandPasteMarkers(this.state.lines.join("\n")));
+	}
+
+	/** Preserve selected-skill identity while transferring a draft between editors. */
+	getTextForEditorTransfer(): string {
+		return expandSkillMentions(this.state.lines.join("\n"));
 	}
 
 	getLines(): string[] {
-		return [...this.state.lines];
+		return this.state.lines.map(stripSkillMentions);
 	}
 
 	/** Return opaque payloads for attachment markers still present in the editor. */
@@ -1072,16 +1140,20 @@ export class Editor implements Component, Focusable {
 	}
 
 	getCursor(): { line: number; col: number } {
-		return { line: this.state.cursorLine, col: this.state.cursorCol };
+		const currentLine = this.state.lines[this.state.cursorLine] ?? "";
+		return {
+			line: this.state.cursorLine,
+			col: stripSkillMentions(currentLine.slice(0, this.state.cursorCol)).length,
+		};
 	}
 
 	setText(text: string): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
-		const normalized = this.normalizeText(text);
-		// Push undo snapshot if content differs (makes programmatic changes undoable)
-		if (this.getText() !== normalized) {
+		const normalized = encodeSkillInvocations(this.normalizeText(text));
+		// Push undo snapshot if content or selected-skill identity differs.
+		if (this.state.lines.join("\n") !== normalized) {
 			this.pushUndoSnapshot();
 		}
 		this.pastes.clear();
@@ -1398,7 +1470,8 @@ export class Editor implements Component, Focusable {
 	private submitValue(): void {
 		this.cancelAutocomplete();
 		this.reconcileAttachments();
-		const result = this.expandPasteMarkers(this.state.lines.join("\n")).trim();
+		const rawText = this.state.lines.join("\n");
+		const result = expandSkillMentions(this.expandPasteMarkers(rawText).trim());
 		const attachments = this.attachments.map((attachment) => attachment.value);
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
@@ -2183,7 +2256,10 @@ export class Editor implements Component, Focusable {
 
 			if (idx !== -1) {
 				this.state.cursorLine = lineIdx;
-				this.setCursorCol(idx);
+				const containingMarker = [...this.segment(line, "grapheme")].find(
+					(segment) => idx >= segment.index && idx < segment.index + segment.segment.length,
+				);
+				this.setCursorCol(containingMarker?.index ?? idx);
 				return;
 			}
 		}
