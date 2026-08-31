@@ -126,8 +126,8 @@
 - Failure: `packages/coding-agent/src` 已出现新启动页，但终端执行 `pi` 仍显示旧界面。
 - Root cause: 全局 `pi` 链接到仓库包，却通过 package bin 执行 `packages/coding-agent/dist/cli.js`；未重建时 `dist` 不含源码改动。
 - Recognition signal: `npm list -g` 显示 linked package，而 `rg` 只能在 `src`、不能在 `dist` 找到新界面标识。
-- Correct approach: 在 `packages/coding-agent` 执行 `npm run build`，再用实际 `pi` 命令（不是 `pi-test.sh`）做 tmux 启动验证。
-- Verified by: 2026-08-23 easy-pi 启动页；重建后 `dist` 出现 `easy-pi`，全局 `pi` 实际启动显示 `eπ easy-pi v0.84.2`。
+- Correct approach: 在 `packages/coding-agent` 执行 `npm run build`，再用实际 `pi` 命令（不是 `pi-test.sh`）做 tmux 启动验证。若 coding-agent 同时依赖本轮修改过的 workspace 包，先重建依赖包；单独构建 coding-agent 会从旧 `dist` 类型检查并可能报已在根 source check 通过的参数类型错误。
+- Verified by: 2026-08-23 easy-pi 启动页；重建后 `dist` 出现 `easy-pi`，全局 `pi` 实际启动显示 `eπ easy-pi v0.84.2`。2026-08-30 skill mention 任务中，coding-agent 单独构建因旧 agent `dist` 报 `AgentMessage[]` 类型错误；先构建 `packages/agent` 后同一 coding-agent 构建通过。
 
 ## Cache affinity 改动——跨 adapter 与 optional/JSON 边界测试
 

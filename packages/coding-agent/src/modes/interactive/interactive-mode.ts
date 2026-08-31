@@ -2813,7 +2813,7 @@ export class InteractiveMode {
 		this.editorComponentFactory = factory;
 
 		// Save text and attachment payloads from the current editor before switching.
-		const currentText = this.editor.getText();
+		const currentText = this.editor.getTextForEditorTransfer?.() ?? this.editor.getText();
 		const currentAttachments = this.editor.getAttachments?.() ?? [];
 
 		this.disposeActiveSelector();
@@ -2909,7 +2909,7 @@ export class InteractiveMode {
 			onHandle?: (handle: OverlayHandle) => void;
 		},
 	): Promise<T> {
-		const savedText = this.editor.getText();
+		const savedText = this.editor.getTextForEditorTransfer?.() ?? this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {

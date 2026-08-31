@@ -3,6 +3,7 @@ import { readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { fuzzyFilter } from "./fuzzy.ts";
+import { encodeSkillMention } from "./skill-mentions.ts";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
@@ -426,14 +427,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const hasTrailingQuoteInItem = item.value.endsWith('"');
 		const adjustedAfterCursor =
 			isQuotedPrefix && hasTrailingQuoteInItem && hasLeadingQuoteAfterCursor ? afterCursor.slice(1) : afterCursor;
-		const slashStart = cursorCol - prefix.length;
-		const isTrailingSkillCompletion =
-			item.value.startsWith("skill:") &&
-			prefix.startsWith("/") &&
-			hasPromptTextBeforeSlash(lines, cursorLine, currentLine.slice(0, cursorCol), slashStart);
-
-		if (isTrailingSkillCompletion) {
-			const insert = `/${item.value} `;
+		if (item.value.startsWith("skill:") && prefix.startsWith("/")) {
+			const insert = `${encodeSkillMention(item.value.slice("skill:".length))} `;
 			const newLines = [...lines];
 			newLines[cursorLine] = `${beforePrefix}${insert}${adjustedAfterCursor}`;
 			return {

@@ -35,4 +35,5 @@ export const defaultMarkdownTheme: MarkdownTheme = {
 export const defaultEditorTheme: EditorTheme = {
 	borderColor: (text: string) => chalk.dim(text),
 	selectList: defaultSelectListTheme,
+	skillMention: (text: string) => chalk.cyan(text),
 };

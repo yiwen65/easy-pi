@@ -1321,6 +1321,7 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
+		skillMention: (text: string) => theme.fg("accent", text),
 	};
 }
 

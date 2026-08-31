@@ -61,6 +61,9 @@ export interface EditorComponent extends Component {
 	 */
 	getExpandedText?(): string;
 
+	/** Get draft text with semantic editor elements encoded for transfer to another editor. */
+	getTextForEditorTransfer?(): string;
+
 	// =========================================================================
 	// Autocomplete support (optional)
 	// =========================================================================
