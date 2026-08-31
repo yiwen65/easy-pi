@@ -15,18 +15,21 @@ export class UserMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private skillNames: readonly string[];
 
 	constructor(
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		skillNames: readonly string[] = [],
 	) {
 		super();
 		this.text = text;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.skillNames = skillNames;
 		this.rebuild();
 	}
 
@@ -36,12 +39,19 @@ export class UserMessageComponent extends Container {
 	}
 
 	getText(): string {
-		return this.text;
+		return [...this.skillNames, this.text].filter(Boolean).join(" ");
 	}
 
 	private rebuild(): void {
 		this.clear();
 		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));
+		const markdownTransformers = [...this.markdownTransformers];
+		if (this.skillNames.length > 0) {
+			markdownTransformers.push((markdown) => {
+				const mentions = this.skillNames.map((name) => theme.fg("accent", name)).join(" ");
+				return markdown ? `${mentions} ${markdown}` : mentions;
+			});
+		}
 		contentBox.addChild(
 			new Markdown(
 				this.text,
@@ -54,7 +64,7 @@ export class UserMessageComponent extends Container {
 				{
 					preserveOrderedListMarkers: true,
 					preserveBackslashEscapes: true,
-					transform: createMarkdownTransform("user", false, this.markdownTransformers),
+					transform: createMarkdownTransform("user", false, markdownTransformers),
 				},
 			),
 		);

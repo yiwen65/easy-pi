@@ -88,7 +88,11 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { type CompactionSummaryMessage, createCompactionSummaryMessage } from "../../core/messages.ts";
+import {
+	type CompactionSummaryMessage,
+	createCompactionSummaryMessage,
+	isSkillPromptMessage,
+} from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -156,7 +160,6 @@ import {
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
-import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import {
 	BranchSummaryStatusIndicator,
 	CompactionStatusIndicator,
@@ -586,6 +589,8 @@ export class InteractiveMode {
 	private grokTurnStartedAt: number | undefined = undefined;
 	private currentTurnThinkingGroup: GrokThinkingTurnGroupComponent | undefined = undefined;
 	private currentTurnToolGroup: GrokToolTurnGroupComponent | undefined = undefined;
+	private pendingSkillMentions: Array<{ name: string; timestamp: number }> = [];
+	private pendingSkillMentionsPopulateHistory = false;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -695,7 +700,11 @@ export class InteractiveMode {
 		this.grokView.setContextPercent(this.session.getContextUsage()?.percent ?? null);
 	}
 
-	private createUserMessageComponent(text: string, timestamp?: number): UserMessageComponent {
+	private createUserMessageComponent(
+		text: string,
+		timestamp?: number,
+		skillNames: readonly string[] = [],
+	): UserMessageComponent {
 		if (this.grokComponentFactory) {
 			return new GrokUserMessageComponent(
 				text,
@@ -703,6 +712,7 @@ export class InteractiveMode {
 				this.outputPad,
 				this.getMarkdownTransformers(),
 				timestamp,
+				skillNames,
 			);
 		}
 		return new UserMessageComponent(
@@ -710,6 +720,7 @@ export class InteractiveMode {
 			this.getMarkdownThemeWithSettings(),
 			this.outputPad,
 			this.getMarkdownTransformers(),
+			skillNames,
 		);
 	}
 
@@ -830,6 +841,8 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
+		this.pendingSkillMentions = [];
+		this.pendingSkillMentionsPopulateHistory = false;
 	}
 
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
@@ -3761,9 +3774,42 @@ export class InteractiveMode {
 		this.chatContainer.addChild(component);
 	}
 
+	private renderUserMessage(
+		text: string,
+		timestamp: number | undefined,
+		options: { populateHistory?: boolean } = {},
+	): void {
+		const skillNames = this.pendingSkillMentions.map((mention) => mention.name);
+		const skillTimestamp = this.pendingSkillMentions[0]?.timestamp;
+		const populateHistory = options.populateHistory || this.pendingSkillMentionsPopulateHistory;
+		this.pendingSkillMentions = [];
+		this.pendingSkillMentionsPopulateHistory = false;
+		if (!text && skillNames.length === 0) return;
+
+		// A user prompt closes the previous history turn and starts new groups.
+		this.completeCurrentTurnThinking();
+		this.currentTurnThinkingGroup = undefined;
+		this.currentTurnToolGroup = undefined;
+		if (this.chatContainer.children.length > 0) {
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		this.chatContainer.addChild(this.createUserMessageComponent(text, timestamp ?? skillTimestamp, skillNames));
+		if (populateHistory) {
+			const historyText = [...skillNames.map((name) => `/skill:${name}`), text].filter(Boolean).join(" ");
+			this.editor.addToHistory?.(historyText);
+		}
+	}
+
+	private flushPendingSkillMentions(): void {
+		if (this.pendingSkillMentions.length > 0) {
+			this.renderUserMessage("", undefined);
+		}
+	}
+
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
+				this.flushPendingSkillMentions();
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
 				if (message.output) {
 					component.appendOutput(message.output);
@@ -3778,6 +3824,12 @@ export class InteractiveMode {
 				break;
 			}
 			case "custom": {
+				if (isSkillPromptMessage(message)) {
+					this.pendingSkillMentions.push({ name: message.details.name, timestamp: message.timestamp });
+					this.pendingSkillMentionsPopulateHistory ||= options?.populateHistory ?? false;
+					break;
+				}
+				this.flushPendingSkillMentions();
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(
@@ -3792,6 +3844,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "compactionSummary": {
+				this.flushPendingSkillMentions();
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
@@ -3799,6 +3852,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "branchSummary": {
+				this.flushPendingSkillMentions();
 				this.chatContainer.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
@@ -3806,41 +3860,18 @@ export class InteractiveMode {
 				break;
 			}
 			case "user": {
-				// A user prompt closes the previous history turn and starts new groups.
-				this.completeCurrentTurnThinking();
-				this.currentTurnThinkingGroup = undefined;
-				this.currentTurnToolGroup = undefined;
 				const textContent = this.getUserMessageText(message);
-				if (textContent) {
-					if (this.chatContainer.children.length > 0) {
-						this.chatContainer.addChild(new Spacer(1));
-					}
-					const skillBlock = parseSkillBlock(textContent);
-					if (skillBlock) {
-						// Render skill block (collapsible)
-						const component = new SkillInvocationMessageComponent(
-							skillBlock,
-							this.getMarkdownThemeWithSettings(),
-						);
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-						// Render user message separately if present
-						if (skillBlock.userMessage) {
-							this.chatContainer.addChild(new Spacer(1));
-							const userComponent = this.createUserMessageComponent(skillBlock.userMessage, message.timestamp);
-							this.chatContainer.addChild(userComponent);
-						}
-					} else {
-						const userComponent = this.createUserMessageComponent(textContent, message.timestamp);
-						this.chatContainer.addChild(userComponent);
-					}
-					if (options?.populateHistory) {
-						this.editor.addToHistory?.(textContent);
-					}
+				const skillBlock = parseSkillBlock(textContent);
+				if (skillBlock) {
+					this.pendingSkillMentions.push({ name: skillBlock.name, timestamp: message.timestamp });
+					this.renderUserMessage(skillBlock.userMessage ?? "", message.timestamp, options);
+				} else {
+					this.renderUserMessage(textContent, message.timestamp, options);
 				}
 				break;
 			}
 			case "assistant": {
+				this.flushPendingSkillMentions();
 				const assistantComponent = this.createAssistantMessageComponent(message);
 				this.chatContainer.addChild(assistantComponent);
 				if (assistantComponent instanceof GrokAssistantMessageComponent) {
@@ -3849,6 +3880,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "toolResult": {
+				this.flushPendingSkillMentions();
 				// Tool results are rendered inline with tool calls, handled separately
 				break;
 			}
@@ -3865,6 +3897,8 @@ export class InteractiveMode {
 		this.pendingTools.clear();
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
+		this.pendingSkillMentions = [];
+		this.pendingSkillMentionsPopulateHistory = false;
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
@@ -3879,10 +3913,12 @@ export class InteractiveMode {
 
 		for (const item of items) {
 			if (isCustomSessionEntry(item)) {
+				this.flushPendingSkillMentions();
 				this.addCustomEntryToChat(item);
 				continue;
 			}
 			if (isCompactionCostNotice(item)) {
+				this.flushPendingSkillMentions();
 				this.addCompactionCostNotice(item);
 				continue;
 			}
@@ -3931,6 +3967,7 @@ export class InteractiveMode {
 			}
 		}
 
+		this.flushPendingSkillMentions();
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
