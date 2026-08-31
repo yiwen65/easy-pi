@@ -1,7 +1,7 @@
 import { Text } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import type { MessageRenderer, MessageRenderOptions } from "../src/core/extensions/types.ts";
-import type { CustomMessage } from "../src/core/messages.ts";
+import { type CustomMessage, createSkillPromptMessage } from "../src/core/messages.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -40,5 +40,25 @@ describe("CustomMessageComponent", () => {
 				.map(stripAnsi)
 				.some((line) => line.startsWith("custom")),
 		).toBe(true);
+	});
+
+	test("renders built-in skill prompt messages without exposing wrapper XML", () => {
+		initTheme("dark");
+		const message = createSkillPromptMessage(
+			"code-debug",
+			"/tmp/code-debug/SKILL.md",
+			"/tmp/code-debug",
+			"# Debug\n\nFind the first divergence.",
+		);
+		const component = new CustomMessageComponent(message);
+
+		const collapsed = component.render(80).map(stripAnsi).join("\n");
+		expect(collapsed).toContain("[skill] code-debug");
+		expect(collapsed).not.toContain("<skill>");
+
+		component.setExpanded(true);
+		const expanded = component.render(80).map(stripAnsi).join("\n");
+		expect(expanded).toContain("Find the first divergence.");
+		expect(expanded).not.toContain("<skill>");
 	});
 });

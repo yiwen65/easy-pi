@@ -4,19 +4,17 @@ import { describe, expect, it } from "vitest";
 describe("export HTML skill block rendering", () => {
 	const templateJs = readFileSync(new URL("../src/core/export-html/template.js", import.meta.url), "utf-8");
 
-	it("strips skill wrapper XML from user message rendering", () => {
-		// Skill commands store a structural wrapper in the raw user message:
-		//   <skill name="..." location="...">\n...\n</skill>\n\nactual prompt
-		// The export renderer must detect that wrapper and render only the user-visible prompt,
-		// not the Pi-generated <skill>...</skill> XML tags.
-		expect(templateJs).toMatch(/parseSkillBlock/);
+	it("parses structured skill context messages and legacy inline skill blocks", () => {
+		expect(templateJs).toContain("const structuredMatch = text.match(/^<skill>\\n<name>");
+		expect(templateJs).toMatch(/legacyMatch/);
 		expect(templateJs).toMatch(/skillBlock\.userMessage/);
 	});
 
-	it("renders skill invocation and user message as separate sibling blocks", () => {
-		// The skill block and user message should render as separate entry-level elements,
-		// matching the TUI layout where SkillInvocationMessageComponent and
-		// UserMessageComponent are siblings, not nested.
+	it("renders built-in skill context entries separately from user messages", () => {
+		expect(templateJs).toMatch(/entry\.customType === 'skill-prompt'/);
+		expect(templateJs).toMatch(/renderSkillInvocation\(skillBlock\)/);
+
+		// Legacy inline messages remain readable after switching new invocations to separate entries.
 		expect(templateJs).toMatch(/skill-invocation/);
 
 		// When a skill block has a userMessage, the user-message div must be emitted

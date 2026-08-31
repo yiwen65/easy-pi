@@ -2,8 +2,9 @@ import type { TextContent } from "@earendil-works/pi-ai";
 import type { Component } from "@earendil-works/pi-tui";
 import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
-import type { CustomMessage } from "../../../core/messages.ts";
+import { type CustomMessage, isSkillPromptMessage, parseSkillBlock } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { SkillInvocationMessageComponent } from "./skill-invocation-message.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -65,6 +66,17 @@ export class CustomMessageComponent extends Container {
 		}
 		this.removeChild(this.box);
 
+		if (isSkillPromptMessage(this.message)) {
+			const skillBlock = parseSkillBlock(this.extractText());
+			if (skillBlock) {
+				const component = new SkillInvocationMessageComponent(skillBlock, this.markdownTheme);
+				component.setExpanded(this._expanded);
+				this.customComponent = component;
+				this.addChild(component);
+				return;
+			}
+		}
+
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
 			try {
@@ -93,21 +105,18 @@ export class CustomMessageComponent extends Container {
 		this.box.addChild(new Text(label, 0, 0));
 		this.box.addChild(new Spacer(1));
 
-		// Extract text content
-		let text: string;
-		if (typeof this.message.content === "string") {
-			text = this.message.content;
-		} else {
-			text = this.message.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-		}
-
 		this.box.addChild(
-			new Markdown(text, 0, 0, this.markdownTheme, {
+			new Markdown(this.extractText(), 0, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
+	}
+
+	private extractText(): string {
+		if (typeof this.message.content === "string") return this.message.content;
+		return this.message.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map((content) => content.text)
+			.join("\n");
 	}
 }
