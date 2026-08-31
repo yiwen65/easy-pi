@@ -72,10 +72,12 @@ describe("AgentSession retry", () => {
 		failCount?: number;
 		maxRetries?: number;
 		delayAssistantMessageEndMs?: number;
+		errorMessage?: string;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
 		const delayAssistantMessageEndMs = options?.delayAssistantMessageEndMs ?? 0;
+		const errorMessage = options?.errorMessage ?? "overloaded_error";
 		let callCount = 0;
 
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -89,7 +91,7 @@ describe("AgentSession retry", () => {
 					if (callCount <= failCount) {
 						const msg = createAssistantMessage("", {
 							stopReason: "error",
-							errorMessage: "overloaded_error",
+							errorMessage,
 						});
 						stream.push({ type: "start", partial: msg });
 						stream.push({ type: "error", reason: "error", error: msg });
@@ -164,6 +166,27 @@ describe("AgentSession retry", () => {
 		expect(events).toContain("start:2");
 		expect(events).toContain("end:success=false");
 		expect(created.session.isRetrying).toBe(false);
+	});
+
+	it("keeps retrying network failures past maxRetries and omits them from session history", async () => {
+		const created = await createSession({
+			failCount: 5,
+			maxRetries: 2,
+			errorMessage: "fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error)",
+		});
+		const retryEvents: Array<{ attempt: number; unlimited?: true }> = [];
+		created.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") retryEvents.push(event);
+		});
+
+		await created.session.prompt("Test");
+
+		expect(created.getCallCount()).toBe(6);
+		expect(retryEvents.map((event) => event.attempt)).toEqual([1, 2, 3, 4, 5]);
+		expect(retryEvents.every((event) => event.unlimited)).toBe(true);
+		expect(
+			created.session.messages.some((message) => message.role === "assistant" && message.stopReason === "error"),
+		).toBe(false);
 	});
 
 	it("prompt waits for retry completion even when assistant message_end handling is delayed", async () => {

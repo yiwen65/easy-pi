@@ -39,6 +39,7 @@ import {
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
+	isNetworkAssistantError,
 	isRecoverableLength,
 	isRetryableAssistantError,
 	modelsAreEqual,
@@ -181,7 +182,14 @@ export type AgentSessionEvent =
 			willRetry: boolean;
 			errorMessage?: string;
 	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			unlimited?: true;
+	  }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| {
 			type: "summarization_retry_scheduled";
@@ -189,6 +197,7 @@ export type AgentSessionEvent =
 			maxAttempts: number;
 			delayMs: number;
 			errorMessage: string;
+			unlimited?: true;
 	  }
 	| { type: "summarization_retry_attempt_start"; source: "branchSummary" }
 	| {
@@ -379,6 +388,7 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	private _boundedRetryAttempt = 0;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -890,8 +900,14 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				appendedEntryId = this.sessionManager.appendMessage(event.message);
+				// Network failures are operational retry state, not conversation history.
+				const isRetriedNetworkFailure =
+					event.message.role === "assistant" &&
+					this.settingsManager.getRetryEnabled() &&
+					isNetworkAssistantError(event.message);
+				if (!isRetriedNetworkFailure) {
+					appendedEntryId = this.sessionManager.appendMessage(event.message);
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -920,6 +936,7 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
+					this._boundedRetryAttempt = 0;
 				}
 			}
 		}
@@ -927,14 +944,16 @@ export class AgentSession {
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
-			return false;
-		}
+		if (!settings.enabled) return false;
 
 		for (let i = event.messages.length - 1; i >= 0; i--) {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
-				return this._isRetryableError(message as AssistantMessage);
+				const assistantMessage = message as AssistantMessage;
+				return (
+					this._isRetryableError(assistantMessage) &&
+					(isNetworkAssistantError(assistantMessage) || this._boundedRetryAttempt < settings.maxRetries)
+				);
 			}
 		}
 		return false;
@@ -1334,10 +1353,11 @@ export class AgentSession {
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
-				attempt: this._retryAttempt,
+				attempt: isNetworkAssistantError(msg) ? this._retryAttempt : this._boundedRetryAttempt,
 				finalError: msg.errorMessage,
 			});
 			this._retryAttempt = 0;
+			this._boundedRetryAttempt = 0;
 		}
 
 		// Overflow recovery must compact before the immediate retry can start. Normal
@@ -3010,13 +3030,14 @@ export class AgentSession {
 		source: { source: "branchSummary" } | { source: "compaction"; reason: "manual" | "threshold" | "overflow" },
 	): RetryCallbacks {
 		return {
-			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
+			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage, unlimited) => {
 				this._emit({
 					type: "summarization_retry_scheduled",
 					attempt,
 					maxAttempts,
 					delayMs,
 					errorMessage,
+					...(unlimited ? { unlimited: true as const } : {}),
 				});
 			},
 			onRetryAttemptStart: () => {
@@ -3041,25 +3062,34 @@ export class AgentSession {
 			return false;
 		}
 
+		const unlimited = isNetworkAssistantError(message);
 		this._retryAttempt++;
+		if (!unlimited) this._boundedRetryAttempt++;
 
-		if (this._retryAttempt > settings.maxRetries) {
+		if (this._boundedRetryAttempt > settings.maxRetries) {
 			// Preserve the completed attempt count so post-run handling can emit the final failure.
 			this._retryAttempt--;
+			this._boundedRetryAttempt--;
 			return false;
 		}
 
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+		const reportedAttempt = unlimited ? this._retryAttempt : this._boundedRetryAttempt;
+		const exponent = unlimited ? Math.min(this._retryAttempt - 1, 30) : this._boundedRetryAttempt - 1;
+		const exponentialDelayMs = settings.baseDelayMs * 2 ** exponent;
+		const delayMs = unlimited
+			? Math.min(exponentialDelayMs, Math.max(settings.baseDelayMs, 30_000))
+			: exponentialDelayMs;
 
 		this._emit({
 			type: "auto_retry_start",
-			attempt: this._retryAttempt,
+			attempt: reportedAttempt,
 			maxAttempts: settings.maxRetries,
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
+			...(unlimited ? { unlimited: true as const } : {}),
 		});
 
-		// Remove error message from agent state (keep in session for history)
+		// Remove the failed attempt from agent context. Non-network failures remain in session history.
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 			this.agent.state.messages = messages.slice(0, -1);
@@ -3073,6 +3103,7 @@ export class AgentSession {
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
 			this._retryAttempt = 0;
+			this._boundedRetryAttempt = 0;
 			this._emit({
 				type: "auto_retry_end",
 				success: false,

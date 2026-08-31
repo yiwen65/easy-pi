@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "../src/providers/faux.ts";
-import { isRetryableAssistantError, type RetryPolicy, retryAssistantCall } from "../src/utils/retry.ts";
+import {
+	isNetworkAssistantError,
+	isRetryableAssistantError,
+	type RetryPolicy,
+	retryAssistantCall,
+} from "../src/utils/retry.ts";
 
 const openAIExplicitRetryMessage =
 	"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_******** in your message.";
@@ -33,11 +38,19 @@ describe("provider retry classification", () => {
 	});
 
 	it("matches Bun fetch socket drop wording", () => {
-		expect(
-			isRetryableAssistantError(
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: bunFetchSocketClosedMessage }),
-			),
-		).toBe(true);
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage: bunFetchSocketClosedMessage });
+		expect(isRetryableAssistantError(message)).toBe(true);
+		expect(isNetworkAssistantError(message)).toBe(true);
+	});
+
+	it("classifies Undici connect timeouts as network failures", () => {
+		const message = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage:
+				"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443, timeout: 10000ms))",
+		});
+		expect(isRetryableAssistantError(message)).toBe(true);
+		expect(isNetworkAssistantError(message)).toBe(true);
 	});
 
 	it("matches upstream request buffer exhaustion wording", () => {
@@ -148,6 +161,38 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).toHaveBeenCalledWith(true, 2);
 	});
 
+	it("keeps retrying network failures past maxRetries until recovery", async () => {
+		let n = 0;
+		const produce = vi.fn(async () => {
+			n++;
+			return n <= 5
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed: connect timeout" })
+				: fauxAssistantMessage("recovered");
+		});
+		const onRetryScheduled = vi.fn();
+		const res = await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled });
+
+		expect(res.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(produce).toHaveBeenCalledTimes(6);
+		expect(onRetryScheduled).toHaveBeenCalledTimes(5);
+		expect(onRetryScheduled.mock.calls.every((call) => call[4] === true)).toBe(true);
+	});
+
+	it("does not charge network retries against the bounded transient-error budget", async () => {
+		let n = 0;
+		const produce = vi.fn(async () => {
+			n++;
+			if (n <= 4) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed" });
+			if (n <= 7) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+			return fauxAssistantMessage("recovered");
+		});
+
+		const res = await retryAssistantCall(produce, enabled, undefined);
+
+		expect(res.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(produce).toHaveBeenCalledTimes(8);
+	});
+
 	it("reports an aborted retried call as unsuccessful", async () => {
 		let n = 0;
 		const produce = vi.fn(async () => {
@@ -163,16 +208,19 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).toHaveBeenCalledWith(false, 1);
 	});
 
-	it("does not retry when policy is disabled", async () => {
-		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
-		const onRetryScheduled = vi.fn();
-		const onRetryFinished = vi.fn();
-		const res = await retryAssistantCall(produce, disabled, undefined, { onRetryScheduled, onRetryFinished });
-		expect(res.stopReason).toBe("error");
-		expect(produce).toHaveBeenCalledTimes(1);
-		expect(onRetryScheduled).not.toHaveBeenCalled();
-		expect(onRetryFinished).not.toHaveBeenCalled();
-	});
+	it.each(["terminated", "fetch failed: connect timeout"])(
+		"does not retry when policy is disabled: %s",
+		async (errorMessage) => {
+			const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage }));
+			const onRetryScheduled = vi.fn();
+			const onRetryFinished = vi.fn();
+			const res = await retryAssistantCall(produce, disabled, undefined, { onRetryScheduled, onRetryFinished });
+			expect(res.stopReason).toBe("error");
+			expect(produce).toHaveBeenCalledTimes(1);
+			expect(onRetryScheduled).not.toHaveBeenCalled();
+			expect(onRetryFinished).not.toHaveBeenCalled();
+		},
+	);
 
 	it("emits onRetryAttemptStart after backoff before each retried call", async () => {
 		const events: string[] = [];

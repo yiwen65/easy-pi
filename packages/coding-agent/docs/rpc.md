@@ -1079,7 +1079,7 @@ If compaction failed (e.g., API quota exceeded), `result` is `null`, `aborted` i
 
 ### auto_retry_start / auto_retry_end
 
-Emitted when automatic retry is triggered after a transient error (overloaded, rate limit, 5xx).
+Emitted when automatic retry is triggered after a transient error (overloaded, rate limit, 5xx, or network transport failure). Network failures continue until recovery or cancellation and set `unlimited` to `true`.
 
 ```json
 {
@@ -1088,6 +1088,19 @@ Emitted when automatic retry is triggered after a transient error (overloaded, r
   "maxAttempts": 3,
   "delayMs": 2000,
   "errorMessage": "529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
+}
+```
+
+For an unlimited network retry:
+
+```json
+{
+  "type": "auto_retry_start",
+  "attempt": 4,
+  "maxAttempts": 3,
+  "delayMs": 16000,
+  "errorMessage": "fetch failed (UND_ERR_CONNECT_TIMEOUT)",
+  "unlimited": true
 }
 ```
 

@@ -9,7 +9,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
-import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
+import {
+	type AssistantMessage,
+	type ImageContent,
+	isNetworkAssistantError,
+	type Message,
+	type Model,
+	type Usage,
+} from "@earendil-works/pi-ai/compat";
 import { createGrokTuiRuntime } from "@earendil-works/pi-grok-tui";
 import type {
 	AutocompleteItem,
@@ -3419,20 +3426,31 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.streamingComponent.updateContent(this.streamingMessage, false);
-					if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
-						this.updateTurnThinking(this.streamingComponent, false);
+					const suppressNetworkError =
+						this.session.autoRetryEnabled && isNetworkAssistantError(this.streamingMessage);
+					if (suppressNetworkError) {
+						this.chatContainer.removeChild(this.streamingComponent);
+						if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
+							this.streamingComponent.dispose();
+						}
+					} else {
+						this.streamingComponent.updateContent(this.streamingMessage, false);
+						if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
+							this.updateTurnThinking(this.streamingComponent, false);
+						}
 					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						if (!errorMessage) {
-							errorMessage = this.streamingMessage.errorMessage || "Error";
-						}
-						for (const [, component] of this.pendingTools.entries()) {
-							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
+						if (!suppressNetworkError) {
+							if (!errorMessage) {
+								errorMessage = this.streamingMessage.errorMessage || "Error";
+							}
+							for (const [, component] of this.pendingTools.entries()) {
+								component.updateResult({
+									content: [{ type: "text", text: errorMessage }],
+									isError: true,
+								});
+							}
 						}
 						this.pendingTools.clear();
 					} else {
@@ -3586,7 +3604,7 @@ export class InteractiveMode {
 					this.session.abortRetry();
 				};
 				this.showStatusIndicator(
-					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
+					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs, event.unlimited),
 				);
 				this.ui.requestRender();
 				break;
@@ -3608,9 +3626,9 @@ export class InteractiveMode {
 			}
 
 			case "summarization_retry_scheduled": {
-				this.showError(event.errorMessage);
+				if (!event.unlimited) this.showError(event.errorMessage);
 				this.showStatusIndicator(
-					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
+					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs, event.unlimited),
 				);
 				this.ui.requestRender();
 				break;

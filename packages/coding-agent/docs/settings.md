@@ -139,11 +139,13 @@ Easy Pi does not use the official Pi update feed. Automatic version checks remai
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
-| `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
+| `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts for non-network transient failures |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
 | `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
+
+Network transport failures (for example DNS, connection, socket, and fetch timeouts) ignore `retry.maxRetries` and continue retrying until the network recovers or the operation is cancelled. Their backoff is capped at 30 seconds, and interactive mode shows one updating status line instead of appending each transport error to the transcript.
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs`, the request fails immediately with an informative error instead of waiting silently. Set it to `0` to disable the limit.
 
