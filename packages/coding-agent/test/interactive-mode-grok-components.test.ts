@@ -168,6 +168,31 @@ describe("InteractiveMode Grok component routing", () => {
 		expect((group as GrokToolTurnGroupComponent).toolCount).toBe(2);
 	});
 
+	test("keeps subagent independent from surrounding tool groups", () => {
+		const context = Object.assign(createContext(true), {
+			chatContainer: new Container(),
+			currentTurnToolGroup: undefined as GrokToolTurnGroupComponent | undefined,
+		});
+		const first = createTool.call(context, "read", "tool-1", { path: "/tmp/a.ts" });
+		addToolToChat.call(context, first);
+		const firstGroup = context.chatContainer.children[0];
+		expect(firstGroup).toBeInstanceOf(GrokToolTurnGroupComponent);
+
+		const subagent = createTool.call(context, "subagent", "tool-2", { agent: "worker", task: "review" });
+		addToolToChat.call(context, subagent);
+		expect(context.chatContainer.children).toEqual([firstGroup, subagent]);
+		expect(context.currentTurnToolGroup).toBeUndefined();
+		expect((firstGroup as GrokToolTurnGroupComponent).toolCount).toBe(1);
+
+		const last = createTool.call(context, "bash", "tool-3", { command: "npm test" });
+		addToolToChat.call(context, last);
+		const lastGroup = context.chatContainer.children[2];
+		expect(lastGroup).toBeInstanceOf(GrokToolTurnGroupComponent);
+		expect(lastGroup).not.toBe(firstGroup);
+		expect((lastGroup as GrokToolTurnGroupComponent).toolCount).toBe(1);
+		expect(context.chatContainer.children).toEqual([firstGroup, subagent, lastGroup]);
+	});
+
 	test("merges multiple assistant thinking messages into one turn-level row", () => {
 		const context = Object.assign(createContext(true), {
 			chatContainer: new Container(),

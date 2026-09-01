@@ -101,6 +101,8 @@ export class GrokToolExecutionComponent extends ToolExecutionComponent {
 
 	/** Whether this tool can participate in the turn-level compact tool row. */
 	canUseTurnGroup(): boolean {
+		// Subagents are independent execution units and keep their own transcript row.
+		if (this.grokToolName === "subagent") return false;
 		// Built-in edit owns its diff shell but must still be compact in Grok mode.
 		// Other self-shell extensions retain complete ownership of their UI.
 		return this.getRenderShell() !== "self" || this.grokToolName === "edit";
