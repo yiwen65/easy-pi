@@ -774,10 +774,10 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Add a tool execution component to the transcript. In Grok mode all tool
-	 * calls of the current turn are grouped into a single collapsible
-	 * GrokToolTurnGroupComponent (one compact line by default); legacy mode
-	 * keeps each tool as a direct chat child.
+	 * Add a tool execution component to the transcript. In Grok mode groupable
+	 * tool calls of the current turn share a collapsible GrokToolTurnGroupComponent
+	 * (one compact line by default); independent tools remain direct chat children.
+	 * Legacy mode keeps every tool as a direct chat child.
 	 */
 	private addToolComponentToChat(component: ToolExecutionComponent): void {
 		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent && component.canUseTurnGroup()) {
@@ -795,6 +795,10 @@ export class InteractiveMode {
 			component.setTurnGrouped(true);
 			group.addTool(component);
 			return;
+		}
+		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent) {
+			// Keep independent tools between the groups that occurred before and after them.
+			this.currentTurnToolGroup = undefined;
 		}
 		this.chatContainer.addChild(component);
 	}
