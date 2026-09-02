@@ -17,7 +17,7 @@ describe("status indicators", () => {
 		expect(lines).toEqual([" ".repeat(20), " ".repeat(20)]);
 	});
 
-	it("renders unlimited network retries without a misleading maximum", () => {
+	it("renders unlimited retries without a misleading maximum", () => {
 		initTheme("dark");
 		vi.useFakeTimers();
 		const tui = { requestRender: vi.fn() } as unknown as TUI;
@@ -25,7 +25,7 @@ describe("status indicators", () => {
 
 		const text = stripAnsi(indicator.render(120).join("\n"));
 
-		expect(text).toContain("Network unavailable; retrying (attempt 7)");
+		expect(text).toContain("Service unavailable; retrying (attempt 7)");
 		expect(text).not.toContain("7/3");
 		indicator.dispose();
 	});

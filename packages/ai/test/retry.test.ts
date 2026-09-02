@@ -3,6 +3,7 @@ import { fauxAssistantMessage } from "../src/providers/faux.ts";
 import {
 	isNetworkAssistantError,
 	isRetryableAssistantError,
+	isUnlimitedRetryAssistantError,
 	type RetryPolicy,
 	retryAssistantCall,
 } from "../src/utils/retry.ts";
@@ -78,6 +79,18 @@ describe("provider retry classification", () => {
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: openAIResponsesEarlyEofMessage }),
 			),
 		).toBe(true);
+	});
+
+	it("limits unlimited retries to network failures and provider overload", () => {
+		const overload = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "Codex error: Our servers are currently overloaded. Please try again later.",
+		});
+		const serverError = fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 server error" });
+
+		expect(isUnlimitedRetryAssistantError(overload)).toBe(true);
+		expect(isNetworkAssistantError(overload)).toBe(false);
+		expect(isUnlimitedRetryAssistantError(serverError)).toBe(false);
 	});
 
 	it("keeps provider limit errors non-retryable", () => {
@@ -160,12 +173,15 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).toHaveBeenCalledWith(true, 2);
 	});
 
-	it("keeps retrying network failures past maxRetries until recovery", async () => {
+	it.each([
+		["network failure", "fetch failed: connect timeout"],
+		["provider overload", "Codex error: Our servers are currently overloaded. Please try again later."],
+	])("keeps retrying %s past maxRetries until recovery", async (_label, errorMessage) => {
 		let n = 0;
 		const produce = vi.fn(async () => {
 			n++;
 			return n <= 5
-				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed: connect timeout" })
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage })
 				: fauxAssistantMessage("recovered");
 		});
 		const onRetryScheduled = vi.fn();

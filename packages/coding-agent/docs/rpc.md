@@ -1079,7 +1079,7 @@ If compaction failed (e.g., API quota exceeded), `result` is `null`, `aborted` i
 
 ### auto_retry_start / auto_retry_end
 
-Emitted when automatic retry is triggered after a transient error (overloaded, rate limit, 5xx, or network transport failure). Network failures continue until recovery or cancellation and set `unlimited` to `true`.
+Emitted when automatic retry is triggered after a transient error (overloaded, rate limit, 5xx, or network transport failure). Network failures and provider overload continue until recovery or cancellation and set `unlimited` to `true`.
 
 ```json
 {
@@ -1091,7 +1091,7 @@ Emitted when automatic retry is triggered after a transient error (overloaded, r
 }
 ```
 
-For an unlimited network retry:
+For an unlimited retry:
 
 ```json
 {

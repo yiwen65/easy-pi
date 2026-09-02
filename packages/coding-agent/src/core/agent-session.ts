@@ -39,9 +39,9 @@ import {
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
-	isNetworkAssistantError,
 	isRecoverableLength,
 	isRetryableAssistantError,
+	isUnlimitedRetryAssistantError,
 	modelsAreEqual,
 	type RetryCallbacks,
 	resetApiProviders,
@@ -895,12 +895,12 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Network failures are operational retry state, not conversation history.
-				const isRetriedNetworkFailure =
+				// Unlimited retry failures are operational state, not conversation history.
+				const isUnlimitedRetryFailure =
 					event.message.role === "assistant" &&
 					this.settingsManager.getRetryEnabled() &&
-					isNetworkAssistantError(event.message);
-				if (!isRetriedNetworkFailure) {
+					isUnlimitedRetryAssistantError(event.message);
+				if (!isUnlimitedRetryFailure) {
 					appendedEntryId = this.sessionManager.appendMessage(event.message);
 				}
 			}
@@ -947,7 +947,7 @@ export class AgentSession {
 				const assistantMessage = message as AssistantMessage;
 				return (
 					this._isRetryableError(assistantMessage) &&
-					(isNetworkAssistantError(assistantMessage) || this._boundedRetryAttempt < settings.maxRetries)
+					(isUnlimitedRetryAssistantError(assistantMessage) || this._boundedRetryAttempt < settings.maxRetries)
 				);
 			}
 		}
@@ -1348,7 +1348,7 @@ export class AgentSession {
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
-				attempt: isNetworkAssistantError(msg) ? this._retryAttempt : this._boundedRetryAttempt,
+				attempt: isUnlimitedRetryAssistantError(msg) ? this._retryAttempt : this._boundedRetryAttempt,
 				finalError: msg.errorMessage,
 			});
 			this._retryAttempt = 0;
@@ -3051,7 +3051,7 @@ export class AgentSession {
 			return false;
 		}
 
-		const unlimited = isNetworkAssistantError(message);
+		const unlimited = isUnlimitedRetryAssistantError(message);
 		this._retryAttempt++;
 		if (!unlimited) this._boundedRetryAttempt++;
 
@@ -3078,7 +3078,7 @@ export class AgentSession {
 			...(unlimited ? { unlimited: true as const } : {}),
 		});
 
-		// Remove the failed attempt from agent context. Non-network failures remain in session history.
+		// Remove the failed attempt from agent context. Bounded failures remain in session history.
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 			this.agent.state.messages = messages.slice(0, -1);

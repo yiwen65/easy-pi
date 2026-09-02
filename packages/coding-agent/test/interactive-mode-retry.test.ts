@@ -3,8 +3,11 @@ import { type Component, Container } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-describe("InteractiveMode network retry rendering", () => {
-	it("removes retryable network errors instead of adding them to the transcript", async () => {
+describe("InteractiveMode unlimited retry rendering", () => {
+	it.each([
+		"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443))",
+		"Codex error: Our servers are currently overloaded. Please try again later.",
+	])("removes unlimited retry errors from the transcript: %s", async (errorMessage) => {
 		const component: Component & { updateContent: ReturnType<typeof vi.fn> } = {
 			invalidate: vi.fn(),
 			render: () => ["network error"],
@@ -32,11 +35,7 @@ describe("InteractiveMode network retry rendering", () => {
 				message: ReturnType<typeof fauxAssistantMessage>;
 			},
 		) => Promise<void>;
-		const message = fauxAssistantMessage("", {
-			stopReason: "error",
-			errorMessage:
-				"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443))",
-		});
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
 
 		await handleEvent.call(fakeThis, { type: "message_end", message });
 
