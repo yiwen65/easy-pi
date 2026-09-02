@@ -77,7 +77,7 @@ describe("AgentSession retry", () => {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
 		const delayAssistantMessageEndMs = options?.delayAssistantMessageEndMs ?? 0;
-		const errorMessage = options?.errorMessage ?? "503 server_error";
+		const errorMessage = options?.errorMessage ?? "429 too many requests";
 		let callCount = 0;
 
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -174,6 +174,7 @@ describe("AgentSession retry", () => {
 			"fetch failed (ECONNRESET: Client network socket disconnected before secure TLS connection was established)",
 		],
 		["provider overloads", "Codex error: Our servers are currently overloaded. Please try again later."],
+		["5xx server failures", "503 service unavailable"],
 	])("keeps retrying %s past maxRetries and omits them from session history", async (_label, errorMessage) => {
 		const created = await createSession({ failCount: 5, maxRetries: 2, errorMessage });
 		const retryEvents: Array<{ attempt: number; unlimited?: true }> = [];
