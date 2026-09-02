@@ -121,15 +121,29 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.session.isRetrying).toBe(false);
 	});
 
-	it("does not retry when retry is disabled", async () => {
+	it.each([
+		"fetch failed (ECONNRESET)",
+		"Codex error: Our servers are currently overloaded. Please try again later.",
+		"503 service unavailable",
+	])("does not persist availability failures when retry is disabled: %s", async (errorMessage) => {
 		const harness = await createHarness({ settings: { retry: { enabled: false } } });
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage })]);
 
 		await harness.session.prompt("test");
 
 		expect(harness.faux.state.callCount).toBe(1);
 		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.stopReason === "error",
+				),
+		).toBe(false);
 	});
 
 	it("does not retry non-retryable errors", async () => {
