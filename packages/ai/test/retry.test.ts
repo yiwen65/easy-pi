@@ -81,16 +81,23 @@ describe("provider retry classification", () => {
 		).toBe(true);
 	});
 
-	it("limits unlimited retries to network failures and provider overload", () => {
-		const overload = fauxAssistantMessage("", {
-			stopReason: "error",
-			errorMessage: "Codex error: Our servers are currently overloaded. Please try again later.",
-		});
-		const serverError = fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 server error" });
+	it.each([
+		"Codex error: Our servers are currently overloaded. Please try again later.",
+		"500 internal server error",
+		"501 status code",
+		"502 bad gateway",
+		"503 service unavailable",
+		"504 gateway timeout",
+		"524 origin timeout",
+		"599 status code",
+	])("classifies provider availability failures for unlimited retry: %s", (errorMessage) => {
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isUnlimitedRetryAssistantError(message)).toBe(true);
+	});
 
-		expect(isUnlimitedRetryAssistantError(overload)).toBe(true);
-		expect(isNetworkAssistantError(overload)).toBe(false);
-		expect(isUnlimitedRetryAssistantError(serverError)).toBe(false);
+	it("keeps rate limits bounded", () => {
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 too many requests" });
+		expect(isUnlimitedRetryAssistantError(message)).toBe(false);
 	});
 
 	it("keeps provider limit errors non-retryable", () => {
@@ -176,6 +183,7 @@ describe("retryAssistantCall", () => {
 	it.each([
 		["network failure", "fetch failed: connect timeout"],
 		["provider overload", "Codex error: Our servers are currently overloaded. Please try again later."],
+		["server error", "503 service unavailable"],
 	])("keeps retrying %s past maxRetries until recovery", async (_label, errorMessage) => {
 		let n = 0;
 		const produce = vi.fn(async () => {
@@ -198,7 +206,7 @@ describe("retryAssistantCall", () => {
 		const produce = vi.fn(async () => {
 			n++;
 			if (n <= 4) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed" });
-			if (n <= 7) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+			if (n <= 7) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 too many requests" });
 			return fauxAssistantMessage("recovered");
 		});
 

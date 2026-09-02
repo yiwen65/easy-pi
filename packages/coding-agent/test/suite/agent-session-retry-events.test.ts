@@ -83,9 +83,9 @@ describe("AgentSession retry and event characterization", () => {
 		});
 
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 server_error" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 server_error" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 server_error" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 too many requests" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 too many requests" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 too many requests" }),
 		]);
 
 		await harness.session.prompt("test");

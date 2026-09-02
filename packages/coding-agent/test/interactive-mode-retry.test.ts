@@ -7,6 +7,7 @@ describe("InteractiveMode unlimited retry rendering", () => {
 	it.each([
 		"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443))",
 		"Codex error: Our servers are currently overloaded. Please try again later.",
+		"503 service unavailable",
 	])("removes unlimited retry errors from the transcript: %s", async (errorMessage) => {
 		const component: Component & { updateContent: ReturnType<typeof vi.fn> } = {
 			invalidate: vi.fn(),

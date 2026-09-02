@@ -4,6 +4,8 @@ function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
 	return new RegExp(patterns.join("|"), "i");
 }
 
+const HTTP_SERVER_ERROR_PATTERN = "\\b5\\d\\d\\b";
+
 const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	// OpenCode Go/free-tier limits returned as 429 JSON error types by OpenCode's
 	// Zen API. These are subscription/account limits, not transient throttles.
@@ -58,7 +60,15 @@ const NETWORK_PROVIDER_ERROR_PATTERNS = [
 ] as const;
 
 const NETWORK_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern(NETWORK_PROVIDER_ERROR_PATTERNS);
-const UNLIMITED_RETRY_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern(["overloaded"]);
+const UNLIMITED_RETRY_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+	"overloaded",
+	HTTP_SERVER_ERROR_PATTERN,
+	"service.?unavailable",
+	"server.?error",
+	"internal.?error",
+	"bad gateway",
+	"gateway timeout",
+]);
 
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// Generic provider load, HTTP status, and server-side transient failures.
@@ -66,11 +76,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"rate.?limit",
 	"too many requests",
 	"429",
-	"500",
-	"502",
-	"503",
-	"504",
-	"524",
+	HTTP_SERVER_ERROR_PATTERN,
 	"service.?unavailable",
 	"server.?error",
 	"internal.?error",
@@ -99,7 +105,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 
 /**
  * Retry policy: bounded transient-error attempts plus unlimited recovery for network
- * failures and provider overload with exponential backoff (`baseDelayMs * 2^(attempt-1)`). Matches `settings.retry`
+ * failures and provider availability errors with exponential backoff (`baseDelayMs * 2^(attempt-1)`). Matches `settings.retry`
  * (`enabled`, `maxRetries`, `baseDelayMs`) in coding-agent; kept here so the classifier
  * and the policy-driven retry loop live together and stay reusable by other callers.
  */
@@ -161,8 +167,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *   too, so callers do not need to care when cancellation happened.
  * - A non-retryable error (per {@link isRetryableAssistantError}, including quota/
  *   billing exhaustion) is returned immediately so deterministic errors fail fast.
- * - Network transport failures and provider overload retry until recovery or cancellation.
- *   Other transient failures retry up to `maxRetries` times. Backoff for unlimited retries
+ * - Network transport failures and provider availability errors retry until recovery or
+ *   cancellation. Other transient failures retry up to `maxRetries` times. Backoff for unlimited retries
  *   is capped at 30 seconds (or `baseDelayMs` when larger) to avoid numeric overflow.
  * - Emits `onRetryScheduled` before each sleep, `onRetryAttemptStart` after each sleep
  *   before the retried call starts, and `onRetryFinished` once at the end.
