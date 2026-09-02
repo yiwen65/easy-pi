@@ -11,7 +11,7 @@ import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type ImageContent,
-	isNetworkAssistantError,
+	isUnlimitedRetryAssistantError,
 	type Message,
 	type Model,
 	type Usage,
@@ -3479,9 +3479,9 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					const suppressNetworkError =
-						this.session.autoRetryEnabled && isNetworkAssistantError(this.streamingMessage);
-					if (suppressNetworkError) {
+					const suppressUnlimitedRetryError =
+						this.session.autoRetryEnabled && isUnlimitedRetryAssistantError(this.streamingMessage);
+					if (suppressUnlimitedRetryError) {
 						this.chatContainer.removeChild(this.streamingComponent);
 						if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
 							this.streamingComponent.dispose();
@@ -3494,7 +3494,7 @@ export class InteractiveMode {
 					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						if (!suppressNetworkError) {
+						if (!suppressUnlimitedRetryError) {
 							if (!errorMessage) {
 								errorMessage = this.streamingMessage.errorMessage || "Error";
 							}

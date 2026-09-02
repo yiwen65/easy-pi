@@ -45,7 +45,7 @@ export class RetryStatusIndicator extends StatusIndicator {
 	constructor(ui: TUI, attempt: number, maxAttempts: number, delayMs: number, unlimited = false) {
 		const retryMessage = (seconds: number) =>
 			unlimited
-				? `Network unavailable; retrying (attempt ${attempt}) in ${seconds}s... (${keyText("app.interrupt")} to cancel)`
+				? `Service unavailable; retrying (attempt ${attempt}) in ${seconds}s... (${keyText("app.interrupt")} to cancel)`
 				: `Retrying (${attempt}/${maxAttempts}) in ${seconds}s... (${keyText("app.interrupt")} to cancel)`;
 		super(
 			"retry",
