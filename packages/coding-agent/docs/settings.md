@@ -145,7 +145,7 @@ Easy Pi does not use the official Pi update feed. Automatic version checks remai
 | `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
 
-Network transport failures (for example DNS, connection, socket, and fetch timeouts), provider-overload errors, and all 5xx server failures ignore `retry.maxRetries` and continue retrying until the service recovers or the operation is cancelled. Their backoff is capped at 30 seconds, and interactive mode shows one updating status line instead of appending each transient error to the transcript.
+Network transport failures (for example DNS, connection, socket, and fetch timeouts), provider-overload errors, and all 5xx server failures ignore `retry.maxRetries` and continue retrying until the service recovers or the operation is cancelled. Their backoff is capped at 30 seconds, and interactive mode shows one updating status line instead of appending each transient error to the transcript. These availability failures are never written to session history, even when automatic retry is disabled.
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs`, the request fails immediately with an informative error instead of waiting silently. Set it to `0` to disable the limit.
 

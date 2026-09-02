@@ -895,11 +895,9 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Unlimited retry failures are operational state, not conversation history.
+				// Availability failures are operational state, not conversation history.
 				const isUnlimitedRetryFailure =
-					event.message.role === "assistant" &&
-					this.settingsManager.getRetryEnabled() &&
-					isUnlimitedRetryAssistantError(event.message);
+					event.message.role === "assistant" && isUnlimitedRetryAssistantError(event.message);
 				if (!isUnlimitedRetryFailure) {
 					appendedEntryId = this.sessionManager.appendMessage(event.message);
 				}
