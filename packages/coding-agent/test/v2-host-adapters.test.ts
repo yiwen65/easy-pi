@@ -48,16 +48,16 @@ describe("v2 host adapters", () => {
 				(runtime) =>
 					runtime.definitions.search.parameters as unknown as {
 						properties: {
-							kind: { anyOf: Array<{ const: string }> };
-							mode?: { anyOf: Array<{ const: string }> };
+							kind: { enum: string[] };
+							mode?: { enum: string[] };
 						};
 						required: string[];
 					},
 			);
-			expect(searchSchemas[0].properties.kind.anyOf.map((entry) => entry.const)).toEqual(["text", "files", "glob"]);
-			expect(searchSchemas[0].properties.mode?.anyOf.map((entry) => entry.const)).toContain("symbol_definition");
+			expect(searchSchemas[0].properties.kind.enum).toEqual(["text", "files", "glob"]);
+			expect(searchSchemas[0].properties.mode?.enum).toContain("symbol_definition");
 			expect(searchSchemas[1]).toEqual(searchSchemas[2]);
-			expect(searchSchemas[1].properties.kind.anyOf.map((entry) => entry.const)).toEqual(["files", "glob"]);
+			expect(searchSchemas[1].properties.kind.enum).toEqual(["files", "glob"]);
 			expect(searchSchemas[1].properties).not.toHaveProperty("mode");
 			expect(searchSchemas[1].required).toEqual(["query", "kind"]);
 
