@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ok, type ShellExecOptions } from "@earendil-works/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { EditOperations } from "../src/core/tools/edit.ts";
 import type { FindOperations } from "../src/core/tools/find.ts";
@@ -73,6 +74,68 @@ describe("v2 host adapters", () => {
 			await memory.cleanup();
 			await ssh.cleanup();
 		}
+	});
+
+	it("executes shared Bash against a host-owned remote environment with live prefixes and cwd policy", async () => {
+		const remote = new MemoryExecutionEnv({ cwd: "/remote/bash-workspace", files: { "sub/file.txt": "remote" } });
+		const calls: Array<{ command: string; options?: ShellExecOptions }> = [];
+		remote.exec = async (command, options) => {
+			calls.push({ command, options });
+			options?.onStdout?.("remote output");
+			return ok({ stdout: "", stderr: "", exitCode: 0 });
+		};
+		const ssh = new SshExecutionEnv({ cwd: remote.cwd, operations: remote });
+		let prefix = "prefix-first";
+		const runtime = createV2ToolRuntime(cwd, {
+			executionEnv: ssh,
+			getShellCommandPrefix: () => prefix,
+			workspacePolicy: {
+				roots: [remote.cwd],
+				allowOutsideWorkspaceRead: false,
+				allowOutsideWorkspaceWrite: false,
+				followSymlinks: true,
+			},
+		});
+		const context = {
+			sessionManager: { getSessionId: () => "remote-session", getSessionFile: () => undefined },
+		} as Parameters<typeof runtime.definitions.bash.execute>[4];
+		try {
+			for (const value of ["prefix-first", "prefix-second"]) {
+				prefix = value;
+				const result = await runtime.definitions.bash.execute(
+					"remote-bash",
+					{ command: "verify", cwd: "sub", timeout: 2 },
+					undefined,
+					undefined,
+					context,
+				);
+				expect(result.content[0]).toMatchObject({ text: "remote output" });
+				expect(result.details).toMatchObject({ cwd: `${remote.cwd}/sub`, exitCode: 0, terminationReason: "exit" });
+				expect(calls.at(-1)).toMatchObject({
+					command: `${value}\nverify`,
+					options: {
+						cwd: `${remote.cwd}/sub`,
+						timeout: 2,
+						inheritEnv: false,
+						env: { PI_SESSION_ID: "remote-session" },
+					},
+				});
+			}
+			await expect(
+				runtime.definitions.bash.execute(
+					"outside",
+					{ command: "verify", cwd: ".." },
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toMatchObject({ code: "OUTSIDE_WORKSPACE" });
+			expect(calls).toHaveLength(2);
+		} finally {
+			await runtime.close();
+		}
+		expect(remote.isCleanedUp).toBe(false);
+		await ssh.cleanup();
 	});
 
 	it("runs structured search, read, and edit against the Memory reference host", async () => {

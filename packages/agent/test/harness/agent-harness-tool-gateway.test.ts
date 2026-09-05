@@ -8,8 +8,11 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { AgentHarness, HarnessFault, type HarnessTool } from "../../src/harness/agent-harness.ts";
+import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { InMemorySessionStorage, Session } from "../../src/harness/session/index.ts";
-import type { AgentToolCall, StreamFn, ToolExecutionInfo } from "../../src/types.ts";
+import { createBashTool } from "../../src/harness/tools/bash.ts";
+import { type AgentToolCall, AgentToolError, type StreamFn, type ToolExecutionInfo } from "../../src/types.ts";
+import { createTempDir } from "./session-test-utils.ts";
 
 const usage: Usage = {
 	input: 1,
@@ -202,6 +205,88 @@ describe("AgentHarness tool gateway (T-003)", () => {
 		if (results[0]?.type === "message" && results[0].message.role === "toolResult") {
 			expect(results[0].message.isError).toBe(true);
 			expect(JSON.stringify(results[0].message.content)).toContain("disk exploded");
+		}
+	});
+
+	it.each([true, false])("persists only explicitly safe error details (opt-in=%s)", async (explicit) => {
+		const session = createSession();
+		const details = { exitCode: 7, absent: undefined, nested: { safe: true, absent: undefined } };
+		const cause = new Error("internal cause");
+		const tool = fakeTool({
+			execute: async () => {
+				throw explicit
+					? new AgentToolError("public failure", details, { cause })
+					: Object.assign(new Error("public failure", { cause }), { details });
+			},
+		});
+		const { harness } = await createHarness(
+			session,
+			scripted(
+				() => toolCallMessage(call),
+				() => assistantMessage("done"),
+			),
+			[tool],
+		);
+		try {
+			await harness.prompt("go");
+			const entry = (await session.findEntries({ order: "oldestFirst" })).find(
+				(entry) => entry.type === "message" && entry.message.role === "toolResult",
+			);
+			expect(entry).toMatchObject({
+				message: {
+					isError: true,
+					content: [{ type: "text", text: "public failure" }],
+					details: explicit ? { exitCode: 7, nested: { safe: true } } : {},
+				},
+			});
+			expect(JSON.stringify(entry)).not.toContain("internal cause");
+			expect(JSON.stringify(entry)).not.toContain("absent");
+		} finally {
+			await harness.close();
+		}
+	});
+
+	it("persists real Bash failure status with replay never", async () => {
+		const session = createSession();
+		const env = new NodeExecutionEnv({ cwd: createTempDir() });
+		const bash = createBashTool();
+		const { harness } = await createHarness(
+			session,
+			scripted(
+				() =>
+					toolCallMessage({
+						type: "toolCall",
+						id: "bash-failure",
+						name: "bash",
+						arguments: { command: "printf durable-failure; exit 7" },
+					}),
+				() => assistantMessage("done"),
+			),
+			[
+				{
+					...bash,
+					execute: (id, params, signal, onUpdate) =>
+						bash.execute(id, params as Parameters<typeof bash.execute>[1], signal, onUpdate, { env }),
+				},
+			],
+		);
+		try {
+			await harness.prompt("go");
+			const entry = (await session.findEntries({ order: "oldestFirst" })).find(
+				(entry) => entry.type === "message" && entry.message.role === "toolResult",
+			);
+			expect(entry).toMatchObject({
+				message: {
+					toolName: "bash",
+					isError: true,
+					content: [{ type: "text", text: "durable-failure\n\nCommand exited with code 7" }],
+					details: { cwd: env.cwd, exitCode: 7, terminationReason: "exit", timedOut: false },
+				},
+			});
+			expect(await session.findRecords({ lane: "main", type: "tool_started" })).toMatchObject([{ replay: "never" }]);
+		} finally {
+			await harness.close();
+			await env.cleanup();
 		}
 	});
 

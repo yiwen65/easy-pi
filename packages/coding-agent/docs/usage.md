@@ -214,7 +214,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-The default `legacy` profile provides `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The opt-in `v2` profile provides `search`, `read`, `edit`, and `run`. Profile selection happens before existing tool filters and extension overrides. It applies only to the current invocation, so resumed or forked sessions use `legacy` unless `--tool-profile=v2` is supplied again.
+The default `legacy` profile provides `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The opt-in `v2` profile provides `search`, `read`, `edit`, and `bash`. Profile selection happens before existing tool filters and extension overrides. It applies only to the current invocation, so resumed or forked sessions use `legacy` unless `--tool-profile=v2` is supplied again.
 
 ### Resource Options
 

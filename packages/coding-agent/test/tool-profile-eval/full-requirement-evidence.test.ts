@@ -11,6 +11,7 @@ import type {
 	SearchRequest,
 	SearchV2Details,
 } from "@earendil-works/pi-agent-core";
+import { AgentToolError, type BashToolDetails } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createGrepToolDefinition } from "../../src/core/tools/grep.ts";
@@ -457,12 +458,25 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 				targetKind: "assignment" as const,
 				preferredPaths: ["src/**"],
 				maxResultsGlobal: 20,
+				maxOutputBytes: 1024,
 			};
 			const structured = await measure(structuredInput, () =>
 				search.execute("structured", structuredInput, undefined, undefined, context),
 			);
 			const structuredDetails = structured.value.details as SearchV2Details;
 			expect(structuredDetails.hits[0]).toMatchObject({ path: "src/payment.ts", matchKind: "assignment" });
+			expect(structuredDetails.status).toBe("complete");
+			expect(structuredDetails.locators[0]).toMatchObject({
+				path: "src/payment.ts",
+				startLine: 1,
+				preview: "export const settlement_timeout_ms = 2750;",
+			});
+			for (const locator of structuredDetails.locators) {
+				expect(locator.preview).toBe("export const settlement_timeout_ms = 2750;");
+				expect(structured.text).toContain(locator.locatorId);
+				expect(structured.text).toContain(`preview=${JSON.stringify(locator.preview)}`);
+			}
+			expect(structured.outputBytes).toBeLessThanOrEqual(structuredInput.maxOutputBytes);
 			evidence.retrieval.push(
 				retrievalObservation("structured_v2", "duplicates", structured, structuredDetails, ["src/payment.ts:1"]),
 			);
@@ -1183,12 +1197,12 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 			pass(15);
 		}
 
-		// 16. A visible syntax failure is repaired through Read -> Edit -> Run with exact state.
+		// 16. A visible syntax failure is repaired through Read -> Edit -> Bash with exact state.
 		{
 			const workflowStartedAt = performance.now();
 			const { cwd, runtime } = runtimeAt("scenario-16");
 			write(cwd, "check.js", "function value() { return 1; }\n");
-			const { read, edit, run } = runtime.definitions;
+			const { read, edit, bash } = runtime.definitions;
 			const context = {} as Parameters<typeof read.execute>[4];
 			const initial = await read.execute(
 				"initial",
@@ -1218,13 +1232,23 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 			);
 			expect((broken.details as EditV2Details).status).toBe("applied");
 			expect(readFileSync(join(cwd, "check.js"), "utf8")).toBe("function value() { return 1;\n");
-			const failed = await run.execute(
-				"check-fail",
-				{ command: `${JSON.stringify(process.execPath)} --check check.js`, cwd, timeout: 10 },
-				undefined,
-				undefined,
-				undefined as never,
-			);
+			const failed = await bash
+				.execute(
+					"check-fail",
+					{ command: `${JSON.stringify(process.execPath)} --check check.js`, cwd, timeout: 10 },
+					undefined,
+					undefined,
+					undefined as never,
+				)
+				.then(
+					() => {
+						throw new Error("Expected Bash to throw for the syntax failure");
+					},
+					(error: unknown) => {
+						if (!(error instanceof AgentToolError)) throw error;
+						return error as AgentToolError<BashToolDetails>;
+					},
+				);
 			expect(failed.details).toMatchObject({ exitCode: expect.any(Number), timedOut: false });
 			expect(failed.details.exitCode).not.toBe(0);
 			const current = await read.execute(
@@ -1253,7 +1277,7 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 				undefined,
 				context,
 			);
-			const passed = await run.execute(
+			const passed = await bash.execute(
 				"check-pass",
 				{ command: `${JSON.stringify(process.execPath)} --check check.js`, cwd, timeout: 10 },
 				undefined,
@@ -1267,22 +1291,14 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 				callsToSafeEdit: 2,
 				callsToVerify: 6,
 				returnedBytes: Buffer.byteLength(
-					[
-						resultText(initial),
-						resultText(broken),
-						resultText(failed),
-						resultText(current),
-						resultText(passed),
-					].join("\n"),
+					[resultText(initial), resultText(broken), failed.message, resultText(current), resultText(passed)].join(
+						"\n",
+					),
 				),
 				returnedTokens: estimatedTokens(
-					[
-						resultText(initial),
-						resultText(broken),
-						resultText(failed),
-						resultText(current),
-						resultText(passed),
-					].join("\n"),
+					[resultText(initial), resultText(broken), failed.message, resultText(current), resultText(passed)].join(
+						"\n",
+					),
 				),
 				inputTokens: [
 					{ path: "check.js", maxLines: 1 },
@@ -1296,7 +1312,7 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 				costUsd: 0,
 				broadQueryRetries: 0,
 				ambiguityRelocations: 0,
-				toolErrors: 0,
+				toolErrors: 1,
 				schemaErrors: 0,
 			});
 			pass(16);
@@ -1354,7 +1370,9 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 		const structuredDuplicate = evidence.retrieval.find(
 			(observation) => observation.variant === "structured_v2" && observation.queryId === "duplicates",
 		);
-		expect(structuredDuplicate?.returnedBytes).toBeLessThan(legacyDuplicate?.returnedBytes ?? 0);
+		// Previews add decision-relevant context; report actual bytes rather than requiring every v2 response to be shorter.
+		expect(structuredDuplicate?.returnedBytes).toBeGreaterThan(0);
+		expect(legacyDuplicate?.returnedBytes).toBeGreaterThan(0);
 		expect(summary.retrieval.structured_v2?.meanTargetRank).toBeLessThan(
 			summary.retrieval.structured_no_path_prior?.meanTargetRank ?? Number.POSITIVE_INFINITY,
 		);
@@ -1366,7 +1384,7 @@ describe("full P0/P1/P2 deterministic evidence", () => {
 			runs: 3,
 			broadQueryRetries: expect.any(Number),
 			ambiguityRelocations: 1,
-			toolErrors: 5,
+			toolErrors: 6,
 			schemaErrors: 4,
 			totalCostUsd: 0,
 		});

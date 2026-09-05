@@ -390,6 +390,17 @@ export interface AgentToolResult<T> {
 	terminate?: boolean;
 }
 
+/** Explicitly opt in to preserving safe structured details on a failed tool call. */
+export class AgentToolError<TDetails = unknown> extends Error {
+	readonly details: TDetails;
+
+	constructor(message: string, details: TDetails, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "AgentToolError";
+		this.details = details;
+	}
+}
+
 /**
  * Callback used by tools to stream partial execution updates.
  *

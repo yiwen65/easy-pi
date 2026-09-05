@@ -1,21 +1,39 @@
 import { type Static, Type } from "typebox";
-import type { AgentHarnessTool } from "../types.ts";
+import { AgentToolError } from "../../types.ts";
+import type { AgentHarnessTool, ExecutionError, Result } from "../types.ts";
 import { getOrThrow } from "../types.ts";
-import { executeShellWithCapture, type ShellCaptureProgress } from "../utils/shell-output.ts";
+import {
+	executeShellWithCapture,
+	type ShellCaptureOptions,
+	type ShellCaptureProgress,
+	type ShellCaptureResult,
+} from "../utils/shell-output.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "../utils/truncate.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
+import { V2ToolError } from "./v2-errors.ts";
+import { resolveWorkspacePath } from "./workspace-policy.ts";
 
 const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000;
 const BASH_UPDATE_THROTTLE_MS = 100;
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
+	cwd: Type.Optional(Type.String({ description: "Initial working directory (defaults to the session cwd)" })),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
+export type BashTerminationReason = "exit" | "signal" | "timeout" | "aborted";
 
 export interface BashToolDetails {
+	command: string;
+	cwd: string;
+	exitCode: number | null;
+	signal: string | null;
+	terminationReason: BashTerminationReason | null;
+	terminationRequested: boolean;
+	timedOut: boolean;
+	durationMs: number;
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
 }
@@ -36,6 +54,11 @@ export type BashPrepare<TContext extends ExecutionToolContext = ExecutionToolCon
 export interface BashToolOptions<TContext extends ExecutionToolContext = ExecutionToolContext> {
 	commandPrefix?: string;
 	prepare?: BashPrepare<TContext>;
+	/** Host transport/capture adapter. It owns cwd resolution and validation, including remote paths. */
+	capture?: (
+		execution: BashExecution,
+		options: ShellCaptureOptions,
+	) => Promise<Result<ShellCaptureResult, ExecutionError>>;
 }
 
 function validateTimeout(timeout: number | undefined): void {
@@ -50,22 +73,49 @@ function validateTimeout(timeout: number | undefined): void {
 
 export function createBashTool<TContext extends ExecutionToolContext = ExecutionToolContext>(
 	options?: BashToolOptions<TContext>,
-): AgentHarnessTool<TContext, typeof bashSchema, BashToolDetails | undefined> {
+): AgentHarnessTool<TContext, typeof bashSchema, BashToolDetails> {
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in an initial working directory. Returns stdout and stderr with structured exit status; nonzero exits, signals, timeouts, and cancellation are tool errors. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first), with full output saved to a temp file. Optional cwd and timeout in seconds. cwd is not a sandbox.`,
 		parameters: bashSchema,
-		async execute(_toolCallId, { command, timeout }, signal, onUpdate, context) {
+		replay: "never",
+		async execute(_toolCallId, { command, cwd, timeout }, signal, onUpdate, context) {
+			if (!command.trim()) throw new V2ToolError("INVALID_INPUT", "command must not be empty.");
 			validateTimeout(timeout);
 			const { env } = context;
+			let executionCwd = cwd ?? env.cwd;
+			if (!options?.capture || context.workspacePolicy) {
+				const resolved = await resolveWorkspacePath(env, cwd ?? ".", "read", context.workspacePolicy, signal);
+				const info = await env.fileInfo(resolved.canonicalPath, signal);
+				if (!info.ok) {
+					throw new V2ToolError(
+						info.error.code === "not_found" ? "NOT_FOUND" : "PERMISSION_DENIED",
+						`Could not inspect cwd ${executionCwd}: ${info.error.message}`,
+					);
+				}
+				if (info.value.kind !== "directory")
+					throw new V2ToolError("NOT_A_DIRECTORY", `cwd is not a directory: ${executionCwd}`);
+				executionCwd = resolved.absolutePath;
+			}
 			const execution: BashExecution = {
 				command: options?.commandPrefix ? `${options.commandPrefix}\n${command}` : command,
-				cwd: env.cwd,
+				cwd: executionCwd,
 				env: {},
 				inheritEnv: true,
 			};
 			await options?.prepare?.(execution, context, signal);
+			const startedAt = Date.now();
+			const initialDetails: BashToolDetails = {
+				command,
+				cwd: execution.cwd,
+				exitCode: null,
+				signal: null,
+				terminationReason: null,
+				terminationRequested: false,
+				timedOut: false,
+				durationMs: 0,
+			};
 			let getLatestProgress: (() => ShellCaptureProgress) | undefined;
 			let updateTimer: ReturnType<typeof setTimeout> | undefined;
 			let updateDirty = false;
@@ -79,6 +129,8 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				onUpdate({
 					content: [{ type: "text", text: progress.output }],
 					details: {
+						...initialDetails,
+						durationMs: Date.now() - startedAt,
 						truncation: progress.truncation.truncated ? progress.truncation : undefined,
 						fullOutputPath: progress.fullOutputPath,
 					},
@@ -104,54 +156,90 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				}, delay);
 			};
 
-			onUpdate?.({ content: [], details: undefined });
+			onUpdate?.({ content: [], details: initialDetails });
 			try {
+				const captureOptions: ShellCaptureOptions = {
+					cwd: execution.cwd,
+					env: execution.env,
+					inheritEnv: execution.inheritEnv,
+					timeout,
+					abortSignal: signal,
+					returnExecutionErrors: true,
+					onChunk: (_chunk, getProgress) => {
+						getLatestProgress = getProgress;
+						scheduleOutputUpdate();
+					},
+				};
 				const capture = getOrThrow(
-					await executeShellWithCapture(env, execution.command, {
-						cwd: execution.cwd,
-						env: execution.env,
-						inheritEnv: execution.inheritEnv,
-						timeout,
-						abortSignal: signal,
-						returnExecutionErrors: true,
-						onChunk: (_chunk, getProgress) => {
-							getLatestProgress = getProgress;
-							scheduleOutputUpdate();
-						},
-					}),
+					await (options?.capture
+						? options.capture(execution, captureOptions)
+						: executeShellWithCapture(env, execution.command, captureOptions)),
 				);
 				clearUpdateTimer();
 				getLatestProgress = () => capture;
 				updateDirty = true;
 				emitOutputUpdate();
 
+				const cancelled = capture.cancelled || signal?.aborted === true;
+				const timedOut = !cancelled && capture.executionError?.code === "timeout";
+				const exitSignal = cancelled || timedOut ? null : (capture.signal ?? null);
+				const exitCode = cancelled || timedOut || exitSignal ? null : (capture.exitCode ?? null);
+				const details: BashToolDetails = {
+					...initialDetails,
+					exitCode,
+					signal: exitSignal,
+					terminationReason: cancelled
+						? "aborted"
+						: timedOut
+							? "timeout"
+							: exitSignal
+								? "signal"
+								: exitCode === null
+									? null
+									: "exit",
+					terminationRequested: cancelled || timedOut,
+					timedOut,
+					durationMs: Date.now() - startedAt,
+					truncation: capture.truncation.truncated ? capture.truncation : undefined,
+					fullOutputPath: capture.fullOutputPath,
+				};
 				let outputText = capture.output;
-				let details: BashToolDetails | undefined;
 				if (capture.truncation.truncated) {
-					details = { truncation: capture.truncation, fullOutputPath: capture.fullOutputPath };
 					const startLine = capture.truncation.totalLines - capture.truncation.outputLines + 1;
 					const endLine = capture.truncation.totalLines;
 					if (capture.truncation.lastLinePartial) {
-						const lastLineSize = formatSize(capture.lastLineBytes);
-						outputText += `\n\n[Showing last ${formatSize(capture.truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${capture.fullOutputPath}]`;
+						outputText += `\n\n[Showing last ${formatSize(capture.truncation.outputBytes)} of line ${endLine} (line is ${formatSize(capture.lastLineBytes)}). Full output: ${capture.fullOutputPath}]`;
 					} else if (capture.truncation.truncatedBy === "lines") {
 						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${capture.truncation.totalLines}. Full output: ${capture.fullOutputPath}]`;
 					} else {
 						outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${capture.truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${capture.fullOutputPath}]`;
 					}
 				}
-
-				const appendStatus = (status: string): string => `${outputText ? `${outputText}\n\n` : ""}${status}`;
-				if (capture.cancelled) throw new Error(appendStatus("Command aborted"));
-				if (capture.executionError?.code === "timeout") {
-					throw new Error(appendStatus(`Command timed out after ${timeout} seconds`), {
-						cause: capture.executionError,
-					});
-				}
-				if (capture.executionError) throw capture.executionError;
-				if (capture.exitCode !== 0 && capture.exitCode !== undefined) {
-					throw new Error(appendStatus(`Command exited with code ${capture.exitCode}`));
-				}
+				const fail = (code: string, status: string, cause?: Error): never => {
+					throw Object.assign(
+						new AgentToolError(
+							`${outputText ? `${outputText}\n\n` : ""}${status}`,
+							details,
+							cause ? { cause } : undefined,
+						),
+						{ code },
+					);
+				};
+				if (cancelled) fail("ABORTED", "Command aborted");
+				if (timedOut)
+					fail(
+						"TIMEOUT",
+						timeout === undefined
+							? capture.executionError!.message
+							: `Command timed out after ${timeout} seconds`,
+						capture.executionError,
+					);
+				if (capture.executionError)
+					fail(capture.executionError.code, capture.executionError.message, capture.executionError);
+				if (exitSignal) fail("SIGNAL", `Command terminated by signal ${exitSignal}`);
+				if (exitCode === null)
+					fail("UNKNOWN_TERMINATION", "Command ended without an exit status; outcome is unknown.");
+				if (exitCode !== 0) fail("NONZERO_EXIT", `Command exited with code ${exitCode}`);
 				return { content: [{ type: "text", text: outputText || "(no output)" }], details };
 			} finally {
 				clearUpdateTimer();

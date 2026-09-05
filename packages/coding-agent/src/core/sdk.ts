@@ -289,7 +289,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const defaultActiveToolNames =
-		toolProfile === "v2" ? ["search", "read", "edit", "run"] : ["read", "bash", "edit", "write"];
+		toolProfile === "v2" ? ["search", "read", "edit", "bash"] : ["read", "bash", "edit", "write"];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;

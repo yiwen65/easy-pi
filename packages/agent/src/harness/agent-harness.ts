@@ -24,6 +24,7 @@ import type {
 	ThinkingLevel,
 	ToolExecutionInfo,
 } from "../types.ts";
+import { AgentToolError } from "../types.ts";
 import { collectEntriesForBranchSummary, generateBranchSummary } from "./compaction/branch-summarization.ts";
 import type { CompactionSettings } from "./compaction/compaction.ts";
 import { prepareCompaction, compact as runCompactionSummary } from "./compaction/compaction.ts";
@@ -1829,7 +1830,7 @@ export class AgentHarness implements AgentLane {
 				if (attempt <= maxRetries) continue;
 				result = {
 					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-					details: {},
+					details: error instanceof AgentToolError ? error.details : {},
 				};
 				break;
 			}

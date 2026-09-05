@@ -586,7 +586,9 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-The default `legacy` profile provides `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The opt-in `v2` profile provides exactly `search`, `read`, `edit`, and `run` before allowlist, denylist, custom-tool, or extension changes. Profiles apply only to the current invocation and are not stored in sessions.
+The default `legacy` profile provides `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The opt-in `v2` profile provides exactly `search`, `read`, `edit`, and `bash` before allowlist, denylist, custom-tool, or extension changes. Profiles apply only to the current invocation and are not stored in sessions.
+
+Both profiles use the same Bash core and renderer. Bash accepts `command`, optional `cwd`, and optional `timeout` in seconds. Success includes structured status details without adding a mandatory exit-0 footer; nonzero exits, signals, timeouts, and cancellation are tool errors with retained details. Native scheduling is unchanged; v2 stays sequential, with no automatic Bash replay. `run` is removed, not an alias: update tool filters and integrations to `bash`. See [Bash contract and migration](docs/sdk.md#bash-contract-and-migration) for SDK changes and host boundaries.
 
 ### Resource Options
 

@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { normalizeSessionName, parseArgs } from "../src/cli/args.ts";
+import { describe, expect, test, vi } from "vitest";
+import { normalizeSessionName, parseArgs, printHelp } from "../src/cli/args.ts";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -31,6 +31,19 @@ describe("parseArgs", () => {
 			const result = parseArgs(["-h"]);
 			expect(result.help).toBe(true);
 		});
+	});
+
+	test("help advertises Bash in both profiles without a Run alias", () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			printHelp();
+			const output = log.mock.calls.map((call) => String(call[0])).join("\n");
+			expect(output).toContain("legacy profile: read, bash, edit, write (default)");
+			expect(output).toContain("v2 profile: search, read, edit, bash");
+			expect(output).not.toContain("v2 profile: search, read, edit, run");
+		} finally {
+			log.mockRestore();
+		}
 	});
 
 	describe("--print flag", () => {
