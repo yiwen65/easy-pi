@@ -507,13 +507,27 @@ function compactTextHit(hit: Extract<SearchHit, { kind: "text" }>): {
 	lineLengthBytes: number;
 	endColumn: number;
 } {
-	const range = hit.ranges[0] ?? [Math.max(0, hit.column - 1), Math.max(0, hit.column - 1)];
-	const match = hit.text.slice(range[0], range[1]).slice(0, MAX_MATCH_CHARS);
-	const half = Math.floor((MAX_PREVIEW_CHARS - Math.min(match.length, MAX_MATCH_CHARS)) / 2);
-	const start = Math.max(0, range[0] - half);
-	const end = Math.min(hit.text.length, Math.max(range[1] + half, start + MAX_PREVIEW_CHARS));
+	const rawRange = hit.ranges[0] ?? [Math.max(0, hit.column - 1), Math.max(0, hit.column - 1)];
+	const range: [number, number] = [
+		Math.max(0, Math.min(hit.text.length, rawRange[0])),
+		Math.max(0, Math.min(hit.text.length, rawRange[1])),
+	];
+	range[1] = Math.max(range[0], range[1]);
+	let matchEnd = Math.min(range[1], range[0] + MAX_MATCH_CHARS);
+	if (matchEnd < range[1] && /[\uD800-\uDBFF]/.test(hit.text[matchEnd - 1] ?? "")) matchEnd--;
+	const match = hit.text.slice(range[0], matchEnd);
+	const visibleMatchLength = Math.min(range[1] - range[0], MAX_PREVIEW_CHARS);
+	const contextBefore = Math.floor((MAX_PREVIEW_CHARS - visibleMatchLength) / 2);
+	let start = Math.max(0, range[0] - contextBefore);
+	let end = Math.min(hit.text.length, start + MAX_PREVIEW_CHARS);
+	start = Math.max(0, end - MAX_PREVIEW_CHARS);
+	if (start > 0 && /[\uDC00-\uDFFF]/.test(hit.text[start] ?? "")) start++;
+	if (end < hit.text.length && /[\uD800-\uDBFF]/.test(hit.text[end - 1] ?? "")) end--;
 	const preview = hit.text.slice(start, end);
-	const adjustedRange: [number, number] = [Math.max(0, range[0] - start), Math.max(0, range[1] - start)];
+	const adjustedRange: [number, number] = [
+		Math.max(0, range[0] - start),
+		Math.max(0, Math.min(range[1], end) - start),
+	];
 	return {
 		hit: {
 			...hit,
@@ -526,7 +540,7 @@ function compactTextHit(hit: Extract<SearchHit, { kind: "text" }>): {
 		preview,
 		prefixOmitted: start > 0,
 		suffixOmitted: end < hit.text.length,
-		lineLengthBytes: new TextEncoder().encode(hit.text).byteLength,
+		lineLengthBytes: textEncoder.encode(hit.text).byteLength,
 		endColumn: range[1] + 1,
 	};
 }
@@ -549,8 +563,22 @@ function formatGroupedLocators(locators: readonly SearchV2Locator[]): string {
 				const locator = byId.get(id);
 				if (!locator) return [];
 				const position = locator.startLine ? `${locator.startLine}:${locator.startColumn ?? 1}` : "file";
-				const match = locator.match ? `\t${JSON.stringify(locator.match)}` : "";
-				return [`  ${locator.locatorId}\t${position}\t${locator.matchKind}${match}`];
+				const fields: string[] = [];
+				if (locator.match) fields.push(JSON.stringify(locator.match));
+				if (locator.preview !== undefined) {
+					const omissions = [
+						...(locator.prefixOmitted ? ["prefix omitted"] : []),
+						...(locator.suffixOmitted ? ["suffix omitted"] : []),
+					];
+					fields.push(
+						`preview${omissions.length > 0 ? ` (${omissions.join(", ")})` : ""}=${JSON.stringify(locator.preview)}`,
+					);
+				}
+				if (locator.enclosingSymbol !== undefined) fields.push(`symbol=${JSON.stringify(locator.enclosingSymbol)}`);
+				if (locator.nodeKind !== undefined) fields.push(`node=${JSON.stringify(locator.nodeKind)}`);
+				return [
+					`  ${locator.locatorId}\t${position}\t${locator.matchKind}${fields.map((field) => `\t${field}`).join("")}`,
+				];
 			});
 			return `${group.path}\n${entries.join("\n")}`;
 		})
@@ -827,6 +855,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 				else if (status === "complete") text = "NO_MATCH_COMPLETE: no matches in the fully covered scope.";
 				else text = "SEARCH_INCOMPLETE: no returned locator proves absence; narrow or change the query.";
 				const notices: string[] = [];
+				if (status !== "complete") notices.push("coverage incomplete");
 				if (page.approximate) notices.push("approximate ranking");
 				if (coverage.truncatedBy) notices.push(`truncated by ${coverage.truncatedBy}`);
 				if (nextCursor) notices.push(`continue with cursor=${nextCursor}`);

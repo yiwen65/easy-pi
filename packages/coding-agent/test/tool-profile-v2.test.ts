@@ -343,15 +343,21 @@ describe("v2 tool profile", () => {
 		});
 		expect(v2.getToolDefinition("run")?.parameters).toMatchObject({ required: ["command"] });
 		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
-		expect(v2.systemPrompt).toContain("use one edit batch with move first");
+		expect(v2.systemPrompt).toContain("update the freshly read source before moving it in the same batch");
+		expect(v2.systemPrompt).not.toContain("move first and update on the destination second");
 		expect(v2.systemPrompt).toContain("Never infer absence from partial");
 		expect(v2.systemPrompt).toContain("concept/semantic candidates");
 		expect(v2.systemPrompt).toContain("verify candidates with structured/literal Search and Read before Edit");
-		expect(v2.systemPrompt).toContain("Choose either mode or queryTemplate, not both");
+		expect(v2.systemPrompt).toContain("Prefer mode and maxResultsGlobal over their aliases");
+		expect(v2.systemPrompt).toContain("Compare previews to select locators");
 		expect(v2.systemPrompt).toContain("Structured/semantic Search requires kind=text and context=0");
 		expect(v2.systemPrompt).toContain("partial or indeterminate commit");
-		expect(v2.systemPrompt).toContain("view_id/file_hash");
-		expect(v2.systemPrompt).toContain("action=prepare");
+		expect(v2.systemPrompt).toContain("a fresh viewId supplies the file hash and permitted range");
+		expect(v2.systemPrompt).toContain("Apply ordinary changes in one edit call");
+		expect(v2.systemPrompt).toContain("host approval and preimage checks still run");
+		expect(v2.systemPrompt).toContain("Use action=prepare when a separate pre-commit review is needed");
+		expect(v2.systemPrompt).toContain("not independent post-edit verification");
+		expect(v2.systemPrompt).not.toContain("then read the changed range and run");
 		v2.dispose();
 	});
 
@@ -675,6 +681,197 @@ describe("v2 tool profile", () => {
 		);
 		expect(runtime.toolEvidenceSummary()).toBeUndefined();
 		await runtime.close();
+	});
+
+	it("uses preview-guided discovery and one viewId-only apply through the host approval hook", async () => {
+		const before = "export const alpha = 'TARGET old';\nexport const beta = 'TARGET keep';\n";
+		writeFileSync(join(cwd, "handlers.ts"), before);
+		let approvals = 0;
+		const runtime = createV2ToolRuntime(cwd, {
+			mutationHooks: {
+				beforeCommit: async (plan) => {
+					approvals++;
+					expect(plan.operations).toHaveLength(1);
+					expect(readFileSync(join(cwd, "handlers.ts"), "utf8")).toBe(before);
+				},
+			},
+		});
+		try {
+			const { search, read, edit } = runtime.definitions;
+			const extensionContext = {} as Parameters<typeof search.execute>[4];
+			const found = await search.execute(
+				"discover",
+				{ query: "TARGET", path: "handlers.ts", mode: "literal", maxResultsGlobal: 2 },
+				undefined,
+				undefined,
+				extensionContext,
+			);
+			expect(found.content[0]).toMatchObject({ text: expect.stringContaining('preview="export const alpha') });
+			expect(found.content[0]).toMatchObject({ text: expect.stringContaining('preview="export const beta') });
+			const locators = (found.details as SearchV2Details).locators;
+			const selected = locators.find((locator) => locator.startLine === 1);
+			if (!selected) throw new Error("Expected the alpha locator");
+			const viewed = await read.execute(
+				"inspect",
+				{ locatorId: selected.locatorId, beforeLines: 0, afterLines: 0 },
+				undefined,
+				undefined,
+				extensionContext,
+			);
+			const update = {
+				operations: [
+					{
+						kind: "update",
+						path: "handlers.ts",
+						oldText: "TARGET old",
+						newText: "TARGET new",
+						viewId: (viewed.details as ReadV2Details).viewId,
+					},
+				],
+			};
+			const applied = await edit.execute("apply", update, undefined, undefined, extensionContext);
+			expect(applied.details).toMatchObject({ status: "applied" });
+			expect(applied.content[0]).toMatchObject({
+				text: expect.stringContaining("-1 export const alpha = 'TARGET old';"),
+			});
+			expect(applied.content[0]).toMatchObject({
+				text: expect.stringContaining("+1 export const alpha = 'TARGET new';"),
+			});
+			expect(applied.content[0]).toMatchObject({ text: expect.stringContaining("not an independent post-edit") });
+			expect(readFileSync(join(cwd, "handlers.ts"), "utf8")).toBe(before.replace("TARGET old", "TARGET new"));
+			expect(runtime.toolEvidenceSummary()).toBeUndefined();
+			await expect(edit.execute("stale", update, undefined, undefined, extensionContext)).rejects.toMatchObject({
+				code: "STALE_VIEW",
+			});
+			expect(approvals).toBe(1);
+		} finally {
+			await runtime.close();
+		}
+	});
+
+	it("does not bypass host denial when action is omitted", async () => {
+		writeFileSync(join(cwd, "denied.txt"), "old\n");
+		let approvals = 0;
+		let notifications = 0;
+		const runtime = createV2ToolRuntime(cwd, {
+			mutationHooks: {
+				beforeCommit: async () => {
+					approvals++;
+					throw new Error("Denied by host");
+				},
+				afterCommit: async () => {
+					notifications++;
+				},
+			},
+		});
+		try {
+			const { read, edit } = runtime.definitions;
+			const extensionContext = {} as Parameters<typeof read.execute>[4];
+			const viewed = await read.execute("read", { path: "denied.txt" }, undefined, undefined, extensionContext);
+			await expect(
+				edit.execute(
+					"denied",
+					{
+						operations: [
+							{
+								kind: "update",
+								path: "denied.txt",
+								oldText: "old",
+								newText: "new",
+								viewId: viewed.details.viewId,
+							},
+						],
+					},
+					undefined,
+					undefined,
+					extensionContext,
+				),
+			).rejects.toMatchObject({
+				code: "EDIT_ROLLED_BACK",
+				message: expect.stringContaining("Mutation approval failed before commit. No files were changed."),
+				cause: expect.objectContaining({ message: "Denied by host" }),
+			});
+			expect(readFileSync(join(cwd, "denied.txt"), "utf8")).toBe("old\n");
+			expect(approvals).toBe(1);
+			expect(notifications).toBe(0);
+		} finally {
+			await runtime.close();
+		}
+	});
+
+	it.each(["apply", "commit"] as const)("preserves pending acceptance in production %s feedback", async (action) => {
+		writeFileSync(join(cwd, "overlay.txt"), "old\n");
+		const backend = new TrackingMutationBackend();
+		let commits = 0;
+		backend.commit = async () => {
+			commits++;
+			return {
+				completedOperationIndexes: [0],
+				changedPaths: [join(cwd, "overlay.txt")],
+				createdDirectories: [],
+				pendingAcceptance: { id: "overlay_1", workspacePath: "/overlay/workspace" },
+			};
+		};
+		const runtime = createV2ToolRuntime(cwd, { mutationBackend: backend });
+		try {
+			const { read, edit } = runtime.definitions;
+			const extensionContext = {} as Parameters<typeof read.execute>[4];
+			const viewed = await read.execute("read", { path: "overlay.txt" }, undefined, undefined, extensionContext);
+			const input = {
+				operations: [
+					{ kind: "update", path: "overlay.txt", oldText: "old", newText: "new", viewId: viewed.details.viewId },
+				],
+			};
+			const prepared =
+				action === "commit"
+					? await edit.execute("prepare", { ...input, action: "prepare" }, undefined, undefined, extensionContext)
+					: undefined;
+			const result = await edit.execute(
+				action,
+				prepared ? { action: "commit", patchId: prepared.details.patchId } : input,
+				undefined,
+				undefined,
+				extensionContext,
+			);
+			expect(result.details).toMatchObject({ status: "pending_acceptance", pendingAcceptance: { id: "overlay_1" } });
+			expect(result.content[0]).toMatchObject({
+				text: expect.stringContaining("base workspace is unchanged until host acceptance"),
+			});
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("-1 old\n+1 new") });
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("not an independent post-edit") });
+			expect(commits).toBe(1);
+			expect(readFileSync(join(cwd, "overlay.txt"), "utf8")).toBe("old\n");
+			expect(runtime.toolEvidenceSummary()).toContain(viewed.details.viewId);
+		} finally {
+			await runtime.close();
+		}
+	});
+
+	it("updates a freshly viewed source before moving it in one batch", async () => {
+		writeFileSync(join(cwd, "source.txt"), "old\n");
+		const runtime = createV2ToolRuntime(cwd);
+		try {
+			const { read, edit } = runtime.definitions;
+			const extensionContext = {} as Parameters<typeof read.execute>[4];
+			const viewed = await read.execute("read", { path: "source.txt" }, undefined, undefined, extensionContext);
+			const result = await edit.execute(
+				"update-move",
+				{
+					operations: [
+						{ kind: "update", path: "source.txt", oldText: "old", newText: "new", viewId: viewed.details.viewId },
+						{ kind: "move", path: "source.txt", to: "destination.txt" },
+					],
+				},
+				undefined,
+				undefined,
+				extensionContext,
+			);
+			expect(result.details).toMatchObject({ status: "applied" });
+			expect(readFileSync(join(cwd, "destination.txt"), "utf8")).toBe("new\n");
+			expect(() => readFileSync(join(cwd, "source.txt"))).toThrow();
+		} finally {
+			await runtime.close();
+		}
 	});
 
 	it("advertises exactly one explicitly selected edit dialect", async () => {

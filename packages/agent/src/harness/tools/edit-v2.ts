@@ -673,22 +673,41 @@ function invalidateCommittedEvidence(ledger: ToolStateLedger, plan: EditPlan, re
 	ledger.invalidatePaths(result.changedPaths, identities);
 }
 
-function preparedFeedback(
-	patchId: string,
+function boundedEditFeedback(output: string): string {
+	if (textEncoder.encode(output).byteLength <= MAX_EDIT_FEEDBACK_BYTES) return output;
+	const suffix = "\n[Diff feedback truncated to 32 KiB.]";
+	const availableBytes = MAX_EDIT_FEEDBACK_BYTES - textEncoder.encode(suffix).byteLength;
+	let low = 0;
+	let high = output.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (textEncoder.encode(output.slice(0, middle)).byteLength <= availableBytes) low = middle;
+		else high = middle - 1;
+	}
+	if (
+		low > 0 &&
+		low < output.length &&
+		output.charCodeAt(low - 1) >= 0xd800 &&
+		output.charCodeAt(low - 1) <= 0xdbff &&
+		output.charCodeAt(low) >= 0xdc00 &&
+		output.charCodeAt(low) <= 0xdfff
+	) {
+		low--;
+	}
+	return `${output.slice(0, low)}${suffix}`;
+}
+
+function successFeedback(
+	message: string,
 	operations: PreparedEditData["operations"],
 	files: EditV2FileChange[],
 ): string {
-	const header = `Prepared ${operations.length} file operation(s). patch_id=${patchId}`;
+	const provenance =
+		"The diff below is derived from the validated edit plan; it is not an independent post-edit re-read or verification.";
 	const diffs = files.map((file) => `${file.status}: ${file.path}\n${file.diff}`).join("\n");
-	let output = `${header}\n\n${operationSummary(operations)}${diffs ? `\n\n${diffs}` : ""}`;
-	if (textEncoder.encode(output).byteLength <= MAX_EDIT_FEEDBACK_BYTES) return output;
-	while (
-		output.length > 0 &&
-		textEncoder.encode(`${output}\n[Diff feedback truncated.]`).byteLength > MAX_EDIT_FEEDBACK_BYTES
-	) {
-		output = output.slice(0, Math.max(0, output.length - 1024));
-	}
-	return `${output}\n[Diff feedback truncated.]`;
+	return boundedEditFeedback(
+		`${message}\n${provenance}\n\n${operationSummary(operations)}${diffs ? `\n\n${diffs}` : ""}`,
+	);
 }
 
 export function createEditV2Tool<TContext extends ExecutionToolContext = ExecutionToolContext>(
@@ -715,10 +734,10 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 		label: "edit",
 		description:
 			dialect === "replacement"
-				? "Prepare or apply one-file exact replacements. Bind updates to a fresh view/hash/range; commit prepared patch IDs only after reviewing the diff."
+				? "Apply one-file exact replacements by default, or prepare them for review. Bind updates to a fresh view/hash/range; commit prepared patch IDs only after reviewing the diff."
 				: dialect === "patch"
-					? "Prepare or apply a versioned Pi Edit Patch v1; commit prepared patch IDs only after reviewing the diff."
-					: "Prepare or apply observed file operations. Bind updates to a fresh view/hash/range; commit prepared patch IDs only after reviewing the diff.",
+					? "Apply a versioned Pi Edit Patch v1 by default, or prepare it for review; commit prepared patch IDs only after reviewing the diff."
+					: "Apply observed file operations by default, or prepare them for review. Bind updates to a fresh view/hash/range; commit prepared patch IDs only after reviewing the diff.",
 		parameters,
 		executionMode: "sequential",
 		replay: "never",
@@ -759,10 +778,10 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 					invalidateCommittedEvidence(ledger, prepared.plan, result);
 					const status = result.pendingAcceptance ? "pending_acceptance" : "applied";
 					const message = result.pendingAcceptance
-						? `Committed patch ${prepared.id} to overlay ${result.pendingAcceptance.id}; the base workspace awaits host acceptance.`
-						: `Applied prepared patch ${prepared.id}.`;
+						? `Applied prepared patch ${prepared.id} to pending_acceptance overlay ${result.pendingAcceptance.id}; the base workspace is unchanged until host acceptance.`
+						: `Applied prepared patch ${prepared.id} to the base workspace.`;
 					return {
-						content: [{ type: "text", text: `${message}\n\n${operationSummary(data.operations)}` }],
+						content: [{ type: "text", text: successFeedback(message, data.operations, data.files) }],
 						details: {
 							status,
 							dialect,
@@ -787,7 +806,16 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 						data: { dialect, operations, files: changes } satisfies PreparedEditData,
 					});
 					return {
-						content: [{ type: "text", text: preparedFeedback(prepared.id, operations, changes) }],
+						content: [
+							{
+								type: "text",
+								text: successFeedback(
+									`Prepared ${operations.length} file operation(s). patch_id=${prepared.id} The base workspace is unchanged.`,
+									operations,
+									changes,
+								),
+							},
+						],
 						details: {
 							status: "prepared",
 							dialect,
@@ -804,10 +832,10 @@ export function createEditV2Tool<TContext extends ExecutionToolContext = Executi
 				invalidateCommittedEvidence(ledger, plan, result);
 				const status = result.pendingAcceptance ? "pending_acceptance" : "applied";
 				const message = result.pendingAcceptance
-					? `Prepared ${operations.length} file operation(s) in overlay ${result.pendingAcceptance.id}; the base workspace is unchanged until host acceptance.`
-					: `Applied ${operations.length} file operation(s).`;
+					? `Applied ${operations.length} file operation(s) to pending_acceptance overlay ${result.pendingAcceptance.id}; the base workspace is unchanged until host acceptance.`
+					: `Applied ${operations.length} file operation(s) to the base workspace.`;
 				return {
-					content: [{ type: "text", text: `${message}\n\n${operationSummary(operations)}` }],
+					content: [{ type: "text", text: successFeedback(message, operations, changes) }],
 					details: {
 						status,
 						dialect,

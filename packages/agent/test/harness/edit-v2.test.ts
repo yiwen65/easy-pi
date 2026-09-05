@@ -43,6 +43,26 @@ class TrackingEnv extends NodeExecutionEnv {
 	}
 }
 
+function feedbackText(result: { content: Array<{ type: string; text?: string }> }): string {
+	const text = result.content[0]?.text;
+	if (typeof text !== "string") throw new Error("Expected text feedback");
+	return text;
+}
+
+function expectValidBoundedFeedback(text: string): void {
+	expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(32 * 1024);
+	for (let index = 0; index < text.length; index++) {
+		const code = text.charCodeAt(index);
+		if (code >= 0xd800 && code <= 0xdbff) {
+			expect(text.charCodeAt(index + 1)).toBeGreaterThanOrEqual(0xdc00);
+			expect(text.charCodeAt(index + 1)).toBeLessThanOrEqual(0xdfff);
+			index++;
+		} else {
+			expect(code < 0xdc00 || code > 0xdfff).toBe(true);
+		}
+	}
+}
+
 class StaleBeforeCommitBackend implements MutationBackend {
 	readonly id = "stale-before-commit";
 	readonly capabilities;
@@ -201,6 +221,46 @@ describe("v2 edit", () => {
 		expect(result.details.operations).toHaveLength(5);
 	});
 
+	it("applies by default with only a fresh viewId and returns plan-derived diff feedback", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("a.txt", "old\n"));
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const view = await createReadV2Tool().execute(
+			"read",
+			{ path: "a.txt", maxLines: 1 },
+			undefined,
+			undefined,
+			context,
+		);
+
+		const result = await createEditV2Tool().execute(
+			"apply",
+			{
+				operations: [
+					{
+						kind: "update",
+						path: "a.txt",
+						oldText: "old",
+						newText: "new",
+						viewId: view.details.viewId,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		const feedback = feedbackText(result);
+		expect(result.details.status).toBe("applied");
+		expect(feedback).toContain("Applied 1 file operation(s) to the base workspace.");
+		expect(feedback).toContain("derived from the validated edit plan");
+		expect(feedback).toContain("not an independent post-edit re-read or verification");
+		expect(feedback).toContain("-1 old\n+1 new");
+		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("new\n");
+	});
+
 	it("creates missing destination parents for create and move", async () => {
 		const env = new TrackingEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("source.txt", "source"));
@@ -264,7 +324,10 @@ describe("v2 edit", () => {
 			patchId: expect.stringMatching(/^patch_/),
 			files: [{ status: "updated", firstChangedLine: 3 }],
 		});
-		expect((prepared.content[0] as { text: string }).text).toContain("-3 same\n+3 changed");
+		const preparedFeedback = feedbackText(prepared);
+		expect(preparedFeedback).toContain("The base workspace is unchanged.");
+		expect(preparedFeedback).toContain("-3 same\n+3 changed");
+		expect(preparedFeedback).toContain("not an independent post-edit re-read or verification");
 
 		const committed = await edit.execute(
 			"commit",
@@ -274,9 +337,123 @@ describe("v2 edit", () => {
 			context,
 		);
 		expect(committed.details.status).toBe("applied");
+		const committedFeedback = feedbackText(committed);
+		expect(committedFeedback).toContain("Applied prepared patch");
+		expect(committedFeedback).toContain("to the base workspace");
+		expect(committedFeedback).toContain("-3 same\n+3 changed");
+		expect(committedFeedback).toContain("not an independent post-edit re-read or verification");
 		expect(getOrThrow(await env.readTextFile("a.txt"))).toBe("same\nmiddle\nchanged\n");
 		expect(toolState.getView(view.details.viewId ?? "", env.cwd)).toBeUndefined();
 		expect(toolState.getEvidence()).toEqual({ locators: [], views: [], patches: [] });
+	});
+
+	it("distinguishes pending-acceptance overlay feedback from base-workspace application", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		const backend: MutationBackend = {
+			id: "pending-overlay",
+			capabilities: {
+				atomicRenameSameFilesystem: false,
+				fsyncFile: false,
+				fsyncDirectory: false,
+				preserveMode: false,
+				detectCrossFilesystem: false,
+				durableJournal: false,
+			},
+			commit: async () => ({
+				completedOperationIndexes: [0],
+				changedPaths: [`${env.cwd}/overlay.txt`],
+				createdDirectories: [],
+				pendingAcceptance: { id: "accept_1", workspacePath: "/overlay/workspace" },
+			}),
+			close: async () => {},
+		};
+		const result = await createEditV2Tool({ backend }).execute(
+			"overlay",
+			{ operations: [{ kind: "create", path: "overlay.txt", content: "overlay content\n" }] },
+			undefined,
+			undefined,
+			{ env },
+		);
+
+		const feedback = feedbackText(result);
+		expect(result.details.status).toBe("pending_acceptance");
+		expect(feedback).toContain("pending_acceptance overlay accept_1");
+		expect(feedback).toContain("base workspace is unchanged until host acceptance");
+		expect(feedback).toContain("+1 overlay content");
+		expect(feedback).toContain("not an independent post-edit re-read or verification");
+		expect(getOrThrow(await env.exists("overlay.txt"))).toBe(false);
+	});
+
+	it("bounds prepare, commit, and default-apply Unicode feedback without splitting characters", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		const toolState = new ToolStateLedger();
+		const context = { env, toolState };
+		const content = `${"😀".repeat(20_000)}\n`;
+		const edit = createEditV2Tool();
+		const prepared = await edit.execute(
+			"prepare-large",
+			{ action: "prepare", operations: [{ kind: "create", path: "prepared.txt", content }] },
+			undefined,
+			undefined,
+			context,
+		);
+		const committed = await edit.execute(
+			"commit-large",
+			{ action: "commit", patchId: prepared.details.patchId },
+			undefined,
+			undefined,
+			context,
+		);
+		const applied = await edit.execute(
+			"apply-large",
+			{ operations: [{ kind: "create", path: "applied.txt", content }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		for (const result of [prepared, committed, applied]) {
+			const feedback = feedbackText(result);
+			expectValidBoundedFeedback(feedback);
+			expect(feedback).toContain("[Diff feedback truncated to 32 KiB.]");
+			expect(feedback).toContain("not an independent post-edit re-read or verification");
+		}
+	});
+
+	it("does not return success feedback when the backend rejects a commit", async () => {
+		const env = new TrackingEnv({ cwd: createTempDir() });
+		const backend: MutationBackend = {
+			id: "rejecting",
+			capabilities: {
+				atomicRenameSameFilesystem: false,
+				fsyncFile: false,
+				fsyncDirectory: false,
+				preserveMode: false,
+				detectCrossFilesystem: false,
+				durableJournal: false,
+			},
+			commit: async () => {
+				throw new V2ToolError("EDIT_ROLLED_BACK", "host approval rejected");
+			},
+			close: async () => {},
+		};
+		const error = await createEditV2Tool({ backend })
+			.execute(
+				"rejected",
+				{ operations: [{ kind: "create", path: "rejected.txt", content: "content" }] },
+				undefined,
+				undefined,
+				{ env },
+			)
+			.catch((caught: unknown) => caught);
+
+		expect(error).toMatchObject({ code: "EDIT_ROLLED_BACK" });
+		expect(error).toBeInstanceOf(Error);
+		if (!(error instanceof Error)) throw new Error("Expected rejection error");
+		expect(error.message).toContain("host approval rejected");
+		expect(error.message).not.toContain("derived from the validated edit plan");
+		expect(error.message).not.toContain("Applied");
+		expect(getOrThrow(await env.exists("rejected.txt"))).toBe(false);
 	});
 
 	it("rejects ambiguous, mismatched, and out-of-view preimages before mutation", async () => {
@@ -881,6 +1058,10 @@ describe("v2 edit", () => {
 					]),
 				},
 			});
+			expect(error).toBeInstanceOf(Error);
+			if (!(error instanceof Error)) throw new Error("Expected partial commit error");
+			expect(error.message).not.toContain("derived from the validated edit plan");
+			expect(error.message).not.toContain("Applied");
 		}
 	});
 });
