@@ -8,6 +8,7 @@ import type {
 	SearchRequest,
 } from "../../src/harness/tools/search-provider.ts";
 import { createSearchV2Tool } from "../../src/harness/tools/search-v2.ts";
+import { ToolStateLedger } from "../../src/harness/tools/tool-state.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
 class FakeProvider implements SearchProvider {
@@ -95,11 +96,10 @@ describe("v2 search", () => {
 			match: "a[b].c",
 		});
 		expect(result.content[0]).toMatchObject({
-			text: expect.stringMatching(/^src\/a\.ts\n {2}loc_[^\t]+\t2:4\ttext\t"a\[b\]\.c"$/),
+			text: expect.stringMatching(/^src\/a\.ts\n {2}loc_[^\t]+\t2:4\ttext\t"a\[b\]\.c"\tpreview="xx a\[b\]\.c"$/),
 		});
 		expect(result.details.groups).toEqual([{ path: "src/a.ts", locatorIds: [result.details.locators[0].locatorId] }]);
 		expect((result.content[0] as { text: string }).text).not.toContain("before");
-		expect((result.content[0] as { text: string }).text).not.toContain("xx ");
 	});
 
 	it("groups same-file locators without repeating paths", async () => {
@@ -201,7 +201,28 @@ describe("v2 search", () => {
 			approximate: true,
 			partial: true,
 		});
-		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("[partial: approximate ranking.]") });
+		expect(result.content[0]).toMatchObject({
+			text: expect.stringContaining("[partial: coverage incomplete; approximate ranking.]"),
+		});
+	});
+
+	it("labels positive incomplete coverage even without approximation or truncation notices", async () => {
+		const provider = new FakeProvider({
+			hits: [{ kind: "text", path: "a.ts", line: 1, column: 1, text: "target", ranges: [[0, 6]] }],
+			complete: false,
+			approximate: false,
+			partial: true,
+		});
+		const result = await createSearchV2Tool().execute(
+			"partial",
+			{ query: "target" },
+			undefined,
+			undefined,
+			context(provider),
+		);
+		expect(result.details.status).toBe("partial");
+		expect(result.details.locators).toHaveLength(1);
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("[partial: coverage incomplete.]") });
 	});
 
 	it("dispatches verified structured modes and preserves provider metadata", async () => {
@@ -256,6 +277,9 @@ describe("v2 search", () => {
 			nodeKind: "FunctionDeclaration",
 			rankReasons: ["exact_symbol", "definition_match"],
 		});
+		expect((result.content[0] as { text: string }).text).toContain(
+			'preview="export function configure() {"\tsymbol="configure"\tnode="FunctionDeclaration"',
+		);
 	});
 
 	it("routes semantic query templates with task ranking and path priors", async () => {
@@ -394,7 +418,42 @@ describe("v2 search", () => {
 		expect(result.details.status).toBe("overflow");
 	});
 
-	it("keeps model-visible output inside the byte budget", async () => {
+	it("keeps preview-bearing model-visible output inside the byte budget", async () => {
+		const provider = new FakeProvider({
+			hits: [
+				{
+					kind: "text",
+					path: "generated.ts",
+					line: 1,
+					column: 161,
+					text: `${"界".repeat(160)}target${"😀".repeat(160)}`,
+					ranges: [[160, 166]],
+				},
+			],
+			complete: true,
+			approximate: false,
+			partial: false,
+		});
+		const toolState = new ToolStateLedger();
+		const result = await createSearchV2Tool().execute(
+			"id",
+			{ query: "target", maxOutputBytes: 128 },
+			undefined,
+			undefined,
+			{ ...context(provider), toolState },
+		);
+		expect(toolState.getEvidence().locators).toEqual([]);
+		const text = (result.content[0] as { text: string }).text;
+		expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(128);
+		expect(result.details.coverage).toMatchObject({
+			returnedCount: 0,
+			truncated: true,
+			truncatedBy: "max_output_bytes",
+		});
+		expect(text).toContain("max_output_bytes");
+	});
+
+	it("keeps long file paths inside the model-visible byte budget", async () => {
 		const provider = new FakeProvider({
 			hits: [{ kind: "file", path: `${"long/".repeat(80)}target.ts` }],
 			complete: true,
@@ -410,11 +469,7 @@ describe("v2 search", () => {
 		);
 		const text = (result.content[0] as { text: string }).text;
 		expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(128);
-		expect(result.details.coverage).toMatchObject({
-			returnedCount: 0,
-			truncated: true,
-			truncatedBy: "max_output_bytes",
-		});
+		expect(result.details.coverage).toMatchObject({ returnedCount: 0, truncatedBy: "max_output_bytes" });
 		expect(text).toContain("max_output_bytes");
 	});
 
@@ -440,7 +495,78 @@ describe("v2 search", () => {
 		expect(incomplete.content[0]).toMatchObject({ text: expect.stringContaining("SEARCH_INCOMPLETE") });
 	});
 
-	it("centers bounded previews on matches in long lines", async () => {
+	it("shows discriminating escaped previews for identical matches", async () => {
+		const provider = new FakeProvider({
+			hits: [
+				{ kind: "text", path: "src/a.ts", line: 1, column: 7, text: "alpha TARGET one", ranges: [[6, 12]] },
+				{ kind: "text", path: "src/a.ts", line: 2, column: 6, text: "beta TARGET two", ranges: [[5, 11]] },
+			],
+			complete: true,
+			approximate: false,
+			partial: false,
+		});
+		const result = await createSearchV2Tool().execute(
+			"id",
+			{ query: "TARGET" },
+			undefined,
+			undefined,
+			context(provider),
+		);
+		const output = (result.content[0] as { text: string }).text;
+		expect(output).toContain('preview="alpha TARGET one"');
+		expect(output).toContain('preview="beta TARGET two"');
+	});
+
+	it("bounds long regex ranges and safely renders Unicode and control characters", async () => {
+		const longMatch = `x${"😀".repeat(180)}\n\t\u0000END`;
+		const controls = 'const 名 = "😀\n\t\u0000";';
+		const provider = new FakeProvider({
+			hits: [
+				{
+					kind: "text",
+					path: "generated.ts",
+					line: 9,
+					column: 1,
+					text: `${longMatch} trailing`,
+					ranges: [[0, longMatch.length]],
+				},
+				{
+					kind: "text",
+					path: "controls.ts",
+					line: 1,
+					column: 1,
+					text: controls,
+					ranges: [[0, controls.length]],
+					enclosingSymbol: "name\n\t\u0000",
+					nodeKind: 'String"Literal',
+				},
+			],
+			complete: true,
+			approximate: false,
+			partial: false,
+		});
+		const result = await createSearchV2Tool().execute(
+			"id",
+			{ query: ".*", mode: "regex" },
+			undefined,
+			undefined,
+			context(provider),
+		);
+		const locator = result.details.locators[0];
+		expect(locator.preview?.length).toBeLessThanOrEqual(320);
+		expect(locator.preview?.endsWith("\ud83d")).toBe(false);
+		expect(locator.match?.length).toBeLessThanOrEqual(200);
+		expect(locator.match?.endsWith("\ud83d")).toBe(false);
+		expect(locator.suffixOmitted).toBe(true);
+		const output = (result.content[0] as { text: string }).text;
+		expect(output).toContain("preview (suffix omitted)=");
+		expect(output).toContain('preview="const 名 = \\"😀\\n\\t\\u0000\\";"');
+		expect(output).toContain(`symbol=${JSON.stringify("name\n\t\u0000")}`);
+		expect(output).toContain(`node=${JSON.stringify('String"Literal')}`);
+		expect(output).not.toContain("\n\t\u0000");
+	});
+
+	it("centers bounded previews on short matches in long lines", async () => {
 		const text = `${"a".repeat(1_000)}TARGET${"b".repeat(1_000)}`;
 		const provider = new FakeProvider({
 			hits: [{ kind: "text", path: "generated.ts", line: 9, column: 1_001, text, ranges: [[1_000, 1_006]] }],
@@ -462,7 +588,7 @@ describe("v2 search", () => {
 			suffixOmitted: true,
 		});
 		expect(result.details.locators[0].preview?.length).toBeLessThanOrEqual(320);
-		expect((result.content[0] as { text: string }).text).not.toContain("a".repeat(100));
+		expect((result.content[0] as { text: string }).text).toContain("preview (prefix omitted, suffix omitted)=");
 	});
 
 	it("rejects cursors outside their session scope", async () => {

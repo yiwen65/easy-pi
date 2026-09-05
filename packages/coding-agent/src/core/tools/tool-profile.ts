@@ -93,27 +93,28 @@ export interface V2ToolRuntimeHandle {
 
 const promptContributions = {
 	search: {
-		snippet: "Locate code as bounded locators with explicit scope, semantics, ranking, and coverage",
+		snippet: "Locate code with bounded previews, readable locators, and explicit coverage",
 		guidelines: [
-			"Use search instead of run for discovery. Start with the narrowest justified path and explicit literal, regex, or JS/TS query-template semantics; use include/exclude and preferredPaths only when the task supports them.",
+			"Use search instead of run for discovery. Start with the narrowest justified path; use include/exclude and preferredPaths only when the task supports them. Compare previews to select locators, then Read before Edit.",
 			"Use concept/semantic candidates only when naming is unknown and a remote provider was explicitly configured; verify candidates with structured/literal Search and Read before Edit.",
 			"Same-file results are grouped but each locator remains independently readable. Never infer absence from partial, overflow, truncated, skipped, or unsupported results; narrow one query dimension and search again.",
-			"Choose either mode or queryTemplate, not both. Structured/semantic Search requires kind=text and context=0; omit targetKind for concept search, otherwise pair it exactly with the requested structured mode. Set ranking only when its value is exposed by the session schema.",
+			"Prefer mode and maxResultsGlobal over their aliases; omit queryTemplate, regex, limit, and targetKind when using these. Structured/semantic Search requires kind=text and context=0; set ranking only when its value is exposed by the session schema.",
 		],
 	},
 	read: {
 		snippet: "Read a locator or bounded range into a numbered, versioned view",
 		guidelines: [
 			"Read a selected locator or JS/TS symbol/AST node with a small window first, then expand progressively; do not page from the start of a large file.",
-			"Use the returned view_id, file_hash, true line range, and continuation metadata for editing or further reads.",
+			"Use the returned view_id as Edit's viewId; displayed line-number prefixes are not file text and must not enter oldText. Use true ranges and continuation metadata for further reads.",
 		],
 	},
 	edit: {
-		snippet: "Prepare and commit view/hash/range-bound file changes",
+		snippet: "Apply view-bound changes, with optional prepare/commit review",
 		guidelines: [
-			"For updates, use freshly read view_id/file_hash evidence, an exact range, and exactly_one_in_range; never choose the first of multiple matches or imply replace-all.",
-			"Use edit action=prepare, inspect the bounded diff, commit its patchId, then read the changed range and run the smallest relevant verification.",
-			"On partial or indeterminate commit, read every changed or unknown path and do not replay blindly. When moving and updating the same file, use one edit batch with move first and update on the destination second.",
+			"For updates, a fresh viewId supplies the file hash and permitted range. Add range only to narrow that view, or use expectedFileHash with an explicit range instead of viewId. Match oldText exactly once; never imply replace-all.",
+			"Apply ordinary changes in one edit call (omit action or use action=apply); host approval and preimage checks still run. Use action=prepare when a separate pre-commit review is needed, inspect its diff, then commit its patchId.",
+			"Inspect the returned plan-derived diff; it is not independent post-edit verification. Re-read when feedback is truncated or more source context is needed, and run the smallest relevant verification for the change.",
+			"On partial or indeterminate commit, read every changed or unknown path and do not replay blindly. For a move plus update, update the freshly read source before moving it in the same batch; updating an already moved destination requires a new Read.",
 		],
 	},
 	run: {
