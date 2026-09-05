@@ -157,6 +157,7 @@ function applyRangeReplacements(
 	path: string,
 	range: LineRange,
 	patchErrors = false,
+	byteRange?: [number, number],
 ): string {
 	const { bom, text } = stripBom(content);
 	const withoutCrlf = text.replaceAll("\r\n", "");
@@ -176,10 +177,22 @@ function applyRangeReplacements(
 			{ paths: [path], recovery: { kind: "read_again", paths: [path] } },
 		);
 	}
-	const start = lineStarts[range.startLine - 1];
+	let start = lineStarts[range.startLine - 1];
 	const endLineStart = lineStarts[range.endLine - 1];
 	const newline = base.indexOf("\n", endLineStart);
-	const end = newline < 0 ? base.length : newline;
+	let end = newline < 0 ? base.length : newline;
+	if (byteRange) {
+		// Read's bounds are raw UTF-8 offsets; matching uses BOM-free, LF-normalized
+		// UTF-16 string indexes. Decode prefixes so CRLF and multibyte characters
+		// cannot shift authorization onto an undisplayed suffix or another line.
+		const bytes = textEncoder.encode(content);
+		const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+		const offsets = byteRange.map(
+			(offset) => normalizeToLF(stripBom(decoder.decode(bytes.subarray(0, offset))).text).length,
+		);
+		start = Math.max(start, offsets[0]);
+		end = Math.max(start, Math.min(end, offsets[1]));
+	}
 	const segment = base.slice(start, end);
 	const matches = replacements.map((replacement, index) => {
 		const oldText = normalizeToLF(replacement.oldText);
@@ -250,7 +263,7 @@ function validateViewBinding(
 	if (view && view.path !== path && view.path !== canonicalPath) {
 		throw new V2ToolError("RANGE_MISMATCH", "The update path does not match the supplied view.");
 	}
-	if (view && (!view.editable || !view.fileHash)) {
+	if (view && (!view.editable || !view.fileHash || !view.byteRange)) {
 		throw new V2ToolError("STALE_VIEW", "The supplied view has no safe full-file hash and cannot authorize editing.");
 	}
 	if (view && operation.expectedFileHash && operation.expectedFileHash !== view.fileHash) {
@@ -526,7 +539,14 @@ async function buildEditPlan(
 			observations.get(path)!,
 			context,
 		);
-		file.content = applyRangeReplacements(file.content, updates, path, binding.range!);
+		file.content = applyRangeReplacements(
+			file.content,
+			updates,
+			path,
+			binding.range!,
+			false,
+			binding.view?.byteRange,
+		);
 		planned.push({ kind: "update", path, content: file.content });
 	} else {
 		for (const operation of operations) {
@@ -576,6 +596,7 @@ async function buildEditPlan(
 						path,
 						binding.range!,
 						dialect === "patch",
+						binding.view?.byteRange,
 					);
 					if (bound) boundUpdatePaths.add(path);
 					planned.push({ kind: "update", path, content: file.content });

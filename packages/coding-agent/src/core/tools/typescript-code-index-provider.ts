@@ -971,11 +971,14 @@ export class TypeScriptCodeIndexProvider implements SearchProvider, SymbolReadPr
 			honorIgnore: request.honorIgnore,
 			includeHidden: request.includeHidden,
 		});
-		const ignored = await this.ignoreRules(root, request.honorIgnore !== false);
+		if (request.checkPath && !(await request.checkPath(root))) {
+			throw new SearchProviderError("unavailable", "Structured search root is forbidden by policy.");
+		}
 		const records: SourceRecord[] = [];
 		const skipped: SearchSkipped[] = [];
+		const ignored = await this.ignoreRules(root, request.honorIgnore !== false, skipped, request.checkPath);
 		let totalBytes = 0;
-		let complete = true;
+		let complete = skipped.length === 0;
 		let fileLimitReached = false;
 		const consider = async (absolutePath: string): Promise<void> => {
 			if (signal?.aborted) throw new SearchProviderError("unavailable", "Structured search aborted.");
@@ -992,6 +995,11 @@ export class TypeScriptCodeIndexProvider implements SearchProvider, SymbolReadPr
 			if (totalBytes + info.size > this.maxSourceBytes) {
 				complete = false;
 				skipped.push({ path: relativePath, reason: "INDEX_BYTE_LIMIT" });
+				return;
+			}
+			if (request.checkPath && !(await request.checkPath(absolutePath))) {
+				complete = false;
+				skipped.push({ path: relativePath, reason: "WORKSPACE_POLICY" });
 				return;
 			}
 			const content = await readFile(absolutePath, "utf8");
@@ -1021,7 +1029,18 @@ export class TypeScriptCodeIndexProvider implements SearchProvider, SymbolReadPr
 					if (!request.includeHidden && entry.name.startsWith(".")) continue;
 					const absolutePath = path.join(directory, entry.name);
 					const relativePath = normalizePath(path.relative(root, absolutePath));
-					if (entry.isSymbolicLink()) continue;
+					if (request.checkPath && !(await request.checkPath(absolutePath))) {
+						complete = false;
+						skipped.push({ path: relativePath, reason: "WORKSPACE_POLICY" });
+						continue;
+					}
+					if (entry.isSymbolicLink()) {
+						if (request.followSymlinks) {
+							complete = false;
+							skipped.push({ path: relativePath, reason: "SYMLINK_FOLLOW_UNAVAILABLE" });
+						}
+						continue;
+					}
 					if (entry.isDirectory()) {
 						if (ignored?.ignores(`${relativePath}/`)) continue;
 						pending.push(absolutePath);
@@ -1062,9 +1081,18 @@ export class TypeScriptCodeIndexProvider implements SearchProvider, SymbolReadPr
 		return snapshot;
 	}
 
-	private async ignoreRules(root: string, enabled: boolean): Promise<Ignore | undefined> {
+	private async ignoreRules(
+		root: string,
+		enabled: boolean,
+		skipped: SearchSkipped[],
+		checkPath?: SearchRequest["checkPath"],
+	): Promise<Ignore | undefined> {
 		if (!enabled) return undefined;
 		const rules = ignore().add([".git/", "node_modules/"]);
+		if (checkPath && !(await checkPath(path.join(root, ".gitignore")))) {
+			skipped.push({ path: ".gitignore", reason: "WORKSPACE_POLICY" });
+			return rules;
+		}
 		try {
 			rules.add(await readFile(path.join(root, ".gitignore"), "utf8"));
 		} catch {

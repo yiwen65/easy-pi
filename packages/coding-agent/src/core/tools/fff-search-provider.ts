@@ -115,7 +115,9 @@ export class FffSearchProvider implements SearchProvider {
 	}
 
 	private supportsNativeRequest(request: SearchRequest): boolean {
+		// FFF cannot call host authorization while indexing; the local fallback preflights traversal.
 		if (
+			request.checkPath !== undefined ||
 			request.fileGlob !== undefined ||
 			request.include?.length ||
 			request.exclude?.length ||

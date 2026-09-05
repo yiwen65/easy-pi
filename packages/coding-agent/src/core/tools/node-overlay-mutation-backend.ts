@@ -8,6 +8,7 @@ import {
 	readdir,
 	readFile,
 	readlink,
+	realpath,
 	rename,
 	rm,
 	symlink,
@@ -166,7 +167,16 @@ export class NodeOverlayMutationBackend implements MutationBackend {
 		await this.writeManifest(root, manifest);
 		try {
 			const budget = { files: 0, bytes: 0 };
-			await this.copyTree(this.workspaceRoot, workspacePath, budget, signal);
+			await this.copyTree(
+				this.workspaceRoot,
+				workspacePath,
+				budget,
+				{
+					source: await realpath(this.workspaceRoot),
+					destination: workspacePath,
+				},
+				signal,
+			);
 			manifest.state = "applying";
 			await this.writeManifest(root, manifest);
 			const mapped = await this.mapPlanToOverlay(plan, workspacePath, signal);
@@ -285,6 +295,7 @@ export class NodeOverlayMutationBackend implements MutationBackend {
 		source: string,
 		destination: string,
 		budget: CopyBudget,
+		roots: { source: string; destination: string },
 		signal?: AbortSignal,
 	): Promise<void> {
 		this.throwIfAborted(signal);
@@ -296,12 +307,26 @@ export class NodeOverlayMutationBackend implements MutationBackend {
 		if (info.isDirectory()) {
 			await mkdir(destination, { mode: info.mode & 0o7777 });
 			for (const entry of await readdir(source)) {
-				await this.copyTree(path.join(source, entry), path.join(destination, entry), budget, signal);
+				await this.copyTree(path.join(source, entry), path.join(destination, entry), budget, roots, signal);
 			}
 			return;
 		}
 		if (info.isSymbolicLink()) {
-			await symlink(await readlink(source), destination);
+			const link = await readlink(source);
+			let target = path.resolve(path.dirname(source), link);
+			try {
+				target = await realpath(source);
+			} catch (error) {
+				if (!(error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ELOOP")))
+					throw error;
+			}
+			// Internal links must lead to the copy, including absolute links and relative
+			// links that leave and re-enter the source tree. External links stay external;
+			// mutation containment checks below reject their use (this is not a sandbox).
+			const mapped = isWithin(roots.source, target)
+				? path.join(roots.destination, path.relative(roots.source, target))
+				: target;
+			await symlink(mapped, destination);
 			return;
 		}
 		if (!info.isFile()) throw new V2ToolError("INVALID_INPUT", `Overlay copy does not support ${source}.`);
@@ -313,15 +338,39 @@ export class NodeOverlayMutationBackend implements MutationBackend {
 		await chmod(destination, info.mode & 0o7777);
 	}
 
+	private async assertContainedTarget(root: string, target: string): Promise<void> {
+		// Resolve the nearest existing ancestor for creates with missing parents.
+		// lstat distinguishes a missing path from a dangling link: an unresolved
+		// link must fail closed, not be treated as a new contained directory.
+		let ancestor = target;
+		try {
+			for (;;) {
+				try {
+					await lstat(ancestor);
+					break;
+				} catch (error) {
+					if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+					const parent = path.dirname(ancestor);
+					if (parent === ancestor) throw error;
+					ancestor = parent;
+				}
+			}
+			const canonical = await realpath(ancestor);
+			if (isWithin(root, canonical) && (canonical !== root || ancestor !== target)) return;
+		} catch (error) {
+			throw new V2ToolError(
+				"OUTSIDE_WORKSPACE",
+				`Cannot establish overlay containment for ${target}.`,
+				undefined,
+				error instanceof Error ? error : undefined,
+			);
+		}
+		throw new V2ToolError("OUTSIDE_WORKSPACE", `${target} resolves outside the overlay workspace.`);
+	}
+
 	private async mapPlanToOverlay(plan: EditPlan, workspacePath: string, signal?: AbortSignal): Promise<EditPlan> {
 		const env = new NodeExecutionEnv({ cwd: workspacePath });
 		try {
-			const observations = [];
-			for (const observation of plan.observations) {
-				this.throwIfAborted(signal);
-				const mapped = this.mapBasePath(observation.path, workspacePath);
-				observations.push((await observeMutationPath(env, mapped, plan.limits.maxFileBytes, signal)).observation);
-			}
 			const operations: EditPlanOperation[] = plan.operations.map((operation) => {
 				const mappedPath = this.mapBasePath(operation.path, workspacePath);
 				switch (operation.kind) {
@@ -348,6 +397,28 @@ export class NodeOverlayMutationBackend implements MutationBackend {
 				}
 				throw new V2ToolError("INVALID_INPUT", "Unsupported overlay mutation operation.");
 			});
+			const mappedObservations = plan.observations.map((observation) =>
+				this.mapBasePath(observation.path, workspacePath),
+			);
+			const targets = new Set(mappedObservations);
+			for (const operation of operations) {
+				targets.add(operation.path);
+				if (operation.kind === "move") targets.add(operation.to);
+				for (const directory of "parentDirectories" in operation ? (operation.parentDirectories ?? []) : [])
+					targets.add(directory);
+			}
+			const canonicalRoot = await realpath(workspacePath);
+			// Validate every endpoint before even reading observations or starting any
+			// mutation. Pathname checks are best effort, not protection against races.
+			for (const target of targets) {
+				this.throwIfAborted(signal);
+				await this.assertContainedTarget(canonicalRoot, target);
+			}
+			const observations = [];
+			for (const mapped of mappedObservations) {
+				this.throwIfAborted(signal);
+				observations.push((await observeMutationPath(env, mapped, plan.limits.maxFileBytes, signal)).observation);
+			}
 			return { observations, operations, limits: plan.limits };
 		} finally {
 			await env.cleanup();

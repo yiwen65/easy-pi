@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import {
 	compareSearchPaths,
@@ -118,6 +118,25 @@ export class LocalSearchProviderV2 implements SearchProvider {
 
 	async search(request: SearchRequest, context: SearchExecutionContext, signal?: AbortSignal): Promise<SearchPage> {
 		if (signal?.aborted) throw new SearchProviderError("unavailable", "Search aborted.");
+		const skipped: NonNullable<SearchPage["skipped"]> = [];
+		if (request.checkPath) request = await this.restrictTraversal(request, skipped, signal);
+		const page = await this.searchPage(request, context, signal);
+		return skipped.length > 0
+			? {
+					...page,
+					complete: false,
+					partial: true,
+					matchedCountRelation: "unknown",
+					skipped: [...(page.skipped ?? []), ...skipped],
+				}
+			: page;
+	}
+
+	private async searchPage(
+		request: SearchRequest,
+		context: SearchExecutionContext,
+		signal?: AbortSignal,
+	): Promise<SearchPage> {
 		if (request.cursor) return this.continueSnapshot(request.cursor, request.expectedGeneration, request.limit);
 		if (request.kind === "text") return this.searchText(request, signal);
 		const fdPath = await ensureTool("fd");
@@ -125,10 +144,76 @@ export class LocalSearchProviderV2 implements SearchProvider {
 		return this.searchPaths(fdPath, request, signal);
 	}
 
+	/** Preflight metadata only: native tools cannot call the host policy during traversal.
+	 * Stable pathname checks are best-effort, not protection against concurrent link replacement.
+	 */
+	private async restrictTraversal(
+		request: SearchRequest,
+		skipped: NonNullable<SearchPage["skipped"]>,
+		signal?: AbortSignal,
+	): Promise<SearchRequest> {
+		const checkPath = request.checkPath;
+		if (!checkPath) return request;
+		const exclude = [...(request.exclude ?? [])];
+		let scanned = 0;
+		const visit = async (directory: string, ancestors: Set<string>): Promise<void> => {
+			if (signal?.aborted) throw new SearchProviderError("unavailable", "Search aborted.");
+			const canonical = await realpath(directory);
+			if (ancestors.has(canonical)) return;
+			const nextAncestors = new Set([...ancestors, canonical]);
+			for (const entry of await readdir(directory, { withFileTypes: true })) {
+				if (++scanned > MAX_SCANNED_PATHS || exclude.length > 1000) {
+					throw new SearchProviderError(
+						"budget_exceeded",
+						"Search policy traversal budget exceeded; narrow the root.",
+					);
+				}
+				const absolutePath = path.join(directory, entry.name);
+				if (!(await checkPath(absolutePath))) {
+					skipped.push({ path: absolutePath, reason: "WORKSPACE_POLICY" });
+					// Ignore files are read independently of search globs by rg/fd.
+					if (
+						request.honorIgnore !== false &&
+						([".gitignore", ".ignore", ".rgignore", ".fdignore", ".git"].includes(entry.name) ||
+							path.relative(request.path, absolutePath).split(path.sep).includes(".git"))
+					) {
+						throw new SearchProviderError(
+							"unavailable",
+							"Search policy forbids an ignore input; use honorIgnore=false.",
+						);
+					}
+					const relative = path.relative(request.path, absolutePath).split(path.sep).join("/");
+					// fd anchors exclusions at the search root; rg matches our absolute input paths.
+					for (const candidate of [
+						`/${relative}`,
+						`**/${absolutePath.split(path.sep).join("/").replace(/^\//, "")}`,
+					]) {
+						const literal = candidate.startsWith("**/")
+							? `**/${candidate.slice(3).replace(/[\\*?[\]{}]/g, "\\$&")}`
+							: candidate.replace(/[\\*?[\]{}]/g, "\\$&");
+						exclude.push(literal, `${literal}/**`);
+					}
+					continue;
+				}
+				if (
+					entry.isDirectory() ||
+					(entry.isSymbolicLink() && request.followSymlinks && (await stat(absolutePath)).isDirectory())
+				) {
+					await visit(absolutePath, nextAncestors);
+				}
+			}
+		};
+		if (!(await checkPath(request.path)))
+			throw new SearchProviderError("unavailable", "Search root is forbidden by policy.");
+		if ((await stat(request.path)).isDirectory()) await visit(request.path, new Set());
+		return { ...request, exclude };
+	}
+
 	private async searchText(request: SearchRequest, signal?: AbortSignal): Promise<SearchPage> {
 		const rgPath = await ensureTool("rg");
 		if (!rgPath) throw new SearchProviderError("unavailable", "ripgrep is unavailable.");
 		const args = ["--json", "--line-number", "--column", "--color=never"];
+		if (request.checkPath) args.push("--no-ignore-parent", "--no-ignore-global", "--no-config");
 		if (request.includeHidden) args.push("--hidden");
 		if (request.honorIgnore === false) args.push("--no-ignore");
 		if (request.followSymlinks) args.push("--follow");
@@ -236,6 +321,7 @@ export class LocalSearchProviderV2 implements SearchProvider {
 		const fastLimit = Math.max(request.limit * 50, 1000);
 		const processLimit = request.kind === "files" && request.ranking === "fast" ? fastLimit : MAX_SCANNED_PATHS + 1;
 		const args = ["--print0", "--color=never", "--type", "f", "--type", "d"];
+		if (request.checkPath) args.push("--no-ignore-parent");
 		if (request.includeHidden) args.push("--hidden");
 		if (request.honorIgnore === false) args.push("--no-ignore");
 		if (request.followSymlinks) args.push("--follow");

@@ -57,6 +57,8 @@ export interface SearchRequest {
 	followSymlinks?: boolean;
 	maxResultsPerFile?: number;
 	maxFiles?: number;
+	/** Host-only authorization. Check before traversing a directory or reading file contents. */
+	checkPath?: (absolutePath: string) => Promise<boolean>;
 	/** Provider-private continuation restored from the public opaque cursor. */
 	cursor?: string;
 	/** Generation captured with the provider-private continuation. */

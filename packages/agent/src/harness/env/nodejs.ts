@@ -457,10 +457,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 		let stream: ReturnType<typeof createReadStream> | undefined;
 		try {
 			stream = createReadStream(resolved, {
-				start: requestedStartByte,
 				signal: options.abortSignal,
 			});
-			let absoluteOffset = requestedStartByte ?? 0;
+			let absoluteOffset = 0;
+			let byteStartLine = 1;
 			let linesToSkip = requestedStartByte === undefined ? requestedStartLine - 1 : 0;
 			let outputStartByte = absoluteOffset;
 			let outputLineBreaks = 0;
@@ -474,6 +474,14 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				if (loopAbort) return loopAbort;
 				const chunk = rawChunk as Buffer;
 				for (const byte of chunk) {
+					// Count line breaks while skipping to the byte position; a supplied
+					// startLine is not evidence of the fragment's actual line number.
+					if (requestedStartByte !== undefined && absoluteOffset < requestedStartByte) {
+						absoluteOffset++;
+						if (byte === 0x0a) byteStartLine++;
+						outputStartByte = absoluteOffset;
+						continue;
+					}
 					if (linesToSkip > 0) {
 						absoluteOffset++;
 						if (byte === 0x0a) {
@@ -510,7 +518,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			let lines = prefix.text.split(/\r?\n/);
 			if (prefix.text.endsWith("\n")) lines.pop();
 			if (prefix.text.length === 0) lines = [];
-			const startLine = requestedStartByte === undefined ? requestedStartLine : requestedStartLine;
+			const startLine = requestedStartByte === undefined ? requestedStartLine : byteStartLine;
 			const endLine = lines.length > 0 ? startLine + lines.length - 1 : startLine;
 			const partialLine = truncatedByBytes && !prefix.text.endsWith("\n");
 			return ok({
