@@ -3,7 +3,7 @@
 - Created: 2026-09-05
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: blocked
 - Source: 用户要求分项计量、找原因并整改，选择“三维整体领先”和新的专项额度，确认完整执行约定。
 
 <!-- task-doc-section:background-goal -->
@@ -31,17 +31,20 @@
 | F-002 | 前一轮 40 请求都为 max；V2 多 24575 tokens，其中 23433 为输入增量，1142 为输出增量；没有逐区块 token 归因。 | 已冻结 UNIFIED-TOOLS-REAL-EVAL.md 与 JSON；仅作为问题证据，不重跑/调优该样本。 |
 | F-003 | provider 原始 input_tokens 包含缓存；Pi 先扣除再单列 cacheRead，原合计未重复计数。 | packages/ai/src/api/openai-responses-shared.ts:570-584。 |
 | F-004 | Codex payload 包含 instructions/tools/转换后的整个 active history；SSE 路径每次提交该 payload。 | packages/ai/src/api/openai-codex-responses.ts buildRequestBody；openai-responses-shared.ts message conversion。 |
-| F-005 | Read V2 四个 schema 分支重复预算属性；V2 有较长独立 guidance；common prompt 在有 Search 时仍可能添加 Bash discovery 指导。 | 已读 read-v2.ts schema、tool-profile.ts guidance、system-prompt.ts 全文；尚未认定为主因。 |
+| F-005 | 基线 Read V2 四个 schema 分支重复预算属性、V2指导较长；common prompt有Search时仍添加Bash发现指导。 | 基线源码；整改已去除指导冲突，Read未改。个别tool的精确token份额未测定。 |
 | F-006 | 当前 Node v24.15.0，macOS 26.5.1 arm64 / Apple M5 / 24 GiB；未找到已安装 tokenizer。 | node --version、sw_vers、sysctl、限定 node_modules 查询。 |
 | F-007 | Vitest base 用绝对 workspace aliases 指向本 checkout 的 AI/Agent/TUI 源码。可为旧 revision 建隔离 worktree 并验证实际 schema/hash，避免错误混用 live 产品代码。 | vitest.base.ts、packages/coding-agent/vitest.config.ts。 |
 | F-008 | 用户已确认三维口径、新预算、同模型、权限及失败结论边界。 | v2_superiority_gate、v2_attribution_optimization_budget、confirm_v2_attribution_optimization。 |
+| F-009 | 7个完整探针分离固定协议差：V2每请求多1170 input tokens，tools+812、system+358。 | v2-attribution/results.json，已核对原始request记录。 |
+| F-010 | 最终离线C固定system+tools字节13595→12448，-1147/-8.4%；148项本地回归通过。 | offline-C2.json及指定6+8文件Vitest结果；只有bytes收益，不是C任务token/时延证据。 |
+| F-011 | 9号请求无可结算usage后所有真实执行停止；pending保持400000 tokens/$0.3664。 | budget.json与9条request记录；known总8011 tokens/$0.0017882，底层失败类型未知。 |
 
 <!-- task-doc-section:assumptions-questions -->
 ## Assumptions and open questions
 
 - Accepted assumption: 当前 Mac/Node 宿主；结论限于固定负载，不推广 Windows/所有任务。
-- Assumption: 比较代码版本可通过隔离 baseline worktree + 同一新 runner 实现；必须先用零模型预检验证 aliases/实际 schema 与 frozen source hash，无混版才允许付费。
-- Open question: None。具体瓶颈、最小补丁和是否能达成三维优势均待证据，不能预判成功。
+- Verified assumption: 隔离baseline worktree、同一runner、公开catalog副本及实际alias/schema/function hash通过前后验证；未混用live产品源码。
+- Open question: None。固定协议成本差已测定；任务级策略贡献、候选真实token/时延/正确性改善因breaker缺证，不能预判成功。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -149,9 +152,9 @@
 - Blocker: unknown usage breaker；T-002/T-003不完整。
 - Unblock condition: 本轮不解锁、不清除pending、不重试；只有用户另行批准的新独立运行可补足缺失的任务级证据。
 
-### [ ] T-005 — 分项结论、三维判定与提交
+### [x] T-005 — 分项结论、三维判定与提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 发布真实归因与整改结果，不把局部改进标成全面领先。
 - Inputs and prerequisites: T-004 已取得可审计结果或明确停止证据；本轮采用已记录的breaker partial出口，审计T-006离线改动。
@@ -163,10 +166,10 @@
   2. V-001/V-003/V-004/V-005 通过后显式 staging/commit，核验路径与原始数据一致性。
   3. 未满足 A-004/A-005 则整体 partial，保留可独立证明的最小收益，不放宽门槛。
 - Acceptance criteria:
-  - A-001 至 A-007。
+  - 审核A-001至A-007，按A-006如实发布partial；本任务done仅表示报告、审计和提交完成，不代表A-004/A-005通过。
 - Verification method:
   - V-001/V-003/V-004/V-005、git diff/status/show。
-- Validation evidence: Not run.
+- Validation evidence: 148项本地回归、root check（No fixes applied）、diff检查、任务validator与独立offline审计通过；9请求/8结算/1pending、分区和原始记录全部一致。结果SHA256=478465987f479b0f3375ad37676203fb63adfe34d795977a0926abf5fad15ed6。17个owned路径提交38ecfc43f8bf11cc129ede8f48e1bc265e177c87，提交后路径/status/hash审计通过；旧资产和无关untracked未变。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -223,9 +226,11 @@
 
 - 2026-09-05T22:18+08:00：T-006 done、T-005 in_progress。最终148项本地回归通过，baseline隔离后验通过；第一份offline-C1记录-1158bytes，复核纠正targetKind不应称为alias后，最终offline-C2为-1147bytes/-8.4%，两份保留不覆盖。未运行任何C provider请求。新增可复用LEARNS：detached worktree需要显式复制/哈希Git忽略的公开模型JSON，不复制认证。分项结果与完整partial/pending账本写入RESULTS.md/results.json；独立离线审计9请求/8结算/1pending全部对账，正在做最终范围审计与显式提交。
 
+- 2026-09-05T22:34+08:00：T-005 done，Overall blocked / final partial。提交38ecfc43f8bf11cc129ede8f48e1bc265e177c87后再次审计通过；仅剩既有无关untracked。本轮停止后0provider调用，所有未完成三维门槛保持未证明。下一步只能在用户另行授权的新独立运行中补证，不解锁本轮ledger、不重跑已封存真实场景。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
 - Evidence: 7个完整协议探针准确拆出+1170 input tokens/request（tools+812、system+358）；本地整改固定协议bytes下降8.4%，148项本地回归通过；真实ledger第9请求usage_unknown后停机，保留全部失败和pending。
-- Limitations: T-002/T-003/T-004 blocked；T-005审计提交进行中。无完整开发配对、无candidate provider数据、无独立验证；准确度/安全性、任务tokens/费用、时延优势均未证明。不得清除pending或继续本轮付费调用。
+- Limitations: T-002/T-003/T-004 blocked；T-001/T-005/T-006 done。无完整开发配对、无candidate provider数据、无独立验证；准确度/安全性、任务tokens/费用、时延优势均未证明。不得清除pending或继续本轮付费调用。
