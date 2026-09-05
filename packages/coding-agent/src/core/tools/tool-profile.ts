@@ -87,32 +87,32 @@ const promptContributions = {
 	search: {
 		snippet: "Locate code with bounded previews, readable locators, and explicit coverage",
 		guidelines: [
-			"Use search instead of bash for discovery. Start with the narrowest justified path; use include/exclude and preferredPaths only when the task supports them. Compare previews to select locators, then Read before Edit.",
-			"Use concept/semantic candidates only when naming is unknown and a remote provider was explicitly configured; verify candidates with structured/literal Search and Read before Edit.",
-			"Same-file results are grouped but each locator remains independently readable. Never infer absence from partial, overflow, truncated, skipped, or unsupported results; narrow one query dimension and search again.",
-			"Prefer mode and maxResultsGlobal over their aliases; omit queryTemplate, regex, limit, and targetKind when using these. Structured/semantic Search requires kind=text and context=0; set ranking only when its value is exposed by the session schema.",
+			"Use search, not bash, for discovery; Read supplied paths directly. Narrow path/include/exclude/preferredPaths only with task evidence. Compare previews to select locators, then Read before Edit.",
+			"Use concept/semantic candidates only for unknown naming with an explicitly configured remote provider; verify via structured/literal Search and Read before Edit.",
+			"Each grouped locator is readable. Never infer absence from partial, overflow, truncated, skipped, or unsupported results; narrow one query dimension and retry.",
+			"Prefer mode/maxResultsGlobal over queryTemplate/regex/limit; omit targetKind unless needed. Structured/semantic Search requires kind=text and context=0. Use only schema-exposed ranking values.",
 		],
 	},
 	read: {
 		snippet: "Read a locator or bounded range into a numbered, versioned view",
 		guidelines: [
-			"Read a selected locator or JS/TS symbol/AST node with a small window first, then expand progressively; do not page from the start of a large file.",
-			"Use the returned view_id as Edit's viewId; displayed line-number prefixes are not file text and must not enter oldText. Use true ranges and continuation metadata for further reads.",
+			"Read a locator or JS/TS symbol/AST node in a small window, then expand as needed; do not page large files from the start.",
+			"Pass view_id as Edit's viewId. Line-number prefixes are not file text: exclude them from oldText. Continue with returned ranges/metadata.",
 		],
 	},
 	edit: {
 		snippet: "Apply view-bound changes, with optional prepare/commit review",
 		guidelines: [
-			"For updates, a fresh viewId supplies the file hash and permitted range. Add range only to narrow that view, or use expectedFileHash with an explicit range instead of viewId. Match oldText exactly once; never imply replace-all.",
-			"Apply ordinary changes in one edit call (omit action or use action=apply); host approval and preimage checks still run. Use action=prepare when a separate pre-commit review is needed, inspect its diff, then commit its patchId.",
-			"Inspect the returned plan-derived diff; it is not independent post-edit verification. Re-read when feedback is truncated or more source context is needed, and run the smallest relevant verification for the change.",
-			"On partial or indeterminate commit, read every changed or unknown path and do not replay blindly. For a move plus update, update the freshly read source before moving it in the same batch; updating an already moved destination requires a new Read.",
+			"A fresh viewId binds hash and permitted range; explicit range only narrows it. Alternatively use expectedFileHash plus range. Match oldText exactly once; never replace-all.",
+			"Apply ordinary changes in one edit call (omit action or use action=apply); host approval and preimage checks still run. Use action=prepare only for separate review, then inspect the diff and commit patchId.",
+			"Inspect the plan-derived diff: it is not independent post-edit verification. Re-read truncated feedback or missing context; run the smallest relevant check.",
+			"After partial or indeterminate commit, read all changed/unknown paths; do not replay blindly. Update a freshly read source before moving it in the same batch; a moved destination needs a new Read before update.",
 		],
 	},
 	bash: {
 		snippet: "Run builds, tests, Git, and other commands in an explicit cwd",
 		guidelines: [
-			"Use bash for the smallest focused verification, not for searching, reading, or editing files. Nonzero exits, signals, timeouts, and cancellation are tool errors with structured status; inspect the output before recovery and do not replay blindly.",
+			"Use bash for focused verification, not file discovery/reading/editing. Nonzero exits, signals, timeouts and cancellation are tool errors with structured status; inspect output before recovery, never replay blindly.",
 			"You can inspect PI_* environment variables for current model and session details.",
 		],
 	},
@@ -151,11 +151,10 @@ function promptContribution(name: keyof typeof promptContributions, context: Exe
 		}
 		const guidelines: string[] = [...promptContributions.search.guidelines];
 		if (!structured) {
-			guidelines[0] = `Use search instead of bash for discovery. This session has ${literal || regex ? "text" : "no text"}${paths ? "/path" : ""} and semantic candidate Search, but JS/TS structured modes are unavailable.`;
+			guidelines[0] = `Use search, not bash, for discovery; Read supplied paths directly. This session has ${literal || regex ? "text" : "no text"}${paths ? "/path" : ""} and semantic candidate Search, but JS/TS structured modes are unavailable.`;
 		}
 		if (!semantic) {
-			guidelines[1] =
-				"Remote concept/semantic candidates are unavailable in this session because no provider was configured; when configured, verify candidates with structured/literal Search and Read before Edit.";
+			guidelines[1] = "Remote concept/semantic candidates are unavailable: no provider is configured.";
 		}
 		return { snippet: prompt.snippet, guidelines };
 	}
@@ -163,7 +162,7 @@ function promptContribution(name: keyof typeof promptContributions, context: Exe
 		return {
 			snippet: prompt.snippet,
 			guidelines: [
-				"Read a selected locator or bounded path range with a small window first, then expand progressively; do not page from the start of a large file.",
+				"Read a locator or bounded path range in a small window, then expand as needed; do not page large files from the start.",
 				"Symbol and AST reads are unavailable in this session; use a locator or bounded path range.",
 				promptContributions.read.guidelines[1],
 			],

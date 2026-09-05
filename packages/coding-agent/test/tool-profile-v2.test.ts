@@ -352,19 +352,21 @@ describe("v2 tool profile", () => {
 		expect(v2.getToolDefinition("bash")?.renderCall).toBeTypeOf("function");
 		expect(v2.agent.state.tools.find((tool) => tool.name === "bash")?.executionMode).toBe("sequential");
 		expect(v2.systemPrompt).toContain("tool errors with structured status");
-		expect(v2.systemPrompt).toContain("update the freshly read source before moving it in the same batch");
+		expect(v2.systemPrompt).toContain("Update a freshly read source before moving it in the same batch");
 		expect(v2.systemPrompt).not.toContain("move first and update on the destination second");
 		expect(v2.systemPrompt).toContain("Never infer absence from partial");
 		expect(v2.systemPrompt).toContain("concept/semantic candidates");
-		expect(v2.systemPrompt).toContain("verify candidates with structured/literal Search and Read before Edit");
-		expect(v2.systemPrompt).toContain("Prefer mode and maxResultsGlobal over their aliases");
+		expect(v2.systemPrompt).toContain(
+			"Remote concept/semantic candidates are unavailable: no provider is configured",
+		);
+		expect(v2.systemPrompt).toContain("Prefer mode/maxResultsGlobal");
 		expect(v2.systemPrompt).toContain("Compare previews to select locators");
 		expect(v2.systemPrompt).toContain("Structured/semantic Search requires kind=text and context=0");
 		expect(v2.systemPrompt).toContain("partial or indeterminate commit");
-		expect(v2.systemPrompt).toContain("a fresh viewId supplies the file hash and permitted range");
+		expect(v2.systemPrompt).toContain("A fresh viewId binds hash and permitted range");
 		expect(v2.systemPrompt).toContain("Apply ordinary changes in one edit call");
 		expect(v2.systemPrompt).toContain("host approval and preimage checks still run");
-		expect(v2.systemPrompt).toContain("Use action=prepare when a separate pre-commit review is needed");
+		expect(v2.systemPrompt).toContain("Use action=prepare only for separate review");
 		expect(v2.systemPrompt).toContain("not independent post-edit verification");
 		expect(v2.systemPrompt).not.toContain("then read the changed range and run");
 		v2.dispose();
@@ -380,9 +382,9 @@ describe("v2 tool profile", () => {
 		expect(session.systemPrompt).toContain("Symbol and AST reads are unavailable in this session");
 		const search = session.getToolDefinition("search");
 		const schema = search?.parameters as unknown as {
-			properties: { kind: { anyOf: Array<{ const: string }> }; mode?: unknown };
+			properties: { kind: { enum: string[] }; mode?: unknown };
 		};
-		expect(schema.properties.kind.anyOf.map((entry) => entry.const)).toEqual(["files", "glob"]);
+		expect(schema.properties.kind.enum).toEqual(["files", "glob"]);
 		expect(schema.properties).not.toHaveProperty("mode");
 		session.dispose();
 	});
@@ -399,16 +401,14 @@ describe("v2 tool profile", () => {
 		if (!search) throw new Error("v2 search definition is missing");
 		const schema = search.parameters as unknown as {
 			properties: {
-				mode?: { anyOf?: Array<{ const?: string }> };
+				mode?: { enum?: string[] };
 				queryTemplate?: unknown;
 				targetKind?: unknown;
 			};
 		};
-		expect(schema.properties.mode?.anyOf?.map((entry) => entry.const)).toEqual(["literal", "regex"]);
+		expect(schema.properties.mode?.enum).toEqual(["literal", "regex"]);
 		expect(schema.properties).not.toHaveProperty("queryTemplate");
-		expect(
-			(schema.properties.targetKind as { anyOf: Array<{ const: string }> }).anyOf.map((entry) => entry.const),
-		).toEqual(["exact_line", "path"]);
+		expect((schema.properties.targetKind as { enum: string[] }).enum).toEqual(["exact_line", "path"]);
 		const result = await search.execute(
 			"text-only-search",
 			{ query: "TEXT_ONLY_MARKER", mode: "literal", path: "." },
@@ -513,6 +513,8 @@ describe("v2 tool profile", () => {
 			toolProfile: "v2",
 			toolsV2: { search: { semanticProvider: semantic } },
 		});
+		expect(session.systemPrompt).toContain("explicitly configured remote provider");
+		expect(session.systemPrompt).toContain("verify via structured/literal Search and Read before Edit");
 		const search = session.getToolDefinition("search");
 		if (!search) throw new Error("v2 search definition is missing");
 		const result = await search.execute(

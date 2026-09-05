@@ -1,0 +1,778 @@
+{
+  "version": 1,
+  "status": "partial",
+  "externalEvidenceId": "pi-v2-attribution-FhvQ0M",
+  "model": "gpt-5.6-luna",
+  "provider": "openai-codex",
+  "thinking": "max",
+  "frozen": {
+    "identity": {
+      "revision": "38c64d5b60eadaff13a7ff480c32d92f62b3817e",
+      "productHash": "59caee9041f923104325f6c3333ac6dccd80f47fb8e92d30fe0b3bf59e55c569",
+      "catalogHash": "3cb37575eafef3f13375215f2072fa30722bc568ced419b0394db1705b266026",
+      "runnerHash": "5a36f191520e1731b4bccc6ec4e66c72627cc6ad221738a60891948363aa2af1",
+      "fixtureHash": "be5ece77479056ebb4cd0906300ceaffead5a605cf374906f09ba52527e81eba",
+      "allocationHash": "1bb1f6c51a2c6ff647f9da9df35edb3eb94a9d42e8e0ce3e95b8eba68d8782d5",
+      "readFunctionHash": "16ebbd5fe175d03e213c91e4bc38e250317ba62fbae9f98f898e2e4cb08ae946",
+      "nodeFunctionHash": "541ce860692591099468fb1c6433a19461138e1dd73263de0a2d52ae4d8ce02d"
+    },
+    "clock": 1788615193621,
+    "modelHash": "0e5dfc9068e1d0ef50e69712f04144172d3b7671877a844740516e015bc9967c",
+    "reservedTokens": 400000,
+    "reservedCostUsd": 0.3664,
+    "protocolHashes": {
+      "A": "deb1824477637247d40ecde59f0d8b11f7910d1ec5ff18700d1259a3e938b85e",
+      "B": "fdc32024e23aed08dbab7b40846571fa808c9911619d53846928bb2e52bb83f2"
+    },
+    "iteration": 0
+  },
+  "budget": {
+    "clock": 1788615193621,
+    "attempts": [
+      "probe-base",
+      "probe-system-A",
+      "probe-system-B",
+      "probe-tools-A",
+      "probe-tools-B",
+      "probe-full-A",
+      "probe-full-B",
+      "development-D-11-A-0"
+    ],
+    "requests": 9,
+    "inputTokens": 7825,
+    "outputTokens": 186,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "costUsd": 0.0017882,
+    "pending": {
+      "id": 9,
+      "tokens": 400000,
+      "costUsd": 0.3664
+    },
+    "stop": "usage_unknown"
+  },
+  "accounting": {
+    "requests": 9,
+    "requestsWithMax": 9,
+    "settledRequests": 8,
+    "unknownUsageRequests": 1,
+    "knownTotalTokens": 8011,
+    "knownCatalogCostUsd": 0.0017882,
+    "knownPlusPendingTokenReservation": 408011,
+    "knownPlusPendingCatalogReservationUsd": 0.3681882
+  },
+  "attribution": {
+    "toolsInputTokenDelta": 812,
+    "systemInputTokenDelta": 358,
+    "fullInputTokenDelta": 1170
+  },
+  "attempts": [
+    {
+      "id": "probe-base",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 1,
+          "maxConfirmed": true,
+          "elapsedMs": 4394,
+          "payload": {
+            "bytes": 367,
+            "sections": {
+              "system": 30,
+              "tools": 0,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 242
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {},
+            "toolDescriptionBytes": {}
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 0,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 0
+          },
+          "inputTokens": 25,
+          "outputTokens": 5,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.000011
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "probe-system-A",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 2,
+          "maxConfirmed": true,
+          "elapsedMs": 10692,
+          "payload": {
+            "bytes": 2838,
+            "sections": {
+              "system": 2501,
+              "tools": 0,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 242
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {},
+            "toolDescriptionBytes": {}
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 0,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 0
+          },
+          "inputTokens": 549,
+          "outputTokens": 5,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.00011580000000000001
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "probe-system-B",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 3,
+          "maxConfirmed": true,
+          "elapsedMs": 3396,
+          "payload": {
+            "bytes": 4689,
+            "sections": {
+              "system": 4352,
+              "tools": 0,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 242
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {},
+            "toolDescriptionBytes": {}
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 0,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 0
+          },
+          "inputTokens": 907,
+          "outputTokens": 5,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.00018740000000000003
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "probe-tools-A",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 4,
+          "maxConfirmed": true,
+          "elapsedMs": 9153,
+          "payload": {
+            "bytes": 3417,
+            "sections": {
+              "system": 30,
+              "tools": 3041,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 251
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {
+              "read": 304,
+              "bash": 313,
+              "edit": 776,
+              "write": 225
+            },
+            "toolDescriptionBytes": {
+              "read": 305,
+              "bash": 351,
+              "edit": 328,
+              "write": 129
+            }
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 1466,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 10
+          },
+          "inputTokens": 538,
+          "outputTokens": 17,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.00012800000000000002
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "probe-tools-B",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 5,
+          "maxConfirmed": true,
+          "elapsedMs": 2912,
+          "payload": {
+            "bytes": 9619,
+            "sections": {
+              "system": 30,
+              "tools": 9243,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 251
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {
+              "search": 3123,
+              "read": 3058,
+              "edit": 1486,
+              "bash": 313
+            },
+            "toolDescriptionBytes": {
+              "search": 213,
+              "read": 218,
+              "edit": 170,
+              "bash": 351
+            }
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 0,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 0
+          },
+          "inputTokens": 1350,
+          "outputTokens": 5,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.000276
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "probe-full-A",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 6,
+          "maxConfirmed": true,
+          "elapsedMs": 7144,
+          "payload": {
+            "bytes": 5888,
+            "sections": {
+              "system": 2501,
+              "tools": 3041,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 251
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {
+              "read": 304,
+              "bash": 313,
+              "edit": 776,
+              "write": 225
+            },
+            "toolDescriptionBytes": {
+              "read": 305,
+              "bash": 351,
+              "edit": 328,
+              "write": 129
+            }
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 1486,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 13
+          },
+          "inputTokens": 1062,
+          "outputTokens": 20,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.0002364
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "probe-full-B",
+      "mode": "probe",
+      "passed": true,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 7,
+          "maxConfirmed": true,
+          "elapsedMs": 4446,
+          "payload": {
+            "bytes": 13941,
+            "sections": {
+              "system": 4352,
+              "tools": 9243,
+              "user": 95,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 251
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 95,
+            "toolParameterBytes": {
+              "search": 3123,
+              "read": 3058,
+              "edit": 1486,
+              "bash": 313
+            },
+            "toolDescriptionBytes": {
+              "search": 213,
+              "read": 218,
+              "edit": 170,
+              "bash": 351
+            }
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 2,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 0,
+            "toolCalls": 0,
+            "reportedReasoningTokens": 0
+          },
+          "inputTokens": 2232,
+          "outputTokens": 5,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.00045240000000000005
+        }
+      ],
+      "stopCategory": null
+    },
+    {
+      "id": "development-D-11-A-0",
+      "mode": "development",
+      "caseId": "D-11",
+      "variant": "A",
+      "iteration": 0,
+      "family": "large",
+      "passed": false,
+      "safe": true,
+      "filesystemPassed": false,
+      "independentCheckPassed": false,
+      "modelVerificationObserved": false,
+      "faultApplied": false,
+      "unsafeWriteEvents": 0,
+      "collateralWriteEvents": 0,
+      "capped": false,
+      "stopCategory": "usage_unknown",
+      "elapsedMs": 24454,
+      "modelElapsedMs": 24441,
+      "toolElapsedMs": 8,
+      "orchestrationMs": 5,
+      "records": [
+        {
+          "ordinal": 1,
+          "globalOrdinal": 8,
+          "maxConfirmed": true,
+          "elapsedMs": 4798,
+          "payload": {
+            "bytes": 6441,
+            "sections": {
+              "system": 2501,
+              "tools": 3041,
+              "user": 590,
+              "assistantText": 0,
+              "assistantCalls": 0,
+              "toolResults": 0,
+              "reasoning": 0,
+              "otherHistory": 0,
+              "protocol": 309
+            },
+            "retainedHistoryBytes": 0,
+            "newHistoryBytes": 590,
+            "toolParameterBytes": {
+              "read": 304,
+              "bash": 313,
+              "edit": 776,
+              "write": 225
+            },
+            "toolDescriptionBytes": {
+              "read": 305,
+              "bash": 351,
+              "edit": 328,
+              "write": 129
+            }
+          },
+          "generated": {
+            "argumentBytes": 101,
+            "textBytes": 0,
+            "thinkingSummaryBytes": 39,
+            "reasoningSignatureBytes": 1942,
+            "toolCalls": 1,
+            "reportedReasoningTokens": 78
+          },
+          "inputTokens": 1162,
+          "outputTokens": 124,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "costUsd": 0.0003812
+        },
+        {
+          "ordinal": 2,
+          "globalOrdinal": 9,
+          "maxConfirmed": true,
+          "elapsedMs": 19643,
+          "payload": {
+            "bytes": 8863,
+            "sections": {
+              "system": 2501,
+              "tools": 3041,
+              "user": 590,
+              "assistantText": 0,
+              "assistantCalls": 265,
+              "toolResults": 212,
+              "reasoning": 1942,
+              "otherHistory": 0,
+              "protocol": 312
+            },
+            "retainedHistoryBytes": 590,
+            "newHistoryBytes": 2419,
+            "toolParameterBytes": {
+              "read": 304,
+              "bash": 313,
+              "edit": 776,
+              "write": 225
+            },
+            "toolDescriptionBytes": {
+              "read": 305,
+              "bash": 351,
+              "edit": 328,
+              "write": 129
+            }
+          },
+          "generated": {
+            "argumentBytes": 0,
+            "textBytes": 0,
+            "thinkingSummaryBytes": 0,
+            "reasoningSignatureBytes": 0,
+            "toolCalls": 0,
+            "reportedReasoningTokens": null
+          }
+        }
+      ],
+      "tools": [
+        {
+          "ordinal": 1,
+          "request": 1,
+          "name": "bash",
+          "isError": false,
+          "code": "OK",
+          "resultBytes": 154,
+          "argumentBytes": 101,
+          "suppliedFields": 2,
+          "elapsedMs": 8,
+          "verification": false,
+          "mutation": false,
+          "faultInjected": false,
+          "knownPathDiscovery": false,
+          "exitCode": 0
+        }
+      ],
+      "productHash": "59caee9041f923104325f6c3333ac6dccd80f47fb8e92d30fe0b3bf59e55c569",
+      "protocolHash": "deb1824477637247d40ecde59f0d8b11f7910d1ec5ff18700d1259a3e938b85e"
+    }
+  ],
+  "offlineCandidates": [
+    {
+      "stage": "offline_candidate",
+      "providerRequests": 0,
+      "before": {
+        "systemBytes": 4352,
+        "toolBytes": 9243
+      },
+      "after": {
+        "systemBytes": 3784,
+        "toolBytes": 8653
+      },
+      "savedBytesPerRequest": 1158,
+      "parameterBytes": {
+        "search": 2533,
+        "read": 3058,
+        "edit": 1486,
+        "bash": 313
+      },
+      "identity": {
+        "revision": "38c64d5b60eadaff13a7ff480c32d92f62b3817e",
+        "productHash": "490d963bfaf43fb8a5fada45edef440b05a28408af110ed6740c4b42a4451fba",
+        "catalogHash": "3cb37575eafef3f13375215f2072fa30722bc568ced419b0394db1705b266026",
+        "runnerHash": "5a36f191520e1731b4bccc6ec4e66c72627cc6ad221738a60891948363aa2af1",
+        "fixtureHash": "be5ece77479056ebb4cd0906300ceaffead5a605cf374906f09ba52527e81eba",
+        "allocationHash": "1bb1f6c51a2c6ff647f9da9df35edb3eb94a9d42e8e0ce3e95b8eba68d8782d5",
+        "readFunctionHash": "16ebbd5fe175d03e213c91e4bc38e250317ba62fbae9f98f898e2e4cb08ae946",
+        "nodeFunctionHash": "541ce860692591099468fb1c6433a19461138e1dd73263de0a2d52ae4d8ce02d"
+      },
+      "protocolHash": "637f7c0c12a01c675725a040198ebb6e2dd2076f1ad3b2ba85e46028b34f1a17"
+    },
+    {
+      "stage": "offline_candidate",
+      "iteration": 2,
+      "providerRequests": 0,
+      "before": {
+        "systemBytes": 4352,
+        "toolBytes": 9243
+      },
+      "after": {
+        "systemBytes": 3795,
+        "toolBytes": 8653
+      },
+      "savedBytesPerRequest": 1147,
+      "parameterBytes": {
+        "search": 2533,
+        "read": 3058,
+        "edit": 1486,
+        "bash": 313
+      },
+      "identity": {
+        "revision": "38c64d5b60eadaff13a7ff480c32d92f62b3817e",
+        "productHash": "64ae4ad9e771b8b5d46e0edab69440edbe5d7c6bb9912bacf0a1af3488dff201",
+        "catalogHash": "3cb37575eafef3f13375215f2072fa30722bc568ced419b0394db1705b266026",
+        "runnerHash": "5a36f191520e1731b4bccc6ec4e66c72627cc6ad221738a60891948363aa2af1",
+        "fixtureHash": "be5ece77479056ebb4cd0906300ceaffead5a605cf374906f09ba52527e81eba",
+        "allocationHash": "1bb1f6c51a2c6ff647f9da9df35edb3eb94a9d42e8e0ce3e95b8eba68d8782d5",
+        "readFunctionHash": "16ebbd5fe175d03e213c91e4bc38e250317ba62fbae9f98f898e2e4cb08ae946",
+        "nodeFunctionHash": "541ce860692591099468fb1c6433a19461138e1dd73263de0a2d52ae4d8ce02d"
+      },
+      "protocolHash": "4c16c3786cd1181c2bad0cd96de73eafcd9ee412549891ffe6cb0c4e4daac5db"
+    }
+  ],
+  "selectedOfflineIteration": 2,
+  "validation": {
+    "sessionsRun": 0,
+    "accuracyGate": "not_proven",
+    "safetyGate": "not_proven",
+    "totalTokensGate": "not_proven",
+    "catalogCostGate": "not_proven",
+    "latencyGate": "not_proven",
+    "pairedLatencyLogRatioInterval": null,
+    "overall": "partial"
+  },
+  "missingDevelopmentBaseline": [
+    "development-D-11-B-0",
+    "development-D-12-B-0",
+    "development-D-12-A-0"
+  ],
+  "unrunCandidateProbes": [
+    "full-C",
+    "system-C",
+    "tools-C",
+    "system-C-tools-B",
+    "system-B-tools-C"
+  ],
+  "unrunValidationIds": [
+    "Q-11",
+    "Q-12",
+    "Q-21",
+    "Q-22",
+    "Q-31",
+    "Q-32"
+  ],
+  "localValidation": {
+    "agentPassed": 77,
+    "codingAgentPassed": 71,
+    "defaultRealSkipped": 1,
+    "rootCheckPassed": true,
+    "baselinePostChangeTestsPassed": 13
+  },
+  "artifactHashes": [
+    {
+      "fileName": "freeze-AB.json",
+      "sha256": "fc3f3e7e1ea606dcc1dde5600dfdcebf6bc50222f13aceb2a1228da0d756979e"
+    },
+    {
+      "fileName": "budget.json",
+      "sha256": "6e29e07b51b4e1a716e027342db08ee97b141e50c033c155254e1c6e405b684e"
+    },
+    {
+      "fileName": "probe-base-started.json",
+      "sha256": "3ebb30034d0175e12f7eef166a6191879b35ad0301e94c28cf1f3baea91ab42c"
+    },
+    {
+      "fileName": "probe-base.json",
+      "sha256": "cfa711c186595c4902499fec328465bd688348cdb01790a4ed1f7eea20532125"
+    },
+    {
+      "fileName": "probe-system-A-started.json",
+      "sha256": "fbe7e1ef11472726b692309d41ac6a9797dbab492c1175df6d5025c4cc7c6eb7"
+    },
+    {
+      "fileName": "probe-system-A.json",
+      "sha256": "23990eb1c1202b64db1751d2ae7ae42cd5201472592edc737f3258ee0c137ac7"
+    },
+    {
+      "fileName": "probe-system-B-started.json",
+      "sha256": "623e65642657cd8dd81389caddb04b74b8109ed79a8277454cd37b8b86d60e1a"
+    },
+    {
+      "fileName": "probe-system-B.json",
+      "sha256": "e9cbc96741dada8480addc03d4859a7f0f22914e1abe8a194a6a30816c5899fd"
+    },
+    {
+      "fileName": "probe-tools-A-started.json",
+      "sha256": "cabd1b548febc5e97a018308b1f02bca5b1e6e565409b16eceea9bc725d5968b"
+    },
+    {
+      "fileName": "probe-tools-A.json",
+      "sha256": "c87bc39e58a0ce683e6b2e2493fa91bebaccd8001c0a79ec58e8b6cc3e76e4ac"
+    },
+    {
+      "fileName": "probe-tools-B-started.json",
+      "sha256": "3ac3f693f351f8837b26d35920ccf67a73e21f392b1a65bc319e3632ba09cb57"
+    },
+    {
+      "fileName": "probe-tools-B.json",
+      "sha256": "8952db43eef9f08563afaf01aa066b8679da5a74103168c5d713236610b0188b"
+    },
+    {
+      "fileName": "probe-full-A-started.json",
+      "sha256": "4e84903e42dd48d86ec97578c769b17ef09f3bdd68c9c1e0cc131558e904e37b"
+    },
+    {
+      "fileName": "probe-full-A.json",
+      "sha256": "b4dbd30de07871cf635d024903dc599b585bf707614fa9fb1b7551a25433dc1f"
+    },
+    {
+      "fileName": "probe-full-B-started.json",
+      "sha256": "cbd55d1c8d61832ddbaf8d9013b352c79012ce1dba2f1b022f83dc0dc91415fc"
+    },
+    {
+      "fileName": "probe-full-B.json",
+      "sha256": "8fc38061a9a0e3d1e94cd5367f94b43a5a7780e88bb74ae3a449250663079dc6"
+    },
+    {
+      "fileName": "development-D-11-A-0-started.json",
+      "sha256": "580968bdf2928ed4f9251459f5077c24187289806b3cb191f448e8d42abdf112"
+    },
+    {
+      "fileName": "development-D-11-A-0.json",
+      "sha256": "bca802c8ab7e69a3fcd38fe8b74562ff7ebf915d55f38f09271791f823c1a883"
+    },
+    {
+      "fileName": "probe-base-request-1.json",
+      "sha256": "5d5c744db1e98cdd8a7b6612002df2b18790d69238e91c04d4b1db9f9b45c36c"
+    },
+    {
+      "fileName": "probe-system-A-request-1.json",
+      "sha256": "e0a5b9eda538125e2511c34cb91e15efd69e0cf915ace6abfb1ac52401ced086"
+    },
+    {
+      "fileName": "probe-system-B-request-1.json",
+      "sha256": "993c881c39f77d1e1fb388fd128aed03b359183012ee21b2237ff7d70d430495"
+    },
+    {
+      "fileName": "probe-tools-A-request-1.json",
+      "sha256": "34f64b480e1a42beaec921eb8801f86dfe44f9fd0783a54696af674d30653ad7"
+    },
+    {
+      "fileName": "probe-tools-B-request-1.json",
+      "sha256": "2c3a77b56df101a2099410631cca7fd141f40b539ef8d19afc10c2c25032b41f"
+    },
+    {
+      "fileName": "probe-full-A-request-1.json",
+      "sha256": "8ab3f21c7d3aa6e57610ba08d55b355e3648692ccd0d442a0bfef005481cdea8"
+    },
+    {
+      "fileName": "probe-full-B-request-1.json",
+      "sha256": "b198c9d887208eb98e6c742236887f764efeeb710e1182a68e5137141ae01c07"
+    },
+    {
+      "fileName": "development-D-11-A-0-request-1.json",
+      "sha256": "6e473376c4881ff441b0976b7426d5e6519e764e57e8fd18c92838bbf7d05930"
+    },
+    {
+      "fileName": "development-D-11-A-0-request-2.json",
+      "sha256": "1e7bda3e62afd32d5edd2bc015547a3ffeed1748a86f18a06bde07b8926afff1"
+    },
+    {
+      "fileName": "offline-C1.json",
+      "sha256": "fcf2ac950e6a8cf51a97a25b2f39175ecab8cfb408e3dedaa93b4ae6ab6a1204"
+    },
+    {
+      "fileName": "offline-C2.json",
+      "sha256": "153d050bb0c09ed6bd18ba5d90fef99b41a5912c9cdd25dbb6467189e4c323f5"
+    }
+  ]
+}

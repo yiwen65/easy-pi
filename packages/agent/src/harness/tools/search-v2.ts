@@ -154,10 +154,10 @@ const searchV2Schema = Type.Object({
 });
 
 function literalSchema(values: readonly string[], description?: string): TSchema {
-	const schemas = values.map((value) => Type.Literal(value));
-	if (schemas.length === 0) return Type.Never(description ? { description } : undefined);
-	if (schemas.length === 1) return Type.Literal(values[0], description ? { description } : undefined);
-	return Type.Union(schemas, description ? { description } : undefined);
+	if (values.length === 0) return Type.Never(description ? { description } : undefined);
+	if (values.length === 1) return Type.Literal(values[0], description ? { description } : undefined);
+	// The same finite string domain, without repeating a const/type object for every value on every request.
+	return Type.Enum(values, { type: "string", ...(description ? { description } : {}) });
 }
 
 /** Narrow the model-visible Search contract to capabilities available in this session. */

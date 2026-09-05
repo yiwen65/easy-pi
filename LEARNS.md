@@ -298,3 +298,11 @@
 - Correct approach: 两处执行 catch 都仅对 `AgentToolError` 保留 details，普通 Error 的任意属性/cause 不透传；durable 路径继续使用已有 strict-JSON normalization。
 - Prevention: 修改工具错误合同时同时跑 `test/agent-loop-tool-error.test.ts`、`test/harness/agent-harness-tool-gateway.test.ts` 与 coding-agent server consumer；检查真实 Bash 失败、ordinary Error 隔离、undefined 清洗和 replay=never。
 - Verified by: 2026-09-05 durable gateway 的显式错误/真实 Bash 两项先失败，最小 catch 修正后 gateway 9/9 及相关 Agent 53、coding-agent 39 项通过。
+
+## Detached baseline 评测——Git revision 不包含被忽略的模型 JSON
+
+- Wrong approach: 为基线创建 detached worktree 并链接现有 node_modules 后，直接运行 source-alias SDK 测试，认为源码 revision 已包含全部运行输入。
+- Why it failed: `packages/ai/src/providers/data/` 被 Git 忽略；已跟踪的 `*.models.ts` 仍静态导入这些 JSON，基线进程因此在生成前就报 `Cannot find module './data/amazon-bedrock.json'`。
+- Correct approach: 只复制当前已存在的公开模型 JSON，不下载、重新生成或复制认证配置；将目录内容哈希与产品/runner 哈希一起封存。
+- Prevention: 版本隔离预检同时验证 tracked 源码、忽略的必需运行输入、实际 package/subpath alias 和生产 schema；不能以 node_modules 链接存在代替加载成功与版本一致性。
+- Verified by: 2026-09-05 v2 attribution baseline 首轮两个 suite 导入失败；复制 JSON 并纳入 catalogHash 后，live/baseline 各 21 tests passed，源、catalog、runner 与运行时函数哈希完全一致。

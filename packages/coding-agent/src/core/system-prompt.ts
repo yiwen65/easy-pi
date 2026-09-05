@@ -101,7 +101,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasRead = tools.includes("read");
 
 	// File exploration guidelines
-	if (hasBash && !hasGrep && !hasFind && !hasLs) {
+	if (hasBash && !hasGrep && !hasFind && !hasLs && !tools.includes("search")) {
 		addGuideline("Use bash for file operations like ls, rg, find");
 	}
 
