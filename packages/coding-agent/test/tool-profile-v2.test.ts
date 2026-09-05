@@ -21,10 +21,13 @@ import type {
 	TextRangeReadOptions,
 	TextRangeReadResult,
 } from "@earendil-works/pi-agent-core";
+import { runAgentLoop } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import { createAssistantMessageEventStream, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { convertToLlm } from "../src/core/messages.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { type CreateAgentSessionOptions, createAgentSession, type InlineExtension } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -33,7 +36,7 @@ import { FffSearchProvider } from "../src/core/tools/fff-search-provider.ts";
 import { createV2ToolRuntime } from "../src/core/tools/tool-profile.ts";
 import { getThemeByName } from "../src/modes/interactive/theme/theme.ts";
 
-const V2_NAMES = ["search", "read", "edit", "run"];
+const V2_NAMES = ["search", "read", "edit", "bash"];
 
 class TrackingSearchProvider implements SearchProvider {
 	readonly id = "tracking-search";
@@ -314,14 +317,17 @@ describe("v2 tool profile", () => {
 	it("keeps legacy as the default and selects exactly four v2 built-ins", async () => {
 		const legacy = await createSession();
 		expect(legacy.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+		const legacyBash = legacy.getToolDefinition("bash");
+		expect(legacyBash?.executionMode).toBeUndefined();
 		legacy.dispose();
 
 		const v2 = await createSession({ toolProfile: "v2" });
 		expect(v2.getActiveToolNames()).toEqual(V2_NAMES);
 		expect(v2.getAllTools().map((tool) => tool.name)).toEqual(V2_NAMES);
 		expect(v2.systemPrompt).toContain("- search:");
-		expect(v2.systemPrompt).toContain("- run:");
-		expect(v2.systemPrompt).not.toContain("- bash:");
+		expect(v2.systemPrompt).toContain("- bash:");
+		expect(v2.systemPrompt).not.toContain("- run:");
+		expect(v2.getToolDefinition("run")).toBeUndefined();
 		expect(v2.getToolDefinition("search")?.parameters).toMatchObject({
 			required: ["query"],
 			properties: {
@@ -341,8 +347,11 @@ describe("v2 tool profile", () => {
 				expect.objectContaining({ required: ["action", "patchId"] }),
 			]),
 		});
-		expect(v2.getToolDefinition("run")?.parameters).toMatchObject({ required: ["command"] });
-		expect(v2.getToolDefinition("run")?.renderCall).toBeTypeOf("function");
+		expect(v2.getToolDefinition("bash")?.parameters).toBe(legacyBash?.parameters);
+		expect(v2.getToolDefinition("bash")?.executionMode).toBe("sequential");
+		expect(v2.getToolDefinition("bash")?.renderCall).toBeTypeOf("function");
+		expect(v2.agent.state.tools.find((tool) => tool.name === "bash")?.executionMode).toBe("sequential");
+		expect(v2.systemPrompt).toContain("tool errors with structured status");
 		expect(v2.systemPrompt).toContain("update the freshly read source before moving it in the same batch");
 		expect(v2.systemPrompt).not.toContain("move first and update on the destination second");
 		expect(v2.systemPrompt).toContain("Never infer absence from partial");
@@ -948,7 +957,7 @@ describe("v2 tool profile", () => {
 		session.dispose();
 	});
 
-	it("applies the configured command prefix and current PI session environment to run", async () => {
+	it("applies the configured command prefix and current PI session environment to bash", async () => {
 		const staleEnvironment = {
 			PI_SESSION_ID: process.env.PI_SESSION_ID,
 			PI_SESSION_FILE: process.env.PI_SESSION_FILE,
@@ -969,15 +978,15 @@ describe("v2 tool profile", () => {
 		const session = await createSession({ toolProfile: "v2", settingsManager, sessionManager });
 
 		try {
-			const run = session.getToolDefinition("run");
-			if (!run) throw new Error("v2 run definition is missing");
+			const bash = session.getToolDefinition("bash");
+			if (!bash) throw new Error("v2 bash definition is missing");
 			const extensionContext = {
 				model: getModel("anthropic", "claude-sonnet-4-5")!,
 				thinkingLevel: "high",
 				sessionManager,
-			} as unknown as Parameters<typeof run.execute>[4];
+			} as unknown as Parameters<typeof bash.execute>[4];
 			const execute = (toolCallId: string) =>
-				run.execute(
+				bash.execute(
 					toolCallId,
 					{
 						command: `printf "%s|%s|%s|%s|%s|%s" "$PI_PREFIX_MARKER" "$PI_SESSION_ID" "\${PI_SESSION_FILE-unset}" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL"`,
@@ -987,13 +996,26 @@ describe("v2 tool profile", () => {
 					extensionContext,
 				);
 
-			const first = await execute("run-session-env-first");
+			const first = await execute("bash-session-env-first");
 			const environmentSuffix = `${sessionManager.getSessionId()}|unset|anthropic|claude-sonnet-4-5|high`;
-			expect(first.content[0]).toMatchObject({ text: `prefix-first|${environmentSuffix}\n\nexit 0` });
+			expect(first.content[0]).toMatchObject({ text: `prefix-first|${environmentSuffix}` });
 
 			settingsManager.setShellCommandPrefix("export PI_PREFIX_MARKER=prefix-second");
-			const second = await execute("run-session-env-second");
-			expect(second.content[0]).toMatchObject({ text: `prefix-second|${environmentSuffix}\n\nexit 0` });
+			const second = await execute("bash-session-env-second");
+			expect(second.content[0]).toMatchObject({ text: `prefix-second|${environmentSuffix}` });
+			expect(second.details).toMatchObject({
+				cwd,
+				exitCode: 0,
+				terminationReason: "exit",
+				durationMs: expect.any(Number),
+			});
+			await expect(
+				bash.execute("failed", { command: "printf failure; exit 7" }, undefined, undefined, extensionContext),
+			).rejects.toMatchObject({
+				name: "AgentToolError",
+				message: "failure\n\nCommand exited with code 7",
+				details: { cwd, exitCode: 7, terminationReason: "exit", timedOut: false },
+			});
 			expect(session.systemPrompt).toContain("inspect PI_* environment variables");
 		} finally {
 			session.dispose();
@@ -1007,8 +1029,8 @@ describe("v2 tool profile", () => {
 	it("applies allowlist, denylist, and extension overrides after profile selection", async () => {
 		const session = await createSession({
 			toolProfile: "v2",
-			tools: ["search", "run"],
-			excludeTools: ["run"],
+			tools: ["search", "bash"],
+			excludeTools: ["bash"],
 			extensions: [
 				(pi) =>
 					pi.registerTool({
@@ -1022,8 +1044,69 @@ describe("v2 tool profile", () => {
 		});
 		expect(session.getActiveToolNames()).toEqual(["search"]);
 		expect(session.getToolDefinition("search")?.description).toBe("extension search override");
-		expect(session.getToolDefinition("bash")).toBeUndefined();
+		expect(session.getToolDefinition("run")).toBeUndefined();
 		session.dispose();
+	});
+
+	it.each(["legacy", "v2"] as const)(
+		"retains Bash failure details through the %s SDK Agent tools",
+		async (toolProfile) => {
+			const session = await createSession({ toolProfile, tools: ["bash"] });
+			try {
+				const messages = await runAgentLoop(
+					[{ role: "user", content: "Run the local regression command", timestamp: 0 }],
+					{ systemPrompt: session.systemPrompt, messages: [], tools: session.agent.state.tools },
+					{ model: session.model!, convertToLlm, shouldStopAfterTurn: () => true },
+					() => {},
+					undefined,
+					() => {
+						const stream = createAssistantMessageEventStream();
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: fauxAssistantMessage(fauxToolCall("bash", { command: "printf loop-failure; exit 9" }), {
+								stopReason: "toolUse",
+							}),
+						});
+						return stream;
+					},
+				);
+				expect(messages.find((message) => message.role === "toolResult")).toMatchObject({
+					toolName: "bash",
+					isError: true,
+					content: [{ type: "text", text: "loop-failure\n\nCommand exited with code 9" }],
+					details: { cwd, exitCode: 9, terminationReason: "exit", timedOut: false },
+				});
+			} finally {
+				session.dispose();
+			}
+		},
+	);
+
+	it("allows an extension to override the unified v2 Bash without adding a Run alias", async () => {
+		const session = await createSession({
+			toolProfile: "v2",
+			tools: ["bash"],
+			extensions: [
+				(pi) =>
+					pi.registerTool({
+						name: "bash",
+						label: "override",
+						description: "extension Bash override",
+						parameters: Type.Object({ command: Type.String() }),
+						execute: async () => ({ content: [{ type: "text", text: "override" }], details: {} }),
+					}),
+			],
+		});
+		try {
+			expect(session.getActiveToolNames()).toEqual(["bash"]);
+			expect(session.getToolDefinition("bash")?.description).toBe("extension Bash override");
+			expect(session.getToolDefinition("run")).toBeUndefined();
+			const tool = session.agent.state.tools[0];
+			expect((await tool.execute("override", { command: "unused" })).content[0]).toMatchObject({ text: "override" });
+		} finally {
+			session.dispose();
+		}
 	});
 
 	it("does not persist v2 across session recreation", async () => {

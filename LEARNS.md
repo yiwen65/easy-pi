@@ -280,3 +280,21 @@
 - Correct approach: 先分别确认 harness workspace 与 `git rev-parse --show-toplevel`；嵌套仓库的 read-only reviewer/analyst 使用绝对 `focusPaths`，或使用含子目录前缀的 workspace-relative 路径。绝对路径重试后 reviewer 成功读取 live 文件并产出可验证 findings。
 - Prevention: 启动 DAG 前比较 `pwd`、Git root 与 task focus path；两者不同时禁止直接使用 Git-root-relative 路径。writer 的 `ownedPaths` 仍须按 subagent workspace 规则填写，不要照搬 reviewer 的绝对路径。
 - Verified by: 2026-08-30 v2 Search 优化任务中 run `0185c593-db62-4bc5-b213-c17837879deb` 因相对路径全部 `ENOENT` 而无结论；改用绝对路径的 run `74d43765-d01c-4697-bcb0-d125ef5c5663` 成功识别并驱动 6 类 bounded closure。
+
+## Bash capture adapter——opaque Operations 的 cwd 不能用本机规则解释
+
+- Wrong approach: 将 native Bash 委托共享核心后，在进入自定义 `BashOperations` 前统一调用本机 `NodeExecutionEnv.absolutePath`，以为只需把文件存在性检查交给宿主。
+- Why it failed: 路径解析本身也属于宿主语义；`~/remote-work` 被展开成本机 home，relative cwd 被重复拼接，Windows 还会改写远程 POSIX 路径分隔符。
+- Recognition signal: 无 spawnHook 的 remote Operations 收到的 cwd 与调用者传入值不同；带重写 cwd hook 的旧回归反而通过。
+- Correct approach: capture adapter 拥有 cwd 解析及验证；默认本机 transport 在 prepare 中解析相对路径，opaque Operations 默认原样接收 cwd；有 ExecutionEnv 的宿主通过该环境实施路径策略。
+- Prevention: 同时覆盖无 hook 的 opaque absolute/home/relative cwd、本机 absolute/relative 绑定，以及 remote ExecutionEnv policy；不要让测试 hook 掩盖前置转换。
+- Verified by: 2026-09-05 `test/bash-tool-contract.test.ts` 三项 opaque cwd 回归先失败，修正后通过；Agent 42 项与 coding-agent 五文件 152 项相关回归通过，Windows 未实机验证。
+
+## AgentToolError——普通 Agent loop 与 durable Harness 必须分别验证
+
+- Wrong approach: 增加显式结构化工具错误后只修改 `agent-loop.ts` 的 catch，并以普通 Agent 的消息测试证明所有宿主均保留 details。
+- Why it failed: server 的 `createCodingAgentHarness` 通过独立 `AgentHarness.executeToolCall` 执行相同核心 Bash；其 catch 仍将 details 置为 `{}`，真实非零退出状态在 durable message 中丢失。
+- Recognition signal: 直接调用与 SDK Agent loop 都有 exitCode，而 `Session.findEntries()` 中错误 toolResult 的 details 为空。
+- Correct approach: 两处执行 catch 都仅对 `AgentToolError` 保留 details，普通 Error 的任意属性/cause 不透传；durable 路径继续使用已有 strict-JSON normalization。
+- Prevention: 修改工具错误合同时同时跑 `test/agent-loop-tool-error.test.ts`、`test/harness/agent-harness-tool-gateway.test.ts` 与 coding-agent server consumer；检查真实 Bash 失败、ordinary Error 隔离、undefined 清洗和 replay=never。
+- Verified by: 2026-09-05 durable gateway 的显式错误/真实 Bash 两项先失败，最小 catch 修正后 gateway 9/9 及相关 Agent 53、coding-agent 39 项通过。

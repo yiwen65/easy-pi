@@ -23,9 +23,4 @@ export interface ExecutionToolContext {
 	mutationBackend?: MutationBackend;
 	toolState?: ToolStateLedger;
 	workspacePolicy?: WorkspacePolicy;
-	run?: {
-		commandPrefix?: string;
-		env?: Record<string, string>;
-		inheritEnv?: boolean;
-	};
 }

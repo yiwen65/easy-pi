@@ -477,7 +477,7 @@ ${chalk.bold("Environment Variables:")}
 
 ${chalk.bold("Built-in Tool Names:")}
   legacy profile: read, bash, edit, write (default); optional grep, find, ls
-  v2 profile: search, read, edit, run
+  v2 profile: search, read, edit, bash
 
   read   - Read file contents
   bash   - Execute bash commands

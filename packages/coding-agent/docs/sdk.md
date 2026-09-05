@@ -65,9 +65,9 @@ const { session } = await createAgentSession({
 
 ### Opt-in v2 tool hosts
 
-Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `run`. The default remains `legacy` and the profile is not persisted. On the default local Node host, v2 Search is FFF-first for ordinary smart-case file, text, and glob requests. Requests whose exact case or scope-filter semantics FFF cannot represent, and hosts where FFF is unavailable, fall back to the structured local rg/fd provider. An injected `toolsV2.search.provider` still replaces this default.
+Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `bash`. The default remains `legacy` (`read`, `bash`, `edit`, `write`) and the profile is not persisted. On the default local Node host, v2 Search is FFF-first for ordinary smart-case file, text, and glob requests. Requests whose exact case or scope-filter semantics FFF cannot represent, and hosts where FFF is unavailable, fall back to the structured local rg/fd provider. An injected `toolsV2.search.provider` still replaces this default.
 
-On the local Node host, legacy Bash and v2 Run are separate tool facades over the same one-shot foreground process executor. They share shell spawning, raw output streaming, timeout/abort handling, process-tree termination, and post-exit pipe draining. Bash retains its existing extension operations, session environment, hooks, and renderer; Run retains structured `command`/`cwd`/`timeout`, sequential scheduling, and non-replay semantics. Final Run details expose `signal`, `terminationReason` (`exit`, `signal`, or `timeout`), and whether Run requested termination. `managedProcessesTerminated` remains only as a deprecated compatibility field. Managed background jobs and interactive PTY terminals are not part of either facade, and neither facade is a sandbox.
+Both profiles use one Agent Bash core, parameter schema, execution/status path, and coding-agent renderer. Native `BashOperations` captures raw bytes; the `ExecutionEnv` path uses environment-backed capture. These are necessary host adapters, not separate command tools. Both default local paths ultimately use `NodeProcessExecutor`. Native default scheduling is unchanged; v2 remains sequential. Bash has `replay: "never"`, so neither profile automatically replays commands. See [Bash contract and migration](#bash-contract-and-migration).
 
 The ordinary v2 mutation workflow is `search locator → read view → edit apply → focused verification`; skip Search when the path is already known. Search returns grouped locator IDs, bounded escaped previews (with omission markers), available symbol/node context, and explicit complete/partial/overflow coverage. Prefer `mode` and `maxResultsGlobal` rather than duplicating selectors through aliases, and normally omit `targetKind`. Previews help select a locator; they are not an editable view or proof of complete coverage. Read returns numbered content plus short-lived `view_id`, snapshot, and a full-file hash only when the file is within the editable hash limit. A view without a hash is intentionally non-editable.
 
@@ -591,8 +591,9 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
-- Default built-ins: `read`, `bash`, `edit`, `write`
+- Legacy built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+- Default built-ins (legacy): `read`, `bash`, `edit`, `write`
+- Opt-in v2 built-ins: `search`, `read`, `edit`, `bash`
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
@@ -617,6 +618,31 @@ const { session } = await createAgentSession({
   excludeTools: ["ask_question"],
 });
 ```
+
+#### Bash contract and migration
+
+Bash accepts `{ command: string, cwd?: string, timeout?: number }`. `cwd` defaults to the session working directory; `timeout` is in seconds with no default deadline. Working-directory resolution and validation use the execution environment and applicable workspace policy, or the native capture adapter for host-specific paths. Custom `BashOperations` owns its path semantics: without an explicit workspace policy, its `cwd` is passed through rather than expanded using the local home directory or path separators. A working directory is not a sandbox.
+
+Final successful results include `BashToolDetails`:
+
+- `command`, `cwd`: requested command and effective initial working directory.
+- `exitCode: number | null`, `signal: string | null`: observed termination status; unknown status is not converted to exit 0.
+- `terminationReason: "exit" | "signal" | "timeout" | "aborted" | null`.
+- `terminationRequested`, `timedOut`: booleans; requesting termination is not proof that every descendant was terminated.
+- `durationMs`: elapsed execution time in milliseconds.
+- Optional `truncation` and `fullOutputPath`: output truncation metadata and the saved full-output location.
+
+Successful text content keeps Bash's existing output, truncation notice, and `(no output)` fallback; there is no mandatory exit-0 footer. Unlike the removed Run tool, nonzero exits, signal exits, timeouts, and cancellation throw `AgentToolError` with structured `details`. An unknown exit status is also an error, not success. Direct callers must catch these failures; the Agent loop and durable `AgentHarness` retain `AgentToolError.details` in error tool results (`isError: true`), with the harness applying its existing strict-JSON normalization before persistence. Ordinary errors, including pre-execution validation failures, do not gain structured status automatically.
+
+Bash retains the core `prepare` API and coding-agent `BashOperations`, `createLocalBashOperations`, `spawnHook`, `commandPrefix`, shell configuration, and session-environment APIs. Session `PI_*` values and dynamic command prefixes are resolved per invocation. An injected `ExecutionEnv` remains host-owned; remote execution is not validated by assuming its paths are local. The shared core does not add managed background jobs, interactive PTYs, or OS sandbox guarantees.
+
+To migrate:
+
+- Replace the tool name `run` with `bash` in calls, allowlists/denylists, prompts, and integrations. There is no `run` alias.
+- Replace removed `createRunV2Tool` and `RunV2*` exports with the existing Bash API. In `@earendil-works/pi-agent-core`, use `createBashTool(options?)` with an execution context and `BashToolInput`/`BashToolDetails`. In `@earendil-works/pi-coding-agent`, use `createBashTool(cwd, options?)` for a bound Agent tool or `createBashToolDefinition(cwd, options?)` for a tool definition with the shared renderer; `BashToolDetails` is also exported there.
+- Handle thrown errors rather than treating nonzero/timeout results as successful Run responses. Use structured details instead of parsing a status footer; do not interpret `terminationRequested` as a cleanup guarantee.
+
+Frozen historical tool-profile evaluations describe the old Run contract at their pinned revision. Use that revision to interpret or reproduce them, not the current Bash toolchain. This migration does not update those artifacts or establish performance gains.
 
 #### Tools with Custom cwd
 

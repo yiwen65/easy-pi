@@ -3,7 +3,6 @@ import {
 	type AgentHarnessTool,
 	createEditV2Tool,
 	createReadV2Tool,
-	createRunV2Tool,
 	createSearchV2Tool,
 	type EditV2Details,
 	type EditV2Dialect,
@@ -19,7 +18,6 @@ import {
 	type ReadProvider,
 	type ReadV2Details,
 	type ResourceReader,
-	type RunV2Details,
 	type SearchCapabilities,
 	type SearchProvider,
 	type SearchV2Details,
@@ -31,28 +29,22 @@ import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { processImage } from "../../utils/image-process.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
-import type {
-	ExtensionContext,
-	ToolDefinition,
-	ToolRenderContext,
-	ToolRenderResultOptions,
-} from "../extensions/types.ts";
-import { resolveSessionShellEnvironment } from "./bash.ts";
+import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../extensions/types.ts";
+import { createBashToolDefinition } from "./bash.ts";
 import { FffSearchProvider } from "./fff-search-provider.ts";
 import { NodeReadProviderV2 } from "./node-read-provider-v2.ts";
 import { replaceTabs } from "./render-utils.ts";
-import { DEFAULT_MAX_BYTES, formatSize } from "./truncate.ts";
+import { formatSize } from "./truncate.ts";
 import { TypeScriptCodeIndexProvider } from "./typescript-code-index-provider.ts";
 
 export type ToolProfile = "legacy" | "v2";
 
-export const V2_TOOL_NAMES = ["search", "read", "edit", "run"] as const;
+export const V2_TOOL_NAMES = ["search", "read", "edit", "bash"] as const;
 
 export type V2SessionResourceSource<T> = T | (() => T);
 export type V2CodeIndexProvider = SearchProvider & SymbolReadProvider;
@@ -95,7 +87,7 @@ const promptContributions = {
 	search: {
 		snippet: "Locate code with bounded previews, readable locators, and explicit coverage",
 		guidelines: [
-			"Use search instead of run for discovery. Start with the narrowest justified path; use include/exclude and preferredPaths only when the task supports them. Compare previews to select locators, then Read before Edit.",
+			"Use search instead of bash for discovery. Start with the narrowest justified path; use include/exclude and preferredPaths only when the task supports them. Compare previews to select locators, then Read before Edit.",
 			"Use concept/semantic candidates only when naming is unknown and a remote provider was explicitly configured; verify candidates with structured/literal Search and Read before Edit.",
 			"Same-file results are grouped but each locator remains independently readable. Never infer absence from partial, overflow, truncated, skipped, or unsupported results; narrow one query dimension and search again.",
 			"Prefer mode and maxResultsGlobal over their aliases; omit queryTemplate, regex, limit, and targetKind when using these. Structured/semantic Search requires kind=text and context=0; set ranking only when its value is exposed by the session schema.",
@@ -117,10 +109,10 @@ const promptContributions = {
 			"On partial or indeterminate commit, read every changed or unknown path and do not replay blindly. For a move plus update, update the freshly read source before moving it in the same batch; updating an already moved destination requires a new Read.",
 		],
 	},
-	run: {
+	bash: {
 		snippet: "Run builds, tests, Git, and other commands in an explicit cwd",
 		guidelines: [
-			"Use run for the smallest focused verification, not for searching, reading, or editing files. Nonzero exits and timeouts are visible results that require inspection and recovery.",
+			"Use bash for the smallest focused verification, not for searching, reading, or editing files. Nonzero exits, signals, timeouts, and cancellation are tool errors with structured status; inspect the output before recovery and do not replay blindly.",
 			"You can inspect PI_* environment variables for current model and session details.",
 		],
 	},
@@ -159,7 +151,7 @@ function promptContribution(name: keyof typeof promptContributions, context: Exe
 		}
 		const guidelines: string[] = [...promptContributions.search.guidelines];
 		if (!structured) {
-			guidelines[0] = `Use search instead of run for discovery. This session has ${literal || regex ? "text" : "no text"}${paths ? "/path" : ""} and semantic candidate Search, but JS/TS structured modes are unavailable.`;
+			guidelines[0] = `Use search instead of bash for discovery. This session has ${literal || regex ? "text" : "no text"}${paths ? "/path" : ""} and semantic candidate Search, but JS/TS structured modes are unavailable.`;
 		}
 		if (!semantic) {
 			guidelines[1] =
@@ -698,168 +690,9 @@ function renderSearchResult(
 	return component;
 }
 
-const RUN_PREVIEW_LINES = 5;
-
-type RunRenderState = {
-	startedAt: number | undefined;
-	endedAt: number | undefined;
-	interval: ReturnType<typeof setInterval> | undefined;
-};
-
-type RunResultRenderState = {
-	cachedWidth: number | undefined;
-	cachedLines: string[] | undefined;
-	cachedHasEarlierOutput: boolean | undefined;
-};
-
-class RunResultRenderComponent extends Container {
-	state: RunResultRenderState = {
-		cachedWidth: undefined,
-		cachedLines: undefined,
-		cachedHasEarlierOutput: undefined,
-	};
-}
-
-function formatDuration(ms: number): string {
-	return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function takeRunPreviewSuffix(output: string): { text: string; hasEarlierOutput: boolean } {
-	let start = output.length;
-	for (let line = 0; line < RUN_PREVIEW_LINES; line++) {
-		const newline = output.lastIndexOf("\n", start - 1);
-		if (newline === -1) return { text: output, hasEarlierOutput: false };
-		start = newline;
-	}
-	return { text: output.slice(start + 1), hasEarlierOutput: true };
-}
-
-function renderRunCall(
-	args: { command?: unknown; cwd?: unknown; timeout?: unknown },
-	theme: Theme,
-	context: ToolRenderContext<RunRenderState>,
-): Text {
-	if (context.executionStarted && context.state.startedAt === undefined) {
-		context.state.startedAt = Date.now();
-		context.state.endedAt = undefined;
-	}
-	const command = typeof args.command === "string" && args.command.length > 0 ? args.command : "...";
-	const metadata: string[] = [];
-	if (typeof args.cwd === "string" && args.cwd.length > 0) metadata.push(`cwd ${args.cwd}`);
-	if (typeof args.timeout === "number") metadata.push(`timeout ${args.timeout}s`);
-	const suffix = metadata.length > 0 ? theme.fg("muted", ` (${metadata.join(", ")})`) : "";
-	const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-	component.setText(theme.fg("toolTitle", theme.bold(`$ ${command}`)) + suffix);
-	return component;
-}
-
-function rebuildRunResult(
-	component: RunResultRenderComponent,
-	result: { content: Array<{ type: string; text?: string }>; details: RunV2Details },
-	options: ToolRenderResultOptions,
-	theme: Theme,
-	startedAt: number | undefined,
-	endedAt: number | undefined,
-): void {
-	const state = component.state;
-	component.clear();
-	let output = textOutput(result).trim();
-	const truncation = result.details?.truncation;
-	const fullOutputPath = result.details?.fullOutputPath;
-	if (!options.isPartial && truncation?.truncated && fullOutputPath) {
-		const footerStart = output.lastIndexOf("\n\n[Output truncated");
-		const footerEnd = footerStart === -1 ? -1 : output.indexOf("]", footerStart);
-		if (footerEnd !== -1 && output.slice(footerStart, footerEnd + 1).includes(fullOutputPath)) {
-			output = `${output.slice(0, footerStart)}${output.slice(footerEnd + 1)}`.trim();
-		}
-	}
-
-	if (output) {
-		if (options.expanded) {
-			const styledOutput = output
-				.split("\n")
-				.map((line) => theme.fg("toolOutput", line))
-				.join("\n");
-			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
-		} else {
-			const suffix = takeRunPreviewSuffix(output);
-			const styledSuffix = suffix.text
-				.split("\n")
-				.map((line) => theme.fg("toolOutput", line))
-				.join("\n");
-			component.addChild({
-				render: (width: number) => {
-					if (state.cachedLines === undefined || state.cachedWidth !== width) {
-						const preview = truncateToVisualLines(styledSuffix, RUN_PREVIEW_LINES, width);
-						state.cachedLines = preview.visualLines;
-						state.cachedHasEarlierOutput = suffix.hasEarlierOutput || preview.skippedCount > 0;
-						state.cachedWidth = width;
-					}
-					if (state.cachedHasEarlierOutput) {
-						const hint =
-							theme.fg("muted", "... (earlier lines,") +
-							` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
-					}
-					return ["", ...(state.cachedLines ?? [])];
-				},
-				invalidate: () => {
-					state.cachedWidth = undefined;
-					state.cachedLines = undefined;
-					state.cachedHasEarlierOutput = undefined;
-				},
-			});
-		}
-	}
-
-	if (truncation?.truncated || fullOutputPath) {
-		const warnings: string[] = [];
-		if (fullOutputPath) warnings.push(`Full output: ${fullOutputPath}`);
-		if (truncation?.truncated) {
-			warnings.push(
-				truncation.truncatedBy === "lines"
-					? `Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`
-					: `Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
-			);
-		}
-		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
-	}
-
-	if (startedAt !== undefined) {
-		const label = options.isPartial ? "Elapsed" : "Took";
-		component.addChild(
-			new Text(`\n${theme.fg("muted", `${label} ${formatDuration((endedAt ?? Date.now()) - startedAt)}`)}`, 0, 0),
-		);
-	}
-}
-
-function renderRunResult(
-	result: { content: Array<{ type: string; text?: string }>; details: RunV2Details },
-	options: ToolRenderResultOptions,
-	theme: Theme,
-	context: ToolRenderContext<RunRenderState>,
-): RunResultRenderComponent {
-	const state = context.state;
-	if (state.startedAt !== undefined && options.isPartial && !state.interval) {
-		state.interval = setInterval(() => context.invalidate(), 1000);
-	}
-	if (!options.isPartial || context.isError) {
-		state.endedAt ??= Date.now();
-		if (state.interval) {
-			clearInterval(state.interval);
-			state.interval = undefined;
-		}
-	}
-	const component = (context.lastComponent as RunResultRenderComponent | undefined) ?? new RunResultRenderComponent();
-	rebuildRunResult(component, result, options, theme, state.startedAt, state.endedAt);
-	component.invalidate();
-	return component;
-}
-
 function bindV2Tool<TParameters extends TSchema, TDetails>(
 	tool: AgentHarnessTool<ExecutionToolContext, TParameters, TDetails>,
 	context: ExecutionToolContext,
-	getCommandPrefix?: () => string | undefined,
 ): ToolDefinition<TParameters, TDetails> {
 	const prompt = promptContribution(tool.name as keyof typeof promptContributions, context);
 	return {
@@ -871,36 +704,14 @@ function bindV2Tool<TParameters extends TSchema, TDetails>(
 		promptGuidelines: prompt.guidelines,
 		constrainedSampling: getExperimentalToolSampling(),
 		executionMode: tool.executionMode,
-		execute: (toolCallId, params, signal, onUpdate, extensionContext: ExtensionContext) => {
-			const executionContext =
-				tool.name === "run"
-					? {
-							...context,
-							run: {
-								commandPrefix: getCommandPrefix?.(),
-								env: resolveSessionShellEnvironment(true, extensionContext),
-								inheritEnv: false,
-							},
-						}
-					: context;
-			return tool.execute(toolCallId, params, signal, onUpdate, executionContext);
-		},
+		execute: (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate, context),
 		renderCall: (args, theme, renderContext) => {
-			if (tool.name === "run") return renderRunCall(args, theme, renderContext);
 			if (tool.name === "search") return renderSearchCall(args, theme, renderContext);
 			if (tool.name === "read") return renderReadCall(args, theme, renderContext);
 			if (tool.name === "edit") return renderEditCall(args, theme, renderContext);
 			return renderCall(tool.name, args, theme);
 		},
 		renderResult: (result, options, theme, renderContext) => {
-			if (tool.name === "run") {
-				return renderRunResult(
-					result as unknown as { content: Array<{ type: string; text?: string }>; details: RunV2Details },
-					options,
-					theme,
-					renderContext,
-				);
-			}
 			if (tool.name === "search") {
 				return renderSearchResult(
 					result as unknown as { content: Array<{ type: string; text?: string }>; details: SearchV2Details },
@@ -1101,7 +912,19 @@ class V2ToolRuntime implements V2ToolRuntimeHandle {
 				}),
 				context,
 			),
-			run: bindV2Tool(createRunV2Tool(), context, this.options.getShellCommandPrefix),
+			bash: {
+				...createBashToolDefinition(this.cwd, {
+					executionEnv: env,
+					workspacePolicy: this.options.workspacePolicy,
+					spawnHook: (execution) => {
+						const prefix = this.options.getShellCommandPrefix?.();
+						return { ...execution, command: prefix ? `${prefix}\n${execution.command}` : execution.command };
+					},
+				}),
+				executionMode: "sequential",
+				promptSnippet: promptContributions.bash.snippet,
+				promptGuidelines: [...promptContributions.bash.guidelines],
+			} as V2ToolDefinition,
 		};
 	}
 

@@ -22,6 +22,7 @@ import type {
 	PrepareNextTurnContext,
 	StreamFn,
 } from "./types.ts";
+import { AgentToolError } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -744,7 +745,10 @@ async function executePreparedToolCall(
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
 		return {
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: createErrorToolResult(
+				error instanceof Error ? error.message : String(error),
+				error instanceof AgentToolError ? error.details : undefined,
+			),
 			isError: true,
 		};
 	} finally {
@@ -799,10 +803,10 @@ async function finalizeExecutedToolCall(
 	};
 }
 
-function createErrorToolResult(message: string): AgentToolResult<any> {
+function createErrorToolResult(message: string, details: unknown = {}): AgentToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
-		details: {},
+		details,
 	};
 }
 

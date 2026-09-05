@@ -476,7 +476,7 @@ describe("Coding Agent Tools", () => {
 			const result = await bashTool.execute("test-call-8", { command: "echo 'test output'" });
 
 			expect(getTextOutput(result)).toContain("test output");
-			expect(result.details).toBeUndefined();
+			expect(result.details).toMatchObject({ exitCode: 0, terminationReason: "exit", timedOut: false });
 		});
 
 		it("should handle command errors", async () => {

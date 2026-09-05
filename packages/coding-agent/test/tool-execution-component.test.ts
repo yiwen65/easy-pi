@@ -139,7 +139,21 @@ describe("ToolExecutionComponent parity", () => {
 		const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
 		const operations: BashOperations = {
 			exec: async () => {
-				await new Promise((resolve) => setTimeout(resolve, 10));
+				expect(updates).toEqual([
+					{
+						content: [],
+						details: {
+							command: "sleep 10",
+							cwd: process.cwd(),
+							exitCode: null,
+							signal: null,
+							terminationReason: null,
+							terminationRequested: false,
+							timedOut: false,
+							durationMs: 0,
+						},
+					},
+				]);
 				return { exitCode: 0 };
 			},
 		};
@@ -151,7 +165,6 @@ describe("ToolExecutionComponent parity", () => {
 			(update) => updates.push(update as { content: Array<{ type: string; text?: string }>; details?: unknown }),
 			{} as never,
 		);
-		expect(updates).toEqual([{ content: [], details: undefined }]);
 		await promise;
 	});
 
@@ -183,7 +196,7 @@ describe("ToolExecutionComponent parity", () => {
 			false,
 		);
 		const collapsed = stripAnsi(component.render(48).join("\n"));
-		expect(collapsed).toContain("read src/example.ts · offset 20 · limit");
+		expect(collapsed).toContain("read src/example.ts · line 20 · max 14 lines");
 		expect(collapsed).toContain("20 const value0 = 0;");
 		expect(collapsed).toContain("31 const value11 = 11;");
 		expect(collapsed).not.toContain("32 const value12");
@@ -262,7 +275,7 @@ describe("ToolExecutionComponent parity", () => {
 		);
 		const rawCollapsed = component.render(52).join("\n");
 		const collapsed = stripAnsi(rawCollapsed);
-		expect(collapsed).toContain("edit · 2 operation(s) · src/a.ts, src/b.ts");
+		expect(collapsed).toContain("edit · apply · 2 operation(s) · src/a.ts, src/b.ts");
 		expect(collapsed).toContain("updated src/file-0.ts · line 3");
 		expect(collapsed).toContain("deleted src/file-1.ts · line 4");
 		expect(collapsed).toContain("2 more diff lines for this file");
@@ -322,7 +335,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(limited).not.toContain("LIMIT_SENTINEL");
 	});
 
-	test("v2 search renderer consumes structured hits with grouping, ranges, status, and continuation", () => {
+	test("v2 search renderer consumes structured locators with grouping, ranges, status, and continuation", () => {
 		const tool = createV2ToolDefinitions(process.cwd()).search;
 		const component = new ToolExecutionComponent(
 			"search",
@@ -339,14 +352,13 @@ describe("ToolExecutionComponent parity", () => {
 			createFakeTui(),
 			process.cwd(),
 		);
-		const hits = Array.from({ length: 10 }, (_, index) => ({
-			kind: "text" as const,
+		const locators = Array.from({ length: 10 }, (_, index) => ({
+			locatorId: `loc_${index}`,
+			matchKind: "literal",
 			path: index < 5 ? "src/auth.ts" : "src/service.ts",
-			line: index + 1,
-			column: 1,
-			text: `Auth marker ${index}`,
-			ranges: [[0, 4]] as Array<[number, number]>,
-			before: index === 0 ? [{ line: 0, text: "context before" }] : undefined,
+			startLine: index + 1,
+			startColumn: 1,
+			match: `Auth marker ${index}`,
 		}));
 		component.updateResult(
 			{
@@ -355,9 +367,9 @@ describe("ToolExecutionComponent parity", () => {
 					kind: "text",
 					query: "Auth",
 					path: "src",
-					hits,
-					returnedCount: hits.length,
-					complete: false,
+					locators,
+					status: "partial",
+					coverage: { returnedCount: locators.length, skipped: [] },
 					approximate: true,
 					partial: true,
 					nextCursor: "s2-next",
@@ -367,18 +379,18 @@ describe("ToolExecutionComponent parity", () => {
 			false,
 		);
 
-		const rawCollapsed = component.render(40).join("\n");
+		const rawCollapsed = component.render(80).join("\n");
 		const collapsed = stripAnsi(rawCollapsed);
 		expect(collapsed).toContain('search "Auth" · text · literal · smart');
-		expect(collapsed).toContain("[approximate · partial]");
+		expect(collapsed).toContain("[partial · 10 returned · approximate]");
 		expect(collapsed).toContain("src/auth.ts");
-		expect(collapsed).toContain("context before");
+		expect(collapsed).toContain("loc_0 1:1 · literal");
 		expect(collapsed).toContain("Auth marker 7");
 		expect(collapsed).not.toContain("Auth marker 8");
-		expect(collapsed).toContain("2 more hits");
+		expect(collapsed).toContain("2 more locators");
 		expect(collapsed).toContain("Continue with cursor s2-next");
 		expect(collapsed).not.toContain("CONTENT_SENTINEL_MUST_NOT_BE_PARSED");
-		expect(rawCollapsed).toContain(theme.fg("accent", theme.bold("Auth")));
+		expect(rawCollapsed).toContain(theme.fg("toolOutput", ' · "Auth marker 0"'));
 		for (const line of component.render(40)) expect(stripAnsi(line).length).toBeLessThanOrEqual(40);
 
 		component.setExpanded(true);
@@ -386,11 +398,11 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("Auth marker 9");
 	});
 
-	test("v2 run renderer shows call metadata and the latest collapsed output", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).run;
+	test("v2 bash renderer shows call metadata and the latest collapsed output", () => {
+		const tool = createV2ToolDefinitions(process.cwd()).bash;
 		const component = new ToolExecutionComponent(
-			"run",
-			"tool-run-render",
+			"bash",
+			"tool-v2-bash-render",
 			{ command: "npm run check", cwd: "workspace/subdir", timeout: 7 },
 			{},
 			tool,
@@ -421,11 +433,11 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("newest-marker");
 	});
 
-	test("v2 run renderer preserves final status without duplicating truncation details", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).run;
+	test("v2 bash renderer preserves final status without duplicating truncation details", () => {
+		const tool = createV2ToolDefinitions(process.cwd()).bash;
 		const component = new ToolExecutionComponent(
-			"run",
-			"tool-run-truncated",
+			"bash",
+			"tool-v2-bash-truncated",
 			{ command: "generate output" },
 			{},
 			tool,
@@ -439,33 +451,35 @@ describe("ToolExecutionComponent parity", () => {
 				content: [
 					{
 						type: "text",
-						text: "latest\n\n[Output truncated to 50KB or configured line limit. Full output: /tmp/run.log]\n\nexit 0",
+						text: "latest\n\n[Showing lines 2-2 of 2. Full output: /tmp/bash.log]\n\nCommand exited with code 7",
 					},
 				],
 				details: {
 					truncation: { truncated: true, truncatedBy: "lines", outputLines: 1, totalLines: 2 },
-					fullOutputPath: "/tmp/run.log",
+					fullOutputPath: "/tmp/bash.log",
+					exitCode: 7,
+					terminationReason: "exit",
 				},
-				isError: false,
+				isError: true,
 			},
 			false,
 		);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("latest");
-		expect(rendered).toContain("exit 0");
+		expect(rendered).toContain("Command exited with code 7");
 		expect(rendered.match(/Full output:/g)).toHaveLength(1);
 		expect(rendered).toContain("Truncated: showing 1 of 2 lines");
 	});
 
-	test("v2 run renderer refreshes elapsed time for silent partial execution and stops after final output", () => {
+	test("v2 bash renderer refreshes elapsed time for silent partial execution and stops after final output", () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-08-29T00:00:00Z"));
 		let renderRequests = 0;
 		const tui = { requestRender: () => renderRequests++ } as unknown as TUI;
-		const tool = createV2ToolDefinitions(process.cwd()).run;
+		const tool = createV2ToolDefinitions(process.cwd()).bash;
 		const component = new ToolExecutionComponent(
-			"run",
-			"tool-run-silent",
+			"bash",
+			"tool-v2-bash-silent",
 			{ command: "sleep 10" },
 			{},
 			tool,
