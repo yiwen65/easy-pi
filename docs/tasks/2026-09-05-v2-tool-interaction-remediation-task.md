@@ -3,7 +3,7 @@
 - Created: 2026-09-05
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户“制定整改计划并参考best-practice实施”；承接上一轮 Pi tools 第一性原理静态分析。
 
 <!-- task-doc-section:background-goal -->
@@ -126,9 +126,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 定向回归、静态检查与任务所有权提交
+### [x] T-004 — 定向回归、静态检查与任务所有权提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 用当前执行证据关闭整改并形成可回退提交。
 - Inputs and prerequisites: T-003 完成；所有子任务报告与 diffs；初始 git 状态。
@@ -143,7 +143,7 @@
   - A-001 至 A-006 有当前证据；不以旧评测结果作为本轮通过依据。
 - Verification method:
   - V-001 至 V-007；提交前后 diff/status 与提交文件清单。
-- Validation evidence: 2026-09-05T14:11+08:00，V-001/V-002/V-004 合并运行 7 files / 86 tests passed；V-003/V-005 合并运行 5 files / 41 tests passed，共 127 项不重复定向测试。14:12 V-006 npm run check exit 0（format/lint、固定依赖、TS imports、shrinkwrap/install-lock、tsgo、browser smoke）；Biome 只格式化本任务 tool-profile-v2.test.ts，随后 diff/status 无范围扩张且 git diff --check 通过。14:13 格式化后 V-003 重跑 24/24 passed。提交与最终 V-007 尚待执行。
+- Validation evidence: 2026-09-05T14:11+08:00，V-001/V-002/V-004 合并运行 7 files / 86 tests passed；V-003/V-005 合并运行 5 files / 41 tests passed，共 127 项不重复定向测试。14:12 V-006 npm run check exit 0（format/lint、固定依赖、TS imports、shrinkwrap/install-lock、tsgo、browser smoke）；Biome 只格式化本任务 tool-profile-v2.test.ts，随后 diff/status 无范围扩张且 git diff --check 通过。14:13 格式化后 V-003 重跑 24/24 passed。14:14 V-007 通过后以显式八路径提交 110b2d7369b1ce220d31d001096704003b229547；14:15 git show 确认仅本任务八文件，git diff 与 cached diff 均为空，无关 untracked 未纳入提交。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -182,10 +182,11 @@
 - 2026-09-05T14:08+08:00：V-003 重跑 24/24 passed，T-003 → done。T-004 → in_progress，owner coordinator；开始最终边界审查、依赖路径回归与 root check，提交前再核对文件所有权。
 - 2026-09-05T14:11+08:00：反向审查加强 Search Unicode fixture：UTF-8 128-byte 预算、故意错开 surrogate pair 的 320/200 字符边界。V-001/V-002/V-004 实际合并命令为 Agent CLI `--run test/harness/search-v2.test.ts test/harness/edit-v2.test.ts test/harness/read-v2.test.ts test/harness/run-v2.test.ts test/harness/tool-state.test.ts test/harness/v2-foundations.test.ts test/harness/agent-harness-tool-gateway.test.ts`，86/86 passed。V-003/V-005 实际合并命令为 coding-agent CLI `--run test/tool-profile-v2.test.ts test/default-tools-setting.test.ts test/tool-system-prompt-contributions.test.ts test/experimental-tool-strict-mode.test.ts test/v2-host-adapters.test.ts`，41/41 passed。
 - 2026-09-05T14:13+08:00：root npm run check 完整输出 exit 0，只格式化本任务集成测试；格式化后重跑 V-003 24/24 passed，diff --check 通过、tracked 仍仅七个任务文件，无关 untracked 保持。测试初次 message 预期修正属于常规迭代，不满足可复用教训门槛，LEARNS.md 不改。准备只显式 stage 本任务八文件并提交；此刻尚未声称提交成功。
+- 2026-09-05T14:15+08:00：产品提交 110b2d7369b1ce220d31d001096704003b229547 成功，八文件路径核验通过，tracked clean。T-004 → done；本次闭环为实现/合同回归通过，不是性能 benchmark 通过。更新最终状态并再次运行 V-007；随后仅提交此文档的收尾状态。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: T-001/T-002/T-003 已完成；127 项定向测试、格式化后集成重跑与 root npm run check 通过。T-004 等待所有权提交和最终文档核验。
+- Result: passed
+- Evidence: T-001 至 T-004 全部 done，无 blocked 任务。127 项定向测试通过；格式化后生产集成 24 项重跑通过；root npm run check、git diff --check、任务文档 validator 通过。产品提交 110b2d7369b1ce220d31d001096704003b229547；所有权与 tracked clean 已核验。
 - Limitations: 不运行真实模型/付费评测，不能从本地合同验证推断完成率或速度提升；schema 别名/字段未裁撤，legacy 默认未变；不新增跨文件原子性或 OS sandbox 保证。
