@@ -151,7 +151,8 @@ type CursorRecord = {
 	path: string;
 	limit: number;
 	providerId: string;
-	providerCursor: string;
+	providerCursor?: string;
+	pending: DirectoryReadPage;
 	generation?: string | number;
 	scopeId: string;
 	expiresAt: number;
@@ -184,6 +185,36 @@ async function shortHash(value: string): Promise<string> {
 async function hashBytes(bytes: Uint8Array): Promise<string> {
 	const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
 	return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Locate and verify the final displayed fragment in the exact bytes used for the hash. */
+function displayedByteRange(
+	bytes: Uint8Array,
+	lines: string[],
+	startLine: number,
+	startByte?: number,
+): [number, number] | undefined {
+	if (lines.length === 0) return undefined;
+	let offset = startByte ?? 0;
+	if (startByte === undefined) {
+		let line = 1;
+		while (offset < bytes.length && line < startLine) {
+			if (bytes[offset++] === 0x0a) line++;
+		}
+		if (line !== startLine) return undefined;
+	}
+	// TextDecoder strips a leading BOM from a range, including byte reads.
+	if (bytes[offset] === 0xef && bytes[offset + 1] === 0xbb && bytes[offset + 2] === 0xbf) offset += 3;
+	const start = offset;
+	for (let index = 0; index < lines.length; index++) {
+		const encoded = textEncoder.encode(lines[index]);
+		for (const byte of encoded) if (bytes[offset++] !== byte) return undefined;
+		if (index < lines.length - 1) {
+			if (bytes[offset] === 0x0d) offset++;
+			if (bytes[offset++] !== 0x0a) return undefined;
+		}
+	}
+	return [start, offset];
 }
 
 function versionSignature(version: ToolFileVersion): string {
@@ -602,6 +633,7 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 				const limit = input.limit ?? input.maxLines ?? DEFAULT_TEXT_MAX_LINES;
 				let providerCursor: string | undefined;
 				let expectedGeneration: string | number | undefined;
+				let pending: DirectoryReadPage | undefined;
 				if (input.cursor) {
 					pruneCursors();
 					const record = cursors.get(input.cursor);
@@ -619,48 +651,47 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 					}
 					providerCursor = record.providerCursor;
 					expectedGeneration = record.generation;
+					pending = record.pending;
 				}
 				let page: DirectoryReadPage;
 				try {
-					page = await provider.readDirectory(
-						{
-							path: resolved.canonicalPath,
-							offset: input.offset ?? 1,
-							limit,
-							cursor: providerCursor,
-							expectedGeneration,
-						},
-						signal,
-					);
+					page =
+						pending && pending.entries.length > 0
+							? pending
+							: await provider.readDirectory(
+									{
+										path: resolved.canonicalPath,
+										offset: input.offset ?? 1,
+										limit,
+										cursor: providerCursor,
+										expectedGeneration,
+									},
+									signal,
+								);
 				} catch (error) {
 					if (signal?.aborted) throw new V2ToolError("ABORTED", "Read was aborted.");
 					if (error instanceof ReadProviderError) throw mapProviderError(error, requestedPath);
 					throw error;
 				}
+				let bounded = boundedDirectoryOutput(page.entries, maxOutputBytes);
 				let nextCursor: string | undefined;
-				if (page.nextCursor) {
+				let notice = "";
+				if (page.nextCursor || bounded.truncated) {
 					pruneCursors();
 					nextCursor = `r2-${Date.now().toString(36)}-${(cursorSequence++).toString(36)}`;
+					notice = `[More entries. Continue with cursor=${nextCursor}; increase maxBytes if no entries fit.]`;
+					const available = Math.max(0, maxOutputBytes - textEncoder.encode(`\n\n${notice}`).byteLength);
+					bounded = boundedDirectoryOutput(page.entries, available);
 					cursors.set(nextCursor, {
 						path: resolved.canonicalPath,
 						limit,
 						providerId: provider.id,
 						providerCursor: page.nextCursor,
+						pending: { ...page, entries: page.entries.slice(bounded.entries.length) },
 						generation: page.generation,
 						scopeId,
 						expiresAt: Date.now() + CURSOR_TTL_MS,
 					});
-				}
-				let bounded = boundedDirectoryOutput(page.entries, maxOutputBytes);
-				let notice = nextCursor
-					? `[More entries. Continue with cursor=${nextCursor}.]`
-					: bounded.truncated
-						? "[Directory output budget reached. Narrow the path or limit.]"
-						: "";
-				if (notice) {
-					const available = Math.max(0, maxOutputBytes - textEncoder.encode(`\n\n${notice}`).byteLength);
-					bounded = boundedDirectoryOutput(page.entries, available);
-					if (!nextCursor && !bounded.truncated) notice = "";
 				}
 				const text = `${bounded.text}${notice ? `\n\n${notice}` : ""}`;
 				return {
@@ -726,9 +757,13 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 					signal,
 				);
 				let fileHash: string | undefined;
+				let hashedBytes: Uint8Array | undefined;
 				if (info.size <= MAX_HASH_BYTES) {
 					const binary = await context.env.readBinaryFile(resolved.canonicalPath, signal);
-					if (binary.ok && binary.value.byteLength <= MAX_HASH_BYTES) fileHash = await hashBytes(binary.value);
+					if (binary.ok && binary.value.byteLength <= MAX_HASH_BYTES) {
+						hashedBytes = binary.value;
+						fileHash = await hashBytes(hashedBytes);
+					}
 				}
 				const finalInfo = await provider.stat(resolved.canonicalPath, signal);
 				const initialVersion = fileVersion(info);
@@ -743,7 +778,13 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 				const snapshotId =
 					locator?.snapshotId ??
 					`snap_${await shortHash(`${scopeId}\0${resolved.canonicalPath}\0${versionSignature(finalVersion)}\0${fileHash ?? ""}`)}`;
-				const actualStartLine = longLineLocator?.startLine ?? range.startLine;
+				let actualStartLine = range.startLine;
+				if (hashedBytes && readByteOffset !== undefined) {
+					actualStartLine = 1;
+					for (let index = 0; index < Math.min(readByteOffset, hashedBytes.length); index++) {
+						if (hashedBytes[index] === 0x0a) actualStartLine++;
+					}
+				}
 				const byteMode = readByteOffset !== undefined;
 				const initialEndLine = range.lines.length > 0 ? actualStartLine + range.lines.length - 1 : actualStartLine;
 				const view = ledger.addView({
@@ -755,11 +796,7 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 					lines: [...range.lines],
 					fileVersion: finalVersion,
 					fileHash,
-					editable: fileHash !== undefined,
-					byteRange:
-						readByteOffset === undefined
-							? undefined
-							: [readByteOffset, readByteOffset + textEncoder.encode(range.lines.join("\n")).byteLength],
+					editable: false,
 				});
 				const formatted = textOutput(
 					view.id,
@@ -778,6 +815,10 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 					actualStartLine,
 					formatted.lines.length > 0 ? actualStartLine + formatted.lines.length - 1 : actualStartLine,
 				];
+				view.byteRange = hashedBytes
+					? displayedByteRange(hashedBytes, formatted.lines, actualStartLine, readByteOffset)
+					: undefined;
+				view.editable = fileHash !== undefined && view.byteRange !== undefined;
 				const outputBytes = textEncoder.encode(formatted.text).byteLength;
 				const hasMoreAfter =
 					formatted.nextOffset !== undefined || formatted.nextByteOffset !== undefined || !range.eof;
@@ -787,7 +828,13 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 						path: resolved.absolutePath,
 						kind: "text",
 						range: view.range,
-						byteRange: view.byteRange,
+						byteRange:
+							readByteOffset === undefined
+								? undefined
+								: (view.byteRange ?? [
+										readByteOffset,
+										readByteOffset + textEncoder.encode(formatted.lines.join("\n")).byteLength,
+									]),
 						lines: formatted.lines,
 						viewId: view.id,
 						locatorId: locator?.id,
@@ -797,7 +844,7 @@ export function createReadV2Tool<TContext extends ExecutionToolContext = Executi
 						symbolGeneration: symbolTarget?.generation,
 						fileHash,
 						fileVersion: finalVersion,
-						editable: fileHash !== undefined,
+						editable: view.editable,
 						hasMore: hasMoreAfter,
 						hasMoreBefore: actualStartLine > 1 || (readByteOffset ?? 0) > 0,
 						hasMoreAfter,

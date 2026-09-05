@@ -657,7 +657,25 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 				throw new V2ToolError("NOT_FOUND", `Search root ${input.path ?? "."} could not be inspected.`);
 			}
 			const scopeId = context.search?.scopeId ?? context.read?.scopeId ?? context.env.cwd;
+			const policySkipped = new Map<string, SearchSkipped>();
+			const checkPath = context.workspacePolicy
+				? async (path: string): Promise<boolean> => {
+						try {
+							await resolveWorkspacePath(context.env, path, "read", context.workspacePolicy, signal);
+							return true;
+						} catch (error) {
+							if (
+								!(error instanceof V2ToolError) ||
+								!["SYMLINK_ESCAPE", "OUTSIDE_WORKSPACE", "PERMISSION_DENIED"].includes(error.code)
+							)
+								throw error;
+							policySkipped.set(path, { path, reason: error.code });
+							return false;
+						}
+					}
+				: undefined;
 			const request: SearchRequest = {
+				checkPath,
 				query: input.query,
 				kind: input.kind,
 				path: scope.absolutePath,
@@ -770,6 +788,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					hit.path,
 					signal,
 				);
+				if (checkPath && !(await checkPath(resolved.path))) continue;
 				const compact = hit.kind === "text" ? compactTextHit(hit) : undefined;
 				const matchKind =
 					hit.kind === "text" ? (hit.matchKind ?? input.targetKind ?? "text") : (input.targetKind ?? "path");
@@ -827,6 +846,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 				files.add(hit.path);
 			}
 
+			skipped.push(...policySkipped.values());
 			const renderText = (): {
 				text: string;
 				status: SearchV2Status;
@@ -834,7 +854,7 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 			} => {
 				const truncatedBy = toolTruncation ?? page.truncatedBy;
 				const truncated = truncatedBy !== undefined || nextCursor !== undefined;
-				const hasMore = truncated || page.partial || !page.complete;
+				const hasMore = truncated || page.partial || !page.complete || skipped.length > 0;
 				const status: SearchV2Status = truncated
 					? "overflow"
 					: hasMore || skipped.length > 0
@@ -844,7 +864,9 @@ export function createSearchV2Tool<TContext extends ExecutionToolContext = Execu
 					returnedCount: locators.length,
 					matchedCount: page.matchedCount,
 					matchedCountRelation:
-						page.matchedCountRelation ?? (page.complete && !page.partial ? "exact" : "unknown"),
+						policySkipped.size > 0
+							? "unknown"
+							: (page.matchedCountRelation ?? (page.complete && !page.partial ? "exact" : "unknown")),
 					hasMore,
 					truncated,
 					truncatedBy,

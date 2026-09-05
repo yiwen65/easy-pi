@@ -46,6 +46,7 @@ export interface ToolView {
 	fileVersion: ToolFileVersion;
 	fileHash?: string;
 	editable: boolean;
+	/** Half-open raw UTF-8 bounds of the final displayed fragment, verified against fileHash. */
 	byteRange?: [number, number];
 }
 

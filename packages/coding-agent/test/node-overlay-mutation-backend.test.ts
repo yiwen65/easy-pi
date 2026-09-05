@@ -1,10 +1,12 @@
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
 	createEditV2Tool,
 	createReadV2Tool,
+	DEFAULT_MUTATION_LIMITS,
 	type EditPlan,
+	type EditPlanOperation,
 	type MutationBackend,
 	type MutationCapabilities,
 	ToolStateLedger,
@@ -180,6 +182,105 @@ describe("NodeOverlayMutationBackend", () => {
 		expect(await readFile(path.join(workspace, "a.txt"), "utf8")).toBe("external");
 		expect(await backend.list()).toMatchObject([{ id, state: "pending" }]);
 		await backend.discard(id);
+	});
+
+	it.each(["update", "create", "delete", "move-source", "move-target", "parents", "leaf"] as const)(
+		"rejects external symlink mutation targets before mutation: %s",
+		async (kind) => {
+			const outside = path.join(root, "outside");
+			await mkdir(outside);
+			await writeFile(path.join(outside, "a.txt"), "outside");
+			await writeFile(path.join(workspace, "a.txt"), "old");
+			await symlink(outside, path.join(workspace, "linked"));
+			await symlink("linked/a.txt", path.join(workspace, "leaf"));
+			const linkedFile = path.join(workspace, "linked/a.txt");
+			const localFile = path.join(workspace, "a.txt");
+			const operations: Record<typeof kind, EditPlanOperation> = {
+				update: { kind: "update", path: linkedFile, content: "new" },
+				create: { kind: "create", path: path.join(workspace, "linked/missing/new.txt"), content: "new" },
+				delete: { kind: "delete", path: linkedFile },
+				"move-source": { kind: "move", path: linkedFile, to: path.join(workspace, "moved.txt") },
+				"move-target": { kind: "move", path: localFile, to: linkedFile },
+				parents: {
+					kind: "update",
+					path: localFile,
+					content: "new",
+					parentDirectories: [path.join(workspace, "linked/new-dir")],
+				},
+				leaf: { kind: "update", path: path.join(workspace, "leaf"), content: "new" },
+			};
+			const backend = new NodeOverlayMutationBackend({ workspaceRoot: workspace, overlayRoot });
+			// Backend callers need not supply observations for every operation. Check all
+			// endpoints and explicit mkdir targets, not only the observed paths.
+			await expect(
+				backend.commit({ observations: [], operations: [operations[kind]], limits: DEFAULT_MUTATION_LIMITS }),
+			).rejects.toMatchObject({
+				code: "EDIT_ROLLED_BACK",
+				cause: expect.objectContaining({ code: "OUTSIDE_WORKSPACE" }),
+			});
+			expect(await readFile(localFile, "utf8")).toBe("old");
+			expect(await readFile(path.join(outside, "a.txt"), "utf8")).toBe("outside");
+			expect(await readdir(outside)).toEqual(["a.txt"]);
+			expect(await backend.list()).toEqual([]);
+		},
+	);
+
+	it.each(["dangling", "cycle", "relative-outside", "chained-outside"] as const)(
+		"fails closed for %s directory links without creating outside files",
+		async (kind) => {
+			const outside = path.join(root, "outside");
+			await mkdir(outside);
+			await symlink(outside, path.join(workspace, "bridge"));
+			const target =
+				kind === "dangling"
+					? path.join(outside, "missing")
+					: kind === "cycle"
+						? "linked"
+						: kind === "relative-outside"
+							? "../outside"
+							: "bridge";
+			await symlink(target, path.join(workspace, "linked"));
+			const backend = new NodeOverlayMutationBackend({ workspaceRoot: workspace, overlayRoot });
+			await expect(
+				backend.commit({
+					observations: [],
+					operations: [{ kind: "create", path: path.join(workspace, "linked/new.txt"), content: "new" }],
+					limits: DEFAULT_MUTATION_LIMITS,
+				}),
+			).rejects.toMatchObject({
+				code: "EDIT_ROLLED_BACK",
+				cause: expect.objectContaining({ code: "OUTSIDE_WORKSPACE" }),
+			});
+			expect(await readdir(outside)).toEqual([]);
+			expect(await backend.list()).toEqual([]);
+		},
+	);
+
+	it("allows creates with missing parents through chained internal links and ignores unused unsafe links", async () => {
+		await mkdir(path.join(workspace, "real"));
+		await symlink(path.join(workspace, "real"), path.join(workspace, "bridge"));
+		await symlink("bridge", path.join(workspace, "linked"));
+		await symlink(path.join(root, "absent"), path.join(workspace, "unused"));
+		const backend = new NodeOverlayMutationBackend({ workspaceRoot: workspace, overlayRoot });
+		const result = await backend.commit({
+			observations: [],
+			operations: [
+				{
+					kind: "create",
+					path: path.join(workspace, "linked/nested/new.txt"),
+					content: "new",
+					parentDirectories: [path.join(workspace, "linked/nested")],
+				},
+			],
+			limits: DEFAULT_MUTATION_LIMITS,
+		});
+		const pending = result.pendingAcceptance;
+		if (!pending) throw new Error("expected pending overlay");
+		expect(await readdir(path.join(workspace, "real"))).toEqual([]);
+		expect(await readFile(path.join(pending.workspacePath, "real/nested/new.txt"), "utf8")).toBe("new");
+		await backend.accept(pending.id);
+		expect(await readFile(path.join(workspace, "real/nested/new.txt"), "utf8")).toBe("new");
+		expect(await backend.list()).toEqual([]);
 	});
 
 	it("enforces pending overlay quotas", async () => {
