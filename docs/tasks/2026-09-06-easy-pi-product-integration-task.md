@@ -72,7 +72,7 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: Not run.
+- Validation evidence: subagent 返回不可恢复 DAG 错误；只读查询 dag_tasks，retire-v2 状态 pending；主工作区未出现 V2 删除。
 - Blocker: 并行 DAG 首次 ownership 重叠被拒；修正后返回 Interrupted DAG attempt is not recoverable (1ad0a233-30a4-4f50-8d3c-ad4a37e5b887)。账本中本任务仍 pending，无实现可整合。
 - Unblock condition: 委派运行时恢复，或用户授权 coordinator 改为串行执行。
 
@@ -92,7 +92,7 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: Not run.
+- Validation evidence: subagent 返回不可恢复 DAG 错误；只读查询 dag_tasks，migrate-harness-modules 状态 pending；目标 packages/permissions 和 packages/subagent 尚不存在。
 - Blocker: 并行 DAG 首次 ownership 重叠被拒；修正后返回 Interrupted DAG attempt is not recoverable (1ad0a233-30a4-4f50-8d3c-ad4a37e5b887)。账本中本任务仍 pending，无实现可整合。
 - Unblock condition: 委派运行时恢复，或用户授权 coordinator 改为串行执行。
 
