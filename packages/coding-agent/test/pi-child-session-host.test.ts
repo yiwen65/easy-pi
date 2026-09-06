@@ -13,11 +13,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
+import { prepareCollaborationFork } from "@easy-pi/subagent/context-fork";
 import type { ChildSession, ChildSessionCreateOptions, ChildSessionPermissions } from "@easy-pi/subagent/session-host";
 import { afterEach, expect, test } from "vitest";
 import type { ExtensionAPI, InlineExtension } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
-import { createPiChildSessionHost } from "../src/extensions/pi-child-session-host.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { createPiChildSessionHost, preparePiCollaborationFork } from "../src/extensions/pi-child-session-host.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -74,6 +76,7 @@ async function fixture(
 		rootSessionId: string,
 		permissions: () => ChildSessionPermissions,
 		storage: ChildSessionCreateOptions["storage"] = { kind: "memory" },
+		fork?: ChildSessionCreateOptions["fork"],
 	) {
 		const request: ChildSessionCreateOptions = {
 			rootSessionId,
@@ -82,6 +85,7 @@ async function fixture(
 			agentDir: join(root, "agent"),
 			model: { provider: faux.provider.id, id: faux.getModel().id, thinkingLevel: "off" },
 			storage,
+			fork,
 			getPermissions: permissions,
 		};
 		const session = await host.create(request);
@@ -307,6 +311,61 @@ test("controller unload and cold followup preserve native history without replay
 	expect(JSON.stringify(context?.messages)).toContain("durable-0");
 	expect(JSON.stringify(context?.messages)).not.toContain("durable-1");
 	expect(second.store.read().agents[0]).toMatchObject({ status: "completed", result: "new explicit answer" });
+});
+
+test("fork imports only the effective checkpoint and branch, survives cold load, and never replays parent tools", async () => {
+	const f = await fixture();
+	const parent = SessionManager.inMemory(f.cwd);
+	const ancestor = parent.appendMessage({ role: "user", content: "discarded-before-checkpoint", timestamp: 1 });
+	parent.appendMessage(fauxAssistantMessage("off-branch-answer"));
+	parent.branch(ancestor);
+	parent.appendCompactionCheckpoint(
+		[
+			{ role: "user", content: "effective checkpoint task", timestamp: 2 },
+			fauxAssistantMessage("effective checkpoint answer"),
+		],
+		100,
+	);
+	parent.appendMessage({ role: "user", content: "current parent turn", timestamp: 3 });
+	parent.appendMessage(
+		fauxAssistantMessage(fauxToolCall("spawn_agent", { task_name: "worker" }), { stopReason: "toolUse" }),
+	);
+	const fork = preparePiCollaborationFork(parent, { mode: "all" });
+	expect(fork).toEqual(prepareCollaborationFork(parent.buildSessionContext().messages));
+	expect(() => preparePiCollaborationFork(parent, { mode: "last-turns", turns: 1 })).toThrow(/unavailable/);
+	const directory = join(f.root, "fork");
+	const child = await f.create("forked", full, { kind: "file", directory }, fork);
+	await child.session.dispose();
+	const file = child.session.sessionFile!;
+	const reopened = await f.create("forked", full, { kind: "file", directory, sessionFile: file });
+	expect(f.faux.state.callCount).toBe(0);
+	expect(reopened.session.context()).toEqual(fork);
+	let captured: Context | undefined;
+	f.faux.setResponses([
+		(context) => {
+			captured = context;
+			return fauxAssistantMessage("child result");
+		},
+	]);
+	await reopened.session.run("new child task");
+	const serialized = JSON.stringify(captured?.messages);
+	expect(serialized).toContain("effective checkpoint answer");
+	expect(serialized).toContain("new child task");
+	expect(reopened.session.forkContext({ mode: "last-turns", turns: 1 }).map((message) => message.role)).toEqual([
+		"user",
+		"assistant",
+	]);
+	expect(() => reopened.session.forkContext({ mode: "last-turns", turns: 2 })).toThrow(/unavailable/);
+	expect(serialized).not.toContain("discarded-before-checkpoint");
+	expect(serialized).not.toContain("off-branch-answer");
+	expect(
+		captured?.messages.some(
+			(message) => message.role === "assistant" && message.content.some((item) => item.type === "toolCall"),
+		),
+	).toBe(false);
+	await expect(f.create("forked", full, { kind: "file", directory, sessionFile: file }, fork)).rejects.toThrow(
+		/existing child/,
+	);
 });
 
 test("abort before asynchronous preflight completes cannot start a provider request", async () => {

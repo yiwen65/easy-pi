@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	assertAgentTransition,
 	COLLABORATION_LIMITS,
@@ -10,6 +11,7 @@ import {
 	validateCollaborationMessage,
 } from "./collaboration-contract.ts";
 import type { CollaborationSnapshot, CollaborationStore, StoredCollaborationAgent } from "./collaboration-store.ts";
+import { prepareCollaborationFork } from "./context-fork.ts";
 import type {
 	ChildSession,
 	ChildSessionHost,
@@ -84,8 +86,15 @@ export class CollaborationController {
 	}
 
 	/** Trusted controller API; fork preparation belongs to the tool/context adapter, not this method. */
-	spawn(caller: ChildSessionIdentity, taskName: string, message: string, model: ChildSessionModel): Promise<string> {
+	spawn(
+		caller: ChildSessionIdentity,
+		taskName: string,
+		message: string,
+		model: ChildSessionModel,
+		fork?: AgentMessage[],
+	): Promise<string> {
 		validateCollaborationMessage(message);
+		const context = fork ? prepareCollaborationFork(fork) : undefined;
 		return this.serialize(async () => {
 			this.assertReady();
 			this.assertCaller(caller);
@@ -107,7 +116,7 @@ export class CollaborationController {
 			snapshot.agents.push(record);
 			this.persist(snapshot);
 			try {
-				const session = await this.load(record);
+				const session = await this.load(record, context);
 				this.start(record, session, message);
 				return path;
 			} catch (error) {
@@ -138,7 +147,7 @@ export class CollaborationController {
 			throw new CollaborationError("limit_reached", "Team execution limit reached");
 	}
 
-	private async load(record: StoredCollaborationAgent): Promise<ChildSession> {
+	private async load(record: StoredCollaborationAgent, fork?: AgentMessage[]): Promise<ChildSession> {
 		const existing = this.sessions.get(record.path);
 		if (existing) {
 			this.sessions.delete(record.path);
@@ -158,6 +167,7 @@ export class CollaborationController {
 			cwd: this.store.cwd,
 			agentDir: this.agentDir,
 			model: record.model,
+			fork,
 			getPermissions: this.getPermissions,
 			storage: this.store.directory
 				? {
