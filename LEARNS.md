@@ -314,3 +314,11 @@
 - Correct approach: 使用 ModelRuntime.createSessionView() 为子会话建立独立 provider 注册表和内存 catalog store，保留父级配置、provider 实现与认证能力；不复制凭据到子目录。这不是隔离任意第三方 JS 全局状态的 sandbox。
 - Prevention: 原生多会话接线须同时测试 provider 注册/覆盖/注销、共享认证、配置 headers 和子 dispose；仅测试 transcript/工具实例隔离不足。
 - Verified by: 2026-09-07 pi-child-session-host.test.ts 的 provider cleanup 回归先失败（root model undefined），接入 session view 后通过；session-view 和宿主/SDK/auth 等 9 files / 56 tests 通过，未调用真实 provider。
+
+## Pi 子会话冷加载——sessionFile 路径不证明历史已经落盘
+
+- Wrong approach: 子宿主返回 sessionFile 后就把会话视为可卸载/恢复，只测试出现 assistant 之后的冷加载。
+- Why it failed: SessionManager 默认延迟到首条 assistant 才创建文件；未运行或 preflight 中断的子会话拥有路径但没有文件，reopen 报 ENOENT。
+- Correct approach: 新子会话通过公开 header/entries 以 wx、0600 显式写入并 sync，再用 SessionManager.open 建立正常持久追加状态；不伪造 assistant，不改私有 flushed 标志。
+- Prevention: 原生宿主至少验证 create→dispose→reopen 全程零 provider 请求，以及 checkpoint fork 在首轮前的冷加载。
+- Verified by: 2026-09-07 pi-child-session-host.test.ts 未启动子会话回归先 ENOENT 后通过；实际 controller LRU/冷加载与 fork 测试通过，未处理真实历史。

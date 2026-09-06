@@ -211,7 +211,7 @@
 
 ### [ ] T-004 — 邮箱、六工具与上下文继承
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 实现 Codex V2 式通信、等待和 fork，保证 Pi 上下文/压缩语义正确。
 - Inputs and prerequisites: T-003 controller/store；T-001 语义契约。
@@ -228,7 +228,7 @@
   - 六工具返回与事件可验证；wait 前/中/后到达消息不丢；闲置父不因结果启动；fork 压缩前后都无错配/历史复活。
 - Verification method:
   - mailbox/六工具指定测试；faux provider 检查实际请求上下文；checkpoint、嵌套 fork、消息命令注入和模型覆盖测试。
-- Validation evidence: Not run.
+- Validation evidence: 部分完成：context-fork 四项 + controller/contract 合计 3 files / 47 tests passed；native host/checkpoint context 2 files / 33 tests passed，root npm run check exit 0。all/none/N 使用有效 branch，剔除未完成工具批次，不伪造结果；256 KiB 超限拒绝。Pi adapter 的 N 只计最近 compaction 之后可证明边界的完整原始 turn，不将 replacement summary 当旧完整 turn。新 child 通过 appendCompactionCheckpoint 安装 fork；实际 faux 请求验证旧分支/压缩淘汰内容不复活，冷加载不重放。邮箱、六工具和安全消息注入尚未实施，不能认定 T-004 完成。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -353,9 +353,12 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 - 2026-09-07: 用户要求继续剩余任务；复核工作区，T-003 开始。采用独立轻量 SQLite registry 保存团队快照及进程所有权，借助事务防止两个控制器同时写入；不复用旧 DAG 表，不读取真实任务数据。死进程遗留所有权只能显式恢复，恢复仅标 interrupted，不执行任务。
 - 2026-09-07: T-003 定向验证完成（43 + 14 tests），最终 root npm run check exit 0、无格式变动/info，task validator 通过。首轮 root check 发现 Pi ThinkingLevel 含 max，契约/存储补齐而非降低继承值；宿主仍拒绝具体模型不支持的 effort。实际宿主证明惰性 session 文件会导致无 assistant 的子会话 ENOENT，已通过公开 entries 独占写入、sync、reopen 修复；不改 SessionManager 内部状态。interrupt 的 abort 在队列外等待，嵌套控制回归通过。旧 DAG/锁/快照未清理，默认尚未切换。
 
+- 2026-09-07: T-003 已提交 `00a67f052`；T-004 开始，coordinator 先实现从宿主有效上下文生成有界 fork，再接持久邮箱和工具。保持新工具未默认接线。
+- 2026-09-07: T-004 fork 子部分验证通过（47 + 33 tests，root check exit 0）。TypeScript lib 不含 findLast，改用已有兼容 reverse/find，不改 tsconfig。审查确认 checkpoint 不证明原始 turn 边界，N 保守只接受最近 compaction 后完整 turn，不足明确拒绝；all 保留有效 summary。新增子会话提前落盘 lesson。下一续接点：coordinator 实现持久消息 ID/消费位置和完成通知，然后安全注入与六工具；T-004 保持 in_progress。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 至 T-003 的最新指定 controller/contract 43 tests、native host/model view 14 tests passed；T-002 既有相关回归历史 9 files / 56 tests passed。真实 provider/冻结评测未执行，原安全改动快照保留。
-- Limitations: T-001 至 T-003 已完成；T-004 至 T-007 待实施。下一步实现持久邮箱、六工具、安全消息注入和 checkpoint-aware fork。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。
+- Evidence: 最新 controller/contract/fork 47 tests、native host/checkpoint context 33 tests passed，root npm run check exit 0；T-002/T-003 的其他回归见各任务历史记录。真实 provider/冻结评测未执行，原安全改动快照保留。
+- Limitations: T-001 至 T-003 已完成；T-004 正在实施；T-005 至 T-007 待实施。下一步实现持久邮箱、六工具、安全消息注入和 checkpoint-aware fork。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。

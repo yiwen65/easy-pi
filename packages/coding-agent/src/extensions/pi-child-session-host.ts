@@ -4,9 +4,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import {
 	CollaborationError,
+	type ForkSelection,
 	validateAgentPath,
 	validateCollaborationMessage,
 } from "@easy-pi/subagent/collaboration-contract";
+import { prepareCollaborationFork } from "@easy-pi/subagent/context-fork";
 import type {
 	ChildSession,
 	ChildSessionHost,
@@ -17,11 +19,30 @@ import type { ExtensionAPI, InlineExtension } from "../core/extensions/types.ts"
 import type { ModelRuntime } from "../core/model-runtime.ts";
 import { DefaultResourceLoader } from "../core/resource-loader.ts";
 import { createAgentSession } from "../core/sdk.ts";
-import { CURRENT_SESSION_VERSION, SessionManager } from "../core/session-manager.ts";
+import {
+	buildSessionContext,
+	CURRENT_SESSION_VERSION,
+	type ReadonlySessionManager,
+	SessionManager,
+} from "../core/session-manager.ts";
 import { type Settings, SettingsManager } from "../core/settings-manager.ts";
 import { createEasyPiHarness } from "./easy-pi.ts";
 
 const IDENTITY_ENTRY = "epi-collaboration-identity";
+
+/** Replacement checkpoints preserve effective text, not proof of original turn boundaries. */
+export function preparePiCollaborationFork(
+	manager: Pick<ReadonlySessionManager, "getBranch">,
+	selection: ForkSelection,
+): AgentMessage[] {
+	if (selection.mode === "none") return [];
+	let branch = manager.getBranch();
+	if (selection.mode === "last-turns") {
+		const checkpoint = branch.map((entry) => entry.type).lastIndexOf("compaction");
+		if (checkpoint >= 0) branch = branch.slice(checkpoint + 1);
+	}
+	return prepareCollaborationFork(buildSessionContext(branch).messages, selection);
+}
 
 /**
  * Native SDK adapter. The caller owns the team store, model runtime and tool registry.
@@ -44,6 +65,9 @@ export function createPiChildSessionHost(options: {
 			if (!isAbsolute(request.cwd) || !isAbsolute(request.agentDir)) {
 				throw new CollaborationError("invalid_arguments", "Child directories must be absolute");
 			}
+			if (request.fork && request.storage.kind === "file" && request.storage.sessionFile)
+				throw new CollaborationError("invalid_arguments", "Cannot fork into an existing child session");
+			const fork = request.fork ? prepareCollaborationFork(request.fork) : undefined;
 			const cwd = await realpath(request.cwd);
 			const identity = Object.freeze({ rootSessionId: request.rootSessionId, agentPath: request.agentPath });
 			const modelRuntime = await options.modelRuntime.createSessionView();
@@ -101,6 +125,7 @@ export function createPiChildSessionHost(options: {
 			}
 			if (request.storage.kind === "memory" || !request.storage.sessionFile) {
 				manager.appendCustomEntry(IDENTITY_ENTRY, { version: 1, ...identity });
+				if (fork?.length) manager.appendCompactionCheckpoint(fork, 0);
 				if (request.storage.kind === "file") {
 					// Pi normally defers file creation until the first assistant message. A team
 					// must also retain children interrupted before that point. Materialize via
@@ -183,6 +208,7 @@ export function createPiChildSessionHost(options: {
 				sessionId: session.sessionId,
 				sessionFile: session.sessionFile,
 				context: (): AgentMessage[] => structuredClone(manager.buildSessionContext().messages),
+				forkContext: (selection) => preparePiCollaborationFork(manager, selection),
 				run(text) {
 					validateCollaborationMessage(text);
 					if (closed) throw new CollaborationError("interrupted", "Child session is closed");

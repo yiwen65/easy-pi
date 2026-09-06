@@ -41,6 +41,7 @@ function fixture(file = false) {
 				sessionId: randomUUID(),
 				sessionFile: options.storage.kind === "file" ? join(options.storage.directory, "session.jsonl") : undefined,
 				context: () => [],
+				forkContext: () => [],
 				run: async (text) => {
 					runs.push(text);
 					return await new Promise<ChildTurnResult>((resolve) => {
