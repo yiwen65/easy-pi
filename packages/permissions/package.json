@@ -1,0 +1,29 @@
+{
+	"name": "@easy-pi/permissions",
+	"version": "0.84.2",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.js"
+		},
+		"./journal": {
+			"types": "./dist/external-mutation-journal.d.ts",
+			"development": "./src/external-mutation-journal.ts",
+			"import": "./dist/external-mutation-journal.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsgo -p tsconfig.build.json"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

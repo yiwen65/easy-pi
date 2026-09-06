@@ -3,7 +3,7 @@
 - Created: 2026-09-06
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: blocked
+- Overall status: in_progress
 - Source: 用户确认的首版契约与“执行整改方案”
 
 <!-- task-doc-section:background-goal -->
@@ -56,10 +56,10 @@
 <!-- task-doc-section:task-list -->
 ## Task list
 
-### [ ] T-001 — 退休 V2 产品路径
+### [x] T-001 — 退休 V2 产品路径
 
-- Status: blocked
-- Owner: coordinator (等待委派恢复或串行授权)
+- Status: done
+- Owner: coordinator (用户已授权串行)
 - Objective: 退休 V2 产品路径，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
 - Scope or files: packages/agent/src/harness/tools; coding-agent/core/tools 与 V2 接线
@@ -72,14 +72,14 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: subagent 返回不可恢复 DAG 错误；只读查询 dag_tasks，retire-v2 状态 pending；主工作区未出现 V2 删除。
-- Blocker: 并行 DAG 首次 ownership 重叠被拒；修正后返回 Interrupted DAG attempt is not recoverable (1ad0a233-30a4-4f50-8d3c-ad4a37e5b887)。账本中本任务仍 pending，无实现可整合。
-- Unblock condition: 委派运行时恢复，或用户授权 coordinator 改为串行执行。
+- Validation evidence: 串行删除 V2 实现/API/运行接线，保留共享 Bash/workspace policy；冻结 tool-profile-eval 无 diff，并从当前编译和 Vitest discovery 排除。Agent harness/bash 12/12；coding-agent args + tool-execution-component 117/117；root npm run check 通过（格式化 10 个本任务文件）。已清理 README/usage/sdk/settings/environment 活跃文档，移除 FFF 及 runtime TypeScript（root 开发依赖保留）；offline lock-only install 和两个官方 generator 完成。补充 tools/default-tools/sdk-session-manager/sdk-skills/sdk-stream-options/dynamic-tools 6 files / 98 tests 通过；最新 root check 无格式改动通过。安装包启动验证留 T-004/T-006。
+- Blocker: None.
+- Unblock condition: None.
 
-### [ ] T-002 — 迁入权限与 Subagent 模块
+### [x] T-002 — 迁入权限与 Subagent 模块
 
-- Status: blocked
-- Owner: coordinator (等待委派恢复或串行授权)
+- Status: done
+- Owner: coordinator (用户已授权串行)
 - Objective: 迁入权限与 Subagent 模块，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
 - Scope or files: 新增 packages/permissions、packages/subagent，保留原仓库至验证完成
@@ -92,9 +92,9 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: subagent 返回不可恢复 DAG 错误；只读查询 dag_tasks，migrate-harness-modules 状态 pending；目标 packages/permissions 和 packages/subagent 尚不存在。
-- Blocker: 并行 DAG 首次 ownership 重叠被拒；修正后返回 Interrupted DAG attempt is not recoverable (1ad0a233-30a4-4f50-8d3c-ad4a37e5b887)。账本中本任务仍 pending，无实现可整合。
-- Unblock condition: 委派运行时恢复，或用户授权 coordinator 改为串行执行。
+- Validation evidence: 已迁入 packages/permissions、packages/subagent 和 coding-agent 组合 factory；原 WJ 源保留。Subagent 首批 8 files / 176 tests，补充 DAG/ledger/merge/nongit/quality/cache 等 20 个指定离线文件 218 tests 通过（合计 28 files / 394 tests）；权限 journal 3 tests、组合/questionnaire 6 tests 通过；root check 通过。权限 node:test 在迁入包和原 WJ 均为 15 passed / 4 failed，均涉及凭据读取策略与测试不一致（原始日志 /tmp/easy-pi-original-permissions.log）。未运行真实 provider。
+- Blocker: None.
+- Unblock condition: None. 用户明确选择 full-access 允许读取凭据；保留灾难性删除拦截。已按新契约更新迁入测试（不改原 WJ），权限测试 19/19 通过。模块迁入范围已完成离线验证；默认装配/launcher/依赖发行接线留 T-004，尚未宣称生产 child 可启动。
 
 ### [x] T-003 — 独立产品身份与数据目录
 
@@ -118,7 +118,7 @@
 
 ### [ ] T-004 — 默认装配与工作区依赖集成
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 默认装配与工作区依赖集成，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
@@ -213,9 +213,17 @@
 
 - 2026-09-06: 第一批委派因 ownership 冲突后出现不可恢复 DAG；T-001/T-002 未执行。T-003 候选已从账本恢复、审查、集成并独立验证。未尝试删除旧源码、迁移用户数据或发布。等待用户允许串行执行剩余任务。
 
+- 2026-09-06: 用户授权串行继续。T-002 迁入当前工作区源码；日志共享契约归权限包，组合 factory 属 coding-agent；原 wj 源码保持不变，真实 provider evaluator 未复制/执行。
+
+- 2026-09-06: T-001 串行开始退休 V2 产品 API/实现；保留共享 Bash cwd policy 并重命名通用错误类型。冻结评测不编辑，仅从当前 TypeScript 编译输入排除；共享 Bash 回归转换为原生 read/edit。
+
+- 2026-09-06: V2 退休回归 129 tests 通过，root check 通过，冻结评测无 diff。权限矛盾提交用户选择；用户明确选择 full-access 允许凭据读取，迁入测试按确认契约更新后 19/19 通过；灾难性删除断言保留，原 WJ 不变。
+
+- 2026-09-06: T-001 依赖/文档收尾，offline lock-only install 后 generators 和 check 通过；新增原生/SDK 回归 98 tests 通过。T-001/T-002 模块阶段完成。T-004 开始：确认 CLI 手工加入 builtInExtensions 而 SDK loader 不加入；组合 factory 的 agentDir 需绑定实例，child launcher 不应猜测任意 process.argv[1]；新私有包还需发行内嵌或其他明确打包接线，不能生成虚构 registry 依赖。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-003 已完成，21 targeted tests 和 root npm run check 通过；任务记录验证通过。
-- Limitations: T-001/T-002 因委派失败 blocked；T-004 至 T-007 尚未执行。整体整改未完成，独立安装/插件完整兼容/清理/导入均未验证，未发布。
+- Evidence: T-001/T-002/T-003 已完成各自模块范围：V2 回归 129 tests + 补充原生/SDK 98 tests；迁入权限 19、journal 3、Subagent 394、组合 6 tests 通过；最新 root check 通过。冻结评测无 diff，root lock 既有 accounts 元数据保留。
+- Limitations: T-004 已开始接线分析，T-005 至 T-007 尚未完成。整体整改未完成，独立安装/默认子进程/插件完整兼容/清理/导入均未验证，未发布。

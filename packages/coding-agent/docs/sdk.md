@@ -63,77 +63,11 @@ const { session } = await createAgentSession({
 });
 ```
 
-### Opt-in v2 tool hosts
+### Standard tool hosts
 
-Set `toolProfile: "v2"` to expose exactly `search`, `read`, `edit`, and `bash`. The default remains `legacy` (`read`, `bash`, `edit`, `write`) and the profile is not persisted. On the default local Node host, v2 Search is FFF-first for ordinary smart-case file, text, and glob requests. Requests whose exact case or scope-filter semantics FFF cannot represent, and hosts where FFF is unavailable, fall back to the structured local rg/fd provider. An injected `toolsV2.search.provider` still replaces this default.
+The V2 profile, `toolProfile`/`toolsV2` session options, and V2 search/read/edit providers and mutation backends have been removed. Use standard built-ins and their Operations adapters for custom hosts; see [Tools with Custom cwd](#tools-with-custom-cwd) and [Bash contract and migration](#bash-contract-and-migration). The standard edit tool does not require V2 view IDs, snapshots, or prepare/commit handles.
 
-Both profiles use one Agent Bash core, parameter schema, execution/status path, and coding-agent renderer. Native `BashOperations` captures raw bytes; the `ExecutionEnv` path uses environment-backed capture. These are necessary host adapters, not separate command tools. Both default local paths ultimately use `NodeProcessExecutor`. Native default scheduling is unchanged; v2 remains sequential. Bash has `replay: "never"`, so neither profile automatically replays commands. See [Bash contract and migration](#bash-contract-and-migration).
-
-The ordinary v2 mutation workflow is `search locator → read view → edit apply → focused verification`; skip Search when the path is already known. Search returns grouped locator IDs, bounded escaped previews (with omission markers), available symbol/node context, and explicit complete/partial/overflow coverage. Prefer `mode` and `maxResultsGlobal` rather than duplicating selectors through aliases, and normally omit `targetKind`. Previews help select a locator; they are not an editable view or proof of complete coverage. Read returns numbered content plus short-lived `view_id`, snapshot, and a full-file hash only when the file is within the editable hash limit. A view without a hash is intentionally non-editable.
-
-For an update, pass the fresh `view_id` as `viewId`: Edit derives its hash and permitted range, so those fields need not be repeated. An explicit `range` may narrow the view; without `viewId`, supply `expectedFileHash` and an exact range. The preimage must match uniquely within that range; displayed Read line numbers are not part of `oldText`. Omitting `action` means `apply`: it still validates the plan, runs host approval hooks, and uses the same mutation backend. For a combined update and move, update the freshly read source before moving it in the same batch. Updating an already moved destination requires reading that destination first.
-
-When a separate pre-commit review is needed, `action: "prepare"` performs no mutation and returns a short-lived `patchId`; inspect the diff, then use `action: "commit"` to consume that ID and recheck every prepared file observation before any write. All successful Edit phases return plan-derived diff feedback bounded to 32 KiB, with an explicit truncation notice. This is not an independent post-edit re-read or verification; re-read when the feedback is truncated or more source context is needed, and run the smallest relevant verification for the change. Overlay results remain `pending_acceptance`: the base workspace is unchanged until host acceptance. Locator, view, cursor, and patch handles are runtime-local, scope-bound, quota-bound, and expire after ten minutes by default; repeat the preceding stage after a stale-handle error.
-
-The default local Node v2 host uses the TypeScript compiler for JS/TS definition, reference, implementation, assignment, call, string, and comment searches plus symbol/AST-bounded reads. Other languages fail closed with `SYMBOL_INDEX_UNAVAILABLE`; text hits are never silently relabeled as structured. Search query templates (`definition`, `references`, `assignment`, `calls`, and `concept`) map to explicit modes, while `preferredPaths` supplies a deterministic task-ranking prior.
-
-Semantic candidate search is remote and never enabled automatically. Configure a `semanticProvider` explicitly; semantic results are candidates that must be verified with structured/literal search and Read before Edit. `createOpenAICompatibleEmbeddingSearchProviderFromEnv()` requires `PI_SEMANTIC_SEARCH=1` plus the endpoint, model, API key, token price, and a positive cost budget. It filters and bounds JS/TS declaration documents before sending them, but selected paths, symbols, comments, and source excerpts still leave the process. Do not enable it for workspaces whose content may not be sent to that endpoint.
-
-The opt-in journal and overlay mutation backends retain their existing guarantees. The default backend prevalidates all files but can still report explicit partial commit after an I/O failure; v2 does not claim cross-file atomic visibility or an OS sandbox.
-
-```typescript
-import { createAgentSession, MemoryExecutionEnv } from "@earendil-works/pi-coding-agent";
-
-const { session } = await createAgentSession({
-  toolProfile: "v2",
-  toolsV2: {
-    executionEnv: () => new MemoryExecutionEnv({ files: { "README.md": "Hello\n" } }),
-    edit: {
-      hooks: {
-        beforeCommit: async (plan, signal) => approve(plan, signal),
-        afterCommit: async (_plan, result) => notify(result),
-      },
-    },
-  },
-});
-```
-
-Explicit OpenAI-compatible semantic provider:
-
-```typescript
-import {
-  createAgentSession,
-  createOpenAICompatibleEmbeddingSearchProviderFromEnv,
-  TypeScriptCodeIndexProvider,
-} from "@earendil-works/pi-coding-agent";
-
-const codeIndex = new TypeScriptCodeIndexProvider();
-const semanticProvider = createOpenAICompatibleEmbeddingSearchProviderFromEnv(codeIndex);
-const { session } = await createAgentSession({
-  toolProfile: "v2",
-  toolsV2: {
-    search: { codeIndexProvider: codeIndex, semanticProvider },
-  },
-});
-
-// Direct instances are host-owned.
-session.dispose();
-await semanticProvider?.close();
-await codeIndex.close();
-```
-
-Lifecycle rules:
-
-- a direct `ExecutionEnv`, provider, backend, or resource reader is host-owned and is never closed by the session;
-- a zero-argument factory creates a session-owned resource, which is replaced on `reload()` and closed on `dispose()`;
-- close failures are best-effort and available in `session.v2ToolLifecycleErrors`;
-- `beforeCommit` may reject before writes; `afterCommit` and `afterRollback` are notifications whose failures do not change the mutation result;
-- hooks receive the caller's abort signal and add no separate timeout; hosts must make shared hooks concurrency-safe;
-- crash-recovery scans do not replay mutation hooks.
-
-`SshExecutionEnv` adapts a host-supplied, already-authenticated result-based SSH/RPC operations object. It never opens a connection or reads credentials. `MemoryExecutionEnv` is a deterministic reference host without a shell. Both preserve the same four model schemas. Generic execution environments intentionally degrade search to file/glob traversal unless a richer `SearchProvider` is injected.
-
-Legacy Operations can migrate incrementally with `NativeFindOperationsSearchProvider`, `NativeReadOperationsProvider`, and `NativeEditOperationsMutationBackend`. Their capability declarations are intentionally narrow: legacy find is glob-only, legacy read has no bounded text-range guarantee, and legacy edit is update-only without durability or mode-preservation guarantees.
+Historical `test/tool-profile-eval/` artifacts are frozen at their recorded revisions and excluded from current compilation and test discovery. They are not a current product test suite and must not be edited or rerun as part of this migration.
 
 ### AgentSession
 
@@ -591,9 +525,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Legacy built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
-- Default built-ins (legacy): `read`, `bash`, `edit`, `write`
-- Opt-in v2 built-ins: `search`, `read`, `edit`, `bash`
+- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+- Default built-ins: `read`, `bash`, `edit`, `write`
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
@@ -642,7 +575,7 @@ To migrate:
 - Replace removed `createRunV2Tool` and `RunV2*` exports with the existing Bash API. In `@earendil-works/pi-agent-core`, use `createBashTool(options?)` with an execution context and `BashToolInput`/`BashToolDetails`. In `@earendil-works/pi-coding-agent`, use `createBashTool(cwd, options?)` for a bound Agent tool or `createBashToolDefinition(cwd, options?)` for a tool definition with the shared renderer; `BashToolDetails` is also exported there.
 - Handle thrown errors rather than treating nonzero/timeout results as successful Run responses. Use structured details instead of parsing a status footer; do not interpret `terminationRequested` as a cleanup guarantee.
 
-Frozen historical tool-profile evaluations describe the old Run contract at their pinned revision. Use that revision to interpret or reproduce them, not the current Bash toolchain. This migration does not update those artifacts or establish performance gains.
+Frozen historical tool-profile evaluations describe the old Run contract at their pinned revision. Interpret them against their pinned revision, not the current Bash toolchain; do not rerun or modify these frozen artifacts. This migration does not update those artifacts or establish performance gains.
 
 #### Tools with Custom cwd
 

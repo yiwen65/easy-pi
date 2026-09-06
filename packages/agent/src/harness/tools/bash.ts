@@ -9,8 +9,8 @@ import {
 	type ShellCaptureResult,
 } from "../utils/shell-output.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "../utils/truncate.ts";
+import { ExecutionToolError } from "./execution-tool-error.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
-import { V2ToolError } from "./v2-errors.ts";
 import { resolveWorkspacePath } from "./workspace-policy.ts";
 
 const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000;
@@ -81,7 +81,7 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 		parameters: bashSchema,
 		replay: "never",
 		async execute(_toolCallId, { command, cwd, timeout }, signal, onUpdate, context) {
-			if (!command.trim()) throw new V2ToolError("INVALID_INPUT", "command must not be empty.");
+			if (!command.trim()) throw new ExecutionToolError("INVALID_INPUT", "command must not be empty.");
 			validateTimeout(timeout);
 			const { env } = context;
 			let executionCwd = cwd ?? env.cwd;
@@ -89,13 +89,13 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				const resolved = await resolveWorkspacePath(env, cwd ?? ".", "read", context.workspacePolicy, signal);
 				const info = await env.fileInfo(resolved.canonicalPath, signal);
 				if (!info.ok) {
-					throw new V2ToolError(
+					throw new ExecutionToolError(
 						info.error.code === "not_found" ? "NOT_FOUND" : "PERMISSION_DENIED",
 						`Could not inspect cwd ${executionCwd}: ${info.error.message}`,
 					);
 				}
 				if (info.value.kind !== "directory")
-					throw new V2ToolError("NOT_A_DIRECTORY", `cwd is not a directory: ${executionCwd}`);
+					throw new ExecutionToolError("NOT_A_DIRECTORY", `cwd is not a directory: ${executionCwd}`);
 				executionCwd = resolved.absolutePath;
 			}
 			const execution: BashExecution = {

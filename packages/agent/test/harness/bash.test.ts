@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { type BashToolDetails, createBashTool } from "../../src/harness/tools/bash.ts";
-import { createEditV2Tool } from "../../src/harness/tools/edit-v2.ts";
-import { createReadV2Tool } from "../../src/harness/tools/read-v2.ts";
-import { createSearchV2Tool } from "../../src/harness/tools/search-v2.ts";
-import { ToolStateLedger } from "../../src/harness/tools/tool-state.ts";
+import { createEditTool } from "../../src/harness/tools/edit.ts";
+import { createReadTool } from "../../src/harness/tools/read.ts";
 import { ExecutionError, err, getOrThrow, ok, type Result, type ShellExecOptions } from "../../src/harness/types.ts";
 import { DEFAULT_MAX_LINES } from "../../src/harness/utils/truncate.ts";
 import { AgentToolError } from "../../src/types.ts";
@@ -76,9 +74,6 @@ class TruncatingExecutionEnv extends NodeExecutionEnv {
 
 describe("unified bash", () => {
 	it("declares conservative scheduling and replay metadata", () => {
-		expect(createSearchV2Tool()).toMatchObject({ executionMode: "parallel", replay: "safe" });
-		expect(createReadV2Tool()).toMatchObject({ executionMode: "parallel", replay: "safe" });
-		expect(createEditV2Tool()).toMatchObject({ executionMode: "sequential", replay: "never" });
 		expect(createBashTool()).toMatchObject({ name: "bash", replay: "never" });
 		expect(createBashTool().executionMode).toBeUndefined();
 	});
@@ -191,28 +186,19 @@ describe("unified bash", () => {
 	it("makes post-edit syntax failures visible and supports read-edit-bash recovery", async () => {
 		const env = new NodeExecutionEnv({ cwd: createTempDir() });
 		getOrThrow(await env.writeFile("module.js", "function value() { return 1; }\n"));
-		const context = { env, toolState: new ToolStateLedger() };
-		const read = createReadV2Tool();
-		const edit = createEditV2Tool();
+		const context = { env };
+		const read = createReadTool();
+		const edit = createEditTool();
 		const bash = createBashTool();
-		const initial = await read.execute(
-			"read-valid",
-			{ path: "module.js", maxLines: 1 },
-			undefined,
-			undefined,
-			context,
-		);
+		await read.execute("read-valid", { path: "module.js", limit: 1 }, undefined, undefined, context);
 		await edit.execute(
 			"break-syntax",
 			{
-				operations: [
+				path: "module.js",
+				edits: [
 					{
-						kind: "update",
-						path: "module.js",
 						oldText: "function value() { return 1; }",
 						newText: "function value( { return 1; }",
-						viewId: initial.details.viewId,
-						range: { startLine: 1, endLine: 1 },
 					},
 				],
 			},
@@ -232,24 +218,15 @@ describe("unified bash", () => {
 		expect(failed.details.exitCode).not.toBe(0);
 		expect(failed.message).toContain("SyntaxError");
 
-		const broken = await read.execute(
-			"read-broken",
-			{ path: "module.js", maxLines: 1 },
-			undefined,
-			undefined,
-			context,
-		);
+		await read.execute("read-broken", { path: "module.js", limit: 1 }, undefined, undefined, context);
 		await edit.execute(
 			"repair-syntax",
 			{
-				operations: [
+				path: "module.js",
+				edits: [
 					{
-						kind: "update",
-						path: "module.js",
 						oldText: "function value( { return 1; }",
 						newText: "function value() { return 2; }",
-						viewId: broken.details.viewId,
-						range: { startLine: 1, endLine: 1 },
 					},
 				],
 			},

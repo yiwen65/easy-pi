@@ -1,5 +1,5 @@
 import type { ExecutionEnv, FileError } from "../types.ts";
-import { V2ToolError } from "./v2-errors.ts";
+import { ExecutionToolError } from "./execution-tool-error.ts";
 
 export interface WorkspacePolicy {
 	roots: string[];
@@ -32,14 +32,24 @@ function lexicalParent(path: string): string | undefined {
 	return normalized.slice(0, slash);
 }
 
-function errorFromFile(error: FileError, path: string): V2ToolError {
+function errorFromFile(error: FileError, path: string): ExecutionToolError {
 	switch (error.code) {
 		case "aborted":
-			return new V2ToolError("ABORTED", `Path resolution was aborted for ${path}.`, undefined, error);
+			return new ExecutionToolError("ABORTED", `Path resolution was aborted for ${path}.`, undefined, error);
 		case "permission_denied":
-			return new V2ToolError("PERMISSION_DENIED", `Permission denied while resolving ${path}.`, undefined, error);
+			return new ExecutionToolError(
+				"PERMISSION_DENIED",
+				`Permission denied while resolving ${path}.`,
+				undefined,
+				error,
+			);
 		default:
-			return new V2ToolError("INVALID_INPUT", `Could not resolve ${path}: ${error.message}`, undefined, error);
+			return new ExecutionToolError(
+				"INVALID_INPUT",
+				`Could not resolve ${path}: ${error.message}`,
+				undefined,
+				error,
+			);
 	}
 }
 
@@ -71,7 +81,7 @@ async function canonicalExistingOrAncestor(
 		suffix.push(child);
 		candidate = parent;
 	}
-	throw new V2ToolError("NOT_FOUND", `No existing ancestor could be resolved for ${absolutePath}.`);
+	throw new ExecutionToolError("NOT_FOUND", `No existing ancestor could be resolved for ${absolutePath}.`);
 }
 
 /**
@@ -98,7 +108,7 @@ export async function resolveWorkspacePath(
 			(existingInfo.ok && existingInfo.value.kind === "symlink") ||
 			(canonicalExisting.ok && normalizeComparablePath(canonicalExisting.value) !== addressedExisting)
 		) {
-			throw new V2ToolError(
+			throw new ExecutionToolError(
 				"SYMLINK_ESCAPE",
 				`A symlink component is not allowed for ${path}. Use a non-symlink path or change the explicit policy.`,
 				{ path },
@@ -117,7 +127,7 @@ export async function resolveWorkspacePath(
 	const outside = !canonicalRoots.some((root) => isWithinRoot(resolved.canonicalPath, root));
 	const allowOutside = access === "read" ? policy.allowOutsideWorkspaceRead : policy.allowOutsideWorkspaceWrite;
 	if (outside && !allowOutside) {
-		throw new V2ToolError(
+		throw new ExecutionToolError(
 			"OUTSIDE_WORKSPACE",
 			`${path} resolves outside the allowed workspace roots. Choose a path inside the workspace.`,
 			{ path, canonicalPath: resolved.canonicalPath },

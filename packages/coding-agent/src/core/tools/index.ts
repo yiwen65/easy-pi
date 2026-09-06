@@ -17,7 +17,6 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
-export { FffSearchProvider } from "./fff-search-provider.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
@@ -35,7 +34,6 @@ export {
 	type GrepToolInput,
 	type GrepToolOptions,
 } from "./grep.ts";
-export { LocalSearchProviderV2 } from "./local-search-provider-v2.ts";
 export {
 	createLsTool,
 	createLsToolDefinition,
@@ -44,31 +42,6 @@ export {
 	type LsToolInput,
 	type LsToolOptions,
 } from "./ls.ts";
-export { MemoryExecutionEnv } from "./memory-execution-env.ts";
-export {
-	NativeEditOperationsMutationBackend,
-	NativeFindOperationsSearchProvider,
-	NativeReadOperationsProvider,
-} from "./native-operations-v2-adapters.ts";
-export {
-	type JournalFailurePoint,
-	type JournalRecoveryResult,
-	NodeJournaledMutationBackend,
-	type NodeJournaledMutationBackendOptions,
-} from "./node-journaled-mutation-backend.ts";
-export {
-	NodeOverlayMutationBackend,
-	type NodeOverlayMutationBackendOptions,
-	type OverlayRecord,
-	type OverlayValidationContext,
-} from "./node-overlay-mutation-backend.ts";
-export { type NodeReadProviderOptions, NodeReadProviderV2 } from "./node-read-provider-v2.ts";
-export {
-	createOpenAICompatibleEmbeddingSearchProviderFromEnv,
-	type EmbeddingSearchUsage,
-	type OpenAICompatibleEmbeddingSearchOptions,
-	OpenAICompatibleEmbeddingSearchProvider,
-} from "./openai-compatible-embedding-search-provider.ts";
 export {
 	createReadTool,
 	createReadToolDefinition,
@@ -77,17 +50,6 @@ export {
 	type ReadToolInput,
 	type ReadToolOptions,
 } from "./read.ts";
-export { SshExecutionEnv, type SshOperations } from "./ssh-execution-env.ts";
-export {
-	type CreateV2ToolDefinitionsOptions,
-	createV2ToolDefinitions,
-	createV2ToolRuntime,
-	type ToolProfile,
-	V2_TOOL_NAMES,
-	type V2CodeIndexProvider,
-	type V2SessionResourceSource,
-	type V2ToolRuntimeHandle,
-} from "./tool-profile.ts";
 export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -98,12 +60,6 @@ export {
 	truncateLine,
 	truncateTail,
 } from "./truncate.ts";
-export {
-	type SemanticCandidateDocument,
-	type SemanticDocumentPage,
-	type TypeScriptCodeIndexOptions,
-	TypeScriptCodeIndexProvider,
-} from "./typescript-code-index-provider.ts";
 export {
 	createWriteTool,
 	createWriteToolDefinition,

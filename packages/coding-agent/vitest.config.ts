@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig, mergeConfig } from "vitest/config";
+import { configDefaults, defineConfig, mergeConfig } from "vitest/config";
 import baseConfig, { workspaceSourcePaths } from "../../vitest.base.ts";
 
 export default mergeConfig(
@@ -7,6 +7,8 @@ export default mergeConfig(
 	defineConfig({
 		test: {
 			globals: true,
+			// Frozen historical evaluators import retired APIs; never discover or rerun them.
+			exclude: [...configDefaults.exclude, "test/tool-profile-eval/**"],
 			environment: "node",
 			testTimeout: 30000,
 			// Tests run offline by default; opt in with allowNetwork() from test/test-network-env.ts.

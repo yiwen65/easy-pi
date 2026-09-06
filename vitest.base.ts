@@ -17,6 +17,10 @@ export const workspaceSourcePaths = {
 export default defineConfig({
 	resolve: {
 		alias: [
+            { find: /^@easy-pi\/permissions$/, replacement: fileURLToPath(new URL("./packages/permissions/src/index.ts", import.meta.url)) },
+            { find: /^@easy-pi\/permissions\/journal$/, replacement: fileURLToPath(new URL("./packages/permissions/src/external-mutation-journal.ts", import.meta.url)) },
+            { find: /^@easy-pi\/subagent$/, replacement: fileURLToPath(new URL("./packages/subagent/src/index.ts", import.meta.url)) },
+            { find: /^@easy-pi\/subagent\/(.+)$/, replacement: fileURLToPath(new URL("./packages/subagent/src/", import.meta.url)) + "$1.ts" },
 			{ find: /^@earendil-works\/pi-telemetry$/, replacement: workspaceSourcePaths.telemetryIndex },
 			{ find: /^@earendil-works\/pi-telemetry\/testing$/, replacement: workspaceSourcePaths.telemetryTesting },
 			{ find: /^@earendil-works\/pi-ai$/, replacement: workspaceSourcePaths.aiIndex },

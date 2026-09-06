@@ -222,7 +222,7 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 |---------|------|---------|-------------|
 | `defaultTools` | string[] | - | Built-in tools enabled initially. When omitted, Pi uses its standard defaults |
 
-`defaultTools` selects the built-in tools enabled at startup from the active invocation profile. Extension and SDK custom tools remain enabled. The default profile is `legacy`; the non-persistent `v2` profile is selected with `--tool-profile=v2` or SDK `toolProfile: "v2"`:
+`defaultTools` selects the standard built-in tools enabled at startup. Extension and SDK custom tools remain enabled. V2 profile selection is no longer supported:
 
 ```json
 {

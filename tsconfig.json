@@ -5,6 +5,10 @@
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
 		"paths": {
+			"@easy-pi/permissions": ["./packages/permissions/src/index.ts"],
+			"@easy-pi/permissions/journal": ["./packages/permissions/src/external-mutation-journal.ts"],
+			"@easy-pi/subagent": ["./packages/subagent/src/index.ts"],
+			"@easy-pi/subagent/*": ["./packages/subagent/src/*.ts"],
 			"*": ["./*"],
 			"@earendil-works/pi-telemetry": ["./packages/telemetry/src/index.ts"],
 			"@earendil-works/pi-telemetry/testing": ["./packages/telemetry/src/testing/index.ts"],
@@ -37,5 +41,5 @@
 		}
 	},
 	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/session-backends/*/src/**/*", "packages/session-backends/*/test/**/*", "packages/coding-agent/examples/**/*"],
-	"exclude": ["**/dist/**", "packages/coding-agent/examples/extensions/gondolin/**"]
+	"exclude": ["packages/coding-agent/test/tool-profile-eval/**", "**/dist/**", "packages/coding-agent/examples/extensions/gondolin/**"]
 }
