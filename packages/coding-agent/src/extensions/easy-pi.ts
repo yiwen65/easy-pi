@@ -14,6 +14,7 @@ import { ExternalMutationJournalWriter } from "@easy-pi/permissions/journal";
 import { registerChildProtocol } from "@easy-pi/subagent/child-protocol-extension";
 import { createSubagentExtension, type SubagentExtensionOptions } from "@easy-pi/subagent/extension";
 import { runChildTask } from "@easy-pi/subagent/process-runner";
+import type { ChildSessionPermissions } from "@easy-pi/subagent/session-host";
 import { resolveWorkspaceRoot } from "@easy-pi/subagent/workspace-router";
 import { getAgentDir } from "../config.ts";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "../core/extensions/types.ts";
@@ -97,11 +98,32 @@ function permissionTarget(event: ToolCallEvent): string {
 
 export interface EasyPiHarnessOptions {
 	subagent?: Omit<SubagentExtensionOptions, "agentDir"> & { agentDir?: string };
+	/** Explicit native-session capability; bypasses legacy process env and DAG registration. */
+	nativeSession?: {
+		getPermissions: () => ChildSessionPermissions;
+		registerTools: (pi: ExtensionAPI) => void;
+	};
 }
 
 export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: ExtensionAPI) => void {
 	return function easyPiHarness(pi: ExtensionAPI): void {
-		const childContext = loadChildHarnessContextFromEnvironment();
+		const childContext = options.nativeSession ? undefined : loadChildHarnessContextFromEnvironment();
+		const readNativePermissions = (): ChildSessionPermissions | undefined => {
+			if (!options.nativeSession) return undefined;
+			const permissions = options.nativeSession.getPermissions();
+			if (
+				!MODE_OPTIONS.some((option) => option.mode === permissions.mode) ||
+				!Array.isArray(permissions.sessionGrants) ||
+				!permissions.sessionGrants.every((grant) => typeof grant === "string") ||
+				!Array.isArray(permissions.protectedRoots) ||
+				!permissions.protectedRoots.every(
+					(root) => typeof root === "string" && isAbsolute(root) && !root.includes("\0"),
+				)
+			)
+				throw new Error("Invalid native session authority");
+			return structuredClone(permissions);
+		};
+		readNativePermissions();
 		const mutationJournal = childContext?.mutationJournal
 			? new ExternalMutationJournalWriter(childContext.mutationJournal)
 			: undefined;
@@ -119,7 +141,7 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 		};
 
 		const updateStatus = (ctx: ExtensionContext) => {
-			ctx.ui.setStatus("wj-harness", `perm:${permissionMode}`);
+			ctx.ui.setStatus("wj-harness", `perm:${readNativePermissions()?.mode ?? permissionMode}`);
 		};
 
 		pi.registerEntryRenderer<AuditRecord>(AUDIT_ENTRY, (entry, _options, theme) => {
@@ -137,6 +159,10 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 		pi.registerCommand("permissions", {
 			description: "Show or change the easy-pi permission mode",
 			async handler(args, ctx) {
+				if (options.nativeSession) {
+					ctx.ui.notify("This agent inherits live parent permissions; change them in the root session.", "info");
+					return;
+				}
 				const requested = args.trim();
 				let nextMode: PermissionMode | undefined;
 				if (requested) nextMode = MODE_OPTIONS.find((option) => option.mode === requested)?.mode;
@@ -177,7 +203,7 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 		pi.on("before_agent_start", (event) => {
 			const contract = [
 				"easy-pi execution contract:",
-				`- Permission mode is ${permissionMode}. Pi tools run with the permissions of the Pi process.`,
+				`- Permission mode is ${readNativePermissions()?.mode ?? permissionMode}. Pi tools run with the permissions of the Pi process.`,
 				"- Full Access allows credential reads and suppresses permission prompts, but retains best-effort catastrophic-deletion checks. This is not an OS sandbox.",
 				"- Run the smallest task-relevant verification justified by the change risk; avoid meaningless checks for simple tasks. If verification is unavailable, state why and report the remaining risk honestly.",
 			].join("\n");
@@ -207,85 +233,97 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 			}
 		}
 
-		const subagentRepositoryRootResolver = options.subagent?.resolveRepositoryRoot ?? resolveWorkspaceRoot;
-		createSubagentExtension({
-			agentDir: getAgentDir(),
-			...(options.subagent ?? {}),
-			runTask:
-				options.subagent?.runTask ??
-				((request) =>
-					runChildTask({
+		if (options.nativeSession) {
+			options.nativeSession.registerTools(pi);
+		} else {
+			const subagentRepositoryRootResolver = options.subagent?.resolveRepositoryRoot ?? resolveWorkspaceRoot;
+			createSubagentExtension({
+				agentDir: getAgentDir(),
+				...(options.subagent ?? {}),
+				runTask:
+					options.subagent?.runTask ??
+					((request) =>
+						runChildTask({
+							...request,
+							invocation: resolveEasyPiInvocation(),
+							controllerEnvironment: {
+								...request.controllerEnvironment,
+								EASY_PI_CODING_AGENT_DIR: options.subagent?.agentDir ?? getAgentDir(),
+							},
+						})),
+				resolveRepositoryRoot: subagentRepositoryRootResolver,
+				createChildHarnessContext: (request) =>
+					createChildHarnessContext({
 						...request,
-						invocation: resolveEasyPiInvocation(),
-						controllerEnvironment: {
-							...request.controllerEnvironment,
-							EASY_PI_CODING_AGENT_DIR: options.subagent?.agentDir ?? getAgentDir(),
-						},
-					})),
-			resolveRepositoryRoot: subagentRepositoryRootResolver,
-			createChildHarnessContext: (request) =>
-				createChildHarnessContext({
-					...request,
-					permissionMode,
-					sessionGrants: [...sessionGrants],
-					protectedRoots: [...new Set([...(childContext?.protectedRoots ?? []), ...request.protectedRoots])],
-				}),
-			authorizeOperatorRead: async () => true,
-			authorizeOperator: async (request, ctx) => {
-				const repositoryRoot = await subagentRepositoryRootResolver(ctx.cwd);
-				if (repositoryRoot !== request.details.baseline.repositoryRoot) {
-					const reason = `Subagent run belongs to a different repository: ${repositoryRoot}`;
-					audit({ action: "permission", decision: "deny", tool: "subagent", reason });
-					return false;
-				}
-				const input = { operation: request.operation, runId: request.runId, repositoryRoot };
-				const outcome = decidePermission({
-					mode: permissionMode,
-					toolName: "subagent",
-					input,
-					cwd: repositoryRoot,
-					sessionGrants,
-					...(childContext
-						? {
-								protectedRoots: childContext.protectedRoots,
-								inheritedWriteRoots: childContext.inheritedWriteRoots,
-							}
-						: {}),
-				});
-				if (outcome.decision === "deny") {
-					audit({ action: "permission", decision: "deny", tool: "subagent", reason: outcome.reason });
-					return false;
-				}
-				if (outcome.decision === "allow") return true;
-				if (!ctx.hasUI || ctx.mode !== "tui") {
-					const reason = `${outcome.reason}; non-interactive mode defaults to deny`;
-					audit({ action: "permission", decision: "deny", tool: "subagent", reason });
-					return false;
-				}
-				const event = {
-					type: "tool_call",
-					toolCallId: `subagent-operator-${request.operation}-${request.runId}`,
-					toolName: "subagent",
-					input,
-				} as ToolCallEvent;
-				const allowed = await requestPermission(ctx, event, outcome.reason, outcome.grantKey);
-				audit({
-					action: "permission",
-					decision: allowed ? "allow" : "deny",
-					tool: "subagent",
-					reason: outcome.reason,
-				});
-				return allowed;
-			},
-		})(pi);
+						permissionMode,
+						sessionGrants: [...sessionGrants],
+						protectedRoots: [...new Set([...(childContext?.protectedRoots ?? []), ...request.protectedRoots])],
+					}),
+				authorizeOperatorRead: async () => true,
+				authorizeOperator: async (request, ctx) => {
+					const repositoryRoot = await subagentRepositoryRootResolver(ctx.cwd);
+					if (repositoryRoot !== request.details.baseline.repositoryRoot) {
+						const reason = `Subagent run belongs to a different repository: ${repositoryRoot}`;
+						audit({ action: "permission", decision: "deny", tool: "subagent", reason });
+						return false;
+					}
+					const input = { operation: request.operation, runId: request.runId, repositoryRoot };
+					const outcome = decidePermission({
+						mode: permissionMode,
+						toolName: "subagent",
+						input,
+						cwd: repositoryRoot,
+						sessionGrants,
+						...(childContext
+							? {
+									protectedRoots: childContext.protectedRoots,
+									inheritedWriteRoots: childContext.inheritedWriteRoots,
+								}
+							: {}),
+					});
+					if (outcome.decision === "deny") {
+						audit({ action: "permission", decision: "deny", tool: "subagent", reason: outcome.reason });
+						return false;
+					}
+					if (outcome.decision === "allow") return true;
+					if (!ctx.hasUI || ctx.mode !== "tui") {
+						const reason = `${outcome.reason}; non-interactive mode defaults to deny`;
+						audit({ action: "permission", decision: "deny", tool: "subagent", reason });
+						return false;
+					}
+					const event = {
+						type: "tool_call",
+						toolCallId: `subagent-operator-${request.operation}-${request.runId}`,
+						toolName: "subagent",
+						input,
+					} as ToolCallEvent;
+					const allowed = await requestPermission(ctx, event, outcome.reason, outcome.grantKey);
+					audit({
+						action: "permission",
+						decision: allowed ? "allow" : "deny",
+						tool: "subagent",
+						reason: outcome.reason,
+					});
+					return allowed;
+				},
+			})(pi);
+		}
 
 		pi.on("tool_call", async (event, ctx) => {
+			let nativePermissions: ChildSessionPermissions | undefined;
+			try {
+				nativePermissions = readNativePermissions();
+			} catch {
+				return { block: true, reason: "Native parent authority is unavailable" };
+			}
+			if (nativePermissions) permissionMode = nativePermissions.mode;
 			const outcome = decidePermission({
 				mode: permissionMode,
 				toolName: event.toolName,
 				input: inputRecord(event),
 				cwd: ctx.cwd,
-				sessionGrants,
+				sessionGrants: nativePermissions ? new Set(nativePermissions.sessionGrants) : sessionGrants,
+				...(nativePermissions ? { protectedRoots: nativePermissions.protectedRoots } : {}),
 				...(childContext
 					? {
 							protectedRoots: childContext.protectedRoots,
@@ -299,6 +337,11 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 				return { block: true, reason: outcome.reason };
 			}
 			if (outcome.decision === "ask") {
+				if (options.nativeSession) {
+					const reason = `${outcome.reason}; explicit parent approval is required`;
+					audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
+					return { block: true, reason };
+				}
 				if (childContext && ctx.mode !== "tui") {
 					if (outcome.grantKey) sessionGrants.add(outcome.grantKey);
 					audit({

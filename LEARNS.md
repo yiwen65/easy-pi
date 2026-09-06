@@ -306,3 +306,11 @@
 - Correct approach: 只复制当前已存在的公开模型 JSON，不下载、重新生成或复制认证配置；将目录内容哈希与产品/runner 哈希一起封存。
 - Prevention: 版本隔离预检同时验证 tracked 源码、忽略的必需运行输入、实际 package/subpath alias 和生产 schema；不能以 node_modules 链接存在代替加载成功与版本一致性。
 - Verified by: 2026-09-05 v2 attribution baseline 首轮两个 suite 导入失败；复制 JSON 并纳入 catalogHash 后，live/baseline 各 21 tests passed，源、catalog、runner 与运行时函数哈希完全一致。
+
+## Pi 原生子会话——共享认证不等于共享可变 provider 注册表
+
+- Wrong approach: 创建多个 AgentSession 时直接复用同一个 ModelRuntime，以为独立的扩展实例足以隔离其关闭行为。
+- Why it failed: ExtensionRunner 的 registerProvider/unregisterProvider 最终修改所绑定的 ModelRuntime；子扩展在 session_shutdown 取消 provider 注册，会让主会话 getModel 返回 undefined。
+- Correct approach: 使用 ModelRuntime.createSessionView() 为子会话建立独立 provider 注册表和内存 catalog store，保留父级配置、provider 实现与认证能力；不复制凭据到子目录。这不是隔离任意第三方 JS 全局状态的 sandbox。
+- Prevention: 原生多会话接线须同时测试 provider 注册/覆盖/注销、共享认证、配置 headers 和子 dispose；仅测试 transcript/工具实例隔离不足。
+- Verified by: 2026-09-07 pi-child-session-host.test.ts 的 provider cleanup 回归先失败（root model undefined），接入 session view 后通过；session-view 和宿主/SDK/auth 等 9 files / 56 tests 通过，未调用真实 provider。
