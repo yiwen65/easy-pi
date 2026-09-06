@@ -167,9 +167,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-002 — 证明 Pi 子会话与权限宿主边界
+### [x] T-002 — 证明 Pi 子会话与权限宿主边界
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 建立可注入的子会话宿主，证明同进程独立会话不会串根树身份/权限/生命周期。
 - Inputs and prerequisites: T-001 的 contract；Pi SDK/ResourceLoader 和当前权限组合证据。
@@ -178,13 +178,13 @@
 - Dependencies: T-001.
 - Execution steps:
   1. 由 coding-agent 提供 SDK factory，避免 subagent 对其运行时循环依赖。
-  2. 替换进程环境 child identity 的新路径；共享 ModelRuntime 但不复制 auth/token 到子目录。
+  2. 替换进程环境 child identity 的新路径；共享认证能力，但经已验证的 createSessionView 隔离可变 provider 注册表，不复制 auth/token 到子目录。
   3. 验证不同 session 的扩展实例、工具注册、授权、事件解绑和 shutdown；dispose 子不能终止 root 或共享模型运行时。
 - Acceptance criteria:
   - 两个根树同时运行合成子会话无交叉身份/消息/授权；full-access 与受限模式各有行为断言。
 - Verification method:
   - 新 session-host integration tests；现有 easy-pi-harness/default-composition、sdk-session-manager 等指定离线测试。
-- Validation evidence: Not run.
+- Validation evidence: 新 session-host.ts 能力边界与 pi-child-session-host.ts SDK adapter；native harness 显式身份/实时权限回调，不读旧 Child 环境、不注册旧 DAG、不自动批准 ask。宿主 10 项、session view 2 项及既有 SDK/harness/auth/credential/modify-models 共 9 files / 56 tests 通过。root check exit 0。真实写入只在合成 temp cwd；创建/冷加载/抢先取消无 provider 请求，关闭单个 child 不影响 peer/root，未知 usage 不填零。createSessionView 额外修复了被回归实证的 provider 注销串扰（见执行记录）。未验证任意第三方插件模块全局状态隔离，trusted extension 非 sandbox 的边界不变。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -302,7 +302,7 @@
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
-本轮：只运行只读源码/Git/指纹检查与本文结构验证；没有执行 Rust/Node 产品测试、构建、真实模型、委派或发布。旧 T-005 的 148/149 等记录不作为本次替换的通过证据。
+规划阶段只做静态分析；授权实施后已执行 T-001/T-002 定向合成测试和 root check，见各任务证据。尚未构建新产品包；没有运行 Rust、真实模型、委派或发布。旧整合 T-005 的 148/149 等记录不作为本次替换的通过证据。
 
 实施时的优先矩阵：
 
@@ -328,7 +328,7 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 ## Risks and blockers
 
 1. **高：共享写入是能力变化，不是优化。** 两个 Agent 可相互覆盖；用户已接受共享模式。仍需 prompt 明确任务文件范围、避免重复提交/重置，但这些约定不是 sandbox 或隔离保证。
-2. **高：同进程插件状态与权限闭包未验证。** T-002 是先行可行性 gate，不应先写完控制器再发现子实例互相污染。
+2. **同进程隔离范围。** T-002 已验证身份/权限/生命周期及 provider 注册隔离；直接共享 ModelRuntime 的方案被测试否定并改为 session view。任意第三方 JS 模块自有全局变量仍是可信扩展的边界，不承诺进程/OS sandbox。
 3. **高：Pi 队列不同于 Codex 邮箱。** 现有 `followUp()` 是排队不是完整 turn 调度；`sendCustomMessage(triggerTurn:false)` 可立即追加内部消息而非安全邮箱。必须用 adapter/受支持注入点证明时序，不用方法同名充当迁移。
 4. **高：fork 会碰深度 compaction。** JSONL 截尾/复制历史可能复活淘汰上下文、丢工具结果或继承父待执行调用；必须用实际请求验证。
 5. **高：旧未提交安全补丁和真实成果未收尾。** 不以重写名义丢弃；执行前建立可回退代码基线和旧历史出口。旧历史不受新 schema 自动管理。
@@ -348,9 +348,11 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 
 - 2026-09-06: T-001 完成，30/30 契约测试及 root check 通过；T-002 开始。下一步验证 native 会话权限不能继承旧 headless child 的自动批准行为，创建/关闭子会话不能影响其他根树。
 
+- 2026-09-07: T-002 完成。新增宿主不改 cwd/env、不复制 auth，显式 parent permissions 拒绝旧 headless auto-allow；支持 create/load/run/context/abort/dispose。初次并发测试因复制带 execute 函数的 Context 导致 DataCloneError，仅修正测试为快照 messages。随后 provider shutdown 独立回归实证 child.unregisterProvider 删除 root provider；通过 ModelRuntime.createSessionView 保留认证/配置并隔离注册表修复，修复前失败、修复后通过。另验证抢先取消 preflight 和活动 stream 取消。9 files / 56 tests 与 root check 通过；计划后续控制器、邮箱/fork、产品切换、旧数据出口和打包仍未完成。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: 分析与用户确认已完成，静态证据定位见 F-001 至 F-017；`task_document.py validate --path <本文绝对路径>` exit 0，输出 Task document is valid。末次只读复核 Codex 工作区仍干净，既有 tracked 差异与两个未跟踪清理文件的 SHA256 均与分析基线一致。
-- Limitations: T-001 已完成契约与基线；T-002 正在实现宿主 gate，T-003 至 T-007 未实施。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。
+- Evidence: T-001 契约 30/30；T-002 宿主、model session view 及既有相关回归 9 files / 56 tests passed，root check 通过。真实 provider/冻结评测未执行，原安全改动快照保留。
+- Limitations: T-001/T-002 已完成；T-003 至 T-007 尚未实施。下一步在已验证宿主上实现 root-scoped controller/registry 和持久化所有权。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。

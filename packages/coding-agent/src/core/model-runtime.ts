@@ -216,6 +216,28 @@ export class ModelRuntime implements Models {
 		return runtime;
 	}
 
+	/**
+	 * Isolate a child session's provider registrations without copying credentials to disk.
+	 * Provider implementations and the credential store remain shared capabilities: this is
+	 * registry isolation for trusted extensions, not a JavaScript sandbox.
+	 */
+	async createSessionView(): Promise<ModelRuntime> {
+		const view = new ModelRuntime(
+			this.credentials,
+			this.config,
+			this.modelsPath,
+			new InMemoryCodingAgentModelsStore(),
+			[...this.defaultBuiltins.values()],
+			false,
+		);
+		for (const [id, provider] of this.nativeExtensionProviders) view.nativeExtensionProviders.set(id, provider);
+		for (const [id, config] of this.extensionProviders) view.extensionProviders.set(id, { ...config });
+		view.configureRadiusProviders();
+		view.rebuildProviders();
+		await view.queueAvailabilityRefresh();
+		return view;
+	}
+
 	private configureRadiusProviders(): void {
 		this.builtins.clear();
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
