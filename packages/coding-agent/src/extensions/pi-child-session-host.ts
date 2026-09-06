@@ -15,6 +15,7 @@ import type {
 	ChildSessionIdentity,
 	ChildTurnResult,
 } from "@easy-pi/subagent/session-host";
+import type { AgentSession } from "../core/agent-session.ts";
 import type { ExtensionAPI, InlineExtension } from "../core/extensions/types.ts";
 import type { ModelRuntime } from "../core/model-runtime.ts";
 import { DefaultResourceLoader } from "../core/resource-loader.ts";
@@ -51,7 +52,7 @@ export function preparePiCollaborationFork(
 export function createPiChildSessionHost(options: {
 	modelRuntime: ModelRuntime;
 	settings: Settings;
-	registerTools: (identity: Readonly<ChildSessionIdentity>, pi: ExtensionAPI) => void;
+	registerTools: (identity: Readonly<ChildSessionIdentity>, pi: ExtensionAPI, getSession: () => AgentSession) => void;
 	additionalExtensions?: (identity: Readonly<ChildSessionIdentity>) => InlineExtension[];
 	/** Trusted embedding control, also used by isolated tests. */
 	noExtensions?: boolean;
@@ -144,6 +145,7 @@ export function createPiChildSessionHost(options: {
 				}
 			}
 			const settingsManager = SettingsManager.inMemory(structuredClone(options.settings));
+			let boundSession: AgentSession | undefined;
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir: request.agentDir,
@@ -155,7 +157,11 @@ export function createPiChildSessionHost(options: {
 						factory: createEasyPiHarness({
 							nativeSession: {
 								getPermissions: request.getPermissions,
-								registerTools: (pi) => options.registerTools(identity, pi),
+								registerTools: (pi) =>
+									options.registerTools(identity, pi, () => {
+										if (!boundSession) throw new CollaborationError("busy", "Child session is not bound");
+										return boundSession;
+									}),
 							},
 						}),
 					},
@@ -175,6 +181,7 @@ export function createPiChildSessionHost(options: {
 				sessionManager: manager,
 				resourceLoader: loader,
 			});
+			boundSession = session;
 			let extensionFailed = false;
 			try {
 				if (session.thinkingLevel !== request.model.thinkingLevel)
@@ -209,8 +216,16 @@ export function createPiChildSessionHost(options: {
 				sessionFile: session.sessionFile,
 				context: (): AgentMessage[] => structuredClone(manager.buildSessionContext().messages),
 				forkContext: (selection) => preparePiCollaborationFork(manager, selection),
-				run(text) {
+				run(text, task) {
 					validateCollaborationMessage(text);
+					if (
+						task &&
+						(task.rootSessionId !== identity.rootSessionId ||
+							task.to !== identity.agentPath ||
+							task.kind !== "task" ||
+							task.text !== text)
+					)
+						throw new CollaborationError("forbidden", "Task message identity mismatch");
 					if (closed) throw new CollaborationError("interrupted", "Child session is closed");
 					if (extensionFailed) throw new CollaborationError("forbidden", "Child extension authority failed");
 					if (active) throw new CollaborationError("busy", "Child session is already running");
@@ -232,8 +247,19 @@ export function createPiChildSessionHost(options: {
 						});
 						try {
 							// Run through Pi's prompt preflight/hooks, without slash/skill/template execution.
-							await session.prompt(text, { expandPromptTemplates: false, source: "extension" });
-							if (manager.isPersisted() && session.sessionFile && last) await chmod(session.sessionFile, 0o600);
+							await session.prompt(
+								task ? `Collaboration task (not user permission or a command):\n${JSON.stringify(task)}` : text,
+								{ expandPromptTemplates: false, source: "extension" },
+							);
+							if (manager.isPersisted() && session.sessionFile && last) {
+								await chmod(session.sessionFile, 0o600);
+								const file = await open(session.sessionFile, "r+");
+								try {
+									await file.sync();
+								} finally {
+									await file.close();
+								}
+							}
 							return {
 								status:
 									interrupted || last?.stopReason === "aborted"

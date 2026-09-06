@@ -322,3 +322,12 @@
 - Correct approach: 新子会话通过公开 header/entries 以 wx、0600 显式写入并 sync，再用 SessionManager.open 建立正常持久追加状态；不伪造 assistant，不改私有 flushed 标志。
 - Prevention: 原生宿主至少验证 create→dispose→reopen 全程零 provider 请求，以及 checkpoint fork 在首轮前的冷加载。
 - Verified by: 2026-09-07 pi-child-session-host.test.ts 未启动子会话回归先 ENOENT 后通过；实际 controller LRU/冷加载与 fork 测试通过，未处理真实历史。
+- Mailbox follow-up: 新 root 同样可能未落盘；接收端不能因 sendCustomMessage 返回或 sessionFile 非空就删除 durable envelope。等 native 文件存在并 sync 后 ack，首条 assistant 或下一请求重试确认；原生消息 ID 防重复。2026-09-07 pi-collaboration-tools.test.ts 验证 idle 不启动、确认失败阻止 provider、显式重启不重复注入，以及后续 checkpoint 不复活原消息。
+
+## Pi 邮箱注入——持久消息必须先于 compaction preflight
+
+- Wrong approach: 初版邮箱 adapter 在扩展 context 事件里持久化并追加消息。
+- Why it failed: AgentSession 的 transform wrapper 先执行 compaction preflight，再调用扩展 context；新增邮箱正文因此不在同一次压缩门槛的输入内。普通 faux 对话能通过，不能证明顺序正确。
+- Correct approach: 在绑定 session_start 时通过公开 Agent.transformContext 宿主接口包住原 transform；先持久化邮箱，再调用原 transform，关闭时只恢复自己安装的 wrapper。不修改私有状态，不从生产者完成回调直接推入接收者 state。
+- Prevention: 在已有 Pi transform 入口捕获消息和 durable branch，断言邮箱在进入 preflight 前已存在，同时验证 shutdown 恢复原接口及 checkpoint 去重。
+- Verified by: 2026-09-07 pi-collaboration-tools.test.ts 的 preflight 顺序与恢复接口回归通过；最新指定 11 files / 113 tests 和 root check 通过。

@@ -182,6 +182,8 @@ export interface CollaborationMessage {
 	to: string;
 	turnId: string;
 	kind: CollaborationMessageKind;
+	/** Present on completion notifications; completion still is not delivery. */
+	status?: Extract<CollaborationStatus, "completed" | "failed" | "interrupted">;
 	text: string;
 }
 

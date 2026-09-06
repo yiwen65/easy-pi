@@ -22,6 +22,21 @@ const ModelSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const MessageSchema = Type.Object(
+	{
+		id: Type.String({ minLength: 1 }),
+		rootSessionId: Type.String({ minLength: 1 }),
+		from: Type.String(),
+		to: Type.String(),
+		turnId: Type.String({ minLength: 1 }),
+		kind: Type.Union([Type.Literal("task"), Type.Literal("message"), Type.Literal("result")]),
+		status: Type.Optional(
+			Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("interrupted")]),
+		),
+		text: Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes }),
+	},
+	{ additionalProperties: false },
+);
 const AgentSchema = Type.Object(
 	{
 		id: Type.String({ pattern: "^[a-f0-9-]{36}$" }),
@@ -37,6 +52,8 @@ const AgentSchema = Type.Object(
 		]),
 		model: ModelSchema,
 		turnId: Type.String({ minLength: 1 }),
+		completionPending: Type.Optional(Type.Boolean()),
+		taskMessage: Type.Optional(MessageSchema),
 		sessionFile: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9._-]+\\.jsonl$" })),
 		result: Type.Optional(Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes })),
 	},
@@ -49,6 +66,11 @@ const SnapshotSchema = Type.Object(
 		cwd: Type.String(),
 		revision: Type.Integer({ minimum: 0 }),
 		agents: Type.Array(AgentSchema, { maxItems: COLLABORATION_LIMITS.maxAgents - 1 }),
+		messages: Type.Optional(
+			Type.Array(MessageSchema, {
+				maxItems: COLLABORATION_LIMITS.maxAgents * COLLABORATION_LIMITS.maxPendingMessages,
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -77,6 +99,34 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 	if (value.agents.some((agent) => agent.parent !== "/root" && !paths.has(agent.parent))) {
 		throw new CollaborationError("storage_error", "Missing parent agent");
 	}
+	const messageIds = new Set<string>();
+	const counts = new Map<string, number>();
+	for (const message of [
+		...(value.messages ?? []),
+		...value.agents.flatMap((agent) => (agent.taskMessage ? [agent.taskMessage] : [])),
+	]) {
+		if (
+			message.rootSessionId !== value.rootSessionId ||
+			messageIds.has(message.id) ||
+			![message.from, message.to].every((path) => path === "/root" || paths.has(path)) ||
+			Buffer.byteLength(message.text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes
+		)
+			throw new CollaborationError("storage_error", "Invalid mailbox message");
+		messageIds.add(message.id);
+	}
+	for (const message of value.messages ?? []) counts.set(message.to, (counts.get(message.to) ?? 0) + 1);
+	for (const agent of value.agents) {
+		if (
+			agent.taskMessage &&
+			(agent.taskMessage.to !== agent.path ||
+				agent.taskMessage.turnId !== agent.turnId ||
+				agent.taskMessage.kind !== "task")
+		)
+			throw new CollaborationError("storage_error", "Invalid task receipt");
+		if (agent.completionPending) counts.set(agent.parent, (counts.get(agent.parent) ?? 0) + 1);
+	}
+	if ([...counts.values()].some((count) => count > COLLABORATION_LIMITS.maxPendingMessages))
+		throw new CollaborationError("storage_error", "Mailbox capacity exceeded");
 	return structuredClone(value);
 }
 
@@ -162,6 +212,20 @@ export class CollaborationStore {
 				}
 				for (const agent of snapshot.agents) {
 					if (agent.status === "pending" || agent.status === "running") agent.status = "interrupted";
+					if (agent.completionPending) {
+						snapshot.messages ??= [];
+						snapshot.messages.push({
+							id: randomUUID(),
+							rootSessionId: snapshot.rootSessionId,
+							from: agent.path,
+							to: agent.parent,
+							turnId: agent.turnId,
+							kind: "result",
+							status: "interrupted",
+							text: "Interrupted controller; inspect retained child history. No task was resumed.",
+						});
+						agent.completionPending = false;
+					}
 				}
 				snapshot.revision++;
 				this.database

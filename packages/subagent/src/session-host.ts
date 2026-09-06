@@ -1,7 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { PermissionMode } from "@easy-pi/permissions";
-import type { CollaborationStatus, ForkSelection } from "./collaboration-contract.ts";
+import type { CollaborationMessage, CollaborationStatus, ForkSelection } from "./collaboration-contract.ts";
 
 /** Trusted, live parent authority. This capability is never accepted in model tool input. */
 export interface ChildSessionPermissions {
@@ -50,7 +50,7 @@ export interface ChildSession {
 	context(): AgentMessage[];
 	/** N may only count complete turns whose original boundaries remain available. */
 	forkContext(selection: ForkSelection): AgentMessage[];
-	run(text: string): Promise<ChildTurnResult>;
+	run(text: string, task?: CollaborationMessage): Promise<ChildTurnResult>;
 	abort(): Promise<void>;
 	dispose(): Promise<void>;
 }
