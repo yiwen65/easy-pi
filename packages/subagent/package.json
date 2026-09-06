@@ -1,0 +1,39 @@
+{
+	"name": "@easy-pi/subagent",
+	"version": "0.84.2",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.js"
+		},
+		"./*": {
+			"types": "./dist/*.d.ts",
+			"development": "./src/*.ts",
+			"import": "./dist/*.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsgo -p tsconfig.build.json"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@easy-pi/permissions": "0.84.2",
+		"@earendil-works/pi-tui": "0.84.2",
+		"typebox": "1.3.7",
+		"@earendil-works/pi-ai": "0.84.2"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.84.2",
+		"@earendil-works/pi-agent-core": "0.84.2"
+	}
+}

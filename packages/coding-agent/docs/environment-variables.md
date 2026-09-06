@@ -78,8 +78,8 @@ These variables are read by Pi itself:
 
 | Variable | Description |
 |----------|-------------|
-| `PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.pi/agent` |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
+| `EASY_PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.easy-pi/agent` |
+| `EASY_PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package updates, and install/update telemetry |
 | `PI_SKIP_VERSION_CHECK` | Disable the Easy Pi version update check |
@@ -93,18 +93,3 @@ These variables are read by Pi itself:
 | `HTTP_PROXY`, `HTTPS_PROXY` | Proxy outbound HTTP requests |
 
 Provider credentials such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and cloud-provider configuration are listed in [Providers](providers.md#environment-variables-or-auth-file).
-
-## Opt-in v2 Semantic Search
-
-These variables are read only by the exported `createOpenAICompatibleEmbeddingSearchProviderFromEnv()` SDK helper. Pi does not create or enable a remote semantic provider automatically.
-
-| Variable | Description |
-|----------|-------------|
-| `PI_SEMANTIC_SEARCH` | Must equal `1` or the helper returns no provider |
-| `PI_EMBEDDING_BASE_URL` | OpenAI-compatible base URL or `/embeddings` endpoint; HTTP(S) only and no embedded credentials |
-| `PI_EMBEDDING_MODEL` | Embedding model identifier sent to the endpoint |
-| `PI_EMBEDDING_API_KEY` | Bearer credential; required and never persisted by the provider |
-| `PI_EMBEDDING_USD_PER_MILLION_TOKENS` | Non-negative token price used by the local cost breaker |
-| `PI_EMBEDDING_MAX_COST_USD` | Positive provider-instance cost budget; defaults to `5` |
-
-The helper fails closed when enabled without the required variables. See [SDK: Opt-in v2 tool hosts](sdk.md#opt-in-v2-tool-hosts) for the explicit provider wiring and data-egress boundary.

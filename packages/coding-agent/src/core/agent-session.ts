@@ -130,7 +130,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions, type V2ToolRuntimeHandle } from "./tools/index.ts";
+import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -230,8 +230,6 @@ export interface AgentSessionConfig {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Override base tool definitions while preserving prompt metadata and renderers. */
 	baseToolDefinitionsOverride?: Record<string, ToolDefinition<any, any>>;
-	/** Owned v2 runtime whose definitions replace the override on reload. */
-	v2ToolRuntime?: V2ToolRuntimeHandle;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
@@ -388,7 +386,6 @@ export class AgentSession {
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _baseToolDefinitionsOverride?: Record<string, ToolDefinition<any, any>>;
-	private _v2ToolRuntime?: V2ToolRuntimeHandle;
 	private _disposed = false;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
@@ -426,8 +423,7 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
-		this._v2ToolRuntime = config.v2ToolRuntime;
-		this._baseToolDefinitionsOverride = config.v2ToolRuntime?.definitions ?? config.baseToolDefinitionsOverride;
+		this._baseToolDefinitionsOverride = config.baseToolDefinitionsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -446,7 +442,6 @@ export class AgentSession {
 				config: { ...config.hfCompaction, mode: hfMode },
 				getToolsTokenEstimate: () => estimateActiveToolsTokens(this.agent.state.tools),
 				getTools: () => this.agent.state.tools,
-				getToolEvidenceSummary: () => this._v2ToolRuntime?.toolEvidenceSummary(),
 			});
 		}
 
@@ -1100,12 +1095,6 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
-		void this._v2ToolRuntime?.close();
-	}
-
-	/** Independent best-effort close failures from session-owned v2 resources. */
-	get v2ToolLifecycleErrors(): readonly Error[] {
-		return this._v2ToolRuntime?.lifecycleErrors ?? [];
 	}
 
 	// =========================================================================
@@ -2972,9 +2961,6 @@ export class AgentSession {
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		const activeToolNames = this.getActiveToolNames();
-		if (this._v2ToolRuntime) {
-			this._baseToolDefinitionsOverride = await this._v2ToolRuntime.reload();
-		}
 		this._buildRuntime({
 			activeToolNames,
 			flagValues: previousFlagValues,

@@ -1,19 +1,5 @@
 import { join } from "node:path";
-import {
-	Agent,
-	type AgentMessage,
-	type EditV2Dialect,
-	type ExecutionEnv,
-	type MutationBackend,
-	type MutationBackendHooks,
-	type MutationLimits,
-	type ReadProvider,
-	type ResourceReader,
-	type SearchProvider,
-	setDefaultStreamFn,
-	type ThinkingLevel,
-	type WorkspacePolicy,
-} from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -39,11 +25,7 @@ import {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
-	createV2ToolRuntime,
 	createWriteTool,
-	type ToolProfile,
-	type V2CodeIndexProvider,
-	type V2SessionResourceSource,
 	withFileMutationQueue,
 } from "./tools/index.ts";
 
@@ -55,30 +37,7 @@ setDefaultStreamFn(streamSimple);
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
-	/** Built-in tool profile for this invocation. Default: legacy. Not persisted in sessions. */
-	toolProfile?: ToolProfile;
-	/** Optional path policy applied by v2 tools. Compatibility mode is used when omitted. */
-	workspacePolicy?: WorkspacePolicy;
-	/** Optional v2 services. Direct instances are host-owned; factory results are session-owned. */
-	toolsV2?: {
-		executionEnv?: V2SessionResourceSource<ExecutionEnv>;
-		search?: {
-			provider?: V2SessionResourceSource<SearchProvider>;
-			codeIndexProvider?: V2SessionResourceSource<V2CodeIndexProvider> | false;
-			semanticProvider?: V2SessionResourceSource<SearchProvider>;
-		};
-		read?: {
-			provider?: V2SessionResourceSource<ReadProvider>;
-			resourceReaders?: Array<V2SessionResourceSource<ResourceReader>>;
-		};
-		edit?: {
-			backend?: V2SessionResourceSource<MutationBackend>;
-			hooks?: MutationBackendHooks;
-			dialect?: EditV2Dialect;
-			limits?: Partial<MutationLimits>;
-		};
-	};
-	/** Global config directory. Default: ~/.pi/agent */
+	/** Global config directory. Default: ~/.easy-pi/agent */
 	agentDir?: string;
 
 	/** Canonical model/auth runtime. Defaults to a runtime using agentDir/auth.json and models.json. */
@@ -151,7 +110,7 @@ export type {
 } from "./extensions/index.ts";
 export type { PromptTemplate } from "./prompt-templates.ts";
 export type { Skill } from "./skills.ts";
-export type { Tool, ToolProfile } from "./tools/index.ts";
+export type { Tool } from "./tools/index.ts";
 
 export {
 	withFileMutationQueue,
@@ -209,10 +168,6 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	const toolProfile = options.toolProfile ?? "legacy";
-	if (toolProfile !== "legacy" && toolProfile !== "v2") {
-		throw new Error(`Unknown tool profile: ${String(toolProfile)}`);
-	}
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
@@ -288,8 +243,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames =
-		toolProfile === "v2" ? ["search", "read", "edit", "bash"] : ["read", "bash", "edit", "write"];
+	const defaultActiveToolNames = ["read", "bash", "edit", "write"];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
@@ -421,48 +375,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
-	const v2ToolRuntime =
-		toolProfile === "v2"
-			? createV2ToolRuntime(cwd, {
-					autoResizeImages: settingsManager.getImageAutoResize(),
-					shellPath: settingsManager.getShellPath(),
-					getShellCommandPrefix: () => settingsManager.getShellCommandPrefix(),
-					workspacePolicy: options.workspacePolicy,
-					executionEnv: options.toolsV2?.executionEnv,
-					searchProvider: options.toolsV2?.search?.provider,
-					codeIndexProvider: options.toolsV2?.search?.codeIndexProvider,
-					semanticSearchProvider: options.toolsV2?.search?.semanticProvider,
-					readProvider: options.toolsV2?.read?.provider,
-					resourceReaders: options.toolsV2?.read?.resourceReaders,
-					mutationBackend: options.toolsV2?.edit?.backend,
-					mutationHooks: options.toolsV2?.edit?.hooks,
-					editDialect: options.toolsV2?.edit?.dialect,
-					editLimits: options.toolsV2?.edit?.limits,
-				})
-			: undefined;
-	let session: AgentSession;
-	try {
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settingsManager,
-			cwd,
-			scopedModels: options.scopedModels,
-			resourceLoader,
-			customTools: options.customTools,
-			modelRuntime,
-			initialActiveToolNames,
-			allowedToolNames,
-			excludedToolNames,
-			baseToolDefinitionsOverride: v2ToolRuntime?.definitions,
-			v2ToolRuntime,
-			extensionRunnerRef,
-			sessionStartEvent: options.sessionStartEvent,
-		});
-	} catch (error) {
-		await v2ToolRuntime?.close();
-		throw error;
-	}
+	const session = new AgentSession({
+		agent,
+		sessionManager,
+		settingsManager,
+		cwd,
+		scopedModels: options.scopedModels,
+		resourceLoader,
+		customTools: options.customTools,
+		modelRuntime,
+		initialActiveToolNames,
+		allowedToolNames,
+		excludedToolNames,
+		extensionRunnerRef,
+		sessionStartEvent: options.sessionStartEvent,
+	});
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

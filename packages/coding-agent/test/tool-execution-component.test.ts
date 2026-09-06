@@ -6,7 +6,6 @@ import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
-import { createV2ToolDefinitions } from "../src/core/tools/tool-profile.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
@@ -168,238 +167,8 @@ describe("ToolExecutionComponent parity", () => {
 		await promise;
 	});
 
-	test("v2 read renderer uses structured text ranges, syntax, and directory snapshot metadata", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).read;
-		const component = new ToolExecutionComponent(
-			"read",
-			"tool-read-render",
-			{ path: "src/example.ts", offset: 20, limit: 14 },
-			{},
-			tool,
-			createFakeTui(),
-			process.cwd(),
-		);
-		const lines = Array.from({ length: 14 }, (_, index) => `const value${index} = ${index};`);
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "CONTENT_SENTINEL_MUST_NOT_BE_PARSED" }],
-				details: {
-					path: "src/example.ts",
-					kind: "text",
-					range: [20, 33],
-					lines,
-					hasMore: true,
-					nextOffset: 34,
-				},
-				isError: false,
-			},
-			false,
-		);
-		const collapsed = stripAnsi(component.render(48).join("\n"));
-		expect(collapsed).toContain("read src/example.ts · line 20 · max 14 lines");
-		expect(collapsed).toContain("20 const value0 = 0;");
-		expect(collapsed).toContain("31 const value11 = 11;");
-		expect(collapsed).not.toContain("32 const value12");
-		expect(collapsed).toContain("2 more lines in this page");
-		expect(collapsed).toContain("Continue with offset 34");
-		expect(collapsed).not.toContain("CONTENT_SENTINEL_MUST_NOT_BE_PARSED");
-		for (const line of component.render(48)) expect(stripAnsi(line).length).toBeLessThanOrEqual(48);
-
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "ANOTHER_SENTINEL" }],
-				details: {
-					path: "src",
-					kind: "directory",
-					entries: [
-						{ name: "nested", kind: "directory", size: 128, mtimeMs: 0 },
-						...Array.from({ length: 13 }, (_, index) => ({ name: `file-${index}`, kind: "file" as const })),
-					],
-					hasMore: true,
-					nextCursor: "r2-next",
-					stable: true,
-				},
-				isError: false,
-			},
-			false,
-		);
-		const directory = stripAnsi(component.render(80).join("\n"));
-		expect(directory).toContain("nested/ · directory 128B");
-		expect(directory).toContain("2 more entries in this page");
-		expect(directory).not.toContain("file-12");
-		expect(directory).toContain("[stable snapshot]");
-		expect(directory).toContain("Continue with cursor r2-next");
-		expect(directory).not.toContain("ANOTHER_SENTINEL");
-	});
-
-	test("v2 edit renderer consumes structured multi-file diffs with bounded folding", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).edit;
-		const component = new ToolExecutionComponent(
-			"edit",
-			"tool-edit-render",
-			{
-				operations: [
-					{ kind: "update", path: "src/a.ts", oldText: "old", newText: "new" },
-					{ kind: "create", path: "src/b.ts", content: "new" },
-				],
-			},
-			{},
-			tool,
-			createFakeTui(),
-			process.cwd(),
-		);
-		const files = Array.from({ length: 4 }, (_, index) => ({
-			path: index === 2 ? "src/\u001b[?1049hbad\nname.ts" : `src/file-${index}.ts`,
-			status: index === 1 ? ("deleted" as const) : ("updated" as const),
-			patch: `patch-${index}`,
-			diff: Array.from(
-				{ length: 10 },
-				(__, line) => `${line % 2 === 0 ? "+" : "-"}${line + 1} line-${index}-${line}`,
-			).join("\n"),
-			firstChangedLine: index + 3,
-		}));
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "CONTENT_SENTINEL_MUST_NOT_BE_PARSED" }],
-				details: {
-					dialect: "operations",
-					operations: [],
-					changedPaths: files.map((file) => file.path),
-					files,
-					patch: "PATCH_SENTINEL_MUST_NOT_BE_PARSED",
-					pendingAcceptance: { id: "overlay-1", workspacePath: "/tmp/overlay-1" },
-				},
-				isError: false,
-			},
-			false,
-		);
-		const rawCollapsed = component.render(52).join("\n");
-		const collapsed = stripAnsi(rawCollapsed);
-		expect(collapsed).toContain("edit · apply · 2 operation(s) · src/a.ts, src/b.ts");
-		expect(collapsed).toContain("updated src/file-0.ts · line 3");
-		expect(collapsed).toContain("deleted src/file-1.ts · line 4");
-		expect(collapsed).toContain("2 more diff lines for this file");
-		expect(collapsed).toContain("1 more changed files");
-		expect(collapsed).toContain("overlay overlay-1 awaits host accept/discard");
-		expect(collapsed).toContain("src/bad\\nname.ts");
-		expect(rawCollapsed).not.toContain("\u001b[?1049h");
-		expect(collapsed).not.toContain("src/file-3.ts");
-		expect(collapsed).not.toContain("CONTENT_SENTINEL_MUST_NOT_BE_PARSED");
-		expect(collapsed).not.toContain("PATCH_SENTINEL_MUST_NOT_BE_PARSED");
-		expect(rawCollapsed).toContain(theme.fg("success", "+1 line-0-0"));
-		for (const line of component.render(52)) expect(stripAnsi(line).length).toBeLessThanOrEqual(52);
-
-		component.setExpanded(true);
-		const expanded = stripAnsi(component.render(80).join("\n"));
-		expect(expanded).toContain("src/file-3.ts");
-		expect(expanded).toContain("line-0-9");
-
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "ERROR_SENTINEL_MUST_NOT_BE_PARSED" }],
-				details: {
-					failedOperationIndex: 1,
-					changedPaths: ["src/a.ts"],
-					unknownPaths: ["src/b.ts"],
-				},
-				isError: true,
-			},
-			false,
-		);
-		const partial = stripAnsi(component.render(60).join("\n"));
-		expect(partial).toContain("partial commit · failed operation 1");
-		expect(partial).toContain("Changed: src/a.ts");
-		expect(partial).toContain("Inspect: src/b.ts");
-		expect(partial).not.toContain("ERROR_SENTINEL_MUST_NOT_BE_PARSED");
-
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "STALE_SENTINEL" }],
-				details: { paths: ["src/a.ts"], recovery: { kind: "read_again", paths: ["src/a.ts"] } },
-				isError: true,
-			},
-			false,
-		);
-		expect(stripAnsi(component.render(60).join("\n"))).toContain("stale edit · no files changed");
-
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "LIMIT_SENTINEL" }],
-				details: { recovery: { kind: "split_edit" } },
-				isError: true,
-			},
-			false,
-		);
-		const limited = stripAnsi(component.render(60).join("\n"));
-		expect(limited).toContain("edit plan too large · split the edit");
-		expect(limited).not.toContain("LIMIT_SENTINEL");
-	});
-
-	test("v2 search renderer consumes structured locators with grouping, ranges, status, and continuation", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).search;
-		const component = new ToolExecutionComponent(
-			"search",
-			"tool-search-render",
-			{
-				query: "Auth",
-				kind: "text",
-				path: "src",
-				fileGlob: "*.ts",
-				context: 1,
-			},
-			{},
-			tool,
-			createFakeTui(),
-			process.cwd(),
-		);
-		const locators = Array.from({ length: 10 }, (_, index) => ({
-			locatorId: `loc_${index}`,
-			matchKind: "literal",
-			path: index < 5 ? "src/auth.ts" : "src/service.ts",
-			startLine: index + 1,
-			startColumn: 1,
-			match: `Auth marker ${index}`,
-		}));
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "CONTENT_SENTINEL_MUST_NOT_BE_PARSED" }],
-				details: {
-					kind: "text",
-					query: "Auth",
-					path: "src",
-					locators,
-					status: "partial",
-					coverage: { returnedCount: locators.length, skipped: [] },
-					approximate: true,
-					partial: true,
-					nextCursor: "s2-next",
-				},
-				isError: false,
-			},
-			false,
-		);
-
-		const rawCollapsed = component.render(80).join("\n");
-		const collapsed = stripAnsi(rawCollapsed);
-		expect(collapsed).toContain('search "Auth" · text · literal · smart');
-		expect(collapsed).toContain("[partial · 10 returned · approximate]");
-		expect(collapsed).toContain("src/auth.ts");
-		expect(collapsed).toContain("loc_0 1:1 · literal");
-		expect(collapsed).toContain("Auth marker 7");
-		expect(collapsed).not.toContain("Auth marker 8");
-		expect(collapsed).toContain("2 more locators");
-		expect(collapsed).toContain("Continue with cursor s2-next");
-		expect(collapsed).not.toContain("CONTENT_SENTINEL_MUST_NOT_BE_PARSED");
-		expect(rawCollapsed).toContain(theme.fg("toolOutput", ' · "Auth marker 0"'));
-		for (const line of component.render(40)) expect(stripAnsi(line).length).toBeLessThanOrEqual(40);
-
-		component.setExpanded(true);
-		const expanded = stripAnsi(component.render(80).join("\n"));
-		expect(expanded).toContain("Auth marker 9");
-	});
-
-	test("v2 bash renderer shows call metadata and the latest collapsed output", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).bash;
+	test("bash renderer shows call metadata and the latest collapsed output", () => {
+		const tool = createBashToolDefinition(process.cwd());
 		const component = new ToolExecutionComponent(
 			"bash",
 			"tool-v2-bash-render",
@@ -433,8 +202,8 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("newest-marker");
 	});
 
-	test("v2 bash renderer preserves final status without duplicating truncation details", () => {
-		const tool = createV2ToolDefinitions(process.cwd()).bash;
+	test("bash renderer preserves final status without duplicating truncation details", () => {
+		const tool = createBashToolDefinition(process.cwd());
 		const component = new ToolExecutionComponent(
 			"bash",
 			"tool-v2-bash-truncated",
@@ -471,12 +240,12 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("Truncated: showing 1 of 2 lines");
 	});
 
-	test("v2 bash renderer refreshes elapsed time for silent partial execution and stops after final output", () => {
+	test("bash renderer refreshes elapsed time for silent partial execution and stops after final output", () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-08-29T00:00:00Z"));
 		let renderRequests = 0;
 		const tui = { requestRender: () => renderRequests++ } as unknown as TUI;
-		const tool = createV2ToolDefinitions(process.cwd()).bash;
+		const tool = createBashToolDefinition(process.cwd());
 		const component = new ToolExecutionComponent(
 			"bash",
 			"tool-v2-bash-silent",

@@ -33,13 +33,13 @@ describe("parseArgs", () => {
 		});
 	});
 
-	test("help advertises Bash in both profiles without a Run alias", () => {
+	test("help advertises only official tool names", () => {
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 		try {
 			printHelp();
 			const output = log.mock.calls.map((call) => String(call[0])).join("\n");
-			expect(output).toContain("legacy profile: read, bash, edit, write (default)");
-			expect(output).toContain("v2 profile: search, read, edit, bash");
+			expect(output).toContain("read, bash, edit, write (default)");
+			expect(output).not.toContain("--tool-profile");
 			expect(output).not.toContain("v2 profile: search, read, edit, run");
 		} finally {
 			log.mockRestore();
@@ -162,15 +162,12 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("rpc");
 		});
 
-		test("parses and validates --tool-profile", () => {
-			expect(parseArgs(["--tool-profile=v2"]).toolProfile).toBe("v2");
-			expect(parseArgs(["--tool-profile", "legacy"]).toolProfile).toBe("legacy");
-			expect(parseArgs(["--tool-profile", "future"]).diagnostics).toEqual([
-				{ type: "error", message: 'Invalid tool profile "future". Valid values: legacy, v2' },
-			]);
-			expect(parseArgs(["--tool-profile"]).diagnostics).toEqual([
-				{ type: "error", message: "--tool-profile requires legacy or v2" },
-			]);
+		test("rejects retired tool profiles explicitly", () => {
+			for (const args of [["--tool-profile=v2"], ["--tool-profile", "legacy"], ["--tool-profile"]]) {
+				expect(parseArgs(args).diagnostics).toEqual([
+					{ type: "error", message: "--tool-profile has been removed; easy-pi uses the official tools." },
+				]);
+			}
 		});
 
 		test("parses --session", () => {
