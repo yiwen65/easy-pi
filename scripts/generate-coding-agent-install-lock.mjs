@@ -12,6 +12,7 @@ const rootLockfilePath = join(repoRoot, "package-lock.json");
 const outputPackageJsonPath = join(outputDir, "package.json");
 const outputLockfilePath = join(outputDir, "package-lock.json");
 const internalPackagePrefix = "@earendil-works/pi-";
+const bundledNames = new Set(readJson(join(codingAgentDir, "package.json")).bundleDependencies ?? []);
 const installPackageName = "@earendil-works/pi-coding-agent-install";
 const allowedInstallScriptPackages = new Map([
 	["@google/genai@1.52.0", "preinstall is a no-op in the published package"],
@@ -52,6 +53,7 @@ function sortedPackageEntry(entry) {
 		"license",
 		"dependencies",
 		"optionalDependencies",
+		"bundleDependencies",
 		"peerDependencies",
 		"peerDependenciesMeta",
 		"bin",
@@ -97,6 +99,7 @@ function copyPackageJsonEntry(packageJson, options) {
 		"license",
 		"dependencies",
 		"optionalDependencies",
+		"bundleDependencies",
 		"peerDependencies",
 		"peerDependenciesMeta",
 		"bin",
@@ -143,7 +146,7 @@ function getInternalWorkspaces(lockPackages) {
 		if (!lockPath.startsWith("packages/") || lockPath.includes("/node_modules/") || !entry.name || !entry.version) {
 			continue;
 		}
-		if (!entry.name.startsWith(internalPackagePrefix)) {
+		if (!entry.name.startsWith(internalPackagePrefix) && !bundledNames.has(entry.name)) {
 			continue;
 		}
 
@@ -201,9 +204,12 @@ function resolveExternalDependency(lockPackages, packageName, fromLockPath) {
 
 function addInternalWorkspace(installLockPackages, addedPaths, queue, name, workspace) {
 	const packageJson = workspace.packageJson;
-	const outputPath = `node_modules/${name}`;
+	const outputPath = bundledNames.has(name)
+		? `node_modules/@earendil-works/pi-coding-agent/node_modules/${name}`
+		: `node_modules/${name}`;
 	const entry = copyPackageJsonEntry(packageJson, { includeName: false });
-	entry.resolved = registryTarballUrl(name, packageJson.version);
+	if (bundledNames.has(name)) entry.inBundle = true;
+	else entry.resolved = registryTarballUrl(name, packageJson.version);
 
 	installLockPackages[outputPath] = sortedPackageEntry(entry);
 	addedPaths.add(outputPath);
@@ -380,7 +386,9 @@ function generateInstallLock() {
 
 		const workspace = internalWorkspaces.get(item.name);
 		if (workspace) {
-			const outputPath = `node_modules/${item.name}`;
+			const outputPath = bundledNames.has(item.name)
+				? `node_modules/@earendil-works/pi-coding-agent/node_modules/${item.name}`
+				: `node_modules/${item.name}`;
 			internalNames.add(item.name);
 			if (!addedPaths.has(outputPath)) {
 				addInternalWorkspace(installLockPackages, addedPaths, queue, item.name, workspace);

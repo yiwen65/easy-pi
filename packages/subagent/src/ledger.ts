@@ -632,24 +632,36 @@ function stableTopologicalTaskIds(request: CompiledSubagentDagRequest): string[]
 
 /** Durable run/task state and append-only lifecycle events backed by node:sqlite. */
 export class RunLedger {
-	private readonly database: DatabaseSync;
+	private connection?: DatabaseSync;
+	private readonly path: string;
 	private readonly runtimeHighWatermarks = new Map<string, { generation: number; sequence: number }>();
 	private closed = false;
 
-	constructor(path: string) {
-		if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-		this.database = new DatabaseSync(path);
+	constructor(path: string, options: { lazy?: boolean } = {}) {
+		this.path = path;
+		if (!options.lazy) this.open();
+	}
+
+	private get database(): DatabaseSync {
+		if (this.closed) throw new Error("Subagent ledger is closed");
+		return this.connection ?? this.open();
+	}
+
+	private open(): DatabaseSync {
+		if (this.path !== ":memory:") mkdirSync(dirname(this.path), { recursive: true });
+		this.connection = new DatabaseSync(this.path);
 		try {
-			this.initializeSchema(path);
+			this.initializeSchema(this.path);
 		} catch (error) {
 			this.closed = true;
 			try {
-				this.database.close();
+				this.connection.close();
 			} catch {
 				// Preserve the schema error.
 			}
 			throw error;
 		}
+		return this.connection;
 	}
 
 	private initializeSchema(path: string): void {
@@ -3589,7 +3601,7 @@ export class RunLedger {
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;
-		this.database.close();
+		this.connection?.close();
 	}
 }
 

@@ -13,9 +13,11 @@ import {
 import { ExternalMutationJournalWriter } from "@easy-pi/permissions/journal";
 import { registerChildProtocol } from "@easy-pi/subagent/child-protocol-extension";
 import { createSubagentExtension, type SubagentExtensionOptions } from "@easy-pi/subagent/extension";
+import { runChildTask } from "@easy-pi/subagent/process-runner";
 import { resolveWorkspaceRoot } from "@easy-pi/subagent/workspace-router";
 import { getAgentDir } from "../config.ts";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "../core/extensions/types.ts";
+import { resolveEasyPiInvocation } from "./product-launcher.ts";
 import { registerRequestUserInput } from "./questionnaire.ts";
 
 const AUDIT_ENTRY = "wj-harness-audit";
@@ -209,6 +211,17 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 		createSubagentExtension({
 			agentDir: getAgentDir(),
 			...(options.subagent ?? {}),
+			runTask:
+				options.subagent?.runTask ??
+				((request) =>
+					runChildTask({
+						...request,
+						invocation: resolveEasyPiInvocation(),
+						controllerEnvironment: {
+							...request.controllerEnvironment,
+							EASY_PI_CODING_AGENT_DIR: options.subagent?.agentDir ?? getAgentDir(),
+						},
+					})),
 			resolveRepositoryRoot: subagentRepositoryRootResolver,
 			createChildHarnessContext: (request) =>
 				createChildHarnessContext({

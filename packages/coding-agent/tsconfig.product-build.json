@@ -1,0 +1,59 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"outDir": "../../.artifacts/easy-pi-product-build",
+		"paths": {
+			"@earendil-works/pi-agent-core": [
+				"../agent/dist/index.d.ts"
+			],
+			"@earendil-works/pi-agent-core/*": [
+				"../agent/dist/*.d.ts"
+			],
+			"@earendil-works/pi-ai": [
+				"../ai/dist/index.d.ts"
+			],
+			"@earendil-works/pi-ai/*": [
+				"../ai/dist/*.d.ts",
+				"../ai/dist/providers/*.d.ts"
+			],
+			"@earendil-works/pi-client": [
+				"../client/dist/index.d.ts"
+			],
+			"@earendil-works/pi-protocol": [
+				"../protocol/dist/index.d.ts"
+			],
+			"@earendil-works/pi-tui": [
+				"../tui/dist/index.d.ts"
+			],
+			"@earendil-works/pi-tui/*": [
+				"../tui/dist/*.d.ts",
+				"../tui/dist/components/*.d.ts"
+			],
+			"@easy-pi/permissions": [
+				"../permissions/src/index.ts"
+			],
+			"@easy-pi/permissions/journal": [
+				"../permissions/src/external-mutation-journal.ts"
+			],
+			"@easy-pi/subagent": [
+				"../subagent/src/index.ts"
+			],
+			"@easy-pi/subagent/*": [
+				"../subagent/src/*.ts"
+			],
+			"@earendil-works/pi-coding-agent": [
+				"./src/index.ts"
+			]
+		},
+		"rootDir": ".."
+	},
+	"include": [
+		"src/**/*.ts",
+		"../permissions/src/**/*.ts",
+		"../subagent/src/**/*.ts"
+	],
+	"exclude": [
+		"node_modules",
+		"dist"
+	]
+}

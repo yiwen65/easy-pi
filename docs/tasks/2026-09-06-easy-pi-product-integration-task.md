@@ -116,9 +116,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 默认装配与工作区依赖集成
+### [x] T-004 — 默认装配与工作区依赖集成
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 默认装配与工作区依赖集成，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
@@ -132,13 +132,13 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: Not run.
+- Validation evidence: CLI/SDK 默认 factory 绑定实例 agentDir，显式产品 child launcher 不再猜 argv/PATH；ledger 延迟初始化。默认装配/launcher/SDK/组合 15 tests，lazy-ledger/ledger/extension 53 tests 通过。product build、root build:offline 与 root check 通过；npm pack 含两个私有 bundle 共 158 文件。临时目录使用生成 install-lock（仅内部包 resolved 指向本地 tarball），npm ci --offline --ignore-scripts 安装 133 packages；隔离安装目录 help/version 和 RPC get_commands 通过，permissions/subagents 默认加载，未生成任务 ledger。无真实 provider 调用；临时安装目录已清理。
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-005 — 任务清理和数据导入契约
 
-- Status: pending
+- Status: blocked
 - Owner: coordinator
 - Objective: 任务清理和数据导入契约，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
@@ -152,13 +152,13 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: Not run.
-- Blocker: None.
-- Unblock condition: None.
+- Validation evidence: 检查 dag-orchestrator.releaseCandidate/gc/sweepRetention：成功 Writer 只生成候选 ref，不等于已交付调用者工作区；自动 retention 默认禁用。未将成功状态当交付自动删除。现有 session importer 也不能证明完整版本化数据迁移。
+- Blocker: 需确认安全交付的可观测信号，以及日志/缓存保留预算（原确认契约中的未决数值）。
+- Unblock condition: 用户确认交付方式与预算后，实施交付清理、未交付 retain/discard 和保守显式导入；不清理旧数据。
 
 ### [ ] T-006 — 公开插件兼容与综合验证
 
-- Status: pending
+- Status: blocked
 - Owner: coordinator
 - Objective: 公开插件兼容与综合验证，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
@@ -172,9 +172,9 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: Not run.
-- Blocker: None.
-- Unblock condition: None.
+- Validation evidence: 用户选择先核实官方版本，而非接受本地 853a80d26/0.84.4。fetch_content 访问官方 raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/package.json 被 fake-IP SSRF 检查阻断；未绕过或擅自改用本地基线。
+- Blocker: 官方版本/提交未核实，T-005 尚未完成。
+- Unblock condition: 官方来源可正常核实或用户提供可核实的固定提交/版本；完成 T-005 后执行该公开契约验收。
 
 ### [ ] T-007 — 移除旧源码并收尾
 
@@ -221,9 +221,13 @@
 
 - 2026-09-06: T-001 依赖/文档收尾，offline lock-only install 后 generators 和 check 通过；新增原生/SDK 回归 98 tests 通过。T-001/T-002 模块阶段完成。T-004 开始：确认 CLI 手工加入 builtInExtensions 而 SDK loader 不加入；组合 factory 的 agentDir 需绑定实例，child launcher 不应猜测任意 process.argv[1]；新私有包还需发行内嵌或其他明确打包接线，不能生成虚构 registry 依赖。
 
+- 2026-09-06: T-004 默认 factory/实例目录/显式 child launcher 接线，新增 lazy ledger 防止默认加载写磁盘。默认装配相关 15 tests、ledger 53 tests、product --noEmit 和 root check 通过。打包采用私有 workspace 随 coding-agent bundle，joint compile 避免声明构建环；未执行构建或安装 smoke。T-004 等待本地构建授权，T-006 待锁定兼容参考。
+
+- 2026-09-06: 用户授权本地构建/临时离线安装，要求先核实官方参考。官方 fetch 被 fake-IP 检查阻断。root offline build、tarball 离线安装与 RPC smoke 通过。npm pack 初始遗漏 hoisted workspace symlinks，build 物化私有 bundle 后包含 158 文件；npm install 离线解析缺 minipass metadata，改用精确 install-lock 的 npm ci 成功。root hydration 被既有 accounts node_modules 断链阻断，保留该路径，coding-agent scoped hydration 成功。临时 smoke 目录已清理。T-005 交付信号/预算待确认；T-006 网络阻塞；不删除旧源。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
 - Evidence: T-001/T-002/T-003 已完成各自模块范围：V2 回归 129 tests + 补充原生/SDK 98 tests；迁入权限 19、journal 3、Subagent 394、组合 6 tests 通过；最新 root check 通过。冻结评测无 diff，root lock 既有 accounts 元数据保留。
-- Limitations: T-004 已开始接线分析，T-005 至 T-007 尚未完成。整体整改未完成，独立安装/默认子进程/插件完整兼容/清理/导入均未验证，未发布。
+- Limitations: T-004 已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；Bun 二进制及真实 provider 未验证。T-005 待交付信号/预算，T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
