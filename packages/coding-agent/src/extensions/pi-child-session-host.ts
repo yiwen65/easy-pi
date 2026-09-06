@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
@@ -101,6 +101,22 @@ export function createPiChildSessionHost(options: {
 			}
 			if (request.storage.kind === "memory" || !request.storage.sessionFile) {
 				manager.appendCustomEntry(IDENTITY_ENTRY, { version: 1, ...identity });
+				if (request.storage.kind === "file") {
+					// Pi normally defers file creation until the first assistant message. A team
+					// must also retain children interrupted before that point. Materialize via
+					// public entries and reopen, so future appends use Pi's persisted state.
+					const file = manager.getSessionFile()!;
+					const handle = await open(file, "wx", 0o600);
+					try {
+						await handle.writeFile(
+							`${[manager.getHeader(), ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+						);
+						await handle.sync();
+					} finally {
+						await handle.close();
+					}
+					manager = SessionManager.open(file, request.storage.directory);
+				}
 			}
 			const settingsManager = SettingsManager.inMemory(structuredClone(options.settings));
 			const loader = new DefaultResourceLoader({

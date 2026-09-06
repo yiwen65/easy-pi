@@ -33,6 +33,16 @@ describe("collaboration contract", () => {
 		expect(parseCollaborationArguments("list_agents", { path_prefix: "/root" })).toEqual({ path_prefix: "/root" });
 	});
 
+	test("accepts Pi max reasoning without silently reducing inherited effort", () => {
+		expect(
+			parseCollaborationArguments("spawn_agent", {
+				task_name: "max-effort",
+				message: "Inspect",
+				reasoning_effort: "max",
+			}).reasoning_effort,
+		).toBe("max");
+	});
+
 	test.each([
 		{},
 		{ task_name: "x", message: "   " },

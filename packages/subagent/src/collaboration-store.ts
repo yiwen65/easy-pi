@@ -1,0 +1,234 @@
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, posix } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { type Static, Type } from "typebox";
+import { Value } from "typebox/value";
+import { COLLABORATION_LIMITS, CollaborationError, validateAgentPath } from "./collaboration-contract.ts";
+
+const ModelSchema = Type.Object(
+	{
+		provider: Type.String({ minLength: 1 }),
+		id: Type.String({ minLength: 1 }),
+		thinkingLevel: Type.Union([
+			Type.Literal("off"),
+			Type.Literal("minimal"),
+			Type.Literal("low"),
+			Type.Literal("medium"),
+			Type.Literal("high"),
+			Type.Literal("xhigh"),
+			Type.Literal("max"),
+		]),
+	},
+	{ additionalProperties: false },
+);
+const AgentSchema = Type.Object(
+	{
+		id: Type.String({ pattern: "^[a-f0-9-]{36}$" }),
+		path: Type.String(),
+		parent: Type.String(),
+		status: Type.Union([
+			Type.Literal("pending"),
+			Type.Literal("running"),
+			Type.Literal("completed"),
+			Type.Literal("failed"),
+			Type.Literal("interrupted"),
+			Type.Literal("closed"),
+		]),
+		model: ModelSchema,
+		turnId: Type.String({ minLength: 1 }),
+		sessionFile: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9._-]+\\.jsonl$" })),
+		result: Type.Optional(Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes })),
+	},
+	{ additionalProperties: false },
+);
+const SnapshotSchema = Type.Object(
+	{
+		version: Type.Literal(1),
+		rootSessionId: Type.String({ minLength: 1 }),
+		cwd: Type.String(),
+		revision: Type.Integer({ minimum: 0 }),
+		agents: Type.Array(AgentSchema, { maxItems: COLLABORATION_LIMITS.maxAgents - 1 }),
+	},
+	{ additionalProperties: false },
+);
+export type StoredCollaborationAgent = Static<typeof AgentSchema>;
+export type CollaborationSnapshot = Static<typeof SnapshotSchema>;
+
+function validateSnapshot(value: unknown): CollaborationSnapshot {
+	if (!Value.Check(SnapshotSchema, value)) throw new CollaborationError("storage_error", "Invalid team snapshot");
+	if (!isAbsolute(value.cwd)) throw new CollaborationError("storage_error", "Invalid team cwd");
+	const paths = new Set<string>();
+	const ids = new Set<string>();
+	for (const agent of value.agents) {
+		validateAgentPath(agent.path);
+		validateAgentPath(agent.parent);
+		if (
+			agent.path === "/root" ||
+			posix.dirname(agent.path) !== agent.parent ||
+			paths.has(agent.path) ||
+			ids.has(agent.id)
+		) {
+			throw new CollaborationError("storage_error", "Invalid team graph");
+		}
+		paths.add(agent.path);
+		ids.add(agent.id);
+	}
+	if (value.agents.some((agent) => agent.parent !== "/root" && !paths.has(agent.parent))) {
+		throw new CollaborationError("storage_error", "Missing parent agent");
+	}
+	return structuredClone(value);
+}
+
+interface Row {
+	snapshot: string;
+	owner: string | null;
+	pid: number | null;
+}
+
+/**
+ * One versioned team snapshot, unrelated to the legacy DAG database. Each commit is durable.
+ * SQLite admission and owner-token checks prevent concurrent control of the same team.
+ */
+export class CollaborationStore {
+	private readonly database: DatabaseSync;
+	private readonly owner = randomUUID();
+	private closed = false;
+	readonly directory: string | undefined;
+	readonly rootSessionId: string;
+	readonly cwd: string;
+
+	constructor(options: { path: string; rootSessionId: string; cwd: string; recoverInterruptedOwner?: boolean }) {
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.rootSessionId) || !isAbsolute(options.cwd)) {
+			throw new CollaborationError("invalid_arguments", "Invalid team identity");
+		}
+		this.rootSessionId = options.rootSessionId;
+		this.cwd = realpathSync(options.cwd);
+		let path = options.path;
+		let fresh = path === ":memory:";
+		if (!fresh) {
+			if (!isAbsolute(path))
+				throw new CollaborationError("invalid_arguments", "Team database path must be absolute");
+			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+			if (lstatSync(dirname(path)).isSymbolicLink())
+				throw new CollaborationError("forbidden", "Unsafe team directory");
+			this.directory = realpathSync(dirname(path));
+			path = join(this.directory, basename(path));
+			for (const candidate of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+				try {
+					const metadata = lstatSync(candidate);
+					if (!metadata.isFile() || metadata.isSymbolicLink())
+						throw new CollaborationError("forbidden", "Unsafe team database file");
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				}
+			}
+			if (!existsSync(path)) {
+				closeSync(openSync(path, "wx", 0o600));
+				fresh = true;
+			}
+		}
+		this.database = new DatabaseSync(path);
+		try {
+			if (fresh) {
+				this.database.exec(
+					"CREATE TABLE team (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL, owner TEXT, pid INTEGER)",
+				);
+				const snapshot: CollaborationSnapshot = {
+					version: 1,
+					rootSessionId: this.rootSessionId,
+					cwd: this.cwd,
+					revision: 0,
+					agents: [],
+				};
+				this.database.prepare("INSERT INTO team VALUES (1, ?, NULL, NULL)").run(JSON.stringify(snapshot));
+			}
+			this.database.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
+			try {
+				const row = this.readRow();
+				const snapshot = this.decode(row);
+				if (row.owner !== null) {
+					if (!Number.isSafeInteger(row.pid) || (row.pid ?? 0) <= 0)
+						throw new CollaborationError("storage_error", "Invalid team owner");
+					let alive = true;
+					try {
+						process.kill(row.pid!, 0);
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+					}
+					if (alive) throw new CollaborationError("busy", "Team is owned by a live controller");
+					if (!options.recoverInterruptedOwner)
+						throw new CollaborationError("interrupted", "Explicit recovery of the interrupted team is required");
+				}
+				for (const agent of snapshot.agents) {
+					if (agent.status === "pending" || agent.status === "running") agent.status = "interrupted";
+				}
+				snapshot.revision++;
+				this.database
+					.prepare("UPDATE team SET snapshot=?, owner=?, pid=? WHERE id=1")
+					.run(JSON.stringify(snapshot), this.owner, process.pid);
+				this.database.exec("COMMIT");
+			} catch (error) {
+				this.database.exec("ROLLBACK");
+				throw error;
+			}
+		} catch (error) {
+			this.database.close();
+			throw error;
+		}
+	}
+
+	private readRow(): Row {
+		if (this.closed) throw new CollaborationError("storage_error", "Team store is closed");
+		const row = this.database.prepare("SELECT snapshot, owner, pid FROM team WHERE id=1").get() as unknown as
+			| Row
+			| undefined;
+		if (!row) throw new CollaborationError("storage_error", "Missing team metadata");
+		return row;
+	}
+
+	private decode(row: Row): CollaborationSnapshot {
+		const snapshot = validateSnapshot(JSON.parse(row.snapshot));
+		if (snapshot.rootSessionId !== this.rootSessionId || snapshot.cwd !== this.cwd) {
+			throw new CollaborationError("forbidden", "Team belongs to another root session or workspace");
+		}
+		return snapshot;
+	}
+
+	read(): CollaborationSnapshot {
+		const row = this.readRow();
+		if (row.owner !== this.owner) throw new CollaborationError("forbidden", "Team ownership was lost");
+		return this.decode(row);
+	}
+
+	/** CAS prevents stale callers from overwriting a newer turn or terminal result. */
+	commit(snapshot: CollaborationSnapshot): CollaborationSnapshot {
+		const next = validateSnapshot(snapshot);
+		if (next.rootSessionId !== this.rootSessionId || next.cwd !== this.cwd)
+			throw new CollaborationError("forbidden", "Invalid team owner");
+		this.database.exec("BEGIN IMMEDIATE");
+		try {
+			const current = this.read();
+			if (current.revision !== next.revision) throw new CollaborationError("busy", "Stale team revision");
+			next.revision++;
+			this.database
+				.prepare("UPDATE team SET snapshot=? WHERE id=1 AND owner=?")
+				.run(JSON.stringify(next), this.owner);
+			this.database.exec("COMMIT");
+			return structuredClone(next);
+		} catch (error) {
+			this.database.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	close(): void {
+		if (this.closed) return;
+		try {
+			this.database.prepare("UPDATE team SET owner=NULL, pid=NULL WHERE id=1 AND owner=?").run(this.owner);
+		} finally {
+			this.closed = true;
+			this.database.close();
+		}
+	}
+}
