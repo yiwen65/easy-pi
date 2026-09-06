@@ -101,7 +101,7 @@
 - AgentPath 是逻辑地址 `/root/<name>`，单段最多 64 ASCII 字符，子级上限 4；相对目标允许 `..` 但不可越过 root。实际授权还须检查调用者 rootSessionId 和 controller 内注册关系，路径格式不是授权。
 - 根树最多 32 个 Agent（含 root/已卸载），最多 4 个活动会话，固定留 1 个 root 控制槽；每邮箱最多 64 条 pending，每消息最多 8192 UTF-8 bytes，fork 快照最多 256 KiB，超限明确失败。上限不是操作系统隔离。
 - wait 默认 30 秒，0 至 10 秒夹至 10 秒，上限 1 小时，非整数/负数/超限拒绝。无 busy polling。
-- fork 缺省 all；none 或 1–999999 的完整 turn 数；模型必须 provider/model，推理值采用 Pi 的 off/minimal/low/medium/high/xhigh。省略继承；不支持的 model/effort 拒绝而非静默降级。暂不暴露没有实现角色解析的 agent_type。
+- fork 缺省 all；none 或 1–999999 的完整 turn 数；模型必须 provider/model，推理值采用 Pi 的 off/minimal/low/medium/high/xhigh/max（T-003 按实际 ThinkingLevel 类型补全 max）。省略继承；不支持的 model/effort 拒绝而非静默降级。暂不暴露没有实现角色解析的 agent_type。
 - 状态 pending→running→completed/failed/interrupted；completed/failed/interrupted 可显式进入下一 running 或 closed；closed 不可复活。completed 不代表交付。权限/容量/上下文/存储/busy 错误分门别类，不回显任意异常内容。
 - 旧模型工具 subagent(tasks[])、ownedPaths/reviewOf 与旧预算/模型路由命令在最终切换时显式退休；旧数据过渡检查仍另行保留，不让旧 DAG 继续接受新任务。
 
@@ -188,13 +188,13 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-003 — 会话树、持久化和原子资源限制
+### [x] T-003 — 会话树、持久化和原子资源限制
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 实现轻量 root-scoped AgentController/registry 和可恢复但不自动运行的状态。
 - Inputs and prerequisites: T-002 宿主，T-001 状态和限额。
-- Scope or files: 拟新增 packages/subagent/src/controller.ts、registry.ts、session-store.ts 及对应测试；按需要复用而非复制现有原子文件工具。
+- Scope or files: packages/subagent/src/collaboration-controller.ts、collaboration-store.ts、test/collaboration-controller.test.ts；coding-agent 原生宿主及测试；契约 reasoning max 补全。
 - Expected output: AgentPath/ID 注册、父子关系、执行 admission、有限驻留、版本化索引及故障恢复规则。
 - Dependencies: T-002.
 - Execution steps:
@@ -205,7 +205,7 @@
   - 并发 spawn 不超限/重名；释放/重复 abort 幂等；目录/版本不可信时拒绝；历史加载没有 provider 请求。
 - Verification method:
   - 确定性并发 barriers；失败注入、重复关闭、跨根访问、断电写入/损坏索引、冷启动合成测试。
-- Validation evidence: Not run.
+- Validation evidence: controller/store + contract 两文件 43 tests passed；实际 Pi host + model runtime view 两文件 14 tests passed。验证并发/同名/总量/嵌套容量、CAS、live-owner 拒绝、dead-owner 显式恢复、未知版本和符号链接不改写、存储失败停止调度、LRU 冷加载不重放。原生未启动子会话冷加载回归先 ENOENT 失败，显式以公开 header/entries 落盘再 reopen 后通过。未模拟硬件断电；SQLite FULL 事务和失败关闭不等于文件系统抗所有断电保证。无真实数据/模型。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -350,9 +350,12 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 
 - 2026-09-07: T-002 完成。新增宿主不改 cwd/env、不复制 auth，显式 parent permissions 拒绝旧 headless auto-allow；支持 create/load/run/context/abort/dispose。初次并发测试因复制带 execute 函数的 Context 导致 DataCloneError，仅修正测试为快照 messages。随后 provider shutdown 独立回归实证 child.unregisterProvider 删除 root provider；通过 ModelRuntime.createSessionView 保留认证/配置并隔离注册表修复，修复前失败、修复后通过。另验证抢先取消 preflight 和活动 stream 取消。9 files / 56 tests 与 root check 通过；计划后续控制器、邮箱/fork、产品切换、旧数据出口和打包仍未完成。
 
+- 2026-09-07: 用户要求继续剩余任务；复核工作区，T-003 开始。采用独立轻量 SQLite registry 保存团队快照及进程所有权，借助事务防止两个控制器同时写入；不复用旧 DAG 表，不读取真实任务数据。死进程遗留所有权只能显式恢复，恢复仅标 interrupted，不执行任务。
+- 2026-09-07: T-003 定向验证完成（43 + 14 tests），最终 root npm run check exit 0、无格式变动/info，task validator 通过。首轮 root check 发现 Pi ThinkingLevel 含 max，契约/存储补齐而非降低继承值；宿主仍拒绝具体模型不支持的 effort。实际宿主证明惰性 session 文件会导致无 assistant 的子会话 ENOENT，已通过公开 entries 独占写入、sync、reopen 修复；不改 SessionManager 内部状态。interrupt 的 abort 在队列外等待，嵌套控制回归通过。旧 DAG/锁/快照未清理，默认尚未切换。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 契约 30/30；T-002 宿主、model session view 及既有相关回归 9 files / 56 tests passed，root check 通过。真实 provider/冻结评测未执行，原安全改动快照保留。
-- Limitations: T-001/T-002 已完成；T-003 至 T-007 尚未实施。下一步在已验证宿主上实现 root-scoped controller/registry 和持久化所有权。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。
+- Evidence: T-001 至 T-003 的最新指定 controller/contract 43 tests、native host/model view 14 tests passed；T-002 既有相关回归历史 9 files / 56 tests passed。真实 provider/冻结评测未执行，原安全改动快照保留。
+- Limitations: T-001 至 T-003 已完成；T-004 至 T-007 待实施。下一步实现持久邮箱、六工具、安全消息注入和 checkpoint-aware fork。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。

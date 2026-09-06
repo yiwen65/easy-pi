@@ -45,6 +45,7 @@ const Reasoning = Type.Union([
 	Type.Literal("medium"),
 	Type.Literal("high"),
 	Type.Literal("xhigh"),
+	Type.Literal("max"),
 ]);
 
 /** Provider-neutral contract: model overrides are explicitly qualified as provider/model. */

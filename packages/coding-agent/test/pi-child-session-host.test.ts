@@ -11,6 +11,8 @@ import {
 	InMemoryCredentialStore,
 	Type,
 } from "@earendil-works/pi-ai";
+import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
+import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
 import type { ChildSession, ChildSessionCreateOptions, ChildSessionPermissions } from "@easy-pi/subagent/session-host";
 import { afterEach, expect, test } from "vitest";
 import type { ExtensionAPI, InlineExtension } from "../src/core/extensions/types.ts";
@@ -248,6 +250,63 @@ test("creation and cold loading do not call the provider; ownership mismatch nev
 	await writeFile(empty, "");
 	await expect(f.create("persisted", full, { kind: "file", directory, sessionFile: empty })).rejects.toThrow();
 	expect(await readFile(empty, "utf8")).toBe("");
+});
+
+test("an unstarted persistent child can be reopened without a provider request", async () => {
+	const f = await fixture();
+	const directory = join(f.root, "unstarted");
+	const first = await f.create("unstarted", full, { kind: "file", directory });
+	const file = first.session.sessionFile!;
+	await first.session.dispose();
+	const reopened = await f.create("unstarted", full, { kind: "file", directory, sessionFile: file });
+	expect(reopened.session.sessionId).toBe(first.session.sessionId);
+	expect(f.faux.state.callCount).toBe(0);
+});
+
+test("controller unload and cold followup preserve native history without replay", async () => {
+	const f = await fixture();
+	const path = join(f.root, "team", "registry.sqlite");
+	const caller = { rootSessionId: "team", agentPath: "/root" };
+	const make = () => {
+		const store = new CollaborationStore({ path, cwd: f.cwd, rootSessionId: "team" });
+		const controller = new CollaborationController({
+			store,
+			host: f.host,
+			agentDir: join(f.root, "agent"),
+			getPermissions: full,
+		});
+		cleanups.push(() => controller.shutdown());
+		return { store, controller };
+	};
+	const first = make();
+	for (let index = 0; index < 4; index++) {
+		f.faux.setResponses([fauxAssistantMessage(`durable-${index}`)]);
+		await first.controller.spawn(caller, `worker${index}`, `task-${index}`, {
+			provider: f.faux.provider.id,
+			id: f.faux.getModel().id,
+			thinkingLevel: "off",
+		});
+		await first.controller.settled();
+	}
+	expect(first.controller.list(caller).filter((agent) => agent.loaded)).toHaveLength(3);
+	expect(first.controller.list(caller)[0].loaded).toBe(false);
+	await first.controller.shutdown();
+	const second = make();
+	expect(second.controller.list(caller).every((agent) => !agent.loaded)).toBe(true);
+	expect(f.faux.state.callCount).toBe(4);
+	let context: Context | undefined;
+	f.faux.setResponses([
+		(request) => {
+			context = request;
+			return fauxAssistantMessage("new explicit answer");
+		},
+	]);
+	await second.controller.followup(caller, "worker0", "explicit followup");
+	await second.controller.settled();
+	expect(f.faux.state.callCount).toBe(5);
+	expect(JSON.stringify(context?.messages)).toContain("durable-0");
+	expect(JSON.stringify(context?.messages)).not.toContain("durable-1");
+	expect(second.store.read().agents[0]).toMatchObject({ status: "completed", result: "new explicit answer" });
 });
 
 test("abort before asynchronous preflight completes cannot start a provider request", async () => {
