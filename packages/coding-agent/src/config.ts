@@ -506,10 +506,10 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.easy-pi/agent/*)
+// User Config Paths (~/.epi/agent/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.easy-pi/agent/). No legacy env fallback. */
+/** Get the agent config directory (e.g., ~/.epi/agent/). No legacy env fallback. */
 export function getAgentDir(): string {
 	const envDir = process.env[ENV_AGENT_DIR];
 	if (envDir) {

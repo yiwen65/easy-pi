@@ -15,7 +15,7 @@
 ## Scope and non-goals
 
 迁移权限和 Subagent 至 pi/packages；删除 V2 产品实现与接线；独立数据目录、默认加载、任务清理、兼容验证和发行准备。
-不发布、不访问真实凭据或迁移/删除旧用户数据。不修改或执行冻结的历史评测。原生工具增强仅在明确收益且保持契约时实施，不引入强制先读后改。
+不发布、不访问真实凭据、不删除旧用户数据。用户后续明确授权将默认目录改为 .epi 并复制迁移真实 session；此授权仅限会话及其目录内附属文件，原件保留，不迁移凭据或其他配置。不修改或执行冻结的历史评测。原生工具增强仅在明确收益且保持契约时实施，不引入强制先读后改。
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -32,9 +32,9 @@
 ## Assumptions and open questions
 
 - Assumption: 用当前 0.84.2 公开参考契约作为初始兼容目标；远端来源及完整兼容尚未验证，不能声明发行完成。
-- Assumption: 建议独立目录 .easy-pi，环境前缀 EASY_PI；保留 Pi 插件 manifest 和模块解析协议。
+- Confirmed: 用户指定独立目录 .epi；产品名 easy-pi、环境前缀 EASY_PI 不变，保留 Pi 插件 manifest 和模块解析协议。
 - Open question: 发布 npm 命名空间与渠道未授权；仅本地实现，发行前再确认。
-- Open question: 导入应显式选择来源，真实迁移不在本次自动执行范围。
+- Confirmed: 用户授权执行 session 迁移；检测到来源 ~/.pi/agent/sessions，目标 ~/.epi/agent/sessions，采用不覆盖的字节保真复制和 SHA-256 校验。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -226,6 +226,8 @@
 - 2026-09-06: 用户授权本地构建/临时离线安装，要求先核实官方参考。官方 fetch 被 fake-IP 检查阻断。root offline build、tarball 离线安装与 RPC smoke 通过。npm pack 初始遗漏 hoisted workspace symlinks，build 物化私有 bundle 后包含 158 文件；npm install 离线解析缺 minipass metadata，改用精确 install-lock 的 npm ci 成功。root hydration 被既有 accounts node_modules 断链阻断，保留该路径，coding-agent scoped hydration 成功。临时 smoke 目录已清理。T-005 交付信号/预算待确认；T-006 网络阻塞；不删除旧源。
 
 - 2026-09-06: T-004 实现与验证已提交 06d7cba32。用户确认 T-005 使用显式“已交付并清理”操作、未交付保留/丢弃选择，以及 256 MiB / 7 天可回收数据预算。未交付成果不受自动删除规则影响。T-005 恢复 in_progress，由 coordinator 串行实施；T-006 继续等待官方基线核实。
+
+- 2026-09-06: 用户新增明确要求“.easy-pi目录改成 .epi 并执行session迁移”。已修改默认身份/文档/路径测试并重建 coding-agent；保留 EASY_PI 环境接口。新增 scripts/migrate-session-data.mjs（默认 dry-run，--apply 才写），校验主会话 v1-v3、复制嵌套附属文件、拒绝符号链接/覆盖冲突/读时变化，私有权限原子发布。3 项 migration node:test、24 项配置/默认装配 Vitest、root check 和 product build 通过。实际从 ~/.pi/agent/sessions 复制 1487 文件（477 主会话、1010 附属文件），33,758,581 bytes；跳过 1 个旧 lease；错误 0。1487 目标哈希与读取快照一致，1487 原文件复核一致；477 主会话在当前 buildSessionContext 内存重建全部成功。审计报告 ~/.epi/agent/migrations/session-migration-2026-09-06.json（0600）。不迁移凭据、不删除原件、不修改冻结评测；运行中旧进程须重启后使用新默认目录。T-005 的历史预算和交付清理仍未完成。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result

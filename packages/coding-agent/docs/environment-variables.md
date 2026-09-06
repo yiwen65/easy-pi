@@ -78,7 +78,7 @@ These variables are read by Pi itself:
 
 | Variable | Description |
 |----------|-------------|
-| `EASY_PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.easy-pi/agent` |
+| `EASY_PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.epi/agent` |
 | `EASY_PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package updates, and install/update telemetry |
@@ -93,3 +93,17 @@ These variables are read by Pi itself:
 | `HTTP_PROXY`, `HTTPS_PROXY` | Proxy outbound HTTP requests |
 
 Provider credentials such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and cloud-provider configuration are listed in [Providers](providers.md#environment-variables-or-auth-file).
+
+### Session directory migration
+
+The default user directory is `~/.epi/agent`; the product name and `EASY_PI_*` overrides are unchanged. Existing processes keep their already-open sessions until restarted. No legacy directory is imported automatically.
+
+From a source checkout, preview an explicit copy of old sessions:
+
+```bash
+node scripts/migrate-session-data.mjs ~/.pi/agent/sessions ~/.epi/agent/sessions
+# After reviewing the preview:
+node scripts/migrate-session-data.mjs ~/.pi/agent/sessions ~/.epi/agent/sessions --apply
+```
+
+The script validates root/project session JSONL headers (versions 1–3) and preserves their bytes, including custom compaction fields. Nested session support files are copied unchanged. It does not move credentials or settings from outside the sessions directory. Existing identical files are skipped; conflicting files, symlinks, and invalid sessions are reported, never overwritten. Keep the original directory: historical absolute references are not rewritten, and a running source session may continue to receive messages after the copied snapshot.

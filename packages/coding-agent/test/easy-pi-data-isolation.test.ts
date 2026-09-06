@@ -42,7 +42,7 @@ describe("easy-pi product identity", () => {
 		expect(resolveProductIdentity()).toEqual({
 			appName: "easy-pi",
 			appTitle: "easy-pi",
-			configDirName: ".easy-pi",
+			configDirName: ".epi",
 			envAgentDir: "EASY_PI_CODING_AGENT_DIR",
 			envSessionDir: "EASY_PI_CODING_AGENT_SESSION_DIR",
 		});
@@ -65,7 +65,7 @@ describe("easy-pi product identity", () => {
 	test("applies independent identity to the actual product manifest", () => {
 		expect(config.APP_NAME).toBe("easy-pi");
 		expect(config.APP_TITLE).toBe("easy-pi");
-		expect(config.CONFIG_DIR_NAME).toBe(".easy-pi");
+		expect(config.CONFIG_DIR_NAME).toBe(".epi");
 		expect(config.ENV_AGENT_DIR).toBe("EASY_PI_CODING_AGENT_DIR");
 		expect(config.ENV_SESSION_DIR).toBe("EASY_PI_CODING_AGENT_SESSION_DIR");
 	});
@@ -75,7 +75,7 @@ describe("easy-pi data isolation", () => {
 	test("ignores legacy overrides and leaves synthetic legacy auth untouched", () => {
 		const legacyAuth = join(home, ".pi", "agent", "auth.json");
 		fixture(legacyAuth, "synthetic legacy sentinel, not credentials");
-		const agentDir = join(home, ".easy-pi", "agent");
+		const agentDir = join(home, ".epi", "agent");
 		expect(config.getAgentDir()).toBe(agentDir);
 		for (const [getter, suffix] of [
 			[config.getAuthPath, "auth.json"],
@@ -106,7 +106,7 @@ describe("easy-pi data isolation", () => {
 		expect(config.getPackageDir()).toBe(join(root, "other-package"));
 		expect(config.getAgentDir()).toBe(join(home, "explicit-agent"));
 		vi.stubEnv("EASY_PI_CODING_AGENT_DIR", "");
-		expect(config.getAgentDir()).toBe(join(home, ".easy-pi", "agent"));
+		expect(config.getAgentDir()).toBe(join(home, ".epi", "agent"));
 	});
 
 	test("loads only easy-pi default user and project skills", () => {
@@ -114,8 +114,8 @@ describe("easy-pi data isolation", () => {
 		for (const [base, name] of [
 			[join(home, ".pi", "agent"), "legacy-user"],
 			[join(cwd, ".pi"), "legacy-project"],
-			[join(home, ".easy-pi", "agent"), "easy-user"],
-			[join(cwd, ".easy-pi"), "easy-project"],
+			[join(home, ".epi", "agent"), "easy-user"],
+			[join(cwd, ".epi"), "easy-project"],
 		]) {
 			fixture(join(base, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: Synthetic skill\n---\nTest`);
 		}
