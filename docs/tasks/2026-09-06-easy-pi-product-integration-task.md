@@ -138,7 +138,7 @@
 
 ### [ ] T-005 — 任务清理和数据导入契约
 
-- Status: blocked
+- Status: in_progress
 - Owner: coordinator
 - Objective: 任务清理和数据导入契约，保持用户确认边界。
 - Inputs and prerequisites: 本契约、当前源码、适用 AGENTS 与历史冻结限制。
@@ -153,8 +153,8 @@
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
 - Validation evidence: 检查 dag-orchestrator.releaseCandidate/gc/sweepRetention：成功 Writer 只生成候选 ref，不等于已交付调用者工作区；自动 retention 默认禁用。未将成功状态当交付自动删除。现有 session importer 也不能证明完整版本化数据迁移。
-- Blocker: 需确认安全交付的可观测信号，以及日志/缓存保留预算（原确认契约中的未决数值）。
-- Unblock condition: 用户确认交付方式与预算后，实施交付清理、未交付 retain/discard 和保守显式导入；不清理旧数据。
+- Blocker: None.
+- Unblock condition: None. 用户已选显式确认交付、256 MiB / 7 天可回收历史预算；未交付成果超限只提示、不自动删除。下一步 coordinator 实施已交付/丢弃/保留操作、确认后 GC 与有界历史保留，然后完成保守显式导入；当前仅完成设计检查，未宣称清理实现已落地。
 
 ### [ ] T-006 — 公开插件兼容与综合验证
 
@@ -225,9 +225,11 @@
 
 - 2026-09-06: 用户授权本地构建/临时离线安装，要求先核实官方参考。官方 fetch 被 fake-IP 检查阻断。root offline build、tarball 离线安装与 RPC smoke 通过。npm pack 初始遗漏 hoisted workspace symlinks，build 物化私有 bundle 后包含 158 文件；npm install 离线解析缺 minipass metadata，改用精确 install-lock 的 npm ci 成功。root hydration 被既有 accounts node_modules 断链阻断，保留该路径，coding-agent scoped hydration 成功。临时 smoke 目录已清理。T-005 交付信号/预算待确认；T-006 网络阻塞；不删除旧源。
 
+- 2026-09-06: T-004 实现与验证已提交 06d7cba32。用户确认 T-005 使用显式“已交付并清理”操作、未交付保留/丢弃选择，以及 256 MiB / 7 天可回收数据预算。未交付成果不受自动删除规则影响。T-005 恢复 in_progress，由 coordinator 串行实施；T-006 继续等待官方基线核实。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
 - Evidence: T-001/T-002/T-003 已完成各自模块范围：V2 回归 129 tests + 补充原生/SDK 98 tests；迁入权限 19、journal 3、Subagent 394、组合 6 tests 通过；最新 root check 通过。冻结评测无 diff，root lock 既有 accounts 元数据保留。
-- Limitations: T-004 已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；Bun 二进制及真实 provider 未验证。T-005 待交付信号/预算，T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
+- Limitations: T-004 已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；Bun 二进制及真实 provider 未验证。T-005 交付信号/预算已确认，清理与导入仍待实施；T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
