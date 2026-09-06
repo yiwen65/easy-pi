@@ -152,9 +152,9 @@
   - 本任务范围满足首版契约，不改变无关文件与真实用户数据。
 - Verification method:
   - 定向离线合成数据测试、引用检查；集成后根 npm run check。
-- Validation evidence: 检查 dag-orchestrator.releaseCandidate/gc/sweepRetention：成功 Writer 只生成候选 ref，不等于已交付调用者工作区；自动 retention 默认禁用。未将成功状态当交付自动删除。现有 session importer 也不能证明完整版本化数据迁移。
-- Blocker: None.
-- Unblock condition: None. 用户已选显式确认交付、256 MiB / 7 天可回收历史预算；未交付成果超限只提示、不自动删除。下一步 coordinator 实施已交付/丢弃/保留操作、确认后 GC 与有界历史保留，然后完成保守显式导入；当前仅完成设计检查，未宣称清理实现已落地。
+- Validation evidence: 工作区已实现 /subagent-cleanup <run-id> [delivered|discard|keep]，权限/仓库范围检查、持久化显式确认、候选释放与 GC；只裁剪已确认且完整释放的历史，默认 256 MiB / 7 天、每轮至多 100 runs。父进程启动只维护既有 ledger、不自动续跑。Writer 启动前写保留标记，中断/取消保留编辑，未确认的恢复 reconciliation 拒绝删除；确认后清理 owned child runtime 与工作树。显式 session 导入已完成，见迁移记录。root npm run check 通过；最新两次定向 6 files 均为 148 passed / 1 timeout，5 个非 orchestrator 文件均通过。新增中断 Writer 与低层保留测试均有通过记录；尚无全绿的最新 orchestrator 文件结果。
+- Blocker: DAG 回归存在不同测试位置的 30 秒超时，原因未证实，不能宣称验证完成。预算目前仅核算 ledger live pages，尚未覆盖所有受保护工作树/日志/cache 的磁盘占用及超额告警。
+- Unblock condition: 定位 DAG 超时并通过修改文件回归；补齐可回收文件/受保护数据占用核算，验证产品构建与接线，审查后提交。不得将未确认产物或主会话纳入自动删除。
 
 ### [ ] T-006 — 公开插件兼容与综合验证
 
@@ -229,9 +229,15 @@
 
 - 2026-09-06: 用户新增明确要求“.easy-pi目录改成 .epi 并执行session迁移”。已修改默认身份/文档/路径测试并重建 coding-agent；保留 EASY_PI 环境接口。新增 scripts/migrate-session-data.mjs（默认 dry-run，--apply 才写），校验主会话 v1-v3、复制嵌套附属文件、拒绝符号链接/覆盖冲突/读时变化，私有权限原子发布。3 项 migration node:test、24 项配置/默认装配 Vitest、root check 和 product build 通过。实际从 ~/.pi/agent/sessions 复制 1487 文件（477 主会话、1010 附属文件），33,758,581 bytes；跳过 1 个旧 lease；错误 0。1487 目标哈希与读取快照一致，1487 原文件复核一致；477 主会话在当前 buildSessionContext 内存重建全部成功。审计报告 ~/.epi/agent/migrations/session-migration-2026-09-06.json（0600）。不迁移凭据、不删除原件、不修改冻结评测；运行中旧进程须重启后使用新默认目录。T-005 的历史预算和交付清理仍未完成。
 
+- 2026-09-06: 用户随后明确授权将 ~/.pi/agent/auth.json 凭据迁入 ~/.epi/agent/auth.json；锁定源/目标、仅合并缺失项，新增 3 项、冲突 0，目标 0600，源保留且验证未变；未输出密钥，未验证 token 有效性。该外部操作不属于后续自动迁移授权。
+
+- 2026-09-06: T-005 独立 /tmp 合成复现完成 retain 两次、默认拒绝 reconciliation、显式丢弃清理，全程约 201 ms。原低层 Vitest 曾反复 30 秒超时，临时阶段日志加入/移除后均通过，未证实根因；诊断改动已撤回，未调整生产代码掩盖超时。两轮 6-file thread-pool 回归均 148/149，分别在 Writer repair 与 transitive Writer 测试超时；前者独立重跑通过。fork-pool orchestrator 55/56，另一 Reviewer closure 测试超时，故不能仅归因于线程池。root check 通过且只格式化本任务文件；无关 lockfile 35 行保留。下一步在失败进程内采集 await/Git/lease 边界，区分子进程停顿和编排等待；不再盲目全量重跑。当前实现保持未提交，T-005 继续 in_progress。
+
+- 2026-09-06: 用户确认并授权以 Codex V2 交互语义、Pi 原生会话和共享工作区替换当前 DAG，独立替换执行权威为 `2026-09-06-codex-subagent-replacement-task.md`。本任务 T-002/T-004 历史通过证据仅覆盖旧实现；默认切换后须以新计划 T-005/T-007 重验装配，T-005 清理/数据保护由新计划 T-006 共同覆盖。原未提交安全改动已保存回退快照，不表示旧超时已修复。官方 Pi 兼容与发布阻塞保持不变。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
 - Evidence: T-001/T-002/T-003 已完成各自模块范围：V2 回归 129 tests + 补充原生/SDK 98 tests；迁入权限 19、journal 3、Subagent 394、组合 6 tests 通过；最新 root check 通过。冻结评测无 diff，root lock 既有 accounts 元数据保留。
-- Limitations: T-004 已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；Bun 二进制及真实 provider 未验证。T-005 交付信号/预算已确认，清理与导入仍待实施；T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
+- Limitations: T-004 已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；Bun 二进制及真实 provider 未验证。T-005 导入已完成，清理实现待最终验证及全文件占用核算；T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
