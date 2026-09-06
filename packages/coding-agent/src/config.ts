@@ -2,6 +2,7 @@ import { accessSync, constants, existsSync, readFileSync, realpathSync } from "f
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
+import { type ProductConfig, resolveProductIdentity } from "./core/product-identity.ts";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
 
@@ -470,10 +471,7 @@ export function getBundledInteractiveAssetPath(name: string): string {
 interface PackageJson {
 	name?: string;
 	version?: string;
-	piConfig?: {
-		name?: string;
-		configDir?: string;
-	};
+	piConfig?: ProductConfig;
 }
 
 let pkg: PackageJson = {};
@@ -484,16 +482,16 @@ try {
 	if (err.code !== "ENOENT") throw e;
 }
 
-const piConfigName: string | undefined = pkg.piConfig?.name;
+const identity = resolveProductIdentity(pkg.piConfig);
 export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
-export const APP_NAME: string = piConfigName || "pi";
-export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
-export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
+export const APP_NAME: string = identity.appName;
+export const APP_TITLE: string = identity.appTitle;
+export const CONFIG_DIR_NAME: string = identity.configDirName;
 export const VERSION: string = pkg.version || "0.0.0";
 
-// e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
-export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
-export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
+// User data overrides are product-specific; PI_PACKAGE_DIR only relocates assets.
+export const ENV_AGENT_DIR = identity.envAgentDir;
+export const ENV_SESSION_DIR = identity.envSessionDir;
 
 export function expandTildePath(path: string): string {
 	return normalizePath(path);
@@ -508,10 +506,10 @@ export function getShareViewerUrl(gistId: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.pi/agent/*)
+// User Config Paths (~/.easy-pi/agent/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.pi/agent/) */
+/** Get the agent config directory (e.g., ~/.easy-pi/agent/). No legacy env fallback. */
 export function getAgentDir(): string {
 	const envDir = process.env[ENV_AGENT_DIR];
 	if (envDir) {
