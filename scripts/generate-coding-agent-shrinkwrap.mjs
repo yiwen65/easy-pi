@@ -10,6 +10,7 @@ const codingAgentDir = join(repoRoot, "packages/coding-agent");
 const rootLockfilePath = join(repoRoot, "package-lock.json");
 const shrinkwrapPath = join(codingAgentDir, "npm-shrinkwrap.json");
 const internalPackagePrefix = "@earendil-works/pi-";
+const bundledNames = new Set(readJson(join(codingAgentDir, "package.json")).bundleDependencies ?? []);
 const allowedInstallScriptPackages = new Map([
 	["@google/genai@1.52.0", "preinstall is a no-op in the published package"],
 	["protobufjs@7.6.5", "postinstall only warns about protobufjs version scheme mismatches"],
@@ -49,6 +50,7 @@ function sortedPackageEntry(entry) {
 		"license",
 		"dependencies",
 		"optionalDependencies",
+		"bundleDependencies",
 		"peerDependencies",
 		"peerDependenciesMeta",
 		"bin",
@@ -94,6 +96,7 @@ function copyPackageJsonEntry(packageJson, options) {
 		"license",
 		"dependencies",
 		"optionalDependencies",
+		"bundleDependencies",
 		"peerDependencies",
 		"peerDependenciesMeta",
 		"bin",
@@ -136,7 +139,7 @@ function getInternalWorkspaces(lockPackages) {
 		if (!lockPath.startsWith("packages/") || lockPath.includes("/node_modules/") || !entry.name || !entry.version) {
 			continue;
 		}
-		if (!entry.name.startsWith(internalPackagePrefix)) {
+		if (!entry.name.startsWith(internalPackagePrefix) && !bundledNames.has(entry.name)) {
 			continue;
 		}
 
@@ -196,7 +199,8 @@ function addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, name, works
 	const packageJson = workspace.packageJson;
 	const outputPath = `node_modules/${name}`;
 	const entry = copyPackageJsonEntry(packageJson, { includeName: false });
-	entry.resolved = registryTarballUrl(name, packageJson.version);
+	if (bundledNames.has(name)) entry.inBundle = true;
+	else entry.resolved = registryTarballUrl(name, packageJson.version);
 
 	shrinkwrapPackages[outputPath] = sortedPackageEntry(entry);
 	addedPaths.add(outputPath);

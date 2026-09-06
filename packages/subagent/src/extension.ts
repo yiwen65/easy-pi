@@ -1300,7 +1300,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 			}
 			return preferences?.maxTokens ?? configuredSessionDefault;
 		};
-		const ledger = options.ledger ?? new RunLedger(ledgerPath);
+		const ledger = options.ledger ?? new RunLedger(ledgerPath, { lazy: true });
 		const mirrorRoot =
 			options.mirrorRoot ??
 			(ledgerPath === ":memory:"
