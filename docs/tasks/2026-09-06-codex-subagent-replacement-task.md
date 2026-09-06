@@ -209,13 +209,13 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 邮箱、六工具与上下文继承
+### [x] T-004 — 邮箱、六工具与上下文继承
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 实现 Codex V2 式通信、等待和 fork，保证 Pi 上下文/压缩语义正确。
 - Inputs and prerequisites: T-003 controller/store；T-001 语义契约。
-- Scope or files: 拟新增 packages/subagent/src/mailbox.ts、tools.ts、context-fork.ts；coding-agent Pi adapter；必要时最小公开 session hook，而非私有 monkey patch。
+- Scope or files: packages/subagent/src/collaboration-mailbox.ts、collaboration-controller.ts、collaboration-store.ts、context-fork.ts、contract/session-host；coding-agent/src/extensions/pi-collaboration-tools.ts、pi-child-session-host.ts；指定测试与 docs/collaboration.md。
 - Expected output: spawn_agent/send_message/followup_task/wait_agent/interrupt_agent/list_agents 与有界自定义消息。
 - Dependencies: T-003.
 - Execution steps:
@@ -228,7 +228,7 @@
   - 六工具返回与事件可验证；wait 前/中/后到达消息不丢；闲置父不因结果启动；fork 压缩前后都无错配/历史复活。
 - Verification method:
   - mailbox/六工具指定测试；faux provider 检查实际请求上下文；checkpoint、嵌套 fork、消息命令注入和模型覆盖测试。
-- Validation evidence: 部分完成：context-fork 四项 + controller/contract 合计 3 files / 47 tests passed；native host/checkpoint context 2 files / 33 tests passed，root npm run check exit 0。all/none/N 使用有效 branch，剔除未完成工具批次，不伪造结果；256 KiB 超限拒绝。Pi adapter 的 N 只计最近 compaction 之后可证明边界的完整原始 turn，不将 replacement summary 当旧完整 turn。新 child 通过 appendCompactionCheckpoint 安装 fork；实际 faux 请求验证旧分支/压缩淘汰内容不复活，冷加载不重放。邮箱、六工具和安全消息注入尚未实施，不能认定 T-004 完成。
+- Validation evidence: 完成内部原生根/子会话接线：subagent controller/mailbox/contract/fork 4 files / 55 tests passed；coding-agent 六工具/host/model-view/checkpoint/harness/default-composition/sdk-stream 7 files / 58 tests passed；root npm run check exit 0。实际 faux 执行六工具、嵌套 spawn/peer message、不同 provider 覆盖、unsupported effort 拒绝、原生 user steering 唤醒 wait；send/完成通知不启动 idle。完成前预留父邮箱容量，结果与终态同事务保存；调用取消在创建期间不启动 child。native 文件 sync 后确认，失败阻止请求、重启不重投，后续 checkpoint 不复活旧正文。公开 Agent.transformContext wrapper 在原 Pi preflight 前注入且 shutdown 恢复原接口，无私有字段修改。all/none/N 与 256 KiB 边界保持，N 仅计最新 compaction 后原始完整 turn。docs/collaboration.md 说明内部装配接口；CLI/SDK 默认切换仍归 T-005，未运行真实 provider/旧数据清理/发行打包。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -356,9 +356,13 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 - 2026-09-07: T-003 已提交 `00a67f052`；T-004 开始，coordinator 先实现从宿主有效上下文生成有界 fork，再接持久邮箱和工具。保持新工具未默认接线。
 - 2026-09-07: T-004 fork 子部分验证通过（47 + 33 tests，root check exit 0）。TypeScript lib 不含 findLast，改用已有兼容 reverse/find，不改 tsconfig。审查确认 checkpoint 不证明原始 turn 边界，N 保守只接受最近 compaction 后完整 turn，不足明确拒绝；all 保留有效 summary。新增子会话提前落盘 lesson。下一续接点：coordinator 实现持久消息 ID/消费位置和完成通知，然后安全注入与六工具；T-004 保持 in_progress。
 
+- 2026-09-07: 用户要求继续邮箱和六工具接线，T-004 继续由 coordinator 串行实施。邮箱与 task receipt 作为 version 1 snapshot 的可选扩展，旧快照仍可只读式恢复状态；每轮启动前预留父邮箱 completion 槽，结果与终态同事务提交，不能因邮箱被填满丢完成通知。send 不加载/启动目标；wait 仅订阅 mailbox/user-input，无轮询。新 Pi adapter 初版在 awaited extension context 边界使用公开 sendCustomMessage(triggerTurn:false) 持久写入并按 ID 去重；后经 preflight 顺序审查前移到公开 Agent.transformContext 宿主接口（见下条）；没有首条 assistant 的 root 尚未落盘时不提前 ack。默认装配/T-005 尚未切换。
+
+- 2026-09-07: T-004 完成，最新 11 files / 113 tests passed、root check exit 0。六工具首轮测试的立即 interrupt 在 child preflight 内生效，故第二次 provider 请求未发生；测试增加显式 provider-start barrier 后验证 active-stream interrupt，不通过延时猜测。审查发现 extension context 在 compaction preflight 后，改为 session_start 安装公开 transform wrapper，并新增原 preflight 入口/关闭恢复回归。接收端处理 root 惰性文件和 ack 失败，原生重启/checkpoint 测试证明不重复或复活旧消息。保留 root lifecycle/default switch 为 T-005；本轮无 legacy/lock/frozen eval 修改。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: 最新 controller/contract/fork 47 tests、native host/checkpoint context 33 tests passed，root npm run check exit 0；T-002/T-003 的其他回归见各任务历史记录。真实 provider/冻结评测未执行，原安全改动快照保留。
-- Limitations: T-001 至 T-003 已完成；T-004 正在实施；T-005 至 T-007 待实施。下一步实现持久邮箱、六工具、安全消息注入和 checkpoint-aware fork。未切换默认工具，不宣称替换完成、Codex 全量兼容或可发布。
+- Evidence: 最新 subagent 4 files / 55 tests、coding-agent 7 files / 58 tests passed，共 113 tests；root npm run check exit 0。真实 provider/冻结评测未执行，原安全改动快照保留。
+- Limitations: T-001 至 T-004 已完成；T-005 至 T-007 待实施。六工具已在显式装配的原生根/子 SDK 会话验收，尚非默认 CLI/SDK 工具面。下一步 T-005 默认装配、Grok/生命周期与共享写入验收，再做历史预算/旧调度退役/打包。不宣称 Codex 全量兼容或可发布。

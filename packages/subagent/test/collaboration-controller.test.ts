@@ -214,6 +214,7 @@ test("a dead owner's running state requires explicit recovery and becomes interr
 		path: "/root/a",
 		parent: "/root",
 		status: "running",
+		completionPending: true,
 		model,
 		turnId: randomUUID(),
 	});
@@ -227,6 +228,92 @@ test("a dead owner's running state requires explicit recovery and becomes interr
 	const recovered = new CollaborationStore({ path, cwd, rootSessionId: "team", recoverInterruptedOwner: true });
 	cleanups.push(() => recovered.close());
 	expect(recovered.read().agents[0].status).toBe("interrupted");
+	expect(recovered.read().messages).toMatchObject([
+		{ from: "/root/a", to: "/root", kind: "result", status: "interrupted" },
+	]);
+});
+
+test("cancellation during host creation preserves the child but never starts its task", async () => {
+	const f = fixture(true);
+	const original = f.host.create;
+	let entered!: () => void;
+	let release!: () => void;
+	const creating = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	f.host.create = async (options) => {
+		entered();
+		await released;
+		return original(options);
+	};
+	const abort = new AbortController();
+	const spawn = f.controller.spawn(caller, "cancelled", "must not run", model, undefined, abort.signal);
+	await creating;
+	abort.abort();
+	release();
+	await expect(spawn).rejects.toThrow(/cancelled/);
+	await expect(f.controller.send(caller, "/root", "cancelled send", abort.signal)).rejects.toThrow(/cancelled/);
+	expect(f.controller.pending(caller)).toEqual([]);
+	expect(f.runs).toEqual([]);
+	expect(f.store.read().agents[0]).toMatchObject({
+		status: "interrupted",
+		completionPending: false,
+		sessionFile: "session.jsonl",
+	});
+	await f.controller.followup(caller, "cancelled", "explicit retry");
+	expect(f.runs).toEqual(["explicit retry"]);
+});
+
+test("send is durable but never starts or reloads an idle target; only the receiver can acknowledge", async () => {
+	const f = fixture(true);
+	await f.controller.spawn(caller, "a", "initial", model);
+	f.finishes.get("/root/a")?.({ status: "completed", text: "result" });
+	await f.controller.settled();
+	const child = { ...caller, agentPath: "/root/a" };
+	const id = await f.controller.send(caller, "a", "queued only");
+	expect(f.runs).toEqual(["initial"]);
+	await f.controller.acknowledge(caller, [id]);
+	expect(f.controller.pending(child)).toMatchObject([{ id, text: "queued only", from: "/root" }]);
+	await expect(f.controller.send({ ...caller, rootSessionId: "other" }, "a", "escape")).rejects.toThrow(
+		/another root/,
+	);
+	await f.controller.shutdown();
+	const restored = new CollaborationStore({ path: join(f.cwd, "registry.sqlite"), cwd: f.cwd, rootSessionId: "team" });
+	cleanups.push(() => restored.close());
+	expect(restored.read().messages?.some((message) => message.id === id)).toBe(true);
+	expect(f.runs).toEqual(["initial"]);
+});
+
+test("completion reserves mailbox capacity before admission, so a full inbox cannot lose the result", async () => {
+	const f = fixture();
+	await f.controller.spawn(caller, "a", "task", model);
+	for (let index = 0; index < 63; index++) await f.controller.send(caller, "/root", `message ${index}`);
+	await expect(f.controller.send(caller, "/root", "overflow")).rejects.toThrow(/full/);
+	await expect(f.controller.spawn(caller, "b", "task", model)).rejects.toThrow(/full/);
+	f.finishes.get("/root/a")?.({ status: "completed", text: "retained result" });
+	await f.controller.settled();
+	expect(f.controller.pending(caller)).toHaveLength(64);
+	expect(f.controller.pending(caller)[63]).toMatchObject({ from: "/root/a", kind: "result", text: "retained result" });
+	await f.controller.acknowledge(
+		caller,
+		f.controller.pending(caller).map((message) => message.id),
+	);
+	const receipt = await f.controller.followup(caller, "a", "explicit followup");
+	expect(f.store.read().agents[0].taskMessage).toMatchObject({ id: receipt, text: "explicit followup", kind: "task" });
+});
+
+test("failed acknowledgement retains pending messages and stops future admission", async () => {
+	const f = fixture();
+	const id = await f.controller.send(caller, "/root", "retained");
+	vi.spyOn(f.store, "commit").mockImplementationOnce(() => {
+		throw new Error("disk failure");
+	});
+	await expect(f.controller.acknowledge(caller, [id])).rejects.toThrow(/persistence failed/);
+	expect(f.store.read().messages).toMatchObject([{ id, text: "retained" }]);
+	await expect(f.controller.send(caller, "/root", "later")).rejects.toThrow(/operator inspection/);
 });
 
 test("unknown snapshots and symlink paths are rejected without overwriting source files", () => {
