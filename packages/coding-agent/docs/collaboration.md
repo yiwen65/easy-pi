@@ -1,6 +1,27 @@
 # Native collaboration wiring
 
-This is the internal easy-pi replacement path, not a new public npm API. The CLI/SDK default switch and Grok integration are tracked separately in T-005 of `docs/tasks/2026-09-06-codex-subagent-replacement-task.md` at the repository root. The old DAG default has not been switched by T-004.
+The CLI/SDK built-in factory now composes native collaboration instead of the old DAG. The six tools are registered when the root session binds its extensions; discovery/help alone opens no team. Persistent teams live under `.epi/agent/teams/<root-session-id>/`; ephemeral roots use memory only. These are internal host APIs, not a new public npm API. Custom ResourceLoaders remain embedding-owned.
+
+## Grok-TUI: `/agents`
+
+Run `/agents` even while root is working. Select a child with Up/Down and Enter to watch its independent session. The focused panel displays model/effort, native history path, execution/residency status, streaming assistant text/thinking, tool calls and tool output. PageUp/PageDown scroll the bounded preview. Alt+Left/Right switches agents; selecting root returns to the unchanged main editor. Escape returns to the list, then closes the panel. Closing the panel does **not** cancel root or children.
+
+Within a child view:
+
+| Default key | Action | Configurable binding |
+| --- | --- | --- |
+| Ctrl+S | Compose a passive message; Enter submits, Escape cancels | `app.agents.message` |
+| Ctrl+F | Compose an explicit new task for an idle child | `app.agents.followup` |
+| Ctrl+K | Request interrupt; Enter confirms, Escape cancels | `app.agents.interrupt` |
+| Alt+Left / Alt+Right | Previous / next agent | `app.agents.previous` / `app.agents.next` |
+
+Accepted is not consumed/completed. Busy followups are rejected, never silently queued. Rejected drafts remain in the panel for correction. Root tool filters apply to operator actions too. Children inherit live root permissions and cannot use removed root tools, including tools removed mid-turn. The default host reloads only already-approved file extensions, not fresh child extension discovery; inline/custom ResourceLoader integrations must use the explicit host composition below for their child factories.
+
+The viewer is display-only: it does not replace the active `AgentSessionRuntime`, consume mail, inject transcript text, load an idle execution slot, or start a provider call. Event subscriptions replace polling: panel repaint listeners detach on close, and native monitoring detaches on child unload/root shutdown. Preview text is capped at 64 Ki UTF-16 code units, initialized from the latest 100 effective messages. Images are labeled rather than decoded. Cold inspection refuses native files over 4 MiB, symlinks and unknown/mismatched identity/version; it never migrates or rewrites them. The history path identifies the full retained JSONL. This is a runtime inspector, not a full tree/export/editor replacement.
+
+## Upgrade boundary
+
+These changes affect the updated source/new builds. Existing running sessions are not hot-switched. Drain legacy DAG runs using their original build before installing a new build; a legacy child environment is rejected by the new built-in harness rather than silently becoming an unrestricted root. Old ledgers/worktrees are not converted, cleaned or replayed. `/agents recover` explicitly acquires a dead-owner team without restarting its tasks; a live owner still blocks recovery. New history disposition/budgets and old-code/package retirement remain T-006/T-007, not completed by the viewer.
 
 ## Host composition
 

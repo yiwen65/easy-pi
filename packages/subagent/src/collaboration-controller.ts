@@ -37,6 +37,7 @@ export class CollaborationController {
 	private failure: unknown;
 	private shutdownPromise: Promise<void> | undefined;
 	private readonly activity = new CollaborationMailboxActivity();
+	private readonly observers = new Set<() => void>();
 
 	constructor(options: {
 		store: CollaborationStore;
@@ -96,6 +97,34 @@ export class CollaborationController {
 				status: agent.status,
 				loaded: this.sessions.has(agent.path),
 			}));
+	}
+
+	/** Observation never loads a session, admits work, or consumes mailbox messages. */
+	subscribe(listener: () => void): () => void {
+		this.assertReady();
+		this.observers.add(listener);
+		return () => this.observers.delete(listener);
+	}
+
+	inspect(caller: ChildSessionIdentity, target: string): StoredCollaborationAgent & { sessionPath?: string } {
+		this.assertReady();
+		const record = this.target(caller, target);
+		return {
+			...record,
+			...(this.store.directory && record.sessionFile
+				? { sessionPath: join(this.store.directory, record.id, record.sessionFile) }
+				: {}),
+		};
+	}
+
+	private changed(): void {
+		for (const listener of this.observers) {
+			try {
+				listener();
+			} catch {
+				/* A display observer is never execution authority. */
+			}
+		}
 	}
 
 	/** Trusted controller API; fork preparation belongs to the tool/context adapter, not this method. */
@@ -255,6 +284,7 @@ export class CollaborationController {
 			if (!idle) throw new CollaborationError("limit_reached", "No idle child session can be unloaded");
 			await idle[1].dispose();
 			this.sessions.delete(idle[0]);
+			this.changed();
 		}
 		const session = await this.host.create({
 			rootSessionId: this.store.rootSessionId,
@@ -283,6 +313,7 @@ export class CollaborationController {
 			this.update(record.path, (current) => {
 				current.sessionFile = basename(session.sessionFile!);
 			});
+		this.changed();
 		return session;
 	}
 
@@ -302,8 +333,10 @@ export class CollaborationController {
 			this.activity.close();
 			// A failed durable update has an uncertain outcome. Stop rather than replay it.
 			for (const session of this.sessions.values()) void session.abort().catch(() => undefined);
+			this.changed();
 			throw new CollaborationError("storage_error", "Team persistence failed; inspect retained sessions");
 		}
+		this.changed();
 	}
 
 	private start(
@@ -341,6 +374,7 @@ export class CollaborationController {
 			})
 			.finally(() => {
 				this.active.delete(record.path);
+				this.changed();
 			});
 		this.active.set(record.path, task);
 		return taskMessage.id;
@@ -409,6 +443,8 @@ export class CollaborationController {
 		if (this.shutdownPromise) return this.shutdownPromise;
 		this.stopping = true;
 		this.activity.close();
+		this.changed();
+		this.observers.clear();
 		this.shutdownPromise = (async () => {
 			await this.queue;
 			// Do not hold the serialization queue while finish() persists an aborted turn.

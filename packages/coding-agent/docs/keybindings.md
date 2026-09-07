@@ -162,6 +162,20 @@ These actions apply to user-prompt navigation in the Grok TUI. On macOS, the `su
 | `app.prompt.next` | `super+down`, `alt+down` | Jump to the next user prompt |
 | `app.prompt.list` | `super+g`, `alt+g` | Open the user prompt jump panel |
 
+### Native Agent Viewer
+
+Open `/agents` in Grok-TUI; Up/Down selects, Enter watches, Escape returns to the list/root. Within the child view:
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.agents.message` | `ctrl+s` | Compose a passive message (does not start an idle agent) |
+| `app.agents.followup` | `ctrl+f` | Compose a new task for an idle child |
+| `app.agents.interrupt` | `ctrl+k` | Confirm interrupt; shared edits are retained |
+| `app.agents.previous` | `alt+left` | Previous agent; root returns to the main editor |
+| `app.agents.next` | `alt+right` | Next agent |
+
+`tui.select.pageUp` / `tui.select.pageDown` scroll the preview. Closing the viewer never cancels an agent. See [Native collaboration](collaboration.md) for limits and upgrade boundaries.
+
 ### Display and Message Queue
 
 | Keybinding id | Default | Description |

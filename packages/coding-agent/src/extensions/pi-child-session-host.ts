@@ -52,8 +52,12 @@ export function preparePiCollaborationFork(
 export function createPiChildSessionHost(options: {
 	modelRuntime: ModelRuntime;
 	settings: Settings;
+	getTools?: () => string[];
+	observeSession?: (identity: Readonly<ChildSessionIdentity>, session: AgentSession) => () => void;
 	registerTools: (identity: Readonly<ChildSessionIdentity>, pi: ExtensionAPI, getSession: () => AgentSession) => void;
 	additionalExtensions?: (identity: Readonly<ChildSessionIdentity>) => InlineExtension[];
+	/** Already-approved root extension files, without fresh child discovery. */
+	additionalExtensionPaths?: string[];
 	/** Trusted embedding control, also used by isolated tests. */
 	noExtensions?: boolean;
 }): ChildSessionHost {
@@ -151,17 +155,23 @@ export function createPiChildSessionHost(options: {
 				agentDir: request.agentDir,
 				settingsManager,
 				noExtensions: options.noExtensions,
+				additionalExtensionPaths: options.additionalExtensionPaths,
 				extensionFactories: [
 					{
 						name: "easy-pi-child",
 						factory: createEasyPiHarness({
 							nativeSession: {
 								getPermissions: request.getPermissions,
-								registerTools: (pi) =>
+								registerTools: (pi) => {
+									pi.on("tool_call", (event) => {
+										if (options.getTools && !options.getTools().includes(event.toolName))
+											return { block: true, reason: "Tool disabled in the live root session" };
+									});
 									options.registerTools(identity, pi, () => {
 										if (!boundSession) throw new CollaborationError("busy", "Child session is not bound");
 										return boundSession;
-									}),
+									});
+								},
 							},
 						}),
 					},
@@ -180,6 +190,7 @@ export function createPiChildSessionHost(options: {
 				settingsManager,
 				sessionManager: manager,
 				resourceLoader: loader,
+				tools: options.getTools?.(),
 			});
 			boundSession = session;
 			let extensionFailed = false;
@@ -198,6 +209,7 @@ export function createPiChildSessionHost(options: {
 				throw error;
 			}
 
+			const stopObserving = options.observeSession?.(identity, session);
 			let active: Promise<ChildTurnResult> | undefined;
 			let interrupted = false;
 			let closing: Promise<void> | undefined;
@@ -230,6 +242,7 @@ export function createPiChildSessionHost(options: {
 					if (extensionFailed) throw new CollaborationError("forbidden", "Child extension authority failed");
 					if (active) throw new CollaborationError("busy", "Child session is already running");
 					interrupted = false;
+					if (options.getTools) session.setActiveToolsByName(options.getTools());
 					const operation = async (): Promise<ChildTurnResult> => {
 						if (closed || interrupted) return { status: "interrupted", text: "" };
 						let last: AssistantMessage | undefined;
@@ -302,6 +315,7 @@ export function createPiChildSessionHost(options: {
 							await active;
 							await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 						} finally {
+							stopObserving?.();
 							session.dispose();
 						}
 					})();

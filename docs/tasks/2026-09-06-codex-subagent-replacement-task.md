@@ -232,25 +232,25 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-005 — 产品交互、状态和共享工作区验收
+### [x] T-005 — 产品交互、状态和共享工作区验收
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 默认装配新控制器，显示真实 Agent 活动/结果，验证替代旧 DAG 的用户路径。
 - Inputs and prerequisites: T-004 六工具通过；新旧默认接线切换尚未对用户发布。
-- Scope or files: packages/subagent/src/extension.ts；coding-agent/src/extensions/easy-pi.ts、index.ts；interactive-grok/components/grok-tool-execution.ts；相关 prompt/权限映射与产品文档。
+- Scope or files: 新 controller 观察接口；coding-agent/src/extensions 原生 root 装配/运行观察、easy-pi.ts、index.ts；SDK 实例绑定；interactive-grok agent 面板、可配置按键、定向测试与产品文档。保留旧 extension.ts dirty。
 - Expected output: /agents 等最小检查/显式控制入口、根树活动和中断展示；去除新路径 DAG/ownedPaths/Reviewer 保证措辞。
 - Dependencies: T-004.
 - Execution steps:
   1. CLI/SDK 默认工厂和子工厂绑定同一个根树 controller；第三方自定义 ResourceLoader 仍由 host 负责。
   2. 新工具全部接入权限和审计，不能只改旧 subagent 名字后绕开特判；共享目录不是权限扩大授权。
-  3. 结果有可检查来源，等待/完成/错误/中断区分；重启只展示保留任务。
+  3. /agents 在 Grok 内展示 agent 列表、独立运行现场（文本/工具/状态）、切换与返回 root；选中 agent 可发消息、追加任务和中断。观察不切换 AgentSessionRuntime、不触发推理；窗口关闭不取消任务，订阅在关闭/根替换时释放。结果有来源；重启只展示保留任务。
   4. 在临时目录实证 child 写入主会话可见、abort 不回滚；不产生 worktree/候选 ref/隐式提交。
 - Acceptance criteria:
   - headless/RPC 和 Grok 使用相同真实状态；读/写/消息权限一致；主交互取消和 session replacement 无 stale callback。
 - Verification method:
   - faux provider 集成、指定 Grok 渲染/默认组合回归、临时 Git 与非 Git cwd 共享编辑测试。
-- Validation evidence: Not run.
+- Validation evidence: coding-agent 8 files / 68 tests（grok-agents-panel、pi-collaboration-tools、pi-child-session-host、easy-pi-default-composition、easy-pi-harness、grok-shell-components、sdk-stream-options、model-runtime-session-view）通过；subagent controller/mailbox/contract/fork 4 files / 55 tests 通过。root npm run check 通过。10 个新增 Grok 集成 case 在实际默认 factory/原生子会话/faux stream 上证明列表、live text/tool、busy 拒绝、被动消息、followup、中断、冷读不重放/不迁移、权限及工具移除、无新扩展发现、旧 Child 环境失败关闭、根 shutdown 释放窗口。TuiAltScreen + xterm 验证非空窗口、键输入和 Unicode/窄宽/终端模式序列过滤；非物理终端验收。Git/非 Git 共享写入保留，Git 无新分支/worktree。默认 source factory 切换，但不更新正在运行的实例或旧 dist；发行构建/包验证仍归 T-007，旧运行 drain 待操作者确认。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -340,6 +340,9 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-07: 用户明确要求完成 Grok-TUI 各 agent session 运行现场接线，T-005 由 coordinator 串行继续。检查当前 dirty 和既有原生控制器；不读凭据、不调用真实 provider、不触碰冻结评测/旧 cleanup/lock。实现原生默认装配作为可用 UI 的必要依赖，保留 T-006/T-007 未完成边界。
+- 2026-09-07: T-005 完成源码接线和定向验收。观察面使用 root-scoped controller 通知/原生 session 事件，缓存索引避免每个 token 读取 SQLite；有界展示不持久重复日志，不注入 root。关闭面板不取消任务；冷读使用只读 fd 和 native effective-context builder，不调用 SessionManager.open 或 provider。审查补上 root tool-filter 实时检查、已批准扩展路径继承和 retired legacy Child 环境失败关闭，避免新默认使旧 Child 成为 full-access root。未部署新 dist（旧运行 drain 未确认）。测试初版按旧文档 new TUI 实例化失败，核实当前导出为类型后改用实际 TuiAltScreen；busy 测试改为等待明确 rejection 而非误匹配 draft。
+
 - 2026-09-06: 定位用户 @codex/ 为 `/Users/w/Projects/easy-pi/codex`，只读核对两个仓库修订/状态，检视 V1/V2 工具注册、AgentControl、spawn、邮箱、恢复、配额、权限和 Pi SDK/装配消费者。
 - 2026-09-06: 用户结构化选择“共享工作区”和“Codex V2 语义，Pi 原生实现”，随后明确确认范围摘要；确认不包括实施。
 - 2026-09-06: 新建并填写本文，规划七个串行阶段。未继续修复旧 DAG 的超时，未修改运行时代码、原产品任务文档或 Codex 源；未启动 subagent。
@@ -364,5 +367,5 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 ## Final validation result
 
 - Result: partial
-- Evidence: 最新 subagent 4 files / 55 tests、coding-agent 7 files / 58 tests passed，共 113 tests；root npm run check exit 0。真实 provider/冻结评测未执行，原安全改动快照保留。
-- Limitations: T-001 至 T-004 已完成；T-005 至 T-007 待实施。六工具已在显式装配的原生根/子 SDK 会话验收，尚非默认 CLI/SDK 工具面。下一步 T-005 默认装配、Grok/生命周期与共享写入验收，再做历史预算/旧调度退役/打包。不宣称 Codex 全量兼容或可发布。
+- Evidence: 最新 subagent 4 files / 55 tests、coding-agent 8 files / 68 tests passed，共 123 tests；root npm run check exit 0。真实 provider/冻结评测未执行，原安全改动快照保留。
+- Limitations: T-001 至 T-005 源码及定向验收完成；T-006/T-007 待实施。CLI/SDK source 默认 factory 已为原生六工具，Grok /agents 可观察并显式控制独立 agent session；仅虚拟终端验证，未部署/热更旧 dist，未停止真实运行会话。历史预算、旧调度源码退役和新包发行验证仍未完成；不宣称 Codex 全量兼容或可发布。

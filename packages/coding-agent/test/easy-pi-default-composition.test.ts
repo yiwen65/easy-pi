@@ -30,11 +30,26 @@ test("SDK defaults include product tools without opening a task ledger", async (
 	});
 	try {
 		expect(extensionsResult.errors).toEqual([]);
+		await session.bindExtensions({ mode: "rpc" });
 		expect(session.getActiveToolNames()).toEqual(
-			expect.arrayContaining(["subagent", "request_user_input", "read", "bash", "edit", "write"]),
+			expect.arrayContaining([
+				"spawn_agent",
+				"send_message",
+				"followup_task",
+				"wait_agent",
+				"interrupt_agent",
+				"list_agents",
+				"request_user_input",
+				"read",
+				"bash",
+				"edit",
+				"write",
+			]),
 		);
+		expect(session.getActiveToolNames()).not.toContain("subagent");
 		expect(existsSync(join(agentDir, "subagent", "state.sqlite"))).toBe(false);
 	} finally {
+		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		session.dispose();
 	}
 });
@@ -52,7 +67,9 @@ test("CLI factory set survives external-discovery disablement and reload without
 		await loader.reload();
 		const loaded = loader.getExtensions();
 		expect(loaded.errors).toEqual([]);
-		expect(loaded.extensions.filter((extension) => extension.tools.has("subagent"))).toHaveLength(1);
+		expect(loaded.extensions.filter((extension) => extension.commands.has("agents"))).toHaveLength(1);
+		expect(loaded.extensions.some((extension) => extension.tools.has("subagent"))).toBe(false);
+		expect(existsSync(join(agentDir, "teams"))).toBe(false);
 		expect(existsSync(join(agentDir, "subagent", "state.sqlite"))).toBe(false);
 	}
 });
