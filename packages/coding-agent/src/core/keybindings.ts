@@ -24,6 +24,11 @@ export interface AppKeybindings {
 	"app.prompt.prev": true;
 	"app.prompt.next": true;
 	"app.prompt.list": true;
+	"app.agents.message": true;
+	"app.agents.followup": true;
+	"app.agents.interrupt": true;
+	"app.agents.previous": true;
+	"app.agents.next": true;
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.message.copy": true;
@@ -103,6 +108,11 @@ export const KEYBINDINGS = {
 		defaultKeys: ["super+g", "alt+g"],
 		description: "Open user prompt list to jump",
 	},
+	"app.agents.message": { defaultKeys: "ctrl+s", description: "Agent viewer: compose passive message" },
+	"app.agents.followup": { defaultKeys: "ctrl+f", description: "Agent viewer: compose new task" },
+	"app.agents.interrupt": { defaultKeys: "ctrl+k", description: "Agent viewer: confirm interrupt" },
+	"app.agents.previous": { defaultKeys: "alt+left", description: "Agent viewer: previous agent" },
+	"app.agents.next": { defaultKeys: "alt+right", description: "Agent viewer: next agent" },
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",
 		description: "Toggle named session filter",

@@ -97,6 +97,8 @@ function permissionTarget(event: ToolCallEvent): string {
 }
 
 export interface EasyPiHarnessOptions {
+	/** Product root composition retains its own permission controls; no legacy DAG registration. */
+	nativeRoot?: (pi: ExtensionAPI, getPermissions: () => ChildSessionPermissions) => void;
 	subagent?: Omit<SubagentExtensionOptions, "agentDir"> & { agentDir?: string };
 	/** Explicit native-session capability; bypasses legacy process env and DAG registration. */
 	nativeSession?: {
@@ -107,7 +109,17 @@ export interface EasyPiHarnessOptions {
 
 export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: ExtensionAPI) => void {
 	return function easyPiHarness(pi: ExtensionAPI): void {
-		const childContext = options.nativeSession ? undefined : loadChildHarnessContextFromEnvironment();
+		if (options.nativeRoot && process.env[CHILD_HARNESS_CONTEXT_ENV]) {
+			const reason =
+				"Legacy DAG child launch is retired in this build. Drain old runs using their original build; no automatic conversion or replay.";
+			pi.on("tool_call", () => ({ block: true, terminate: true, reason }));
+			pi.on("session_start", (_event, ctx) => {
+				ctx.ui.notify(reason, "error");
+			});
+			return;
+		}
+		const childContext =
+			options.nativeSession || options.nativeRoot ? undefined : loadChildHarnessContextFromEnvironment();
 		const readNativePermissions = (): ChildSessionPermissions | undefined => {
 			if (!options.nativeSession) return undefined;
 			const permissions = options.nativeSession.getPermissions();
@@ -235,6 +247,12 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 
 		if (options.nativeSession) {
 			options.nativeSession.registerTools(pi);
+		} else if (options.nativeRoot) {
+			options.nativeRoot(pi, () => ({
+				mode: permissionMode,
+				sessionGrants: [...sessionGrants],
+				protectedRoots: [],
+			}));
 		} else {
 			const subagentRepositoryRootResolver = options.subagent?.resolveRepositoryRoot ?? resolveWorkspaceRoot;
 			createSubagentExtension({

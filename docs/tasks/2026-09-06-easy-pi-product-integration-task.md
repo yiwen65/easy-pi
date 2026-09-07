@@ -209,6 +209,8 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-07: 新替换计划 T-005 源码接线完成：CLI/SDK built-in factory 使用原生六工具，Grok `/agents` 可查看并控制独立子 session。最新 coding-agent 8 files / 68 tests 与 subagent 4 files / 55 tests、root check 通过；包含虚拟终端/共享写入/实时权限与关闭边界。本文 T-002/T-004 的旧 DAG 迁入/发行证据仍仅为历史记录，新包安装验收须由替换 T-007 重做；本文 T-005 的预算/保护由替换 T-006 继续，不标完成。未更新旧 dist、未停止真实会话或读取旧 ledger；需先 drain 旧运行再部署新构建。
+
 - 2026-09-06: 建立唯一执行记录；第一批 T-001/T-002/T-003 开始准备并行委派。记录现有 lockfile/accounts 与 wj 工作区改动，禁止无关覆盖。
 
 - 2026-09-06: 第一批委派因 ownership 冲突后出现不可恢复 DAG；T-001/T-002 未执行。T-003 候选已从账本恢复、审查、集成并独立验证。未尝试删除旧源码、迁移用户数据或发布。等待用户允许串行执行剩余任务。
@@ -240,4 +242,4 @@
 
 - Result: partial
 - Evidence: T-001/T-002/T-003 已完成各自模块范围：V2 回归 129 tests + 补充原生/SDK 98 tests；迁入权限 19、journal 3、Subagent 394、组合 6 tests 通过；最新 root check 通过。冻结评测无 diff，root lock 既有 accounts 元数据保留。
-- Limitations: T-004 已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；Bun 二进制及真实 provider 未验证。T-005 导入已完成，清理实现待最终验证及全文件占用核算；T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
+- Limitations: T-004 的旧 DAG 版本已通过本地 Node 打包/离线安装/无 provider RPC 启动验证；新原生默认/Grok 接线已做源码定向验收，新版本尚未重做包安装或部署。Bun 二进制及真实 provider 未验证。T-005 导入已完成，清理实现待最终验证及全文件占用核算；T-006 官方基线受网络检查阻断，T-007 依赖前两者；未发布，旧源码和旧数据保留。
