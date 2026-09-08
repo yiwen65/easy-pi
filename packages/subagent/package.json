@@ -11,14 +11,45 @@
 			"development": "./src/index.ts",
 			"import": "./dist/index.js"
 		},
-		"./*": {
-			"types": "./dist/*.d.ts",
-			"development": "./src/*.ts",
-			"import": "./dist/*.js"
+		"./collaboration-contract": {
+			"types": "./dist/collaboration-contract.d.ts",
+			"development": "./src/collaboration-contract.ts",
+			"import": "./dist/collaboration-contract.js"
+		},
+		"./collaboration-controller": {
+			"types": "./dist/collaboration-controller.d.ts",
+			"development": "./src/collaboration-controller.ts",
+			"import": "./dist/collaboration-controller.js"
+		},
+		"./collaboration-mailbox": {
+			"types": "./dist/collaboration-mailbox.d.ts",
+			"development": "./src/collaboration-mailbox.ts",
+			"import": "./dist/collaboration-mailbox.js"
+		},
+		"./collaboration-store": {
+			"types": "./dist/collaboration-store.d.ts",
+			"development": "./src/collaboration-store.ts",
+			"import": "./dist/collaboration-store.js"
+		},
+		"./context-fork": {
+			"types": "./dist/context-fork.d.ts",
+			"development": "./src/context-fork.ts",
+			"import": "./dist/context-fork.js"
+		},
+		"./session-host": {
+			"types": "./dist/session-host.d.ts",
+			"development": "./src/session-host.ts",
+			"import": "./dist/session-host.js"
 		}
 	},
 	"files": [
-		"dist"
+		"dist/index.*",
+		"dist/collaboration-contract.*",
+		"dist/collaboration-controller.*",
+		"dist/collaboration-mailbox.*",
+		"dist/collaboration-store.*",
+		"dist/context-fork.*",
+		"dist/session-host.*"
 	],
 	"scripts": {
 		"build": "tsgo -p tsconfig.build.json"

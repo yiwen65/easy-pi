@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,17 @@ try {
 		"-p", resolve(root, "packages/coding-agent/tsconfig.product-build.json"),
 		"--outDir", output,
 	], { cwd: root, stdio: "inherit" });
+	// Fail before touching installed artifacts if a legacy dependency re-enters
+	// the compiler's transitive graph. Package exports alone cannot stop bundling.
+	const nativeModules = new Set([
+		"index", "collaboration-contract", "collaboration-controller",
+		"collaboration-mailbox", "collaboration-store", "context-fork", "session-host",
+	]);
+	for (const file of readdirSync(join(output, "subagent/src"))) {
+		if (!nativeModules.has(file.replace(/\.(?:js|d\.ts)(?:\.map)?$/, ""))) {
+			throw new Error(`Unexpected Subagent product artifact: ${file}`);
+		}
+	}
 	for (const name of ["permissions", "subagent", "coding-agent"]) {
 		const destination = join(root, "packages", name, "dist");
 		rmSync(destination, { recursive: true, force: true });

@@ -139,7 +139,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-002 -> T-003 -> T-004 -> T-005 -> T-006 -> T-007.
+- Dependency graph: T-001 -> T-002 -> T-003 -> T-004 -> T-005; T-005 -> T-006 -> T-007; T-005 -> T-008 -> T-007. 用户明确要求先断开旧运行入口并 rebuild，T-008 不依赖历史预算；保留旧源码/数据，不将 T-006 冒充完成。
 - Parallel batches: 无必须并行批次；按上述顺序逐阶段落地，避免调度、会话、权限和状态协议并行漂移。
 - Serialization constraints: coordinator 独占本文、默认装配、权限接线、会话核心、生成锁文件和历史过渡；新旧切换仅在其余 gates 通过后进行。沿用用户既有串行许可，不重试已失败的 Subagent 委派编排。
 
@@ -284,7 +284,7 @@
 - Inputs and prerequisites: T-001 至 T-006 通过；保存的旧基线；明确旧数据检查出口。
 - Scope or files: packages/subagent exports/旧 DAG/worktree/merge/quality/process 路径的消费者闭包；coding-agent 构建/包/锁与活跃文档；原整合任务关联状态。
 - Expected output: 无隐藏双调度栈的发行包、许可声明、破坏性变化说明、离线验证与回退记录。
-- Dependencies: T-006.
+- Dependencies: T-006, T-008.
 - Execution steps:
   1. 按消费者证据删除旧运行路径，保留仍需用于旧数据保护的最小检查/清理逻辑；共享 permissions/journal 不因包名相似而删除。
   2. 若移植 Codex 实际代码/文本，添加合适 license/NOTICE 和修改说明；不宣称官方兼容认证。
@@ -299,10 +299,32 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-008 — 断开旧 Subagent 产品面并 rebuild
+
+- Status: done
+- Owner: coordinator
+- Objective: 仅保留原生六工具及 /agents 的生产路径，按用户明确许可重建本地 dist。
+- Inputs and prerequisites: 用户“把原有subagent拔掉，接线新subagent后rebuild”；T-005；当前 dirty 和原始回退快照。
+- Scope or files: easy-pi harness/旧 launcher/默认组合测试；subagent index/package exports/编译入口；产品构建校验；根 docs/archive 内旧 harness/测试字节快照；不修改旧 dirty DAG 模块或真实历史。
+- Expected output: 无旧 DAG fallback/import/export 的产品、新构建产物及离线 faux SDK/CLI smoke。
+- Dependencies: T-005.
+- Execution steps:
+  1. 保存当前旧 harness（含既有 historyMaintenance 行）、旧测试/launcher 为非执行文本档案，原 .git tar 不变。
+  2. 移除旧装配、Child 环境加载/自动批准/旧进程 launcher；权限与 native root/child 保留。
+  3. 私有 Subagent exports/files/build 只允许原生模块；旧源码保留用于尚未完成的数据保护工作，不参与产品打包。
+  4. 定向测试/check 后 rebuild，检查真实 dist/私有 bundle/pack 清单，临时目录无凭据 faux/CLI smoke；不终止当前进程。
+- Acceptance criteria:
+  - 构建中没有旧 scheduler/worktree/process-runner；新工具与 /agents 可用，旧环境失败关闭；数据与 dirty 基线保全。
+- Verification method:
+  - 静态消费闭包、指定 Vitest、root check、product rebuild、构建产物验证、隔离配置下 CLI metadata 和 faux provider smoke。
+- Validation evidence: coding-agent 8 files / 68 tests、subagent 4 files / 55 tests 通过；root npm run check exit 0。npm run build --workspace=packages/coding-agent 成功（包含 copy-assets）。scripts/check-native-subagent-product.mjs 使用真实 dist、内存凭据和 faux provider 验证原生 spawn/六工具，旧 package 子路径拒绝、两份 dist 仅 7 个原生模块、CLI --help/--version、两个 npm pack --dry-run --offline 清单通过；不是隔离重装或真实 provider 验收。旧 harness/测试/launcher 原样归档（含原 dirty historyMaintenance 行），原 tar SHA256 仍为 2ed18755bd073b520183f2049a20d73d557ab6e24477d60915c33eb04cda87ab。旧 dirty DAG/lock/冻结评测未变；未停止会话。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
-规划阶段只做静态分析；授权实施后已执行 T-001/T-002 定向合成测试和 root check，见各任务证据。尚未构建新产品包；没有运行 Rust、真实模型、委派或发布。旧整合 T-005 的 148/149 等记录不作为本次替换的通过证据。
+规划阶段只做静态分析；授权实施后已执行 T-001 至 T-005 及 T-008 定向合成测试和 root check，见各任务证据。T-008 已重建本地产品并检查 pack 清单；未做隔离发行安装，没有运行 Rust、真实模型、委派或发布。旧整合 T-005 的 148/149 等记录不作为本次替换的通过证据。
 
 实施时的优先矩阵：
 
@@ -334,11 +356,15 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 5. **高：旧未提交安全补丁和真实成果未收尾。** 不以重写名义丢弃；执行前建立可回退代码基线和旧历史出口。旧历史不受新 schema 自动管理。
 6. **中：Codex 语义也依赖版本/feature/provider。** 已看到说明与模型覆盖实现存在差异；移植确定行为而非宣传文本，保留来源修订。
 7. **中：内存驻留上限不是磁盘预算，成功输出也不是交付。** LRU 卸载不能代替 256 MiB/7 天确认清理规则。
-8. **中：外部消费者未知。** 私有包仍导出大量旧 DAG 类型/子路径；先搜索 workspace/扩展消费者，显式列出破坏性变化，不静默同名改语义。
+8. **中：外部消费者未知。** T-008 已断开私有包旧 DAG 类型/子路径和 harness subagent 选项；workspace 产品消费闭包通过构建验证，破坏性变化见 collaboration.md。未知外部扩展必须迁移，不提供旧调度兼容 fallback。
 9. **发布仍阻塞。** 本计划不会解决官方 Pi 参考版本核实、npm 包名/权限和发布授权问题。
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
+
+- 2026-09-07: T-008 完成产品拔线及用户授权 rebuild。直接/default harness 不再有旧 fallback；旧 Child 只保留失败关闭标记，显式 native child 仍按父权限运行。旧源码保留，exports/files/编译闭包限定 7 个原生模块，产品构建在替换 dist 前检查模块白名单，独立离线 post-build 脚本实测 compiled faux spawn 和打包清单。123 tests、root check 通过；本地 pi 链接对应的 dist 已更新，新启动使用新实现，运行中的会话不热切换。T-006/T-007 不据此标完成。
+
+- 2026-09-07: 用户进一步明确授权断开旧 subagent 并 rebuild；新增 T-008，由 coordinator 串行实施。旧 runtime 源码仍有未提交保护改动，选择从产品 import/export/build/files 闭包拔除而不物理删除这些恢复资产；旧 harness/相关测试先作文本档案。此授权允许覆盖本地构建产物，不表示可清理旧历史、停止现有会话或发布 npm。
 
 - 2026-09-07: 用户明确要求完成 Grok-TUI 各 agent session 运行现场接线，T-005 由 coordinator 串行继续。检查当前 dirty 和既有原生控制器；不读凭据、不调用真实 provider、不触碰冻结评测/旧 cleanup/lock。实现原生默认装配作为可用 UI 的必要依赖，保留 T-006/T-007 未完成边界。
 - 2026-09-07: T-005 完成源码接线和定向验收。观察面使用 root-scoped controller 通知/原生 session 事件，缓存索引避免每个 token 读取 SQLite；有界展示不持久重复日志，不注入 root。关闭面板不取消任务；冷读使用只读 fd 和 native effective-context builder，不调用 SessionManager.open 或 provider。审查补上 root tool-filter 实时检查、已批准扩展路径继承和 retired legacy Child 环境失败关闭，避免新默认使旧 Child 成为 full-access root。未部署新 dist（旧运行 drain 未确认）。测试初版按旧文档 new TUI 实例化失败，核实当前导出为类型后改用实际 TuiAltScreen；busy 测试改为等待明确 rejection 而非误匹配 draft。
@@ -367,5 +393,5 @@ Pi 回归仅运行指定文件，新测试按 T-001 至 T-007 实际新增路径
 ## Final validation result
 
 - Result: partial
-- Evidence: 最新 subagent 4 files / 55 tests、coding-agent 8 files / 68 tests passed，共 123 tests；root npm run check exit 0。真实 provider/冻结评测未执行，原安全改动快照保留。
-- Limitations: T-001 至 T-005 源码及定向验收完成；T-006/T-007 待实施。CLI/SDK source 默认 factory 已为原生六工具，Grok /agents 可观察并显式控制独立 agent session；仅虚拟终端验证，未部署/热更旧 dist，未停止真实运行会话。历史预算、旧调度源码退役和新包发行验证仍未完成；不宣称 Codex 全量兼容或可发布。
+- Evidence: 最新 subagent 4 files / 55 tests、coding-agent 8 files / 68 tests passed，共 123 tests；root npm run check exit 0。T-008 产品 rebuild（含资源）、compiled faux spawn/CLI metadata/双 pack 清单验证通过。真实 provider/冻结评测未执行，原安全改动快照保留。
+- Limitations: T-001 至 T-005 及 T-008 完成；T-006/T-007 待实施。CLI/SDK 及本地 dist 默认仅原生六工具，Grok /agents 可观察并显式控制独立 agent session；仅虚拟终端验证，未热更或停止真实运行会话。历史预算、恢复感知的旧源码物理退役和隔离发行安装验收仍未完成；不宣称 Codex 全量兼容或可发布。

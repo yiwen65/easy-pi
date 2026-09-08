@@ -7,7 +7,6 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createBuiltInExtensions } from "../src/extensions/index.ts";
-import { resolveEasyPiInvocation } from "../src/extensions/product-launcher.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -71,18 +70,5 @@ test("CLI factory set survives external-discovery disablement and reload without
 		expect(loaded.extensions.some((extension) => extension.tools.has("subagent"))).toBe(false);
 		expect(existsSync(join(agentDir, "teams"))).toBe(false);
 		expect(existsSync(join(agentDir, "subagent", "state.sqlite"))).toBe(false);
-	}
-});
-
-test("child launcher targets this product rather than the embedding script", () => {
-	const original = process.argv;
-	try {
-		process.argv = [process.execPath, "/tmp/unrelated-app.js"];
-		const invocation = resolveEasyPiInvocation();
-		expect(invocation.command).toBe(process.execPath);
-		expect(invocation.args?.at(-1)).toMatch(/coding-agent\/src\/cli\.ts$/);
-		expect(invocation.args).not.toContain("/tmp/unrelated-app.js");
-	} finally {
-		process.argv = original;
 	}
 });

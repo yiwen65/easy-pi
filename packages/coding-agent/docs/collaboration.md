@@ -21,7 +21,11 @@ The viewer is display-only: it does not replace the active `AgentSessionRuntime`
 
 ## Upgrade boundary
 
-These changes affect the updated source/new builds. Existing running sessions are not hot-switched. Drain legacy DAG runs using their original build before installing a new build; a legacy child environment is rejected by the new built-in harness rather than silently becoming an unrestricted root. Old ledgers/worktrees are not converted, cleaned or replayed. `/agents recover` explicitly acquires a dead-owner team without restarting its tasks; a live owner still blocks recovery. New history disposition/budgets and old-code/package retirement remain T-006/T-007, not completed by the viewer.
+The local product has been rebuilt with native collaboration only. Existing running sessions are not hot-switched. Legacy runs require their original build; any legacy process-child launch into this build fails closed, without reading the old context or silently becoming an unrestricted root. Old ledgers/worktrees are not converted, cleaned or replayed. `/agents recover` explicitly acquires a dead-owner team without restarting its tasks; a live owner still blocks recovery.
+
+Breaking internal API change: `createEasyPiHarness()` now defaults to native collaboration; use `{ agentDir }` for root storage or `{ nativeSession }` for explicit child authority. The old `subagent` options, process launcher, `/subagents`, `/subagent-models`, DAG tool and legacy private-package exports are retired. `@easy-pi/subagent` exports/bundles only the collaboration contract/controller/mailbox/store, context fork and session host. Recovery source remains in the repository, not in the product; removed harness/launcher/tests have byte snapshots under root `docs/archive/native-subagent-cutover/`.
+
+After an authorized product build, `node scripts/check-native-subagent-product.mjs` (repository root) checks compiled faux spawning, six tools, retired exports, CLI metadata and npm pack inventories offline. This is not an isolated installation, real-provider or physical-terminal acceptance. History disposition/budgets and final recovery-aware source retirement/distribution acceptance remain T-006/T-007.
 
 ## Host composition
 

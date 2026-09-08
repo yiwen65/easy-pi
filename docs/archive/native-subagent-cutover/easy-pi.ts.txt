@@ -1,10 +1,24 @@
+import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { Text } from "@earendil-works/pi-tui";
-import { CHILD_HARNESS_CONTEXT_ENV, decidePermission, type PermissionMode } from "@easy-pi/permissions";
+import {
+	CHILD_HARNESS_CONTEXT_ENV,
+	type ChildHarnessContext,
+	canonicalizeProspectivePath,
+	createChildHarnessContext,
+	decidePermission,
+	type PermissionMode,
+	validateChildHarnessContext,
+} from "@easy-pi/permissions";
+import { ExternalMutationJournalWriter } from "@easy-pi/permissions/journal";
+import { registerChildProtocol } from "@easy-pi/subagent/child-protocol-extension";
+import { createSubagentExtension, type SubagentExtensionOptions } from "@easy-pi/subagent/extension";
+import { runChildTask } from "@easy-pi/subagent/process-runner";
 import type { ChildSessionPermissions } from "@easy-pi/subagent/session-host";
+import { resolveWorkspaceRoot } from "@easy-pi/subagent/workspace-router";
 import { getAgentDir } from "../config.ts";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "../core/extensions/types.ts";
-import { registerPiCollaborationRoot } from "./pi-collaboration-root.ts";
+import { resolveEasyPiInvocation } from "./product-launcher.ts";
 import { registerRequestUserInput } from "./questionnaire.ts";
 
 const AUDIT_ENTRY = "wj-harness-audit";
@@ -26,6 +40,24 @@ interface AuditRecord {
 
 function inputRecord(event: ToolCallEvent): Record<string, unknown> {
 	return event.input as Record<string, unknown>;
+}
+
+function loadChildHarnessContextFromEnvironment(): ChildHarnessContext | undefined {
+	const path = process.env[CHILD_HARNESS_CONTEXT_ENV];
+	if (!path) return undefined;
+	if (!isAbsolute(path) || path.includes("\0")) {
+		throw new Error(`${CHILD_HARNESS_CONTEXT_ENV} must name an absolute context file`);
+	}
+	try {
+		const metadata = lstatSync(path);
+		if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
+			throw new Error("context file must be a private regular file");
+		}
+		return validateChildHarnessContext(JSON.parse(readFileSync(path, "utf8")));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Cannot load WJ Child Harness context ${path}: ${message}`);
+	}
 }
 
 function sanitizeUiText(value: string, preserveNewlines = false): string {
@@ -65,8 +97,9 @@ function permissionTarget(event: ToolCallEvent): string {
 }
 
 export interface EasyPiHarnessOptions {
-	/** Root-owned storage; defaults to the easy-pi agent directory. */
-	agentDir?: string;
+	/** Product root composition retains its own permission controls; no legacy DAG registration. */
+	nativeRoot?: (pi: ExtensionAPI, getPermissions: () => ChildSessionPermissions) => void;
+	subagent?: Omit<SubagentExtensionOptions, "agentDir"> & { agentDir?: string };
 	/** Explicit native-session capability; bypasses legacy process env and DAG registration. */
 	nativeSession?: {
 		getPermissions: () => ChildSessionPermissions;
@@ -76,7 +109,7 @@ export interface EasyPiHarnessOptions {
 
 export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: ExtensionAPI) => void {
 	return function easyPiHarness(pi: ExtensionAPI): void {
-		if (!options.nativeSession && process.env[CHILD_HARNESS_CONTEXT_ENV]) {
+		if (options.nativeRoot && process.env[CHILD_HARNESS_CONTEXT_ENV]) {
 			const reason =
 				"Legacy DAG child launch is retired in this build. Drain old runs using their original build; no automatic conversion or replay.";
 			pi.on("tool_call", () => ({ block: true, terminate: true, reason }));
@@ -85,6 +118,8 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 			});
 			return;
 		}
+		const childContext =
+			options.nativeSession || options.nativeRoot ? undefined : loadChildHarnessContextFromEnvironment();
 		const readNativePermissions = (): ChildSessionPermissions | undefined => {
 			if (!options.nativeSession) return undefined;
 			const permissions = options.nativeSession.getPermissions();
@@ -101,8 +136,12 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 			return structuredClone(permissions);
 		};
 		readNativePermissions();
-		const sessionGrants = new Set<string>();
-		let permissionMode: PermissionMode = "full-access";
+		const mutationJournal = childContext?.mutationJournal
+			? new ExternalMutationJournalWriter(childContext.mutationJournal)
+			: undefined;
+		const inheritedSessionGrants = childContext?.sessionGrants ?? [];
+		const sessionGrants = new Set<string>(inheritedSessionGrants);
+		let permissionMode: PermissionMode = childContext?.permissionMode ?? "full-access";
 		let permissionPromptQueue = Promise.resolve();
 
 		const audit = (record: Omit<AuditRecord, "timestamp" | "mode">) => {
@@ -165,10 +204,13 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 		registerRequestUserInput(pi);
 
 		pi.on("session_start", (_event, ctx) => {
-			permissionMode = "full-access";
+			permissionMode = childContext?.permissionMode ?? "full-access";
 			sessionGrants.clear();
+			for (const grant of inheritedSessionGrants) sessionGrants.add(grant);
 			updateStatus(ctx);
 		});
+
+		if (childContext) registerChildProtocol(pi);
 
 		pi.on("before_agent_start", (event) => {
 			const contract = [
@@ -205,12 +247,85 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 
 		if (options.nativeSession) {
 			options.nativeSession.registerTools(pi);
-		} else {
-			registerPiCollaborationRoot(pi, options.agentDir ?? getAgentDir(), () => ({
+		} else if (options.nativeRoot) {
+			options.nativeRoot(pi, () => ({
 				mode: permissionMode,
 				sessionGrants: [...sessionGrants],
 				protectedRoots: [],
 			}));
+		} else {
+			const subagentRepositoryRootResolver = options.subagent?.resolveRepositoryRoot ?? resolveWorkspaceRoot;
+			createSubagentExtension({
+				agentDir: getAgentDir(),
+				historyMaintenance: !childContext,
+				...(options.subagent ?? {}),
+				runTask:
+					options.subagent?.runTask ??
+					((request) =>
+						runChildTask({
+							...request,
+							invocation: resolveEasyPiInvocation(),
+							controllerEnvironment: {
+								...request.controllerEnvironment,
+								EASY_PI_CODING_AGENT_DIR: options.subagent?.agentDir ?? getAgentDir(),
+							},
+						})),
+				resolveRepositoryRoot: subagentRepositoryRootResolver,
+				createChildHarnessContext: (request) =>
+					createChildHarnessContext({
+						...request,
+						permissionMode,
+						sessionGrants: [...sessionGrants],
+						protectedRoots: [...new Set([...(childContext?.protectedRoots ?? []), ...request.protectedRoots])],
+					}),
+				authorizeOperatorRead: async () => true,
+				authorizeOperator: async (request, ctx) => {
+					const repositoryRoot = await subagentRepositoryRootResolver(ctx.cwd);
+					if (repositoryRoot !== request.details.baseline.repositoryRoot) {
+						const reason = `Subagent run belongs to a different repository: ${repositoryRoot}`;
+						audit({ action: "permission", decision: "deny", tool: "subagent", reason });
+						return false;
+					}
+					const input = { operation: request.operation, runId: request.runId, repositoryRoot };
+					const outcome = decidePermission({
+						mode: permissionMode,
+						toolName: "subagent",
+						input,
+						cwd: repositoryRoot,
+						sessionGrants,
+						...(childContext
+							? {
+									protectedRoots: childContext.protectedRoots,
+									inheritedWriteRoots: childContext.inheritedWriteRoots,
+								}
+							: {}),
+					});
+					if (outcome.decision === "deny") {
+						audit({ action: "permission", decision: "deny", tool: "subagent", reason: outcome.reason });
+						return false;
+					}
+					if (outcome.decision === "allow") return true;
+					if (!ctx.hasUI || ctx.mode !== "tui") {
+						const reason = `${outcome.reason}; non-interactive mode defaults to deny`;
+						audit({ action: "permission", decision: "deny", tool: "subagent", reason });
+						return false;
+					}
+					const event = {
+						type: "tool_call",
+						toolCallId: `subagent-operator-${request.operation}-${request.runId}`,
+						toolName: "subagent",
+						input,
+					} as ToolCallEvent;
+					const allowed = await requestPermission(ctx, event, outcome.reason, outcome.grantKey);
+					audit({
+						action: "permission",
+						decision: allowed ? "allow" : "deny",
+						tool: "subagent",
+						reason: outcome.reason,
+					});
+					return allowed;
+				},
+			})(pi);
 		}
 
 		pi.on("tool_call", async (event, ctx) => {
@@ -228,6 +343,12 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 				cwd: ctx.cwd,
 				sessionGrants: nativePermissions ? new Set(nativePermissions.sessionGrants) : sessionGrants,
 				...(nativePermissions ? { protectedRoots: nativePermissions.protectedRoots } : {}),
+				...(childContext
+					? {
+							protectedRoots: childContext.protectedRoots,
+							inheritedWriteRoots: childContext.inheritedWriteRoots,
+						}
+					: {}),
 			});
 
 			if (outcome.decision === "deny") {
@@ -240,21 +361,69 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 					audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
 					return { block: true, reason };
 				}
-				if (!ctx.hasUI) {
-					const reason = `${outcome.reason}; non-interactive mode defaults to deny`;
+				if (childContext && ctx.mode !== "tui") {
+					if (outcome.grantKey) sessionGrants.add(outcome.grantKey);
+					audit({
+						action: "permission",
+						decision: "allow",
+						tool: event.toolName,
+						reason: `${outcome.reason}; headless Child allowed for this session`,
+					});
+				} else {
+					if (!ctx.hasUI) {
+						const reason = `${outcome.reason}; non-interactive mode defaults to deny`;
+						audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
+						return { block: true, reason };
+					}
+					const allowed = await requestPermission(ctx, event, outcome.reason, outcome.grantKey);
+					audit({
+						action: "permission",
+						decision: allowed ? "allow" : "deny",
+						tool: event.toolName,
+						reason: outcome.reason,
+					});
+					if (!allowed) return { block: true, reason: "Blocked by user" };
+				}
+			}
+			if (mutationJournal && (event.toolName === "write" || event.toolName === "edit")) {
+				const rawPath = inputRecord(event).path;
+				if (typeof rawPath !== "string") {
+					const reason = "External mutation path is missing after WJ permission approval";
 					audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
 					return { block: true, reason };
 				}
-				const allowed = await requestPermission(ctx, event, outcome.reason, outcome.grantKey);
-				audit({
-					action: "permission",
-					decision: allowed ? "allow" : "deny",
-					tool: event.toolName,
-					reason: outcome.reason,
-				});
-				if (!allowed) return { block: true, reason: "Blocked by user" };
+				try {
+					mutationJournal.authorize(
+						event.toolCallId,
+						event.toolName,
+						canonicalizeProspectivePath(rawPath, ctx.cwd),
+					);
+				} catch (error) {
+					const reason = `Allowed external mutation was blocked because its journal could not be persisted: ${error instanceof Error ? error.message : String(error)}`;
+					audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
+					return { block: true, reason };
+				}
+				// Pi permits later extension handlers to mutate arguments without
+				// re-validation. Freeze the exact target after permission and journal approval.
+				Object.freeze(inputRecord(event));
 			}
+
 			return undefined;
+		});
+
+		pi.on("tool_result", async (event) => {
+			if (!mutationJournal || (event.toolName !== "write" && event.toolName !== "edit")) return undefined;
+			try {
+				await mutationJournal.observe(event.toolCallId, event.isError ? "failed" : "succeeded");
+				return undefined;
+			} catch (error) {
+				const reason = `External mutation post-state journal failed: ${error instanceof Error ? error.message : String(error)}`;
+				audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
+				return {
+					content: [{ type: "text" as const, text: reason }],
+					isError: true,
+				};
+			}
 		});
 	};
 }
