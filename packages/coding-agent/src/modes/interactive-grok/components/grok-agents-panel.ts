@@ -1,5 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
-import { type Component, type Focusable, Input, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	type Focusable,
+	Input,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { CollaborationError } from "@easy-pi/subagent/collaboration-contract";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { PiCollaborationMonitor } from "../../../extensions/pi-collaboration-monitor.ts";
@@ -144,8 +151,15 @@ export class GrokAgentsPanel implements Component, Focusable {
 		const th = this.theme;
 		const hint = (id: Parameters<KeybindingsManager["getKeys"]>[0]) => this.keys.getKeys(id).join("/") || "unbound";
 		const rows = this.monitor.list();
-		const lines = [th.fg("accent", th.bold("Agents — shared workspace"))];
-		const maxHeight = Math.max(4, this.height());
+		const height = Math.max(4, this.height());
+		const framed = width >= 4;
+		const contentWidth = Math.max(1, width - (framed ? 4 : 0));
+		const maxHeight = height - (framed ? 2 : 0);
+		const cancelTarget = this.composing ? "cancel action" : this.watching ? "back to list" : "return to main session";
+		const lines = [
+			th.fg("accent", th.bold("Agents — shared workspace")),
+			th.fg("warning", `${hint("tui.select.cancel")}: ${cancelTarget} · Main editor inactive`),
+		];
 		if (!this.watching) {
 			lines.push(
 				th.fg(
@@ -153,7 +167,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 					`${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} watch · ${hint("tui.select.cancel")} root`,
 				),
 			);
-			const available = Math.max(1, maxHeight - 3);
+			const available = Math.max(1, maxHeight - lines.length - 1);
 			const start = Math.max(0, this.selected - available + 1);
 			for (const [index, row] of rows.slice(start, start + available).entries()) {
 				const label = `${start + index === this.selected ? ">" : " "} ${row.task_name}  ${row.status}  ${row.loaded ? "loaded" : "unloaded"}${row.task_name === "/root" ? " — return to main session" : ""}`;
@@ -185,7 +199,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 					`${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt`,
 				),
 			);
-			const body = wrapTextWithAnsi(safe(view.text || "Waiting for session activity…"), Math.max(1, width));
+			const body = wrapTextWithAnsi(safe(view.text || "Waiting for session activity…"), contentWidth);
 			const room = Math.max(1, maxHeight - lines.length - (this.composing ? 3 : 1));
 			this.scroll = Math.min(this.scroll, Math.max(0, body.length - room));
 			const end = Math.max(room, body.length - this.scroll);
@@ -199,11 +213,20 @@ export class GrokAgentsPanel implements Component, Focusable {
 							: `${this.composing === "send" ? "Message (does not start idle agent)" : "New task (idle child only)"} → ${view.path}`,
 					),
 				);
-				if (this.composing !== "interrupt") lines.push(...this.input.render(width));
+				if (this.composing !== "interrupt") lines.push(...this.input.render(contentWidth));
 			}
 		}
 		if (this.notice || this.busy) lines.push(th.fg("warning", oneLine(this.busy ? "Submitting…" : this.notice)));
-		return lines.slice(0, maxHeight).map((line) => truncateToWidth(line, Math.max(0, width)));
+		// Fill the viewport, including empty rows: this is a focused modal, not
+		// transcript output. Never leave a usable-looking root editor underneath.
+		const body = Array.from({ length: maxHeight }, (_, index) => {
+			const line = truncateToWidth(lines[index] ?? "", contentWidth);
+			if (!framed) return truncateToWidth(line, Math.max(0, width));
+			return `${th.fg("accent", "│")} ${line}${" ".repeat(Math.max(0, contentWidth - visibleWidth(line)))} ${th.fg("accent", "│")}`;
+		});
+		return framed
+			? [th.fg("accent", `╭${"─".repeat(width - 2)}╮`), ...body, th.fg("accent", `╰${"─".repeat(width - 2)}╯`)]
+			: body;
 	}
 	invalidate(): void {
 		this.input.invalidate();
