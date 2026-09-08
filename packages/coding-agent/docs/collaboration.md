@@ -4,7 +4,7 @@ The CLI/SDK built-in factory now composes native collaboration instead of the ol
 
 ## Grok-TUI: `/agents`
 
-Run `/agents` even while root is working. Select a child with Up/Down and Enter to watch its independent session. The focused panel displays model/effort, native history path, execution/residency status, streaming assistant text/thinking, tool calls and tool output. PageUp/PageDown scroll the bounded preview. Alt+Left/Right switches agents; selecting root returns to the unchanged main editor. Escape returns to the list, then closes the panel. Closing the panel does **not** cancel root or children.
+Run `/agents` even while root is working. It opens a framed, viewport-filling modal that hides the main editor while it owns keyboard focus; it is not another message in the transcript. The top hint shows the configured cancel key (Esc by default) and its current destination. Select a child with Up/Down and Enter to watch its independent session. The focused panel displays model/effort, native history path, execution/residency status, streaming assistant text/thinking, tool calls and tool output. PageUp/PageDown scroll the bounded preview. Alt+Left/Right switches agents; selecting root returns to the unchanged main editor. Escape returns to the list, then closes the panel. Closing the panel does **not** cancel root or children.
 
 Within a child view:
 

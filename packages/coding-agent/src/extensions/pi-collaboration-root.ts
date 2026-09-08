@@ -122,7 +122,7 @@ export function registerPiCollaborationRoot(
 							keybindings,
 							requestRender: () => tui.requestRender(),
 							done: () => done(),
-							height: () => Math.max(4, tui.terminal.rows - 2),
+							height: () => Math.max(4, tui.terminal.rows),
 						}),
 					{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center" } },
 				);

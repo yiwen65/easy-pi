@@ -1,5 +1,13 @@
 # Project Learnings
 
+## `/agents` 焦点面板——捕获焦点的 UI 必须明确区别于正文
+
+- Wrong approach: `/agents` 只渲染几行列表，overlay 高度随内容收缩；底下主输入框继续可见。测试替换 `ui.custom` 并只断言文字存在，就宣称用户可用。
+- Why it failed: 焦点已经转走，但界面仍像普通正文加可输入的主编辑器。用户报告“面板没出现、主 session 卡死”。死 owner 只解释重启后的拒绝，不能据此宣称最初冻结已定位；Host 发出字节也不能证明用户看到了面板。
+- Correct approach: 对照同一会话的 Host 输出和实际 App 截图。本次截图证明面板就在正文中间；改为填满 viewport 的明确边框面板，遮住主输入区并显示当前取消键去向。保留 Esc 关闭、原草稿及后台任务。
+- Prevention: 使用真实 Grok renderer + InteractiveMode.showExtensionCustom + xterm，放入主输入草稿/正文 sentinel，断言 modal 中不可见、Esc 后焦点及草稿仍保留；覆盖 resize。不要把传输、渲染和视觉识别混为一个 oracle。
+- Verified by: 2026-09-09 grok-agents-host.test.ts 普通/全屏两例修复前均因 root draft 仍可见而失败，修复后通过；现有面板/工具共 3 files / 21 tests 通过。未复现进程死锁，不把视觉修复冒充已证明的并发修复。
+
 ## Fullscreen TUI 内容边界——禁止渲染内容透传 DEC 私有模式序列
 
 - Wrong approach: 把工具输出/日志中的所有 ANSI 片段原样保留到最终终端行，认为只有 renderer 自己会控制 alternate screen。
