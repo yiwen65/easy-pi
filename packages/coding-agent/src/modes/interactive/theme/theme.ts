@@ -45,13 +45,14 @@ const ThemeJsonSchema = Type.Object({
 		dim: ColorValueSchema,
 		text: ColorValueSchema,
 		thinkingText: ColorValueSchema,
-		// Backgrounds & Content Text (11 required, 3 optional)
+		// Backgrounds & Content Text (11 required, 4 optional)
 		selectedBg: ColorValueSchema,
 		scrollbarThumb: Type.Optional(ColorValueSchema),
 		searchMatchBg: Type.Optional(ColorValueSchema),
 		searchMatchText: Type.Optional(ColorValueSchema),
 		userMessageBg: ColorValueSchema,
 		userMessageText: ColorValueSchema,
+		userMessageBorder: Type.Optional(ColorValueSchema),
 		customMessageBg: ColorValueSchema,
 		customMessageText: ColorValueSchema,
 		customMessageLabel: ColorValueSchema,
@@ -123,6 +124,7 @@ export type ThemeColor =
 	| "thinkingText"
 	| "searchMatchText"
 	| "userMessageText"
+	| "userMessageBorder"
 	| "customMessageText"
 	| "customMessageLabel"
 	| "toolTitle"
@@ -168,7 +170,7 @@ export type ThemeBg =
 	| "toolSuccessBg"
 	| "toolErrorBg";
 
-type OptionalThemeColor = "thinkingMax" | "searchMatchText";
+type OptionalThemeColor = "thinkingMax" | "searchMatchText" | "userMessageBorder";
 type OptionalThemeBg = "scrollbarThumb" | "searchMatchBg";
 
 type ColorMode = "truecolor" | "256color";
@@ -333,6 +335,7 @@ function withThemeColorFallbacks(colors: ThemeJson["colors"]): ThemeJson["colors
 	scrollbarThumb: ColorValue;
 	searchMatchBg: ColorValue;
 	searchMatchText: ColorValue;
+	userMessageBorder: ColorValue;
 } {
 	return {
 		...colors,
@@ -340,6 +343,7 @@ function withThemeColorFallbacks(colors: ThemeJson["colors"]): ThemeJson["colors
 		scrollbarThumb: colors.scrollbarThumb ?? colors.selectedBg,
 		searchMatchBg: colors.searchMatchBg ?? colors.selectedBg,
 		searchMatchText: colors.searchMatchText ?? colors.text,
+		userMessageBorder: colors.userMessageBorder ?? colors.accent,
 	};
 }
 
@@ -372,6 +376,7 @@ export class Theme {
 			...fgColors,
 			thinkingMax: fgColors.thinkingMax ?? fgColors.thinkingXhigh,
 			searchMatchText: fgColors.searchMatchText ?? fgColors.text,
+			userMessageBorder: fgColors.userMessageBorder ?? fgColors.accent,
 		};
 		for (const [key, value] of Object.entries(colors) as [ThemeColor, string | number][]) {
 			this.fgColors.set(key, fgAnsi(value, mode));
