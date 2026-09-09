@@ -145,6 +145,8 @@
 - Correct approach: 在 `packages/coding-agent` 执行 `npm run build`，再用实际 `pi` 命令（不是 `pi-test.sh`）做 tmux 启动验证。若 coding-agent 同时依赖本轮修改过的 workspace 包，先重建依赖包；单独构建 coding-agent 会从旧 `dist` 类型检查并可能报已在根 source check 通过的参数类型错误。
 - Verified by: 2026-08-23 easy-pi 启动页；重建后 `dist` 出现 `easy-pi`，全局 `pi` 实际启动显示 `eπ easy-pi v0.84.2`。2026-08-30 skill mention 任务中，coding-agent 单独构建因旧 agent `dist` 报 `AgentMessage[]` 类型错误；先构建 `packages/agent` 后同一 coding-agent 构建通过。
 
+- Thinking follow-up: 两轮源码点击回归通过后，用户仍无法点击子行折叠；实际 `pi` 链接的 `dist` 仍含 `localRow !== 0`，根 check 不会更新产物。用户授权后按 TUI → coding-agent 重建，直接导入 dist、通过 `InteractiveMode.handleTranscriptContentClick` 和 VirtualTerminal 验证连续点击、同格 motion、全部展开子行以及拖选复制通过，实际 `pi` 离线全屏启动通过。已有进程不会热替换已加载模块，必须明确要求重启 Pi；不得只要求刷新 UI 或 `/reload`。
+
 ## Cache affinity 改动——跨 adapter 与 optional/JSON 边界测试
 
 - Wrong approach: 修改共享 OpenAI cache-key helper 后只跑 completions 测试，并用对象展开直接合并 optional `sessionId`；strict-JSON 清洗又只删除 object property 的 `undefined`。
