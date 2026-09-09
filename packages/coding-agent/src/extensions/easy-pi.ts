@@ -113,10 +113,6 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 			});
 		};
 
-		const updateStatus = (ctx: ExtensionContext) => {
-			ctx.ui.setStatus("wj-harness", `perm:${readNativePermissions()?.mode ?? permissionMode}`);
-		};
-
 		pi.registerEntryRenderer<AuditRecord>(AUDIT_ENTRY, (entry, _options, theme) => {
 			const data = entry.data;
 			if (!data) return undefined;
@@ -155,7 +151,6 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 				permissionMode = nextMode;
 				sessionGrants.clear();
 				audit({ action: "mode", reason: `Mode changed to ${nextMode}` });
-				updateStatus(ctx);
 				if (nextMode === "manual-allow") {
 					ctx.ui.notify("Manual Allow prompts for write/edit; other tools are allowed.", "info");
 				}
@@ -164,10 +159,9 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 
 		registerRequestUserInput(pi);
 
-		pi.on("session_start", (_event, ctx) => {
+		pi.on("session_start", () => {
 			permissionMode = "full-access";
 			sessionGrants.clear();
-			updateStatus(ctx);
 		});
 
 		pi.on("before_agent_start", (event) => {

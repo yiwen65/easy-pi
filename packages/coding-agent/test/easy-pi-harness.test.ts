@@ -75,6 +75,24 @@ test("root permission mode, audit, noninteractive denial and exact session grant
 	expect(prompt).toMatchObject({ systemPrompt: expect.stringContaining("smallest task-relevant verification") });
 });
 
+test("does not display permission status on session start or mode changes", async () => {
+	for (const native of [false, true]) {
+		const f = fixture(
+			native
+				? {
+						nativeSession: {
+							getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }),
+							registerTools: vi.fn(),
+						},
+					}
+				: undefined,
+		);
+		await f.handlers.get("session_start")![0]!({}, f.ctx);
+		await f.commands.get("permissions")!.handler("manual-allow", f.ctx);
+		expect(f.ctx.ui.setStatus).not.toHaveBeenCalled();
+	}
+});
+
 test("full access still denies catastrophic deletion", async () => {
 	const f = fixture();
 	const result = await f.handlers.get("tool_call")![0]!(
