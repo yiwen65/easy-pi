@@ -411,6 +411,47 @@ describe("Grok transcript components", () => {
 		expectFits(group);
 	});
 
+	test("toggles turn thinking from every rendered row, including wrapped content", () => {
+		for (const width of [20, 80]) {
+			const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
+			group.updateThinking({}, "first reasoning with enough words to wrap across narrow rows", true);
+			group.updateThinking({}, "second reasoning\n\nlast paragraph", false);
+			expect(group.render(width)).toHaveLength(1);
+			expect(group.handleOverviewClick(-1)).toBe(false);
+			expect(group.handleOverviewClick(1)).toBe(false);
+			expect(group.handleOverviewClick(0)).toBe(true);
+			const expandedRows = group.render(width).length;
+			expect(expandedRows).toBeGreaterThan(3);
+			expect(group.handleOverviewClick(expandedRows)).toBe(false);
+			for (let row = 0; row < expandedRows; row++) {
+				expect(group.handleOverviewClick(row)).toBe(true);
+				expect(group.render(width)).toHaveLength(1);
+				expect(group.handleOverviewClick(0)).toBe(true);
+				expect(group.render(width)).toHaveLength(expandedRows);
+			}
+			group.completeTurn();
+			expect(group.handleOverviewClick(expandedRows - 1)).toBe(true);
+			expect(group.render(width)).toHaveLength(1);
+			expect(group.handleOverviewClick(0)).toBe(true);
+			expect(group.render(width)).toHaveLength(expandedRows);
+			group.render(0);
+			expect(group.handleOverviewClick(0)).toBe(false);
+		}
+	});
+
+	test("does not toggle empty or user-hidden turn thinking", () => {
+		for (const hidden of [false, true]) {
+			const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, hidden);
+			expect(group.render(80)).toHaveLength(0);
+			expect(group.handleOverviewClick(0)).toBe(false);
+			if (hidden) {
+				group.updateThinking({}, "hidden reasoning", false);
+				expect(group.render(80)).toHaveLength(1);
+				expect(group.handleOverviewClick(0)).toBe(false);
+			}
+		}
+	});
+
 	test("legacy assistant component keeps thinking expanded by default", () => {
 		const legacy = new AssistantMessageComponent(
 			createAssistantMessage([

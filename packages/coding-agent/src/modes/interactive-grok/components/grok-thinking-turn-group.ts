@@ -26,6 +26,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	private tick = 0;
 	private tickerInterval: ReturnType<typeof setInterval> | undefined;
 	private markdown: Markdown | undefined;
+	private renderedRowCount = 0;
 
 	constructor(markdownTheme: MarkdownTheme, hiddenLabel: string, outputPad: number, userHidden: boolean, ui?: TUI) {
 		super();
@@ -63,7 +64,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	}
 
 	handleOverviewClick(localRow: number): boolean {
-		if (this.userHidden || localRow !== 0) return false;
+		if (this.userHidden || localRow < 0 || localRow >= this.renderedRowCount) return false;
 		this.expanded = !this.expanded;
 		this.syncTicker();
 		return true;
@@ -128,10 +129,13 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		this.renderedRowCount = 0;
 		if (width <= 0 || this.entries.size === 0) return [];
 		this.syncTicker();
 		const overview = this.overviewLine(width);
-		if (!this.expanded || this.userHidden || !this.markdown) return [overview];
-		return [overview, ...this.markdown.render(width)];
+		const lines =
+			!this.expanded || this.userHidden || !this.markdown ? [overview] : [overview, ...this.markdown.render(width)];
+		this.renderedRowCount = lines.length;
+		return lines;
 	}
 }
