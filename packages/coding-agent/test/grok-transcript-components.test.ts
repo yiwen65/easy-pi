@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -76,6 +76,38 @@ describe("Grok transcript components", () => {
 		expect(rendered).toContain("09:05");
 		expect(rendered).toContain("你好，Grok 👋");
 		expectFits(component);
+	});
+
+	test("keeps short user messages compact with semantic markers on the prompt header", () => {
+		const component = new GrokUserMessageComponent("hello");
+		const lines = component.render(40);
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toMatch(/^\x1b\]133;A\x07/);
+		expect(stripAnsi(lines[0])).toContain("❯");
+		expect(stripAnsi(lines[1])).toContain("hello");
+		expect(lines[1]).toContain("\x1b]133;B\x07\x1b]133;C\x07");
+		expect(lines[1]).not.toContain("\x1b]133;A\x07");
+		component.setOutputPad(0);
+		component.invalidate();
+		expect(component.render(40)).toHaveLength(2);
+		expectFits(component, [4, 20, 40, 80]);
+	});
+
+	test("preserves user Markdown, skill mentions and paragraph spacing in the compact band", () => {
+		const component = new GrokUserMessageComponent(
+			"first paragraph\n\nsecond paragraph",
+			undefined,
+			1,
+			[(markdown) => markdown.replace("first", "updated")],
+			Date.now(),
+			["review"],
+		);
+		const lines = component.render(40).map(stripAnsi);
+		expect(lines).toHaveLength(4);
+		expect(lines[1]).toContain("review updated paragraph");
+		expect(lines[2].trim()).toBe("");
+		expect(lines[3]).toContain("second paragraph");
+		expectFits(component, [20, 40, 80]);
 	});
 
 	test("renders thinking as a one-line live marquee without role headers", () => {
@@ -382,8 +414,8 @@ describe("Grok transcript components", () => {
 		// Internal assistant/tool boundaries keep the latest thinking visible.
 		const activeFrame = group.render(80).join("\n");
 		const active = stripAnsi(activeFrame);
-		expect(activeFrame).toContain(theme.fg("accent", "✦ second reasoning"));
-		expect(active).toContain("✦ second reasoning");
+		expect(activeFrame).toContain(theme.fg("muted", "▸ Thought process · second reasoning"));
+		expect(active).toContain("▸ Thought process · second reasoning");
 		expect(active).not.toContain("first reasoning");
 		expect(active).not.toContain("Thinking...");
 
@@ -391,16 +423,17 @@ describe("Grok transcript components", () => {
 		group.completeTurn();
 		const collapsedFrame = group.render(80).join("\n");
 		const collapsed = stripAnsi(collapsedFrame);
-		expect(collapsedFrame).toContain(theme.fg("accent", "✦ Thinking..."));
+		expect(collapsedFrame).toContain(theme.fg("muted", "▸ Thought process"));
 		expect(group.entryCount).toBe(2);
 		expect(group.render(80)).toHaveLength(1);
-		expect(collapsed).toContain("✦ Thinking...");
+		expect(collapsed).toContain("▸ Thought process");
+		expect(collapsed).not.toContain("Thinking");
 		expect(collapsed).not.toContain("first reasoning");
 		expect(collapsed).not.toContain("second reasoning");
 
 		expect(group.handleOverviewClick(0)).toBe(true);
 		const expanded = stripAnsi(group.render(80).join("\n"));
-		expect(expanded).toContain("✦ Thinking...");
+		expect(expanded).toContain("▾ Thought process");
 		expect(expanded).toContain("first reasoning");
 		expect(expanded).toContain("second reasoning");
 
@@ -409,6 +442,42 @@ describe("Grok transcript components", () => {
 		expect(group.render(80)).toHaveLength(1);
 		expect(stripAnsi(group.render(80).join("\n"))).not.toContain("first reasoning");
 		expectFits(group);
+	});
+
+	test("distinguishes live thinking from completed history and stops its animation", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const ui = { requestRender } as unknown as TUI;
+		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false, ui);
+		const owner = {};
+		try {
+			group.updateThinking(owner, "正在分析输入并检查边界条件", true);
+			expect(stripAnsi(group.render(80)[0])).toContain("▸ Thinking… · 正在分析");
+			vi.advanceTimersByTime(120);
+			expect(requestRender).toHaveBeenCalled();
+			group.setExpanded(true);
+			expect(stripAnsi(group.render(80)[0])).toContain("▾ Thinking…");
+			group.completeTurn();
+			requestRender.mockClear();
+			vi.advanceTimersByTime(240);
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(stripAnsi(group.render(80)[0])).toContain("▾ Thought process");
+			group.setExpanded(false);
+			expect(stripAnsi(group.render(80)[0])).toContain("▸ Thought process");
+			expectFits(group, [4, 12, 24, 80]);
+		} finally {
+			group.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	test("preserves custom thinking labels and keeps hidden thinking private", () => {
+		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Custom reasoning", 1, true);
+		group.updateThinking({}, "private content", true);
+		expect(stripAnsi(group.render(80)[0])).toContain("▸ Custom reasoning");
+		expect(stripAnsi(group.render(80).join("\n"))).not.toContain("private content");
+		group.completeTurn();
+		expect(stripAnsi(group.render(80)[0])).toContain("▸ Custom reasoning");
 	});
 
 	test("toggles turn thinking from every rendered row, including wrapped content", () => {
@@ -450,6 +519,21 @@ describe("Grok transcript components", () => {
 				expect(group.handleOverviewClick(0)).toBe(false);
 			}
 		}
+	});
+
+	test("uses only one separator before the answer when thinking is delegated to its turn group", () => {
+		const component = new GrokAssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "reasoning" },
+				{ type: "text", text: "answer" },
+			]),
+		);
+		component.setThinkingDelegated(true);
+		const lines = component.render(80).map(stripAnsi);
+		expect(lines).toHaveLength(2);
+		expect(lines[0].trim()).toBe("");
+		expect(lines[1]).toContain("answer");
+		component.dispose();
 	});
 
 	test("legacy assistant component keeps thinking expanded by default", () => {

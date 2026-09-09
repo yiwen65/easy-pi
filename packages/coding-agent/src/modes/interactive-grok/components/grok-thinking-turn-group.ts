@@ -10,7 +10,6 @@ import { theme } from "../../interactive/theme/theme.ts";
 import { flattenInline, marqueeWindow } from "./grok-marquee.ts";
 
 const TICK_INTERVAL_MS = 120;
-const PREFIX = "✦ ";
 
 /** One collapsed/expandable Thinking block shared by every assistant message in a turn. */
 export class GrokThinkingTurnGroupComponent extends Container {
@@ -120,11 +119,17 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	private overviewLine(width: number): string {
 		const padLeft = " ".repeat(this.outputPad);
 		const contentWidth = Math.max(1, width - this.outputPad);
+		const thinking = !this.userHidden && !this.turnComplete && this.streamingEntries.size > 0;
+		const label =
+			this.hiddenLabel === "Thinking..." ? (thinking ? "Thinking…" : "Thought process") : this.hiddenLabel;
+		const prefix = `${this.expanded ? "▾" : "▸"} ${label}`;
 		const liveThinking = this.userHidden || this.expanded || this.turnComplete ? undefined : this.latestThinking();
-		const body = liveThinking
-			? marqueeWindow(flattenInline(liveThinking), Math.max(1, contentWidth - visibleWidth(PREFIX)), this.tick)
-			: this.hiddenLabel;
-		const line = theme.italic(theme.fg("accent", `${PREFIX}${body}`));
+		const previewWidth = contentWidth - visibleWidth(prefix) - 3;
+		const preview =
+			liveThinking && previewWidth > 0
+				? ` · ${marqueeWindow(flattenInline(liveThinking), previewWidth, this.tick)}`
+				: "";
+		const line = theme.fg(thinking ? "accent" : "muted", prefix + preview);
 		return padLeft + truncateToWidth(line, contentWidth, "");
 	}
 

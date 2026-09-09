@@ -3,6 +3,8 @@ import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { UserMessageComponent } from "../../interactive/components/user-message.ts";
 import { getMarkdownTheme, theme } from "../../interactive/theme/theme.ts";
 
+const OSC133_ZONE_START = "\x1b]133;A\x07";
+
 function formatClock(timestamp: number): string {
 	const date = new Date(timestamp);
 	return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
@@ -27,7 +29,7 @@ export class GrokUserMessageComponent extends UserMessageComponent {
 		timestamp = Date.now(),
 		skillNames: readonly string[] = [],
 	) {
-		super(text, markdownTheme, outputPad, markdownTransformers, skillNames);
+		super(text, markdownTheme, outputPad, markdownTransformers, skillNames, 0);
 		this.timestamp = timestamp;
 	}
 
@@ -45,6 +47,8 @@ export class GrokUserMessageComponent extends UserMessageComponent {
 		const signature = `${theme.fg("accent", theme.bold("❯"))} ${theme.fg("muted", formatClock(this.timestamp))}`;
 		const bandText = truncateToWidth(` ${signature}`, width, "", true);
 		const band = this.highlighted ? theme.bg("searchMatchBg", bandText) : theme.bg("userMessageBg", bandText);
-		return [band, ...body];
+		// The prompt band is part of the user message's semantic zone.
+		body[0] = body[0].replace(OSC133_ZONE_START, "");
+		return [OSC133_ZONE_START + band, ...body];
 	}
 }

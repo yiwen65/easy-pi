@@ -14,6 +14,7 @@ export class UserMessageComponent extends Container {
 	private text: string;
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
+	private readonly paddingY: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private skillNames: readonly string[];
 
@@ -23,11 +24,13 @@ export class UserMessageComponent extends Container {
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
 		skillNames: readonly string[] = [],
+		paddingY = 1,
 	) {
 		super();
 		this.text = text;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
+		this.paddingY = paddingY;
 		this.markdownTransformers = markdownTransformers;
 		this.skillNames = skillNames;
 		this.rebuild();
@@ -44,7 +47,9 @@ export class UserMessageComponent extends Container {
 
 	private rebuild(): void {
 		this.clear();
-		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));
+		const contentBox = new Box(this.outputPad, this.paddingY, (content: string) =>
+			theme.bg("userMessageBg", content),
+		);
 		const markdownTransformers = [...this.markdownTransformers];
 		if (this.skillNames.length > 0) {
 			markdownTransformers.push((markdown) => {

@@ -71,9 +71,10 @@ export class AssistantMessageComponent extends Container {
 
 	/**
 	 * Factory for the one-line component shown in place of hidden thinking.
-	 * Subclasses may override to render a live/animated placeholder.
+	 * Subclasses may override to render a live/animated placeholder, or return
+	 * undefined when thinking is rendered elsewhere and needs no separator.
 	 */
-	protected createHiddenThinkingComponent(): Component {
+	protected createHiddenThinkingComponent(): Component | undefined {
 		return new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0);
 	}
 
@@ -154,7 +155,9 @@ export class AssistantMessageComponent extends Container {
 
 				if (this.hideThinkingBlock) {
 					// Show one compact placeholder for each hidden run of thinking blocks.
-					this.contentContainer.addChild(this.createHiddenThinkingComponent());
+					const placeholder = this.createHiddenThinkingComponent();
+					if (!placeholder) continue;
+					this.contentContainer.addChild(placeholder);
 				} else {
 					// Render each run of thinking blocks as one Markdown section.
 					this.contentContainer.addChild(
