@@ -1,5 +1,13 @@
 # Project Learnings
 
+## Thinking 点击折叠——必须验证鼠标选择状态机，而非只调用组件方法
+
+- Wrong approach: 只测试 `GrokThinkingTurnGroupComponent.handleOverviewClick` 的行命中，就认定任意行点击可折叠；用户随后报告点击触发 copy。
+- Why it failed: `TuiAltScreen` 消费内容点击后仍保留 `lastClick`，快速再次点击被识别为选词，anchor 移到词首，绕过内容点击并复制。另一个已复现边界是同格 motion 被无条件判为拖选。
+- Correct approach: 内容点击被消费后清除多击计数；字符选择尚未拖动且 motion 仍在原格时忽略该 motion，真实跨格拖选继续复制。
+- Prevention: 用 VirtualTerminal 发送 SGR press/motion/release，覆盖词内部连续点击、同格 motion、展开正文点击及真正拖选；同时断言可见折叠状态与 clipboard 调用，不能只调用组件方法。
+- Verified by: `test/grok-thinking-mouse.test.ts` 两例修复前分别复制 Thinking 和未展开；清除计数后仅第一例转绿，再修正同格 motion 后两例通过。Grok 20 项、TUI 45 项及根 check 通过；未替代用户物理终端复测。
+
 ## `/agents` 焦点面板——捕获焦点的 UI 必须明确区别于正文
 
 - Wrong approach: `/agents` 只渲染几行列表，overlay 高度随内容收缩；底下主输入框继续可见。测试替换 `ui.custom` 并只断言文字存在，就宣称用户可用。
