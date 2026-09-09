@@ -60,8 +60,8 @@ export class GrokComponentFactory {
 		return new GrokEditorFrame(editorHost, { theme: this.theme });
 	}
 
-	createStatsBar(session: AgentSession, footerData?: ReadonlyFooterDataProvider, ui?: GrokRenderDriver): GrokStatsBar {
-		return new GrokStatsBar(session, this.theme, footerData, ui);
+	createStatsBar(session: AgentSession, ui?: GrokRenderDriver): GrokStatsBar {
+		return new GrokStatsBar(session, this.theme, ui);
 	}
 
 	createFooter(footerData?: ReadonlyFooterDataProvider): GrokFooter {

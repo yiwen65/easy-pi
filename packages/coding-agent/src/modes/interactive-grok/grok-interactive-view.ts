@@ -44,9 +44,7 @@ export class GrokInteractiveView {
 		this.ui = options.ui;
 		this.status = new GrokStatus(options.status ?? { kind: "idle", label: "Ready" }, theme, { reserveLine: true });
 		this.editorFrame = new GrokEditorFrame(options.editorHost, { theme });
-		this.statsBar = options.session
-			? new GrokStatsBar(options.session, theme, options.footerData, options.ui)
-			: undefined;
+		this.statsBar = options.session ? new GrokStatsBar(options.session, theme, options.ui) : undefined;
 		this.footer = new GrokFooter(theme, options.footerData);
 		this.statusSlot = new Container();
 		this.statusSlot.addChild(this.status);
@@ -100,10 +98,6 @@ export class GrokInteractiveView {
 
 	setSession(session: AgentSession): void {
 		this.statsBar?.setSession(session);
-	}
-
-	setAutoCompactEnabled(enabled: boolean): void {
-		this.statsBar?.setAutoCompactEnabled(enabled);
 	}
 
 	setStatus(status: GrokStatusState): void {

@@ -387,21 +387,11 @@ describe("Grok shell components", () => {
 					.slice(editorBottom + 1)
 					.join("")
 					.replace(/\s/g, "");
-				for (const text of [
-					"↑188k",
-					"↓8.9k",
-					"R3.5M",
-					"$5.877",
-					"(sub)",
-					"42.6%/272k",
-					"(auto)",
-					"(openai-codex)",
-					"gpt-5.6-sol",
-					"high",
-					"perm:full-access",
-				]) {
+				for (const text of ["↑188k", "↓8.9k", "R3.5M", "$5.877", "gpt-5.6-sol", "high", "perm:full-access"]) {
 					expect(footerText).toContain(text);
 				}
+				expect(footerText).not.toMatch(/openai-codex|\(sub\)|\(auto\)|42\.6%|272k/);
+				expect(viewport[0]).toContain("43%");
 			}
 		} finally {
 			ui.stop();
@@ -425,8 +415,9 @@ describe("Grok shell components", () => {
 
 		const rendered = view.regularComponents.flatMap((component) => component.render(120)).join("\n");
 		expect(rendered).toContain("(main)");
-		expect(rendered).toContain("↑188k ↓17k R1.7M CR90.0% $2.279 35.8%/272k (auto)");
-		expect(rendered).toContain("(openai-codex) gpt-5.6-sol • high");
+		expect(rendered).toContain("↑188k ↓17k R1.7M CR90.0% $2.279");
+		expect(rendered).toContain("gpt-5.6-sol • high");
+		expect(rendered).not.toMatch(/openai-codex|35\.8%\/272k|\(auto\)/);
 		expectWithinWidth(view.fullscreenRoot, [40, 80, 120]);
 		view.dispose();
 	});
@@ -441,22 +432,18 @@ describe("GrokStatsBar", () => {
 		cost: { total: 2.279 },
 	};
 
-	it("restores native Pi footer info: tokens, cache, cost, context, provider/model/thinking", () => {
+	it("shows usage, cost and model effort without provider or duplicated context", () => {
 		const factory = new GrokComponentFactory(identityTheme);
-		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }), createStubFooterData(2));
+		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }));
 
 		const line = bar.render(120)[0] ?? "";
-		expect(line).toContain("↑188k ↓17k R1.7M CR90.0% $2.279 35.8%/272k (auto)");
-		expect(line).toContain("(openai-codex) gpt-5.6-sol • high");
+		expect(line.replace(/ +/g, " ")).toBe("↑188k ↓17k R1.7M CR90.0% $2.279 gpt-5.6-sol • high");
 		expectWithinWidth(bar, [40, 80, 120]);
 	});
 
-	it("hides the provider when only one provider is available and omits thinking for non-reasoning models", () => {
+	it("omits effort for non-reasoning models", () => {
 		const factory = new GrokComponentFactory(identityTheme);
-		const bar = factory.createStatsBar(
-			createStubSession({ usage: fullUsage, reasoning: false }),
-			createStubFooterData(1),
-		);
+		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage, reasoning: false }));
 
 		const line = bar.render(120)[0] ?? "";
 		expect(line).not.toContain("(openai-codex)");
@@ -464,24 +451,24 @@ describe("GrokStatsBar", () => {
 		expect(line).not.toContain("• high");
 	});
 
-	it("marks thinking off explicitly and appends (sub) for subscription providers", () => {
+	it("shows off effort and subscription cost without parenthetical explanations", () => {
 		const factory = new GrokComponentFactory(identityTheme);
 		const bar = factory.createStatsBar(
 			createStubSession({ usage: fullUsage, thinkingLevel: "off", usingSubscription: true }),
-			createStubFooterData(1),
 		);
 
 		const line = bar.render(120)[0] ?? "";
-		expect(line).toContain("$2.279 (sub)");
-		expect(line).toContain("gpt-5.6-sol • thinking off");
+		expect(line).toContain("$2.279");
+		expect(line).toContain("gpt-5.6-sol • off");
+		expect(line).not.toMatch(/[()]/);
 	});
 
 	it("color-codes thinking levels on a heat scale", () => {
 		const factory = new GrokComponentFactory(markerTheme);
 		const levelOf = (thinkingLevel: string) =>
-			factory.createStatsBar(createStubSession({ usage: fullUsage, thinkingLevel }), createStubFooterData(1));
+			factory.createStatsBar(createStubSession({ usage: fullUsage, thinkingLevel }));
 
-		expect(levelOf("off").render(120)[0]).toContain(`${D}thinking off${X}`);
+		expect(levelOf("off").render(120)[0]).toContain(`${D}off${X}`);
 		expect(levelOf("minimal").render(120)[0]).toContain(`${M}minimal${X}`);
 		expect(levelOf("low").render(120)[0]).toContain(`${T}low${X}`);
 		expect(levelOf("medium").render(120)[0]).toContain(`${A}medium${X}`);
@@ -497,7 +484,7 @@ describe("GrokStatsBar", () => {
 			const session = createStubSession({ usage: fullUsage, thinkingLevel: "high" });
 			const requestRender = vi.fn();
 			const factory = new GrokComponentFactory(markerTheme);
-			const bar = factory.createStatsBar(session, createStubFooterData(1), { requestRender });
+			const bar = factory.createStatsBar(session, { requestRender });
 
 			expect(bar.render(120)[0]).toContain(`${A}gpt-5.6-sol${X}${M} • ${X}${W}high${X}`);
 
@@ -517,7 +504,6 @@ describe("GrokStatsBar", () => {
 		const factory = new GrokComponentFactory(markerTheme);
 		const bar = factory.createStatsBar(
 			createStubSession({ usage: fullUsage, modelId: "a-very-long-model-identifier", usingSubscription: true }),
-			createStubFooterData(2),
 		);
 		const expected = stripTerminalSequences(bar.render(200).join("")).replace(/\s/g, "");
 		for (const width of [4, 12, 24, 40, 50, 68, 80, 120, 200]) {
@@ -537,7 +523,7 @@ describe("GrokStatsBar", () => {
 			(session.sessionManager as unknown as { getEntries: () => unknown[] }).getEntries = () => entries;
 			const requestRender = vi.fn();
 			const factory = new GrokComponentFactory(markerTheme);
-			const bar = factory.createStatsBar(session, createStubFooterData(2), { requestRender });
+			const bar = factory.createStatsBar(session, { requestRender });
 
 			const first = bar.render(120)[0] ?? "";
 			expect(first).toContain(`${D}↑${X}${T}188k${X}`);
@@ -568,18 +554,35 @@ describe("GrokStatsBar", () => {
 	it("does not schedule flash timers without a render driver", () => {
 		const timerSpy = vi.spyOn(globalThis, "setTimeout");
 		const factory = new GrokComponentFactory(markerTheme);
-		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }), createStubFooterData(1));
+		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }));
 		bar.render(120);
 		bar.render(120);
 		expect(timerSpy).not.toHaveBeenCalled();
 		timerSpy.mockRestore();
 	});
 
-	it("color-codes the context segment by usage threshold", () => {
-		const factory = new GrokComponentFactory(markerTheme);
-		const low = factory.createStatsBar(createStubSession({ usage: fullUsage, contextPercent: 35.8 }));
-		expect(low.render(120)[0]).toContain(`${S}35.8%/272k (auto)${X}`);
-		const high = factory.createStatsBar(createStubSession({ usage: fullUsage, contextPercent: 85 }));
-		expect(high.render(120)[0]).toContain(`${W}85.0%/272k (auto)${X}`);
+	it("does not read context usage for the stats bar", () => {
+		const session = createStubSession({ usage: fullUsage });
+		const getContextUsage = vi.spyOn(session, "getContextUsage");
+		const bar = new GrokComponentFactory(markerTheme).createStatsBar(session);
+		bar.render(120);
+		expect(getContextUsage).not.toHaveBeenCalled();
+	});
+
+	it("wraps model-only output without an empty leading row", () => {
+		const bar = new GrokComponentFactory(identityTheme).createStatsBar(
+			createStubSession({ modelId: "a-very-long-model-identifier" }),
+		);
+		const lines = bar.render(12);
+		expect(lines.every((line) => line.trim().length > 0)).toBe(true);
+		expect(lines.join("").replace(/\s/g, "")).toBe("a-very-long-model-identifier•high");
+		expectWithinWidth(bar, [12, 40, 80]);
+	});
+
+	it("retains zero subscription cost without the subscription label", () => {
+		const bar = new GrokComponentFactory(identityTheme).createStatsBar(
+			createStubSession({ usingSubscription: true }),
+		);
+		expect(bar.render(80)[0]?.replace(/ +/g, " ")).toBe("$0.000 gpt-5.6-sol • high");
 	});
 });
