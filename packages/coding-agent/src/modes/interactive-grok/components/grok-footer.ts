@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { GrokChromeTheme } from "../grok-component-factory.ts";
 
@@ -35,7 +35,7 @@ export class GrokFooter implements Component {
 			.map(([, text]) => sanitizeStatusText(text))
 			.filter(Boolean)
 			.join("  ");
-		return status ? [this.theme.muted(truncateToWidth(status, safeWidth))] : [];
+		return status ? wrapTextWithAnsi(this.theme.muted(status), safeWidth) : [];
 	}
 }
 
