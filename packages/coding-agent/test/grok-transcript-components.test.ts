@@ -439,8 +439,8 @@ describe("Grok transcript components", () => {
 		// Internal assistant/tool boundaries keep the latest thinking visible.
 		const activeFrame = group.render(80).join("\n");
 		const active = stripAnsi(activeFrame);
-		expect(activeFrame).toContain(theme.fg("muted", "▸ Thought process · second reasoning"));
-		expect(active).toContain("▸ Thought process · second reasoning");
+		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "✦ second reasoning")));
+		expect(active).toContain("✦ second reasoning");
 		expect(active).not.toContain("first reasoning");
 		expect(active).not.toContain("Thinking...");
 
@@ -448,17 +448,17 @@ describe("Grok transcript components", () => {
 		group.completeTurn();
 		const collapsedFrame = group.render(80).join("\n");
 		const collapsed = stripAnsi(collapsedFrame);
-		expect(collapsedFrame).toContain(theme.fg("muted", "▸ Thought process"));
+		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "✦ Thinking...")));
 		expect(group.entryCount).toBe(2);
 		expect(group.render(80)).toHaveLength(1);
-		expect(collapsed).toContain("▸ Thought process");
-		expect(collapsed).not.toContain("Thinking");
+		expect(collapsed).toContain("✦ Thinking...");
+		expect(collapsed).not.toContain("Thought process");
 		expect(collapsed).not.toContain("first reasoning");
 		expect(collapsed).not.toContain("second reasoning");
 
 		expect(group.handleOverviewClick(0)).toBe(true);
 		const expanded = stripAnsi(group.render(80).join("\n"));
-		expect(expanded).toContain("▾ Thought process");
+		expect(expanded).toContain("✦ Thinking...");
 		expect(expanded).toContain("first reasoning");
 		expect(expanded).toContain("second reasoning");
 
@@ -477,18 +477,18 @@ describe("Grok transcript components", () => {
 		const owner = {};
 		try {
 			group.updateThinking(owner, "正在分析输入并检查边界条件", true);
-			expect(stripAnsi(group.render(80)[0])).toContain("▸ Thinking… · 正在分析");
+			expect(stripAnsi(group.render(80)[0])).toContain("✦ 正在分析");
 			vi.advanceTimersByTime(120);
 			expect(requestRender).toHaveBeenCalled();
 			group.setExpanded(true);
-			expect(stripAnsi(group.render(80)[0])).toContain("▾ Thinking…");
+			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
 			group.completeTurn();
 			requestRender.mockClear();
 			vi.advanceTimersByTime(240);
 			expect(requestRender).not.toHaveBeenCalled();
-			expect(stripAnsi(group.render(80)[0])).toContain("▾ Thought process");
+			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
 			group.setExpanded(false);
-			expect(stripAnsi(group.render(80)[0])).toContain("▸ Thought process");
+			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
 			expectFits(group, [4, 12, 24, 80]);
 		} finally {
 			group.dispose();
@@ -499,10 +499,10 @@ describe("Grok transcript components", () => {
 	test("preserves custom thinking labels and keeps hidden thinking private", () => {
 		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Custom reasoning", 1, true);
 		group.updateThinking({}, "private content", true);
-		expect(stripAnsi(group.render(80)[0])).toContain("▸ Custom reasoning");
+		expect(stripAnsi(group.render(80)[0])).toContain("✦ Custom reasoning");
 		expect(stripAnsi(group.render(80).join("\n"))).not.toContain("private content");
 		group.completeTurn();
-		expect(stripAnsi(group.render(80)[0])).toContain("▸ Custom reasoning");
+		expect(stripAnsi(group.render(80)[0])).toContain("✦ Custom reasoning");
 	});
 
 	test("toggles turn thinking from every rendered row, including wrapped content", () => {
