@@ -65,7 +65,7 @@ describe("Grok transcript components", () => {
 		expectFits(component, [16, 40, 80]);
 	});
 
-	test("renders a timestamped, accented user band with a stable text signature", () => {
+	test("renders a timestamped user frame with a stable text signature", () => {
 		const timestamp = new Date(2026, 7, 22, 9, 5).getTime();
 		const component = new GrokUserMessageComponent("你好，Grok 👋", undefined, 1, [], timestamp);
 		const rendered = stripAnsi(component.render(40).join("\n"));
@@ -78,22 +78,32 @@ describe("Grok transcript components", () => {
 		expectFits(component);
 	});
 
-	test("keeps short user messages compact with semantic markers on the prompt header", () => {
-		const component = new GrokUserMessageComponent("hello");
+	test("separates user messages with rounded borders and keeps OSC markers outside the body", () => {
+		const timestamp = new Date(2026, 7, 22, 9, 5).getTime();
+		const component = new GrokUserMessageComponent("hello", undefined, 1, [], timestamp);
 		const lines = component.render(40);
-		expect(lines).toHaveLength(2);
-		expect(lines[0]).toMatch(/^\x1b\]133;A\x07/);
-		expect(stripAnsi(lines[0])).toContain("❯");
-		expect(stripAnsi(lines[1])).toContain("hello");
-		expect(lines[1]).toContain("\x1b]133;B\x07\x1b]133;C\x07");
-		expect(lines[1]).not.toContain("\x1b]133;A\x07");
+		expect(lines.map(stripAnsi)).toEqual([
+			"",
+			`╭─ ❯ 09:05 ${"─".repeat(28)}╮`,
+			`│ hello${" ".repeat(32)}│`,
+			`╰${"─".repeat(38)}╯`,
+			"",
+		]);
+		expect(lines[1]).toMatch(/^\x1b\]133;A\x07/);
+		expect(lines[3]).toMatch(/^\x1b\]133;B\x07\x1b\]133;C\x07/);
+		expect(lines[2]).not.toContain("\x1b]133;");
+		expect(lines[1]).toContain(theme.getFgAnsi("userMessageBorder"));
+		expect(lines[2]).toContain(theme.getBgAnsi("userMessageBg"));
+		expect(lines[2]).toContain(theme.getFgAnsi("userMessageText"));
+		expect(component.getText()).toBe("hello");
 		component.setOutputPad(0);
 		component.invalidate();
-		expect(component.render(40)).toHaveLength(2);
-		expectFits(component, [4, 20, 40, 80]);
+		expect(component.render(40)).toHaveLength(5);
+		expectFits(component, [1, 2, 4, 6, 20, 40, 80]);
+		expect(component.render(0)).toEqual([]);
 	});
 
-	test("preserves user Markdown, skill mentions and paragraph spacing in the compact band", () => {
+	test("preserves user Markdown, skill mentions and paragraph spacing inside the frame", () => {
 		const component = new GrokUserMessageComponent(
 			"first paragraph\n\nsecond paragraph",
 			undefined,
@@ -103,11 +113,26 @@ describe("Grok transcript components", () => {
 			["review"],
 		);
 		const lines = component.render(40).map(stripAnsi);
-		expect(lines).toHaveLength(4);
-		expect(lines[1]).toContain("review updated paragraph");
-		expect(lines[2].trim()).toBe("");
-		expect(lines[3]).toContain("second paragraph");
+		expect(lines).toHaveLength(7);
+		expect(lines[2]).toContain("review updated paragraph");
+		expect(lines[3]).toBe(`│${" ".repeat(38)}│`);
+		expect(lines[4]).toContain("second paragraph");
 		expectFits(component, [20, 40, 80]);
+	});
+
+	test("rewraps styled and wide user text within the frame after resizing", () => {
+		const text = "**重要** 中文用户消息 👋 请检查窄窗口换行。";
+		const component = new GrokUserMessageComponent(text);
+		for (const width of [80, 20, 6, 32, 80]) {
+			const lines = component.render(width).map(stripAnsi);
+			for (const line of lines.slice(1, -1)) expect(visibleWidth(line)).toBe(width);
+			const content = lines
+				.slice(2, -2)
+				.map((line) => line.slice(1, -1).trim())
+				.join("");
+			expect(content.replaceAll(" ", "")).toBe("重要中文用户消息👋请检查窄窗口换行。");
+		}
+		expect(component.getText()).toBe(text);
 	});
 
 	test("renders thinking as a one-line live marquee without role headers", () => {

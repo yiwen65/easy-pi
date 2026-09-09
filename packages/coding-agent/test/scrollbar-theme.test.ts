@@ -28,6 +28,20 @@ afterEach(() => {
 });
 
 describe("optional fullscreen theme colors", () => {
+	it("falls back to accent when userMessageBorder is omitted", () => {
+		const themeJson = loadDarkTheme();
+		themeJson.name = "legacy-user-frame-theme";
+		delete themeJson.colors.userMessageBorder;
+		const loadedTheme = loadThemeFromPath(writeTheme(themeJson), "truecolor");
+		expect(loadedTheme.getFgAnsi("userMessageBorder")).toBe(loadedTheme.getFgAnsi("accent"));
+	});
+
+	it("uses the dark theme's purple user background and border", () => {
+		const loadedTheme = loadThemeFromPath(writeTheme(loadDarkTheme()), "truecolor");
+		expect(loadedTheme.getBgAnsi("userMessageBg")).toBe("\x1b[48;2;53;37;65m");
+		expect(loadedTheme.getFgAnsi("userMessageBorder")).toBe("\x1b[38;2;185;154;232m");
+	});
+
 	it("falls back to selectedBg when scrollbarThumb is omitted", () => {
 		const themeJson = loadDarkTheme();
 		themeJson.name = "legacy-scrollbar-theme";
