@@ -1012,6 +1012,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					// Content click handlers are best-effort.
 				}
 				if (consumed) {
+					// A control activation must not seed the next word/line selection.
+					this.lastClick = undefined;
 					this.selectionAnchor = undefined;
 					this.selectionFocus = undefined;
 					this.requestRender();
@@ -1024,6 +1026,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		if ((event.button & 32) !== 0) {
 			if (!this.selectionPressActive || !this.selectionAnchor) return;
+			// Terminals may report motion within the same cell during a click.
+			if (
+				!this.selectionDragged &&
+				this.selectionGranularity === "character" &&
+				this.selectionAnchor.scrollView === point.scrollView &&
+				this.selectionAnchor.row === point.row &&
+				this.selectionAnchor.col === point.col
+			) {
+				return;
+			}
 			this.selectionDragged = true;
 			this.lastClick = undefined;
 			this.pressedUrl = undefined;
