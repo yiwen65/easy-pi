@@ -65,6 +65,7 @@ export class UserMessageComponent extends Container {
 				this.markdownTheme,
 				{
 					color: (content: string) => theme.fg("userMessageText", content),
+					bold: true,
 				},
 				{
 					preserveOrderedListMarkers: true,
