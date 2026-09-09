@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type Component, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, ScrollView, stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
@@ -302,6 +302,23 @@ describe("Grok shell components", () => {
 		expect(footer.render(80)[0]).toBe("first status  second status");
 	});
 
+	it("wraps all extension statuses on narrow widths without losing styled or wide text", () => {
+		const statuses = new Map([
+			["permission", "perm:full-access"],
+			["status", `${A}状态：正在检查项目🙂${X}`],
+		]);
+		const footer = new GrokComponentFactory(markerTheme).createFooter({
+			...createStubFooterData(1),
+			getExtensionStatuses: () => statuses,
+		});
+		const expected = stripTerminalSequences(footer.render(200).join("")).replace(/\s/g, "");
+		for (const width of [4, 12, 24, 40, 80]) {
+			expectWithinWidth(footer, [width]);
+			expect(stripTerminalSequences(footer.render(width).join("")).replace(/\s/g, "")).toBe(expected);
+		}
+		expect(footer.render(12).length).toBeGreaterThan(1);
+	});
+
 	it("renders nothing when there are no extension statuses", () => {
 		const factory = new GrokComponentFactory(identityTheme);
 		const footer = factory.createFooter(createStubFooterData(1));
@@ -338,6 +355,58 @@ describe("Grok shell components", () => {
 		expect(view.regularComponents.flatMap((component) => component.render(80)).join("\n")).not.toContain("Ready");
 		expectWithinWidth(view.fullscreenRoot, [40, 80, 120]);
 		view.dispose();
+	});
+
+	it("grows the fullscreen dock when footer information wraps on resize", async () => {
+		const terminal = new VirtualTerminal(120, 30);
+		const ui = new TuiAltScreen(terminal);
+		const statuses = new Map([["permission", "perm:full-access"]]);
+		const view = new GrokComponentFactory(markerTheme).createInteractiveView({
+			document: new StubComponent(["transcript"]),
+			transcriptViewport: new ScrollView(new StubComponent(["transcript"]), { primary: true }),
+			editorHost: new EditorHost(),
+			location: { path: "/workspace" },
+			contextPercent: 42.6,
+			session: createStubSession({
+				usage: { input: 188_000, output: 8_900, cacheRead: 3_500_000, cacheWrite: 0, cost: { total: 5.877 } },
+				contextPercent: 42.6,
+				usingSubscription: true,
+			}),
+			footerData: { ...createStubFooterData(2), getExtensionStatuses: () => statuses },
+		});
+		ui.setLayoutRoot(view.fullscreenRoot);
+		ui.start();
+		try {
+			for (const width of [120, 68, 40, 24, 120]) {
+				terminal.resize(width, 30);
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				const editorBottom = viewport.findIndex((line) => line.includes("╰"));
+				expect(editorBottom).toBeGreaterThan(0);
+				const footerText = viewport
+					.slice(editorBottom + 1)
+					.join("")
+					.replace(/\s/g, "");
+				for (const text of [
+					"↑188k",
+					"↓8.9k",
+					"R3.5M",
+					"$5.877",
+					"(sub)",
+					"42.6%/272k",
+					"(auto)",
+					"(openai-codex)",
+					"gpt-5.6-sol",
+					"high",
+					"perm:full-access",
+				]) {
+					expect(footerText).toContain(text);
+				}
+			}
+		} finally {
+			ui.stop();
+			view.dispose();
+		}
 	});
 
 	it("mounts a stats bar with native Pi session info when a session is provided", () => {
@@ -444,14 +513,20 @@ describe("GrokStatsBar", () => {
 		}
 	});
 
-	it("drops the model side before truncating the stats on narrow widths", () => {
-		const factory = new GrokComponentFactory(identityTheme);
-		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }), createStubFooterData(2));
-
-		const line = bar.render(50)[0] ?? "";
-		expect(visibleWidth(line)).toBeLessThanOrEqual(50);
-		expect(line).toContain("↑188k");
-		expect(line).not.toContain("gpt-5.6-sol • high");
+	it("wraps stats and model information without losing content when resized", () => {
+		const factory = new GrokComponentFactory(markerTheme);
+		const bar = factory.createStatsBar(
+			createStubSession({ usage: fullUsage, modelId: "a-very-long-model-identifier", usingSubscription: true }),
+			createStubFooterData(2),
+		);
+		const expected = stripTerminalSequences(bar.render(200).join("")).replace(/\s/g, "");
+		for (const width of [4, 12, 24, 40, 50, 68, 80, 120, 200]) {
+			const lines = bar.render(width);
+			expectWithinWidth(bar, [width]);
+			expect(stripTerminalSequences(lines.join("")).replace(/\s/g, "")).toBe(expected);
+		}
+		expect(bar.render(50).length).toBeGreaterThan(1);
+		expect(bar.render(200)).toHaveLength(1);
 	});
 
 	it("flashes changed segments in accent and fades back after the flash window", () => {

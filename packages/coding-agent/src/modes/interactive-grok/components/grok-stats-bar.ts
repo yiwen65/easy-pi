@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
@@ -86,12 +86,7 @@ export class GrokStatsBar implements Component {
 		if (leftWidth + MIN_GAP + rightWidth <= safeWidth) {
 			return [left + " ".repeat(safeWidth - leftWidth - rightWidth) + right];
 		}
-		if (leftWidth + MIN_GAP < safeWidth) {
-			const fittedRight = truncateToWidth(right, safeWidth - leftWidth - MIN_GAP, "");
-			const fittedRightWidth = visibleWidth(fittedRight);
-			return [left + " ".repeat(Math.max(0, safeWidth - leftWidth - fittedRightWidth)) + fittedRight];
-		}
-		return [truncateToWidth(left, safeWidth, this.theme.dim("…"))];
+		return wrapTextWithAnsi(`${left}${" ".repeat(MIN_GAP)}${right}`, safeWidth);
 	}
 
 	private renderLeft(): string {
