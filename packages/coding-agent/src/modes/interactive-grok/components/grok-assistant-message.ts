@@ -9,13 +9,6 @@ import { flattenInline, marqueeWindow } from "./grok-marquee.ts";
 const TICK_INTERVAL_MS = 120;
 const MARQUEE_PREFIX = "✦ ";
 
-class EmptyThinkingComponent implements Component {
-	invalidate(): void {}
-	render(): string[] {
-		return [];
-	}
-}
-
 /**
  * One-line thinking placeholder used while thinking is collapsed.
  *
@@ -149,8 +142,8 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 		);
 	}
 
-	protected override createHiddenThinkingComponent(): Component {
-		if (this.thinkingDelegated) return new EmptyThinkingComponent();
+	protected override createHiddenThinkingComponent(): Component | undefined {
+		if (this.thinkingDelegated) return undefined;
 		const marquee = new ThinkingMarqueeComponent(this.grokThinkingLabel, this.outputPad, () => this.marqueeLive());
 		this.marquees.push(marquee);
 		return marquee;
