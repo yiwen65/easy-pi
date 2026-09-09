@@ -1,10 +1,31 @@
 import { Container, ScrollView, Text, TuiAltScreen } from "@earendil-works/pi-tui";
+import chalk from "chalk";
 import { beforeAll, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { GrokUserMessageComponent } from "../src/modes/interactive-grok/components/grok-user-message.ts";
 
 beforeAll(() => initTheme("dark"));
+
+test.each(["dark", "light"])("user text is bold purple without a filled background in %s", (name) => {
+	const previousLevel = chalk.level;
+	chalk.level = 3;
+	initTheme(name);
+	try {
+		const component = new GrokUserMessageComponent("hello 中文消息");
+		for (const width of [20, 80]) {
+			const lines = component.render(width);
+			expect(lines[2]).toContain("\x1b[1m");
+			expect(lines[2]).toContain(theme.getFgAnsi("userMessageText"));
+			expect(lines.join("\n")).not.toMatch(/\x1b\[(?:48[;:]|4[0-7]m)/);
+			expect(lines[0]).toBe("");
+			expect(lines.at(-1)).toBe("");
+		}
+	} finally {
+		chalk.level = previousLevel;
+		initTheme("dark");
+	}
+});
 
 test("framed user text stays selectable after terminal resize", async () => {
 	const terminal = new VirtualTerminal(80, 12);

@@ -36,10 +36,17 @@ describe("optional fullscreen theme colors", () => {
 		expect(loadedTheme.getFgAnsi("userMessageBorder")).toBe(loadedTheme.getFgAnsi("accent"));
 	});
 
-	it("uses the dark theme's purple user background and border", () => {
-		const loadedTheme = loadThemeFromPath(writeTheme(loadDarkTheme()), "truecolor");
-		expect(loadedTheme.getBgAnsi("userMessageBg")).toBe("\x1b[48;2;53;37;65m");
-		expect(loadedTheme.getFgAnsi("userMessageBorder")).toBe("\x1b[38;2;185;154;232m");
+	it.each([
+		["dark", "\x1b[38;2;185;154;232m"],
+		["light", "\x1b[38;2;112;48;160m"],
+	])("uses terminal background and purple user text in %s", (name, purple) => {
+		const loadedTheme = loadThemeFromPath(
+			new URL(`../src/modes/interactive/theme/${name}.json`, import.meta.url).pathname,
+			"truecolor",
+		);
+		expect(loadedTheme.getBgAnsi("userMessageBg")).toBe("\x1b[49m");
+		expect(loadedTheme.getFgAnsi("userMessageText")).toBe(purple);
+		expect(loadedTheme.getFgAnsi("userMessageBorder")).toBe(purple);
 	});
 
 	it("falls back to selectedBg when scrollbarThumb is omitted", () => {
