@@ -23,10 +23,11 @@ export class CompactionSummaryMessageComponent extends Box {
 		this.updateDisplay();
 	}
 
-	/** Toggle when the visible compaction label or token summary is clicked. */
+	/** Collapse from any expanded row; expand from the collapsed label or token summary. */
 	handleContentClick(localRow: number, width: number): boolean {
 		const line = this.render(width)[localRow];
-		if (!line?.includes("[compaction]") && !line?.includes("Compacted")) return false;
+		if (line === undefined) return false;
+		if (!this.expanded && !line.includes("[compaction]") && !line.includes("Compacted")) return false;
 		this.setExpanded(!this.expanded);
 		return true;
 	}
