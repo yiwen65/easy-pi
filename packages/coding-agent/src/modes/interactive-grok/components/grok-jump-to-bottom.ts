@@ -24,7 +24,7 @@ export class GrokJumpToBottom implements Component {
 		const labelWidth = visibleWidth(label);
 		this.hitStart = Math.max(0, Math.floor((width - labelWidth) / 2));
 		this.hitEnd = this.hitStart + labelWidth;
-		return [" ".repeat(this.hitStart) + this.theme.accent(`\x1b[1;7m${label}\x1b[22;27m`)];
+		return [" ".repeat(this.hitStart) + this.theme.accent(label)];
 	}
 
 	handleClick(row: number, col: number): boolean {

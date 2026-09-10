@@ -149,7 +149,7 @@ test("updates after resize and content shrink, stays hidden for short content an
 	}
 });
 
-test("button is highlighted, width-safe and only its rendered cells are clickable", () => {
+test("button has no background highlight, stays width-safe and only its rendered cells are clickable", () => {
 	const scroll = new ScrollView(new Text("body"), { follow: "end" });
 	scroll.updateLayout(100, 10, () => {});
 	scroll.scrollToStart();
@@ -157,7 +157,7 @@ test("button is highlighted, width-safe and only its rendered cells are clickabl
 	for (const width of [1, 2, 3, 4, 20, 80]) {
 		const lines = button.render(width);
 		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
-		expect(lines[0]).toContain("\x1b[1;7m");
+		expect(lines[0]).not.toMatch(/\x1b\[(?:1;7|7|48[;:]|4[0-7]m)/);
 		expect(button.handleClick(1, 0)).toBe(false);
 		expect(button.handleClick(0, width)).toBe(false);
 	}
