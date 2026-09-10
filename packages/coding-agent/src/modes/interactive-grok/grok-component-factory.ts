@@ -56,8 +56,8 @@ export class GrokComponentFactory {
 		return new GrokStatus(state, this.theme);
 	}
 
-	createEditorFrame(editorHost: Component): GrokEditorFrame {
-		return new GrokEditorFrame(editorHost, { theme: this.theme });
+	createEditorFrame(editorHost: Component, session?: AgentSession): GrokEditorFrame {
+		return new GrokEditorFrame(editorHost, { theme: this.theme, session });
 	}
 
 	createStatsBar(session: AgentSession, ui?: GrokRenderDriver): GrokStatsBar {

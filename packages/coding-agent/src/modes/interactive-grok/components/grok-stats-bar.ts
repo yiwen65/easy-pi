@@ -1,4 +1,4 @@
-import { type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import { computeSessionUsageStats, formatTokens } from "../../interactive/components/footer.ts";
@@ -10,7 +10,6 @@ export interface GrokRenderDriver {
 }
 
 const FLASH_MS = 1200;
-const MIN_GAP = 2;
 
 interface StatsSegment {
 	/** Stable identity used for change detection / flash. */
@@ -23,8 +22,8 @@ interface StatsSegment {
 
 /**
  * Grok stats bar: restores the native Pi footer information (token totals,
- * latest cache-read ratio, cost) on the left and `model • effort` on the right. Usage segments may briefly flash when they
- * change; model and thinking colors update immediately without a fade repaint.
+ * latest cache-read ratio, cost). Usage segments may briefly flash when they change.
+ * Model and effort are displayed in the editor frame.
  */
 export class GrokStatsBar implements Component {
 	private session: AgentSession;
@@ -61,15 +60,8 @@ export class GrokStatsBar implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, Math.floor(width));
-		const left = this.renderLeft();
-		const right = this.renderRight();
-		const leftWidth = visibleWidth(left);
-		const rightWidth = visibleWidth(right);
-
-		if (leftWidth + MIN_GAP + rightWidth <= safeWidth) {
-			return [left + " ".repeat(safeWidth - leftWidth - rightWidth) + right];
-		}
-		return wrapTextWithAnsi(left ? `${left}${" ".repeat(MIN_GAP)}${right}` : right, safeWidth);
+		const usage = this.renderLeft();
+		return usage ? wrapTextWithAnsi(usage, safeWidth) : [];
 	}
 
 	private renderLeft(): string {
@@ -127,15 +119,5 @@ export class GrokStatsBar implements Component {
 			this.ui?.requestRender();
 		}, FLASH_MS + 50);
 		this.flashTimer.unref?.();
-	}
-
-	private renderRight(): string {
-		const state = this.session.state;
-		const modelName = state.model?.id || "no-model";
-		const level = state.model?.reasoning ? state.thinkingLevel || "off" : "";
-
-		if (!level) return this.theme.accent(modelName);
-		const styledLevel = level === "off" ? this.theme.dim(level) : this.theme.thinkingLevel(level, level);
-		return this.theme.accent(modelName) + this.theme.muted(" • ") + styledLevel;
 	}
 }

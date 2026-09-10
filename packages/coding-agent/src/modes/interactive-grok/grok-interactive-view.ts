@@ -43,7 +43,7 @@ export class GrokInteractiveView {
 		this.topBar = new GrokTopBar(options.location, options.contextPercent, theme);
 		this.ui = options.ui;
 		this.status = new GrokStatus(options.status ?? { kind: "idle", label: "Ready" }, theme, { reserveLine: true });
-		this.editorFrame = new GrokEditorFrame(options.editorHost, { theme });
+		this.editorFrame = new GrokEditorFrame(options.editorHost, { theme, session: options.session });
 		this.statsBar = options.session ? new GrokStatsBar(options.session, theme, options.ui) : undefined;
 		this.footer = new GrokFooter(theme, options.footerData);
 		this.statusSlot = new Container();
@@ -97,6 +97,7 @@ export class GrokInteractiveView {
 	}
 
 	setSession(session: AgentSession): void {
+		this.editorFrame.setSession(session);
 		this.statsBar?.setSession(session);
 	}
 
