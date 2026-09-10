@@ -1,8 +1,9 @@
-import { type Component, Container, VStack } from "@earendil-works/pi-tui";
+import { type Component, Container, ScrollView, VStack } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GrokEditorFrame } from "./components/grok-editor-frame.ts";
 import { GrokFooter } from "./components/grok-footer.ts";
+import { GrokJumpToBottom } from "./components/grok-jump-to-bottom.ts";
 import { type GrokRenderDriver, GrokStatsBar } from "./components/grok-stats-bar.ts";
 import { GrokStatus, type GrokStatusState } from "./components/grok-status.ts";
 import { type GrokLocation, GrokTopBar } from "./components/grok-top-bar.ts";
@@ -53,10 +54,15 @@ export class GrokInteractiveView {
 		const before = [...(options.beforeEditor ?? [])];
 		const after = [...(options.afterEditor ?? [])];
 		const stats = this.statsBar ? [this.statsBar] : [];
+		const jumpToBottom =
+			options.transcriptViewport instanceof ScrollView
+				? [new GrokJumpToBottom(options.transcriptViewport, theme)]
+				: [];
 		const dock = new VStack([
 			...pending.map((component) => ({ component, shrink: 1, minSize: 0 })),
 			{ component: this.statusSlot, shrink: 1, minSize: 0 },
 			...before.map((component) => ({ component, shrink: 1, minSize: 0 })),
+			...jumpToBottom.map((component) => ({ component, basis: 1, shrink: 0, minSize: 1 })),
 			{ component: this.editorFrame, shrink: 1, minSize: 3 },
 			...stats.map((component) => ({ component, shrink: 1, minSize: 1 })),
 			...after.map((component) => ({ component, shrink: 1, minSize: 0 })),

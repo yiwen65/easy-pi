@@ -33,6 +33,9 @@ export interface Component {
 	 */
 	handleInput?(data: string): void;
 
+	/** Fullscreen layout click in local cell coordinates. Return true to consume without copying or changing focus. */
+	handleClick?(row: number, col: number): boolean;
+
 	/**
 	 * If true, component receives key release events (Kitty protocol).
 	 * Default is false - release events are filtered out.
