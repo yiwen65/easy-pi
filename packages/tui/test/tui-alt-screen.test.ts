@@ -90,9 +90,9 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 6", "line 7", "line 8", "line 9"],
+			["line 4", "line 5", "line 6", "line 7"],
 		);
-		assert.strictEqual(tui.viewportTop, 5);
+		assert.strictEqual(tui.viewportTop, 3);
 		assert.strictEqual(tui.isFollowingOutput, false);
 
 		text.setText(Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"));
@@ -100,9 +100,12 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 6", "line 7", "line 8", "line 9"],
+			["line 4", "line 5", "line 6", "line 7"],
 		);
 
+		terminal.sendInput("\x1b[<65;1;1M");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.viewportTop, 6);
 		tui.stop();
 	});
 
@@ -131,7 +134,7 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 4", "line 5", "line 6", "line 7", "editor", "footer"],
+			["line 2", "line 3", "line 4", "line 5", "editor", "footer"],
 		);
 		assert.strictEqual(transcript.isFollowingEnd, false);
 
@@ -140,7 +143,7 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
-			["line 4", "line 5", "line 6", "line 7", "editor", "footer"],
+			["line 2", "line 3", "line 4", "line 5", "editor", "footer"],
 		);
 
 		tui.scrollToBottom();
@@ -188,10 +191,10 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[<64;15;1M");
 		await terminal.waitForRender();
 		assert.strictEqual(left.scrollTop, 3);
-		assert.strictEqual(right.scrollTop, 2);
+		assert.strictEqual(right.scrollTop, 0);
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
-			["a4        b3", "a5        b4", "a6        b5", "a7        b6"],
+			["a4        b1", "a5        b2", "a6        b3", "a7        b4"],
 		);
 		tui.stop();
 	});
@@ -278,9 +281,9 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("drags a visible scrollbar thumb and keeps it visible until release", async () => {
+	it("drags a visible scrollbar thumb and keeps it visible until release with a one-line wheel override", async () => {
 		const terminal = new RecordingTerminal(10, 5);
-		const tui = new TuiAltScreen(terminal);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 1 });
 		const scrollView = new ScrollView(
 			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
 			{
