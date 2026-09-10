@@ -148,19 +148,18 @@ function expectWithinWidth(component: Component, widths: readonly number[]): voi
 }
 
 describe("Grok shell components", () => {
-	it("renders location and context meter in a responsive top bar", () => {
+	it("omits project and branch while keeping the context meter right aligned", () => {
 		const factory = new GrokComponentFactory(identityTheme);
 		const topBar = factory.createTopBar({ path: "/Users/example/a-very-long/project/path", branch: "main" }, 42);
 
-		expect(topBar.render(40)[0]).toContain("…");
-		expect(topBar.render(80)[0]).toContain("/Users/example/a-very-long/project/path");
-		expect(topBar.render(80)[0]).toContain("(main)");
-		expect(topBar.render(80)[0]).toContain("42%");
-		// The branch survives while the path truncates from the left.
-		const narrow = topBar.render(30)[0] ?? "";
-		expect(narrow).toContain("(main)");
-		expect(narrow).toContain("…");
-		expectWithinWidth(topBar, [40, 80, 120]);
+		for (const width of [16, 40, 80, 120]) {
+			expect(topBar.render(width)[0]).toBe(`${" ".repeat(width - 10)}███░░░ 42%`);
+		}
+		topBar.setLocation({ path: "/another/project", branch: "feature" });
+		expect(topBar.render(80)[0]).not.toMatch(/project|feature|main/);
+		topBar.setLocation({ path: "/another/project", branch: "feature", sessionName: "Named session" });
+		expect(topBar.render(80)[0]).toContain("Named session");
+		expectWithinWidth(topBar, [1, 4, 8, 16, 40, 80, 120]);
 	});
 
 	it("color-codes the context meter as usage grows", () => {
@@ -433,7 +432,7 @@ describe("Grok shell components", () => {
 		});
 
 		const rendered = view.regularComponents.flatMap((component) => component.render(120)).join("\n");
-		expect(rendered).toContain("(main)");
+		expect(rendered).not.toMatch(/\(main\)|\/workspace/);
 		expect(rendered).toContain("↑188k ↓17k R1.7M CR90.0% $2.279");
 		expect(rendered).toContain("gpt-5.6-sol • high");
 		expect(rendered.match(/gpt-5\.6-sol • high/g)).toHaveLength(1);

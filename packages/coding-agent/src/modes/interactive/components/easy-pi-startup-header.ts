@@ -12,7 +12,6 @@ export interface EasyPiLandingTelemetry {
 }
 
 export interface EasyPiStartupHeaderOptions {
-	getCompactHints: () => readonly string[];
 	getExpandedHints: () => readonly string[];
 	getTelemetry: () => EasyPiLandingTelemetry;
 	expanded?: boolean;
@@ -20,13 +19,11 @@ export interface EasyPiStartupHeaderOptions {
 
 /** Static, responsive easy-pi landing page with restrained terminal typography. */
 export class EasyPiStartupHeader implements Component {
-	private readonly getCompactHints: () => readonly string[];
 	private readonly getExpandedHints: () => readonly string[];
 	private readonly getTelemetry: () => EasyPiLandingTelemetry;
 	private expanded: boolean;
 
 	constructor(options: EasyPiStartupHeaderOptions) {
-		this.getCompactHints = options.getCompactHints;
 		this.getExpandedHints = options.getExpandedHints;
 		this.getTelemetry = options.getTelemetry;
 		this.expanded = options.expanded ?? false;
@@ -48,11 +45,7 @@ export class EasyPiStartupHeader implements Component {
 		if (safeWidth < 16) return lines;
 
 		if (safeWidth >= visibleWidth(TAGLINE)) lines.push(this.center(theme.fg("dim", TAGLINE), safeWidth));
-		if (safeWidth < 24) {
-			lines.push("");
-			lines.push(...this.renderCommandRail(safeWidth));
-			return lines;
-		}
+		if (safeWidth < 24) return lines;
 
 		lines.push("");
 		lines.push(...this.renderResources(safeWidth));
@@ -66,7 +59,6 @@ export class EasyPiStartupHeader implements Component {
 			return lines;
 		}
 
-		lines.push(...this.renderCommandRail(safeWidth));
 		return lines;
 	}
 
@@ -90,10 +82,6 @@ export class EasyPiStartupHeader implements Component {
 			],
 			width,
 		);
-	}
-
-	private renderCommandRail(width: number): string[] {
-		return this.renderSegments(this.getCompactHints(), width);
 	}
 
 	private renderSegments(segments: readonly string[], width: number): string[] {

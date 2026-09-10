@@ -14,7 +14,6 @@ const telemetry = {
 
 function createHeader(overrides: Partial<EasyPiStartupHeaderOptions> = {}): EasyPiStartupHeader {
 	return new EasyPiStartupHeader({
-		getCompactHints: () => ["Esc interrupt", "/ commands", "! shell", "Ctrl+O details"],
 		getExpandedHints: () => [
 			"Ctrl+C to interrupt",
 			"Ctrl+D to exit",
@@ -43,15 +42,17 @@ describe("EasyPiStartupHeader", () => {
 		expect(output).toContain("The deepest truths are often the simplest");
 		expect(output).toContain("15 skills  ·  9 extensions  ·  5 prompts");
 		expect(output.match(/easy-pi/gu)).toHaveLength(1);
-		expect(output).toContain("Esc interrupt");
-		expect(output).toContain("Ctrl+O details");
+		expect(output).not.toContain("interrupt");
+		expect(output).not.toContain("details");
+		expect(output).not.toContain("commands");
+		expect(output).not.toContain("shell");
 		expect(output).not.toContain("v1.2.3");
 		expect(output).not.toContain("gpt-5.6-sol");
 		expect(output).not.toContain("reasoning");
 		expect(output).not.toContain("% context");
 		expect(output).not.toMatch(/[█▄▀◆◦◉]/u);
 		expect(output).not.toContain("Eπ // CORE");
-		expect(lines.filter((line) => stripTerminalSequences(line).trim().length > 0)).toHaveLength(4);
+		expect(lines.filter((line) => stripTerminalSequences(line).trim().length > 0)).toHaveLength(3);
 	});
 
 	test("only shows the tagline when it fits in full", () => {
@@ -96,7 +97,7 @@ describe("EasyPiStartupHeader", () => {
 	test("omits version metadata at every width", () => {
 		const header = createHeader();
 		for (const width of [16, 24, 40, 120]) {
-			expect(plain(header.render(width))).not.toMatch(/\beasy-pi v/u);
+			expect(plain(header.render(width))).not.toMatch(/\beasy-pi v|interrupt|commands|shell|details/u);
 		}
 	});
 

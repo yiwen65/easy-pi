@@ -85,7 +85,7 @@ describe("Grok visual contract", () => {
 		});
 
 		expect(renderRegular(view.regularComponents, 40)).toEqual([
-			"/workspace                    ███░░░ 42%",
+			"                              ███░░░ 42%",
 			"transcript",
 			"",
 			"╭──────────────────────────────────────╮",
