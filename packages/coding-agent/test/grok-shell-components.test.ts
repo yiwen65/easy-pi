@@ -193,6 +193,24 @@ describe("Grok shell components", () => {
 		expectWithinWidth(frame, [40, 80, 120]);
 	});
 
+	it("places unchanged model effort in the lower-right border notch and preserves it on narrow widths", () => {
+		const factory = new GrokComponentFactory(markerTheme);
+		const session = createStubSession({ modelId: "模型-long-model-identifier" });
+		const frame = factory.createEditorFrame(new EditorHost(), session);
+		const wide = frame.render(80);
+		expect(wide).toHaveLength(3);
+		expect(stripTerminalSequences(wide.at(-1) ?? "")).toMatch(/^╰─+ 模型-long-model-identifier • high ─╯$/);
+		expect(visibleWidth(wide.at(-1) ?? "")).toBe(80);
+		for (const width of [6, 12, 20, 40, 80]) {
+			const lines = frame.render(width).slice(2);
+			const label = stripTerminalSequences(lines.join("")).replace(/[╰╯│─\s]/g, "");
+			expect(label).toBe("模型-long-model-identifier•high");
+			expectWithinWidth(frame, [width]);
+		}
+		frame.setSession(createStubSession({ modelId: "replacement", thinkingLevel: "off" }));
+		expect(stripTerminalSequences(frame.render(80).at(-1) ?? "")).toContain("replacement • off");
+	});
+
 	it("renders the Grok editor frame with the active thinking-level border color", () => {
 		const frame = new GrokComponentFactory(identityTheme).createEditorFrame(new EditorHost());
 		const maxBorder = (text: string) => `${P}${text}${X}`;
@@ -387,10 +405,11 @@ describe("Grok shell components", () => {
 					.slice(editorBottom + 1)
 					.join("")
 					.replace(/\s/g, "");
-				for (const text of ["↑188k", "↓8.9k", "R3.5M", "$5.877", "gpt-5.6-sol", "high", "perm:full-access"]) {
+				for (const text of ["↑188k", "↓8.9k", "R3.5M", "$5.877", "perm:full-access"]) {
 					expect(footerText).toContain(text);
 				}
-				expect(footerText).not.toMatch(/openai-codex|\(sub\)|\(auto\)|42\.6%|272k/);
+				expect(footerText).not.toMatch(/gpt-5\.6-sol|high|openai-codex|\(sub\)|\(auto\)|42\.6%|272k/);
+				expect(viewport[editorBottom]).toContain(" gpt-5.6-sol • high ─╯");
 				expect(viewport[0]).toContain("43%");
 			}
 		} finally {
@@ -417,6 +436,10 @@ describe("Grok shell components", () => {
 		expect(rendered).toContain("(main)");
 		expect(rendered).toContain("↑188k ↓17k R1.7M CR90.0% $2.279");
 		expect(rendered).toContain("gpt-5.6-sol • high");
+		expect(rendered.match(/gpt-5\.6-sol • high/g)).toHaveLength(1);
+		expect(view.editorFrame.render(120).at(-1)).toContain("gpt-5.6-sol • high");
+		view.setSession(createStubSession({ modelId: "new-session-model", thinkingLevel: "low" }));
+		expect(view.editorFrame.render(120).at(-1)).toContain("new-session-model • low");
 		expect(rendered).not.toMatch(/openai-codex|35\.8%\/272k|\(auto\)/);
 		expectWithinWidth(view.fullscreenRoot, [40, 80, 120]);
 		view.dispose();
@@ -432,20 +455,20 @@ describe("GrokStatsBar", () => {
 		cost: { total: 2.279 },
 	};
 
-	it("shows usage, cost and model effort without provider or duplicated context", () => {
+	it("shows only usage and cost without duplicating the editor model label", () => {
 		const factory = new GrokComponentFactory(identityTheme);
 		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage }));
 
 		const line = bar.render(120)[0] ?? "";
-		expect(line.replace(/ +/g, " ")).toBe("↑188k ↓17k R1.7M CR90.0% $2.279 gpt-5.6-sol • high");
+		expect(line.replace(/ +/g, " ")).toBe("↑188k ↓17k R1.7M CR90.0% $2.279");
 		expectWithinWidth(bar, [40, 80, 120]);
 	});
 
 	it("omits effort for non-reasoning models", () => {
 		const factory = new GrokComponentFactory(identityTheme);
-		const bar = factory.createStatsBar(createStubSession({ usage: fullUsage, reasoning: false }));
+		const frame = factory.createEditorFrame(new EditorHost(), createStubSession({ reasoning: false }));
 
-		const line = bar.render(120)[0] ?? "";
+		const line = frame.render(120).at(-1) ?? "";
 		expect(line).not.toContain("(openai-codex)");
 		expect(line).toContain("gpt-5.6-sol");
 		expect(line).not.toContain("• high");
@@ -459,22 +482,23 @@ describe("GrokStatsBar", () => {
 
 		const line = bar.render(120)[0] ?? "";
 		expect(line).toContain("$2.279");
-		expect(line).toContain("gpt-5.6-sol • off");
+		const frame = factory.createEditorFrame(new EditorHost(), createStubSession({ thinkingLevel: "off" }));
+		expect(frame.render(120).at(-1)).toContain("gpt-5.6-sol • off");
 		expect(line).not.toMatch(/[()]/);
 	});
 
 	it("color-codes thinking levels on a heat scale", () => {
 		const factory = new GrokComponentFactory(markerTheme);
 		const levelOf = (thinkingLevel: string) =>
-			factory.createStatsBar(createStubSession({ usage: fullUsage, thinkingLevel }));
+			factory.createEditorFrame(new EditorHost(), createStubSession({ thinkingLevel })).render(120).at(-1);
 
-		expect(levelOf("off").render(120)[0]).toContain(`${D}off${X}`);
-		expect(levelOf("minimal").render(120)[0]).toContain(`${M}minimal${X}`);
-		expect(levelOf("low").render(120)[0]).toContain(`${T}low${X}`);
-		expect(levelOf("medium").render(120)[0]).toContain(`${A}medium${X}`);
-		expect(levelOf("high").render(120)[0]).toContain(`${W}high${X}`);
-		expect(levelOf("xhigh").render(120)[0]).toContain(`${E}xhigh${X}`);
-		expect(levelOf("max").render(120)[0]).toContain(`${P}max${X}`);
+		expect(levelOf("off")).toContain(`${D}off${X}`);
+		expect(levelOf("minimal")).toContain(`${M}minimal${X}`);
+		expect(levelOf("low")).toContain(`${T}low${X}`);
+		expect(levelOf("medium")).toContain(`${A}medium${X}`);
+		expect(levelOf("high")).toContain(`${W}high${X}`);
+		expect(levelOf("xhigh")).toContain(`${E}xhigh${X}`);
+		expect(levelOf("max")).toContain(`${P}max${X}`);
 	});
 
 	it("updates the thinking level color immediately without scheduling a fade repaint", () => {
@@ -484,23 +508,22 @@ describe("GrokStatsBar", () => {
 			const session = createStubSession({ usage: fullUsage, thinkingLevel: "high" });
 			const requestRender = vi.fn();
 			const factory = new GrokComponentFactory(markerTheme);
-			const bar = factory.createStatsBar(session, { requestRender });
+			const frame = factory.createEditorFrame(new EditorHost(), session);
 
-			expect(bar.render(120)[0]).toContain(`${A}gpt-5.6-sol${X}${M} • ${X}${W}high${X}`);
+			expect(frame.render(120).at(-1)).toContain(`${A}gpt-5.6-sol${X}${M} • ${X}${W}high${X}`);
 
 			(session.state as { thinkingLevel: string }).thinkingLevel = "low";
-			const switched = bar.render(120)[0] ?? "";
+			const switched = frame.render(120).at(-1) ?? "";
 			expect(switched).toContain(`${A}gpt-5.6-sol${X}${M} • ${X}${T}low${X}`);
 			expect(requestRender).not.toHaveBeenCalled();
 			expect(timeoutSpy).not.toHaveBeenCalled();
-			bar.dispose();
 		} finally {
 			timeoutSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});
 
-	it("wraps stats and model information without losing content when resized", () => {
+	it("wraps stats without losing content when resized", () => {
 		const factory = new GrokComponentFactory(markerTheme);
 		const bar = factory.createStatsBar(
 			createStubSession({ usage: fullUsage, modelId: "a-very-long-model-identifier", usingSubscription: true }),
@@ -511,7 +534,7 @@ describe("GrokStatsBar", () => {
 			expectWithinWidth(bar, [width]);
 			expect(stripTerminalSequences(lines.join("")).replace(/\s/g, "")).toBe(expected);
 		}
-		expect(bar.render(50).length).toBeGreaterThan(1);
+		expect(bar.render(24).length).toBeGreaterThan(1);
 		expect(bar.render(200)).toHaveLength(1);
 	});
 
@@ -569,20 +592,15 @@ describe("GrokStatsBar", () => {
 		expect(getContextUsage).not.toHaveBeenCalled();
 	});
 
-	it("wraps model-only output without an empty leading row", () => {
-		const bar = new GrokComponentFactory(identityTheme).createStatsBar(
-			createStubSession({ modelId: "a-very-long-model-identifier" }),
-		);
-		const lines = bar.render(12);
-		expect(lines.every((line) => line.trim().length > 0)).toBe(true);
-		expect(lines.join("").replace(/\s/g, "")).toBe("a-very-long-model-identifier•high");
-		expectWithinWidth(bar, [12, 40, 80]);
+	it("renders no stats row before there is any usage", () => {
+		const bar = new GrokComponentFactory(identityTheme).createStatsBar(createStubSession({}));
+		expect(bar.render(12)).toEqual([]);
 	});
 
 	it("retains zero subscription cost without the subscription label", () => {
 		const bar = new GrokComponentFactory(identityTheme).createStatsBar(
 			createStubSession({ usingSubscription: true }),
 		);
-		expect(bar.render(80)[0]?.replace(/ +/g, " ")).toBe("$0.000 gpt-5.6-sol • high");
+		expect(bar.render(80)[0]?.replace(/ +/g, " ")).toBe("$0.000");
 	});
 });
