@@ -56,6 +56,10 @@ export class ScrollView extends Container {
 		return this.currentScrollTop;
 	}
 
+	get isAtEnd(): boolean {
+		return this.currentScrollTop >= Math.max(0, this.contentHeight - this.currentViewportHeight);
+	}
+
 	get isFollowingEnd(): boolean {
 		return this.followingEnd;
 	}
@@ -179,6 +183,7 @@ export class ScrollView extends Container {
 	}
 
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		const wasAtEnd = this.isAtEnd;
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
@@ -190,6 +195,8 @@ export class ScrollView extends Container {
 			this.followingEnd = true;
 		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
+		// Controls may have been measured before this frame updated the viewport metrics.
+		if (wasAtEnd !== this.isAtEnd) this.requestRenderCallback?.();
 	}
 
 	override addChild(_component: Component): void {

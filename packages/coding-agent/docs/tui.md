@@ -14,6 +14,7 @@ All components implement:
 interface Component {
   render(width: number): string[];
   handleInput?(data: string): void;
+  handleClick?(row: number, col: number): boolean;
   wantsKeyRelease?: boolean;
   invalidate(): void;
 }
@@ -23,6 +24,7 @@ interface Component {
 |--------|-------------|
 | `render(width)` | Return array of strings (one per line). Each line **must not exceed `width`**. |
 | `handleInput?(data)` | Receive keyboard input when component has focus. |
+| `handleClick?(row, col)` | Optional fullscreen layout control handler, outside ScrollViews. Coordinates are local terminal cells; return `true` to consume a stationary primary click without copying or changing focus. Disabled while an overlay is visible; scroll content uses `onContentClick` instead. |
 | `wantsKeyRelease?` | If true, component receives key release events (Kitty protocol). Default: false. |
 | `invalidate()` | Clear cached render state. Called on theme changes. |
 

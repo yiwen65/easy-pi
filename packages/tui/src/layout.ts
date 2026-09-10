@@ -385,6 +385,18 @@ function containsPoint(rect: LayoutRect, x: number, y: number): boolean {
 	return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
 }
 
+/** Dispatch to a visible layout control, deepest child first. ScrollView content uses onContentClick instead. */
+export function dispatchLayoutClick(frame: LayoutFrame, x: number, y: number): boolean {
+	const visit = (box: LayoutBox): boolean => {
+		if (!containsPoint(box.clip, x, y) || !containsPoint(box.rect, x, y) || box.scrollView) return false;
+		for (const child of [...box.children].reverse()) {
+			if (visit(child)) return true;
+		}
+		return box.component.handleClick?.(y - box.rect.y + (box.lineOffset ?? 0), x - box.rect.x) ?? false;
+	};
+	return visit(frame.root);
+}
+
 export function getScrollViewBox(frame: LayoutFrame, scrollView: ScrollView): LayoutBox | undefined {
 	const visit = (box: LayoutBox): LayoutBox | undefined => {
 		if (box.scrollView === scrollView) return box;

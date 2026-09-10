@@ -9,6 +9,7 @@ import { ScrollView } from "./components/scroll-view.ts";
 import { getKeybindings } from "./keybindings.ts";
 import { isKeyRelease } from "./keys.ts";
 import {
+	dispatchLayoutClick,
 	getScrollbarGeometry,
 	getScrollViewBox,
 	getScrollViewsAt,
@@ -994,20 +995,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 			if (
 				!this.selectionDragged &&
-				this.onContentClick &&
-				this.selectionAnchor?.scrollView &&
-				this.selectionAnchor.scrollView === point.scrollView &&
+				this.selectionAnchor?.scrollView === point.scrollView &&
 				this.selectionAnchor.row === point.row &&
 				this.selectionAnchor.col === point.col
 			) {
 				const anchor = this.selectionAnchor;
 				let consumed = false;
 				try {
-					consumed = this.onContentClick({
-						scrollView: anchor.scrollView as ScrollView,
-						row: anchor.row,
-						col: anchor.col,
-					});
+					if (anchor.scrollView) {
+						consumed =
+							this.onContentClick?.({ scrollView: anchor.scrollView, row: anchor.row, col: anchor.col }) ??
+							false;
+					} else if (!this.hasOverlay() && this.currentLayout) {
+						consumed = dispatchLayoutClick(this.currentLayout, event.x, event.y);
+					}
 				} catch {
 					// Content click handlers are best-effort.
 				}
