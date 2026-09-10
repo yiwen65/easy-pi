@@ -1267,12 +1267,6 @@ export class InteractiveMode {
 							.extensions.filter((extension) => !extension.hidden).length,
 					};
 				},
-				getCompactHints: () => [
-					hint("app.interrupt", "interrupt"),
-					rawKeyHint("/", "commands"),
-					rawKeyHint("!", "shell"),
-					hint("app.tools.expand", "details"),
-				],
 				getExpandedHints: () => [
 					hint("app.interrupt", "to interrupt"),
 					hint("app.clear", "to clear"),
