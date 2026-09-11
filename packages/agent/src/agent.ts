@@ -122,6 +122,7 @@ export interface AgentOptions {
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	promptCacheKey?: string;
+	cacheAffinityId?: string;
 	sessionId?: string;
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
@@ -213,6 +214,8 @@ export class Agent {
 	private activeRun?: ActiveRun;
 	/** Logical provider prompt-cache grouping key, independent from transport affinity. */
 	public promptCacheKey?: string;
+	/** Codex SSE cache-affinity lineage; never the native or connection identity. */
+	public cacheAffinityId?: string;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -243,6 +246,7 @@ export class Agent {
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(runtimeOptions.followUpMode ?? "one-at-a-time");
 		this.promptCacheKey = runtimeOptions.promptCacheKey;
+		this.cacheAffinityId = runtimeOptions.cacheAffinityId;
 		this.sessionId = runtimeOptions.sessionId;
 		this.thinkingBudgets = runtimeOptions.thinkingBudgets;
 		this.transport = runtimeOptions.transport ?? "auto";
@@ -471,6 +475,7 @@ export class Agent {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
 			promptCacheKey: this.promptCacheKey,
+			cacheAffinityId: this.cacheAffinityId,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,

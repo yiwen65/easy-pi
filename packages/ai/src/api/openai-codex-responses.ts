@@ -266,6 +266,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			);
 			const transportSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 			const codexSessionId = clampOpenAIPromptCacheKey(transportSessionId);
+			const cacheAffinityId =
+				options?.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.cacheAffinityId);
 			const promptCacheKey =
 				options?.cacheRetention === "none"
 					? undefined
@@ -276,7 +278,14 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				body = nextBody as RequestBody;
 			}
 			const websocketRequestId = codexSessionId || uuidv7();
-			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, codexSessionId);
+			const sseHeaders = buildSSEHeaders(
+				model.headers,
+				options?.headers,
+				accountId,
+				apiKey,
+				codexSessionId,
+				cacheAffinityId,
+			);
 			const websocketHeaders = buildWebSocketHeaders(
 				model.headers,
 				options?.headers,
@@ -287,7 +296,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const bodyJson = JSON.stringify(body);
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
-			const transport = options?.transport || "auto";
+			// Cache-affine forks must not share server-side WebSocket session state.
+			// Keep connection pools, continuation state and cancellation keyed by the native session.
+			const transport = options?.cacheAffinityId !== undefined ? "sse" : options?.transport || "auto";
 			let startEmitted = false;
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(transportSessionId);
 			if (websocketDisabledForSession) {
@@ -1621,15 +1632,16 @@ function buildSSEHeaders(
 	accountId: string,
 	token: string,
 	sessionId?: string,
+	cacheAffinityId?: string,
 ): Headers {
 	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token);
 	headers.set("OpenAI-Beta", "responses=experimental");
 	headers.set("accept", "text/event-stream");
 	headers.set("content-type", "application/json");
 
-	if (sessionId) {
-		headers.set("session-id", sessionId);
-		headers.set("x-client-request-id", sessionId);
+	if (cacheAffinityId || sessionId) {
+		headers.set("session-id", cacheAffinityId || sessionId!);
+		headers.set("x-client-request-id", sessionId || uuidv7());
 	}
 
 	return headers;
