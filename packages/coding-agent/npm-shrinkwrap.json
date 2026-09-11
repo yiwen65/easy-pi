@@ -43,7 +43,7 @@
 				"@easy-pi/subagent"
 			],
 			"bin": {
-				"pi": "dist/cli.js"
+				"epi": "dist/cli.js"
 			},
 			"engines": {
 				"node": ">=22.19.0"
