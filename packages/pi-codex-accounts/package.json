@@ -1,0 +1,27 @@
+{
+  "name": "pi-codex-accounts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multiple named OpenAI Codex accounts for Pi",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsgo --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "@typescript/native-preview": "7.0.0-dev.20260120.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
