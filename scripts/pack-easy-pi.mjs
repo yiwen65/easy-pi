@@ -65,12 +65,15 @@ for (const [directory, name] of internal) {
 const manifestPath = join(output, "package.json");
 const manifest = readJson(manifestPath);
 manifest.name = "easy-pi";
-manifest.version = "0.1.0-beta.1";
+const version = process.env.EASY_PI_VERSION ?? "0.1.0-beta.1";
+if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`Invalid EASY_PI_VERSION: ${version}`);
+manifest.version = version;
 manifest.bin = { epi: "dist/cli.js" };
 manifest.repository = { type: "git", url: "git+https://github.com/yiwen65/easy-pi.git" };
 manifest.bugs = { url: "https://github.com/yiwen65/easy-pi/issues" };
 manifest.homepage = "https://github.com/yiwen65/easy-pi";
 manifest.bundleDependencies = bundleNames;
+writeFileSync(join(output, "README.md"), "# easy-pi\n\nNative AI coding agent CLI.\n\n```bash\nnpm install -g easy-pi\nepi\n```\n");
 manifest.dependencies = { ...manifest.dependencies, ...bundledExternalDependencies };
 delete manifest.devDependencies;
 delete manifest.scripts;
