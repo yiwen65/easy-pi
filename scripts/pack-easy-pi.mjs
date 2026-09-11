@@ -39,6 +39,7 @@ rmSync(join(output, "dist"), { recursive: true, force: true });
 cpSync(join(product, "dist"), join(output, "dist"), { recursive: true });
 
 const bundleNames = [];
+const bundledExternalDependencies = {};
 for (const [directory, name] of internal) {
 	const source = join(root, directory);
 	const target = destinationFor(name);
@@ -48,6 +49,11 @@ for (const [directory, name] of internal) {
 	writeFileSync(join(target, "package.json"), `${JSON.stringify({ ...manifest, private: undefined }, null, "\t").replace(/,\n\t\t"private": undefined/, "")}\n`);
 	cpSync(join(source, "dist"), join(target, "dist"), { recursive: true });
 	bundleNames.push(name);
+	for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
+		if (!internal.some(([, internalName]) => internalName === dependency)) {
+			bundledExternalDependencies[dependency] ??= version;
+		}
+	}
 }
 
 const manifestPath = join(output, "package.json");
@@ -59,6 +65,7 @@ manifest.repository = { type: "git", url: "git+https://github.com/yiwen65/easy-p
 manifest.bugs = { url: "https://github.com/yiwen65/easy-pi/issues" };
 manifest.homepage = "https://github.com/yiwen65/easy-pi";
 manifest.bundleDependencies = bundleNames;
+manifest.dependencies = { ...manifest.dependencies, ...bundledExternalDependencies };
 delete manifest.devDependencies;
 delete manifest.scripts;
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
