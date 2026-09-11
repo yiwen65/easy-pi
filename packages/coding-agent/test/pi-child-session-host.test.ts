@@ -11,6 +11,11 @@ import {
 	InMemoryCredentialStore,
 	Type,
 } from "@earendil-works/pi-ai";
+import {
+	COLLABORATION_LIMITS,
+	DELIVER_RESULT_TOOL_NAME,
+	DelegationResultSchema,
+} from "@easy-pi/subagent/collaboration-contract";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
 import { prepareCollaborationFork } from "@easy-pi/subagent/context-fork";
@@ -20,6 +25,7 @@ import type { ExtensionAPI, InlineExtension } from "../src/core/extensions/types
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createPiChildSessionHost, preparePiCollaborationFork } from "../src/extensions/pi-child-session-host.ts";
+import { spawnArgs } from "./collaboration-fixture.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -77,6 +83,7 @@ async function fixture(
 		permissions: () => ChildSessionPermissions,
 		storage: ChildSessionCreateOptions["storage"] = { kind: "memory" },
 		fork?: ChildSessionCreateOptions["fork"],
+		signal?: AbortSignal,
 	) {
 		const request: ChildSessionCreateOptions = {
 			rootSessionId,
@@ -87,6 +94,7 @@ async function fixture(
 			storage,
 			fork,
 			getPermissions: permissions,
+			signal,
 		};
 		const session = await host.create(request);
 		cleanups.push(() => session.dispose());
@@ -368,6 +376,28 @@ test("fork imports only the effective checkpoint and branch, survives cold load,
 	);
 });
 
+test("startup cancellation cleans native bindings after an asynchronous extension returns", async () => {
+	const entered = deferred();
+	const release = deferred();
+	const f = await fixture(() => [
+		(pi) => {
+			pi.on("session_start", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		},
+	]);
+	const abort = new AbortController();
+	const creating = f.create("cancelled-start", full, { kind: "memory" }, undefined, abort.signal);
+	const rejected = expect(creating).rejects.toThrow();
+	await entered.promise;
+	abort.abort();
+	release.resolve();
+	await rejected;
+	expect(f.shutdowns).toEqual(["cancelled-start"]);
+	expect(f.faux.state.callCount).toBe(0);
+});
+
 test("abort before asynchronous preflight completes cannot start a provider request", async () => {
 	const entered = deferred();
 	const release = deferred();
@@ -439,6 +469,186 @@ test("child extension provider cleanup cannot unregister a root-owned provider",
 	const child = await f.create("provider-isolation", full);
 	await child.session.dispose();
 	expect(f.runtime.getModel(f.faux.provider.id, f.faux.getModel().id)).toBeDefined();
+});
+
+test("initial and cold followup requests carry the deliver_result contract without repairing invalid real-provider output", async () => {
+	const f = await fixture();
+	const caller = { rootSessionId: "result-contract", agentPath: "/root" };
+	const reference = {
+		path: "evidence.txt",
+		sha256: "dd04b89cadf9af64537e008365c20ff80f5f87d6278a9c91fa6bbe796c85f429",
+		start_line: 1,
+		end_line: 1,
+	};
+	const { delegation } = spawnArgs("worker", "Extract the numeric result from the supplied evidence.", {
+		mode: "curated",
+		references: [reference],
+	});
+	// Real gpt-5.6-luna/max output: valid JSON, but evidence elements violate string[].
+	const invalid = JSON.stringify({
+		summary: "CURATED_SYNTHETIC_B92A: 17",
+		outcome: "succeeded",
+		artifacts: [],
+		evidence: [{ path: reference.path, sha256: reference.sha256, observation: "8+9=17" }],
+		checks: [],
+		risks: [],
+	});
+	const valid = JSON.stringify({
+		summary: "CURATED_SYNTHETIC_B92A: 17",
+		outcome: "succeeded",
+		artifacts: [],
+		evidence: [`${reference.path}:1 sha256=${reference.sha256}; 8+9=17`],
+		checks: [],
+		risks: [],
+	});
+	const requests: Context[] = [];
+	const make = () => {
+		const store = new CollaborationStore({
+			path: join(f.root, "result-contract", "registry.sqlite"),
+			cwd: f.cwd,
+			rootSessionId: caller.rootSessionId,
+		});
+		const controller = new CollaborationController({
+			store,
+			host: f.host,
+			agentDir: join(f.root, "agent"),
+			getPermissions: full,
+		});
+		cleanups.push(() => controller.shutdown());
+		return { store, controller };
+	};
+	f.faux.setResponses(
+		[invalid, valid].map((text) => (context: Context) => {
+			// Tool executes are functions; keep the wire-visible shape only.
+			requests.push(
+				JSON.parse(
+					JSON.stringify({
+						systemPrompt: context.systemPrompt,
+						messages: context.messages,
+						tools: context.tools?.map(({ name, parameters }) => ({ name, parameters })),
+					}),
+				),
+			);
+			return fauxAssistantMessage(text);
+		}),
+	);
+	const first = make();
+	await first.controller.spawn(
+		caller,
+		"worker",
+		delegation.task.objective,
+		{
+			provider: f.faux.provider.id,
+			id: f.faux.getModel().id,
+			thinkingLevel: "off",
+		},
+		[
+			{
+				role: "user",
+				content: JSON.stringify({ ...reference, text: "CURATED_SYNTHETIC_B92A: 8+9=17" }),
+				timestamp: 1,
+			},
+		],
+		undefined,
+		{ delegation, tools: [] },
+	);
+	await first.controller.settled();
+	expect(f.faux.state.callCount).toBe(1);
+	expect(first.store.read().agents[0]).toMatchObject({
+		status: "completed",
+		result: invalid,
+		resultValidation: { contract: "invalid", acceptance: "not_reviewed" },
+	});
+	expect(first.store.read().messages).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				to: "/root",
+				kind: "result",
+				text: invalid,
+				resultValidation: { contract: "invalid", acceptance: "not_reviewed" },
+			}),
+		]),
+	);
+	await first.controller.shutdown();
+	const second = make();
+	expect(f.faux.state.callCount).toBe(1);
+	await second.controller.followup(caller, "worker", "Explicit new task", undefined, {
+		delegation: { ...delegation, task: { ...delegation.task, objective: "Explicit new task" } },
+		tools: [],
+	});
+	await second.controller.settled();
+	expect(f.faux.state.callCount).toBe(2);
+	expect(second.store.read().agents[0]).toMatchObject({
+		result: valid,
+		resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+	});
+	for (const context of requests) {
+		const message = context.messages.at(-1)!;
+		expect(message.role).toBe("user");
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.filter((part) => part.type === "text")
+						.map((part) => part.text)
+						.join("\n");
+		const deliver = context.tools?.find((tool) => tool.name === DELIVER_RESULT_TOOL_NAME);
+		expect(deliver, "the actual provider request must carry the deliver_result tool").toBeDefined();
+		expect(deliver!.parameters).toEqual(DelegationResultSchema);
+		expect(text).toContain("arrays of nonblank strings");
+		expect(text).toContain("not curated reference objects");
+		expect(text).toContain(`${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes`);
+		expect(context.systemPrompt).not.toContain("Final result JSON Schema:");
+	}
+	expect(JSON.stringify(requests[1].messages)).toContain("This follow-up retains your existing child history");
+});
+
+test("the deliver_result protocol tool overrides the final text, replaces earlier deliveries, and works despite an empty delegated tool list", async () => {
+	const f = await fixture();
+	const caller = { rootSessionId: "deliver-tool", agentPath: "/root" };
+	const first = {
+		summary: "CURATED_SYNTHETIC_B92A: 17",
+		outcome: "succeeded",
+		artifacts: [],
+		evidence: ["evidence.txt:1 sha256=dd04b89cadf9af64537e008365c20ff80f5f87d6278a9c91fa6bbe796c85f429; 8+9=17"],
+		checks: [],
+		risks: [],
+	};
+	const second = { ...first, summary: "CURATED_SYNTHETIC_B92A: 18" };
+	const { delegation } = spawnArgs("worker", "Compute the numeric result from the supplied evidence.");
+	const store = new CollaborationStore({
+		path: ":memory:",
+		cwd: f.cwd,
+		rootSessionId: caller.rootSessionId,
+	});
+	const controller = new CollaborationController({
+		store,
+		host: f.host,
+		agentDir: join(f.root, "agent"),
+		getPermissions: full,
+	});
+	cleanups.push(() => controller.shutdown());
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, first), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, second), { stopReason: "toolUse" }),
+		fauxAssistantMessage("This narrative is not the contracted result."),
+	]);
+	await controller.spawn(
+		caller,
+		"worker",
+		delegation.task.objective,
+		{ provider: f.faux.provider.id, id: f.faux.getModel().id, thinkingLevel: "off" },
+		[],
+		undefined,
+		{ delegation, tools: [] },
+	);
+	await controller.settled();
+	expect(f.faux.state.callCount).toBe(3);
+	expect(store.read().agents[0]).toMatchObject({
+		status: "completed",
+		result: JSON.stringify(second),
+		resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+	});
 });
 
 test("a failed extension startup rejects the host instead of silently continuing without its hooks", async () => {

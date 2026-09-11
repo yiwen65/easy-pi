@@ -221,7 +221,8 @@ export class ModelRuntime implements Models {
 	 * Provider implementations and the credential store remain shared capabilities: this is
 	 * registry isolation for trusted extensions, not a JavaScript sandbox.
 	 */
-	async createSessionView(): Promise<ModelRuntime> {
+	async createSessionView(signal?: AbortSignal): Promise<ModelRuntime> {
+		signal?.throwIfAborted();
 		const view = new ModelRuntime(
 			this.credentials,
 			this.config,
@@ -234,7 +235,8 @@ export class ModelRuntime implements Models {
 		for (const [id, config] of this.extensionProviders) view.extensionProviders.set(id, { ...config });
 		view.configureRadiusProviders();
 		view.rebuildProviders();
-		await view.queueAvailabilityRefresh();
+		await view.queueAvailabilityRefresh(signal);
+		signal?.throwIfAborted();
 		return view;
 	}
 

@@ -4873,6 +4873,9 @@ export class InteractiveMode {
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
+					subagentModel: this.settingsManager.getSubagentModel(),
+					subagentThinkingLevel: this.settingsManager.getSubagentThinkingLevel(),
+					subagentModels: this.session.modelRuntime.getAvailableSnapshot(),
 					currentTheme: this.themeController.getThemeSelection() || "dark",
 					terminalTheme: this.themeController.getTerminalTheme(),
 					availableThemes: getAvailableThemes(),
@@ -4946,6 +4949,12 @@ export class InteractiveMode {
 						this.session.setThinkingLevel(level);
 						this.footer.invalidate();
 						this.updateEditorBorderColor();
+					},
+					onSubagentModelChange: (model) => {
+						this.settingsManager.setSubagentModel(model);
+					},
+					onSubagentThinkingLevelChange: (level) => {
+						this.settingsManager.setSubagentThinkingLevel(level);
 					},
 					onThemeChange: (themeSetting) => {
 						this.settingsManager.setTheme(themeSetting);
