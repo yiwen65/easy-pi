@@ -9,13 +9,22 @@ import {
 	type CollaborationMessage,
 	type CollaborationStatus,
 	childAgentPath,
+	type Delegation,
 	resolveAgentPath,
 	validateCollaborationMessage,
+	validateDelegation,
+	validateDelegationResult,
 } from "./collaboration-contract.ts";
 import { CollaborationMailboxActivity } from "./collaboration-mailbox.ts";
-import type { CollaborationSnapshot, CollaborationStore, StoredCollaborationAgent } from "./collaboration-store.ts";
+import type {
+	CollaborationAuthority,
+	CollaborationSnapshot,
+	CollaborationStore,
+	StoredCollaborationAgent,
+} from "./collaboration-store.ts";
 import { prepareCollaborationFork } from "./context-fork.ts";
 import type {
+	ChildRequestPrefix,
 	ChildSession,
 	ChildSessionHost,
 	ChildSessionIdentity,
@@ -33,11 +42,15 @@ export class CollaborationController {
 	private readonly sessions = new Map<string, ChildSession>();
 	private readonly active = new Map<string, Promise<void>>();
 	private queue: Promise<unknown> = Promise.resolve();
+	// Slow native lifecycle work is serialized separately, never holding control admission.
+	private lifecycle: Promise<unknown> = Promise.resolve();
+	private readonly loading = new Map<string, { abort: AbortController; done: Promise<string> }>();
 	private stopping = false;
 	private failure: unknown;
 	private shutdownPromise: Promise<void> | undefined;
 	private readonly activity = new CollaborationMailboxActivity();
 	private readonly observers = new Set<() => void>();
+	private readonly liveTools = new Map<string, () => readonly string[]>();
 
 	constructor(options: {
 		store: CollaborationStore;
@@ -66,12 +79,14 @@ export class CollaborationController {
 		if (this.failure) throw new CollaborationError("storage_error", "Team requires explicit operator inspection");
 	}
 
-	private assertCaller(caller: ChildSessionIdentity): void {
+	private assertCaller(caller: ChildSessionIdentity, authority?: readonly CollaborationAuthority[]): void {
 		if (caller.rootSessionId !== this.store.rootSessionId)
 			throw new CollaborationError("forbidden", "Agent belongs to another root session");
 		if (
 			caller.agentPath !== "/root" &&
-			!this.store.read().agents.some((agent) => agent.path === caller.agentPath && agent.status !== "closed")
+			!(authority ?? this.store.readAuthority()).some(
+				(agent) => agent.path === caller.agentPath && agent.status !== "closed",
+			)
 		) {
 			throw new CollaborationError("unknown_agent", "Unknown calling agent");
 		}
@@ -96,6 +111,24 @@ export class CollaborationController {
 				task_name: agent.path,
 				status: agent.status,
 				loaded: this.sessions.has(agent.path),
+				...(agent.delegation
+					? {
+							context: {
+								mode: agent.delegation.context.mode,
+								...(agent.contextBytes === undefined ? {} : { bytes: agent.contextBytes }),
+								measured:
+									agent.delegation.context.mode === "fork" && agent.delegation.context.prefix === "preserve"
+										? ("request_prefix" as const)
+										: ("messages" as const),
+								prefix:
+									agent.delegation.context.mode === "fork" && agent.delegation.context.prefix === "preserve"
+										? ("required" as const)
+										: ("rebuilt" as const),
+							},
+						}
+					: {}),
+				...(agent.resultValidation ? { resultValidation: agent.resultValidation } : {}),
+				...(agent.usage ? { usage: agent.usage } : {}),
 			}));
 	}
 
@@ -127,7 +160,52 @@ export class CollaborationController {
 		}
 	}
 
-	/** Trusted controller API; fork preparation belongs to the tool/context adapter, not this method. */
+	/** Trusted native-session binding; unloaded ancestors retain their persisted ceiling. */
+	bindTools(caller: ChildSessionIdentity, getTools: () => readonly string[]): () => void {
+		this.assertCaller(caller);
+		if (this.liveTools.has(caller.agentPath)) throw new CollaborationError("busy", "Tool authority already bound");
+		this.liveTools.set(caller.agentPath, getTools);
+		return () => {
+			if (this.liveTools.get(caller.agentPath) !== getTools) return;
+			try {
+				if (caller.agentPath !== "/root" && !this.failure) {
+					let active: readonly string[];
+					try {
+						active = getTools();
+					} catch {
+						active = [];
+					}
+					const current = this.target(caller, ".");
+					const narrowed = (current.tools ?? [...active]).filter((name) => active.includes(name));
+					if (JSON.stringify(current.tools) !== JSON.stringify(narrowed))
+						this.update(caller.agentPath, (record) => {
+							record.tools = narrowed;
+						});
+				}
+			} finally {
+				this.liveTools.delete(caller.agentPath);
+			}
+		};
+	}
+
+	/** A live deny anywhere in the creation ancestry also denies descendant execution. */
+	toolAllowed(caller: ChildSessionIdentity, name: string): boolean {
+		this.assertReady();
+		const records = this.store.readAuthority();
+		this.assertCaller(caller, records);
+		let path = caller.agentPath;
+		while (path !== "/root") {
+			const live = this.liveTools.get(path);
+			if (live && !live().includes(name)) return false;
+			const record = records.find((agent) => agent.path === path);
+			if (!record || record.status === "closed" || (record.tools && !record.tools.includes(name))) return false;
+			path = record.parent;
+		}
+		const root = this.liveTools.get("/root");
+		return !root || root().includes(name);
+	}
+
+	/** Trusted controller API; model-facing callers must supply validated admission metadata. */
 	spawn(
 		caller: ChildSessionIdentity,
 		taskName: string,
@@ -135,18 +213,21 @@ export class CollaborationController {
 		model: ChildSessionModel,
 		fork?: AgentMessage[],
 		signal?: AbortSignal,
+		admission?: { delegation: Delegation; tools: string[]; prefix?: ChildRequestPrefix },
 	): Promise<string> {
 		validateCollaborationMessage(message);
+		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
 		const context = fork ? prepareCollaborationFork(fork) : undefined;
-		return this.serialize(async () => {
+		return this.serialize(() => {
 			this.assertReady();
 			if (signal?.aborted) throw new CollaborationError("interrupted", "Spawn was cancelled before admission");
 			this.assertCaller(caller);
 			const snapshot = this.store.read();
 			const path = childAgentPath(caller.agentPath, taskName);
 			if (snapshot.agents.some((agent) => agent.path === path))
-				throw new CollaborationError("busy", "Agent name already exists");
-			if (snapshot.agents.length >= COLLABORATION_LIMITS.maxAgents - 1)
+				throw new CollaborationError("busy", "Agent name already exists", undefined, [taskName]);
+			// Closed records are retained for audit but free their team slot; names are never reused.
+			if (snapshot.agents.filter((agent) => agent.status !== "closed").length >= COLLABORATION_LIMITS.maxAgents - 1)
 				throw new CollaborationError("limit_reached", "Team agent limit reached");
 			this.checkCapacity();
 			this.checkMailboxCapacity(snapshot, caller.agentPath);
@@ -155,42 +236,82 @@ export class CollaborationController {
 				path,
 				parent: caller.agentPath,
 				model: structuredClone(model),
+				...(delegation
+					? {
+							delegation,
+							tools: [...new Set(admission!.tools)].filter(
+								(name) =>
+									this.toolAllowed(caller, name) &&
+									(delegation.capabilities.tools === "inherit" ||
+										delegation.capabilities.tools.includes(name)),
+							),
+						}
+					: {}),
+				contextBytes: Buffer.byteLength(JSON.stringify(admission?.prefix?.context ?? context ?? []), "utf8"),
 				status: "pending",
 				completionPending: true,
 				turnId: randomUUID(),
 			};
+			this.reserve(record, message, caller, "initial");
 			snapshot.agents.push(record);
 			this.persist(snapshot);
-			try {
-				const session = await this.load(record, context);
-				if (signal?.aborted) throw new CollaborationError("interrupted", "Spawn was cancelled before execution");
-				this.start(record, session, message, caller);
-				return path;
-			} catch (error) {
-				this.update(record.path, (current) => {
-					current.status = signal?.aborted ? "interrupted" : "failed";
-					current.completionPending = false;
-				});
-				throw error;
-			}
+			// Wrap the promise so the control queue does not adopt lifecycle work.
+			return { path, ready: this.schedule(record, signal, context, admission?.prefix) };
+		}).then(async ({ path, ready }) => {
+			await ready;
+			return path;
 		});
 	}
 
-	followup(caller: ChildSessionIdentity, target: string, message: string, signal?: AbortSignal): Promise<string> {
+	followup(
+		caller: ChildSessionIdentity,
+		target: string,
+		message: string,
+		signal?: AbortSignal,
+		admission?: { delegation: Delegation; tools: string[] },
+	): Promise<string> {
 		validateCollaborationMessage(message);
-		return this.serialize(async () => {
+		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
+		return this.serialize(() => {
 			this.assertReady();
 			if (signal?.aborted) throw new CollaborationError("interrupted", "Followup was cancelled before admission");
 			const record = this.target(caller, target);
-			if (this.active.has(record.path) || record.status === "pending" || record.status === "closed")
+			if (
+				this.active.has(record.path) ||
+				this.loading.has(record.path) ||
+				record.status === "pending" ||
+				record.status === "closed"
+			)
 				throw new CollaborationError("busy", "Agent cannot accept a follow-up now");
 			this.checkCapacity();
 			this.checkMailboxCapacity(this.store.read(), record.parent);
-			const session = await this.load(record);
-			if (signal?.aborted) throw new CollaborationError("interrupted", "Followup was cancelled before execution");
+			if (delegation) {
+				// Follow-ups retain child context and may only reduce its execution ceiling.
+				if (
+					(delegation.task.relationship === "verify" || delegation.task.relationship === "explore") &&
+					(!record.delegation || record.delegation.task.relationship !== delegation.task.relationship)
+				)
+					throw new CollaborationError(
+						"context_unavailable",
+						"Independent work requires a fresh child, not a reused execution context",
+						"fresh_child_required",
+					);
+				record.delegation = delegation;
+				record.tools = [...new Set(admission!.tools)].filter(
+					(name) =>
+						this.toolAllowed(caller, name) &&
+						(delegation.capabilities.tools === "inherit" || delegation.capabilities.tools.includes(name)) &&
+						this.toolAllowed({ rootSessionId: caller.rootSessionId, agentPath: record.path }, name),
+				);
+			} else if (record.delegation) {
+				throw new CollaborationError("invalid_arguments", "Follow-up requires an explicit task contract");
+			}
+			assertAgentTransition(record.status, "pending");
 			record.turnId = randomUUID();
-			return this.start(record, session, message, caller);
-		});
+			this.reserve(record, message, caller, "existing");
+			this.update(record.path, (current) => Object.assign(current, record));
+			return { ready: this.schedule(record, signal) };
+		}).then(({ ready }) => ready);
 	}
 
 	private checkMailboxCapacity(snapshot: CollaborationSnapshot, target: string): void {
@@ -267,11 +388,63 @@ export class CollaborationController {
 	}
 
 	private checkCapacity(): void {
-		if (this.active.size >= COLLABORATION_LIMITS.maxActiveSessions - 1)
+		if (new Set([...this.active.keys(), ...this.loading.keys()]).size >= COLLABORATION_LIMITS.maxActiveSessions - 1)
 			throw new CollaborationError("limit_reached", "Team execution limit reached");
 	}
 
-	private async load(record: StoredCollaborationAgent, fork?: AgentMessage[]): Promise<ChildSession> {
+	/** A reserved turn owns capacity until startup settles, even if its host ignores cancellation. */
+	private schedule(
+		record: StoredCollaborationAgent,
+		signal?: AbortSignal,
+		fork?: AgentMessage[],
+		prefix?: ChildRequestPrefix,
+	): Promise<string> {
+		const abort = new AbortController();
+		const cancel = () => abort.abort();
+		// Admission observers can synchronously stop the controller before this reservation is registered.
+		if (this.stopping || this.failure || signal?.aborted) cancel();
+		else signal?.addEventListener("abort", cancel, { once: true });
+		const done = this.lifecycle.then(async () => {
+			try {
+				if (abort.signal.aborted) throw new CollaborationError("interrupted", "Startup cancelled");
+				const session = await this.load(record, abort.signal, fork, prefix);
+				return await this.serialize(() => {
+					this.assertReady();
+					const current = this.store.read().agents.find((agent) => agent.path === record.path)!;
+					if (abort.signal.aborted || current.status !== "pending" || current.turnId !== record.turnId)
+						throw new CollaborationError("interrupted", "Startup cancelled before execution");
+					this.loading.delete(record.path);
+					return this.start(current, session, abort.signal);
+				});
+			} catch (error) {
+				await this.serialize(() => {
+					if (this.failure) return;
+					this.update(record.path, (current) => {
+						current.status = abort.signal.aborted ? "interrupted" : "failed";
+						current.completionPending = false;
+						if (current.delegation)
+							current.resultValidation = { contract: "not_completed", acceptance: "not_reviewed" };
+					});
+				});
+				if (abort.signal.aborted) throw new CollaborationError("interrupted", "Startup cancelled");
+				throw error;
+			} finally {
+				signal?.removeEventListener("abort", cancel);
+				if (this.loading.get(record.path)?.abort === abort) this.loading.delete(record.path);
+				this.changed();
+			}
+		});
+		this.loading.set(record.path, { abort, done });
+		this.lifecycle = done.catch(() => undefined);
+		return done;
+	}
+
+	private async load(
+		record: StoredCollaborationAgent,
+		signal: AbortSignal,
+		fork?: AgentMessage[],
+		prefix?: ChildRequestPrefix,
+	): Promise<ChildSession> {
 		const existing = this.sessions.get(record.path);
 		if (existing) {
 			this.sessions.delete(record.path);
@@ -280,19 +453,26 @@ export class CollaborationController {
 		}
 		// Only persisted idle sessions can be evicted. Memory-only sessions are bounded by maxAgents.
 		if (this.store.directory && this.sessions.size >= COLLABORATION_LIMITS.maxActiveSessions - 1) {
-			const idle = [...this.sessions].find(([path, session]) => !this.active.has(path) && session.sessionFile);
+			const idle = [...this.sessions].find(
+				([path, session]) => !this.active.has(path) && !this.loading.has(path) && session.sessionFile,
+			);
 			if (!idle) throw new CollaborationError("limit_reached", "No idle child session can be unloaded");
 			await idle[1].dispose();
 			this.sessions.delete(idle[0]);
 			this.changed();
 		}
+		if (signal.aborted) throw new CollaborationError("interrupted", "Startup cancelled before creation");
 		const session = await this.host.create({
+			signal,
 			rootSessionId: this.store.rootSessionId,
 			agentPath: record.path,
 			cwd: this.store.cwd,
 			agentDir: this.agentDir,
 			model: record.model,
 			fork,
+			prefix,
+			toolAllowed: (name) =>
+				this.toolAllowed({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name),
 			getPermissions: this.getPermissions,
 			storage: this.store.directory
 				? {
@@ -304,15 +484,21 @@ export class CollaborationController {
 					}
 				: { kind: "memory" },
 		});
-		if (session.identity.rootSessionId !== this.store.rootSessionId || session.identity.agentPath !== record.path) {
+		try {
+			if (session.identity.rootSessionId !== this.store.rootSessionId || session.identity.agentPath !== record.path)
+				throw new CollaborationError("forbidden", "Child host returned a mismatched identity");
+			// Retain the validated native path even when cancelled before its first turn.
+			if (session.sessionFile && !this.failure)
+				this.update(record.path, (current) => {
+					current.sessionFile = basename(session.sessionFile!);
+				});
+			if (signal.aborted || this.stopping || this.failure)
+				throw new CollaborationError("interrupted", "Startup cancelled after creation");
+		} catch (error) {
 			await session.dispose();
-			throw new CollaborationError("forbidden", "Child host returned a mismatched identity");
+			throw error;
 		}
 		this.sessions.set(record.path, session);
-		if (session.sessionFile)
-			this.update(record.path, (current) => {
-				current.sessionFile = basename(session.sessionFile!);
-			});
 		this.changed();
 		return session;
 	}
@@ -332,6 +518,7 @@ export class CollaborationController {
 			this.failure = error;
 			this.activity.close();
 			// A failed durable update has an uncertain outcome. Stop rather than replay it.
+			for (const loading of this.loading.values()) loading.abort.abort();
 			for (const session of this.sessions.values()) void session.abort().catch(() => undefined);
 			this.changed();
 			throw new CollaborationError("storage_error", "Team persistence failed; inspect retained sessions");
@@ -339,12 +526,12 @@ export class CollaborationController {
 		this.changed();
 	}
 
-	private start(
+	private reserve(
 		record: StoredCollaborationAgent,
-		session: ChildSession,
 		text: string,
 		caller: ChildSessionIdentity,
-	): string {
+		contextUse: "initial" | "existing",
+	): void {
 		const taskMessage: CollaborationMessage = {
 			id: randomUUID(),
 			rootSessionId: this.store.rootSessionId,
@@ -353,18 +540,32 @@ export class CollaborationController {
 			turnId: record.turnId,
 			kind: "task",
 			text,
+			parent: record.parent,
+			contextUse,
+			...(record.delegation ? { delegation: record.delegation } : {}),
 		};
+		record.status = "pending";
+		record.completionPending = true;
+		record.taskMessage = taskMessage;
+		record.result = undefined;
+		record.resultValidation = undefined;
+		record.usage = undefined;
+	}
+
+	private start(record: StoredCollaborationAgent, session: ChildSession, signal: AbortSignal): string {
+		const taskMessage = record.taskMessage!;
 		this.update(record.path, (current) => {
 			assertAgentTransition(current.status, "running");
 			current.status = "running";
-			current.turnId = record.turnId;
-			current.completionPending = true;
-			current.taskMessage = taskMessage;
-			if (session.sessionFile) current.sessionFile = basename(session.sessionFile);
 		});
 		// Register execution synchronously, before the host or a nested tool can re-enter.
 		const task = Promise.resolve()
-			.then(() => session.run(text, taskMessage))
+			.then((): Promise<ChildTurnResult> | ChildTurnResult => {
+				// The running notification can itself trigger shutdown or startup cancellation.
+				if (this.stopping || this.failure || signal.aborted)
+					return { status: "interrupted", text: "Child startup interrupted before execution" };
+				return session.run(taskMessage.text, taskMessage);
+			})
 			.then(
 				(result) => this.finish(record, result),
 				() => this.finish(record, { status: "failed", text: "Child execution failed; inspect its session" }),
@@ -395,6 +596,15 @@ export class CollaborationController {
 							.subarray(0, COLLABORATION_LIMITS.maxMessageBytes - Buffer.byteLength(suffix) - 3)
 							.toString("utf8") + suffix;
 			current.completionPending = false;
+			if (current.delegation) current.resultValidation = validateDelegationResult(result.text, current.status);
+			current.usage = result.usage
+				? {
+						input: result.usage.input,
+						output: result.usage.output,
+						cacheRead: result.usage.cacheRead,
+						cacheWrite: result.usage.cacheWrite,
+					}
+				: undefined;
 			snapshot.messages ??= [];
 			snapshot.messages.push({
 				id: randomUUID(),
@@ -405,6 +615,7 @@ export class CollaborationController {
 				kind: "result",
 				status: current.status,
 				text: current.result,
+				...(current.resultValidation ? { resultValidation: current.resultValidation } : {}),
 			});
 			this.persist(snapshot);
 			this.activity.notify(current.parent);
@@ -417,6 +628,14 @@ export class CollaborationController {
 			const record = this.target(caller, target);
 			if (record.path === caller.agentPath)
 				throw new CollaborationError("forbidden", "An agent cannot interrupt itself");
+			const loading = this.loading.get(record.path);
+			if (loading) {
+				this.update(record.path, (current) => {
+					current.status = "interrupted";
+				});
+				loading.abort.abort();
+				return { status: record.status, session: undefined };
+			}
 			if (!this.active.has(record.path)) return { status: record.status, session: undefined };
 			this.update(record.path, (current) => {
 				current.status = "interrupted";
@@ -428,13 +647,55 @@ export class CollaborationController {
 		return status;
 	}
 
+	/**
+	 * Retire a settled descendant: history and the record remain inspectable, the team slot and the
+	 * native session are released, and the name is never reusable. Closed agents are terminal.
+	 */
+	async close(caller: ChildSessionIdentity, target: string): Promise<CollaborationStatus> {
+		const { path, previous, session } = await this.serialize(() => {
+			this.assertReady();
+			const record = this.target(caller, target);
+			if (record.path === caller.agentPath)
+				throw new CollaborationError("forbidden", "An agent cannot close itself");
+			if (!record.path.startsWith(`${caller.agentPath}/`))
+				throw new CollaborationError("forbidden", "Agents can only close their own descendants");
+			const session = this.sessions.get(record.path);
+			if (record.status === "closed") return { path: record.path, previous: record.status, session };
+			if (
+				record.status === "pending" ||
+				record.status === "running" ||
+				this.active.has(record.path) ||
+				this.loading.has(record.path)
+			)
+				throw new CollaborationError("busy", "Interrupt a running child before closing it");
+			const openDescendants = this.store
+				.read()
+				.agents.filter((agent) => agent.path.startsWith(`${record.path}/`) && agent.status !== "closed");
+			if (openDescendants.length)
+				throw new CollaborationError("busy", "Close descendants before closing this agent");
+			assertAgentTransition(record.status, "closed");
+			this.update(record.path, (current) => {
+				current.status = "closed";
+				current.completionPending = false;
+			});
+			return { path: record.path, previous: record.status, session };
+		});
+		// Disposal can await native teardown; never hold the control queue for it.
+		if (session) {
+			await session.dispose();
+			this.sessions.delete(path);
+			this.changed();
+		}
+		return previous;
+	}
+
 	/** Wait for already-admitted work only. Never starts or retries a child. */
 	async settled(): Promise<void> {
 		for (;;) {
 			await this.queue;
-			const active = [...this.active.values()];
+			const active = [...this.active.values(), ...[...this.loading.values()].map((loading) => loading.done)];
 			if (!active.length) break;
-			await Promise.all(active);
+			await Promise.allSettled(active);
 		}
 		if (this.failure) throw new CollaborationError("storage_error", "Failed to persist a child result");
 	}
@@ -442,16 +703,20 @@ export class CollaborationController {
 	shutdown(): Promise<void> {
 		if (this.shutdownPromise) return this.shutdownPromise;
 		this.stopping = true;
+		for (const loading of this.loading.values()) loading.abort.abort();
 		this.activity.close();
 		this.changed();
 		this.observers.clear();
 		this.shutdownPromise = (async () => {
 			await this.queue;
 			// Do not hold the serialization queue while finish() persists an aborted turn.
-			const aborts = await Promise.allSettled([...this.sessions.values()].map((session) => session.abort()));
+			const aborting = Promise.allSettled([...this.sessions.values()].map((session) => session.abort()));
+			await this.lifecycle;
+			const aborts = await aborting;
 			await Promise.all([...this.active.values()]);
 			const disposals = await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
 			this.sessions.clear();
+			this.liveTools.clear();
 			this.store.close();
 			if ([...aborts, ...disposals].some((result) => result.status === "rejected")) {
 				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");

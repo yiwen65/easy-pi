@@ -3598,6 +3598,75 @@ export class RunLedger {
 		}));
 	}
 
+	/** Durable user intent; task success or process interruption is never an implicit acknowledgement. */
+	confirmDagCleanup(runId: string, disposition: "delivered" | "discard", now = Date.now()): void {
+		this.ensureOpen();
+		if (disposition !== "delivered" && disposition !== "discard") throw new Error("Invalid cleanup disposition");
+		if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid cleanup timestamp");
+		this.transaction(() => {
+			const row = this.database.prepare("SELECT status FROM dag_runs WHERE run_id = ?").get(runId) as
+				| { status: string }
+				| undefined;
+			if (!row || !["succeeded", "failed", "cancelled"].includes(row.status))
+				throw new Error("Cleanup confirmation requires a terminal run");
+			const previous = this.database
+				.prepare("SELECT 1 FROM dag_events WHERE run_id = ? AND event_type = 'run.cleanup_confirmed' LIMIT 1")
+				.get(runId);
+			if (!previous) this.insertDagEvent(runId, "run.cleanup_confirmed", { version: 1, disposition }, now);
+		});
+	}
+
+	/** Only explicitly acknowledged, fully released histories are eligible. Never resumes or deletes pending work. */
+	pruneConfirmedHistory(options: { now?: number; maxAgeMs?: number; maxBytes?: number; maxRuns?: number } = {}): {
+		deletedRunIds: string[];
+		liveBytes: number;
+		overBudget: boolean;
+	} {
+		this.ensureOpen();
+		const now = options.now ?? Date.now();
+		const maxAgeMs = options.maxAgeMs ?? 7 * 24 * 60 * 60 * 1000;
+		const maxBytes = options.maxBytes ?? 256 * 1024 * 1024;
+		const maxRuns = options.maxRuns ?? 100;
+		if (
+			![now, maxAgeMs, maxBytes, maxRuns].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+			maxBytes === 0 ||
+			maxRuns < 1 ||
+			maxRuns > 100
+		) {
+			throw new Error("Invalid history retention limits");
+		}
+		const liveBytes = () => {
+			const size = this.database.prepare("PRAGMA page_size").get() as { page_size: number };
+			const pages = this.database.prepare("PRAGMA page_count").get() as { page_count: number };
+			const free = this.database.prepare("PRAGMA freelist_count").get() as { freelist_count: number };
+			return (pages.page_count - free.freelist_count) * size.page_size;
+		};
+		const deletedRunIds = this.transaction(() => {
+			const candidates = this.database
+				.prepare(`SELECT run_id, gc_completed_at FROM dag_runs
+				WHERE status IN ('succeeded', 'failed', 'cancelled') AND resource_gc_state = 'released'
+				AND (integration_json IS NULL OR candidate_release_state = 'released')
+				AND EXISTS (SELECT 1 FROM dag_events WHERE dag_events.run_id = dag_runs.run_id AND event_type = 'run.cleanup_confirmed')
+				ORDER BY gc_completed_at, run_id LIMIT ?`)
+				.all(maxRuns) as unknown as Array<{ run_id: string; gc_completed_at: number }>;
+			const removed: string[] = [];
+			for (const candidate of candidates) {
+				if (candidate.gc_completed_at > now - maxAgeMs && liveBytes() <= maxBytes) break;
+				this.database.prepare("DELETE FROM dag_runs WHERE run_id = ?").run(candidate.run_id);
+				removed.push(candidate.run_id);
+			}
+			return removed;
+		});
+		if (deletedRunIds.length) {
+			// Release SQLite free pages as well as rows. Busy readers may defer reclamation.
+			this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+			this.database.exec("VACUUM");
+			this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+		}
+		const remaining = liveBytes();
+		return { deletedRunIds, liveBytes: remaining, overBudget: remaining > maxBytes };
+	}
+
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;

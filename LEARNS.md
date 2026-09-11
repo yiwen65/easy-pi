@@ -349,3 +349,19 @@
 - Correct approach: 在绑定 session_start 时通过公开 Agent.transformContext 宿主接口包住原 transform；先持久化邮箱，再调用原 transform，关闭时只恢复自己安装的 wrapper。不修改私有状态，不从生产者完成回调直接推入接收者 state。
 - Prevention: 在已有 Pi transform 入口捕获消息和 durable branch，断言邮箱在进入 preflight 前已存在，同时验证 shutdown 恢复原接口及 checkpoint 去重。
 - Verified by: 2026-09-07 pi-collaboration-tools.test.ts 的 preflight 顺序与恢复接口回归通过；最新指定 11 files / 113 tests 和 root check 通过。
+
+## 原生 Subagent 工具权限——卸载不能丢掉实时收窄
+
+- Wrong approach: 子权限取持久化 ceiling 与祖先实时工具列表的交集，但卸载时只删除祖先 getter。
+- Why it failed: 祖先禁用 bash 后，后代调用被拒；detach 删除 getter 后又退回较宽的创建 ceiling，后代错误恢复 bash 能力。
+- Correct approach: 解除绑定前把当前工具列表与原 ceiling 的交集持久化；失败启动也必须发 child shutdown 释放已安装的绑定，再 dispose。持久化失败仍停止团队，不扩大权限或自动重跑。
+- Prevention: 同时覆盖 live revoke→detach/LRU→cold reopen，以及 startup failure→explicit followup。执行门测试必须先证明工具确实被广告：SDK setActiveTools 本身不能突破初始 allowlist，不能把它挡住的调用当作后端权限门证据。
+- Verified by: 2026-09-10 collaboration-controller.test.ts 的 unloading a narrowed ancestor 在修正前 detach 后返回 true，修正后及重开 store 均保持 false；原生宿主重新广告 bash 的执行门、失败启动绑定释放回归通过。指定 subagent 64 项、coding-agent 69 项通过，未运行真实模型。
+
+## 原生 Subagent 准入——同步状态通知也是取消重入边界
+
+- Wrong approach: 把慢加载移出控制队列后，只在加载前和 running 状态提交前检查取消，忽略 commit 内同步 observer 的重入。
+- Why it failed: pending 通知内 shutdown 时 loading 尚未注册，取消扫描漏掉它；running 通知内 shutdown/abort 又发生在最后一次检查之后，随后微任务仍调用 host.run。
+- Correct approach: 注册 startup 时继承已有 stopping/failure，首次 host.run 前再次检查控制器状态与 startup signal；跳过执行的已接收回合正常终结为 interrupted，不重跑。
+- Prevention: controller 并发回归除异步 host barrier 外，加入 pending/running observer 同步 shutdown 与 running observer abort，断言 create/run 次数和持久状态，不能只断言 abort 被调用。
+- Verified by: 2026-09-11 三项 notification 回归修正前分别出现停止后一次 create、两次场景下意外 run；最小边界检查后三项及 controller 全部32项通过，未调用真实模型。

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, rmdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { WorktreeHandle } from "./types.ts";
@@ -524,6 +524,7 @@ async function removeValidatedTaskMarker(validated: ValidatedTaskMarker, signal?
 		validated.seal,
 		signal,
 	);
+	await rm(`${validated.path}.retained`, { force: true });
 	await unlink(validated.path);
 	await syncDirectory(dirname(validated.path));
 }
@@ -716,6 +717,7 @@ export async function reconcileTaskWorktrees(
 	runId: string,
 	taskId: string,
 	signal?: AbortSignal,
+	options: { discardRetained?: boolean } = {},
 ): Promise<void> {
 	assertTaskIdentifier(runId, "runId");
 	assertTaskIdentifier(taskId, "taskId");
@@ -756,6 +758,16 @@ export async function reconcileTaskWorktrees(
 			undefined,
 			signal,
 		);
+		if (!options.discardRetained) {
+			try {
+				await lstat(`${marker.path}.retained`);
+				throw new Error(
+					"Interrupted worktree is retained; explicitly acknowledge delivery or discard before cleanup",
+				);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
 		if (worktree && (await isCurrentWorktree(worktree.path, root))) {
 			throw new Error("Refusing to reconcile the current user worktree");
 		}
@@ -786,6 +798,11 @@ export async function reconcileTaskWorktrees(
 			await runGit(["update-ref", "-d", ref, expectedRef], { cwd: root, signal });
 		}
 		await removeValidatedTaskMarker(marker, signal);
+		try {
+			await rmdir(dirname(marker.marker.worktreePath));
+		} catch (error) {
+			if (!["ENOENT", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+		}
 	}
 }
 
@@ -1026,6 +1043,22 @@ export async function createTaskWorktree(options: CreateTaskWorktreeOptions): Pr
 			path: worktreePath,
 			branch,
 			baselineCommit: resolvedBaseline,
+			retainForDisposition: async () => {
+				await verifyTaskWorktree(state);
+				try {
+					const retained = await open(`${state.markerPath}.retained`, "wx", 0o600);
+					try {
+						await retained.sync();
+					} finally {
+						await retained.close();
+					}
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+					const metadata = await lstat(`${state.markerPath}.retained`);
+					if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("Unsafe retained-worktree marker");
+				}
+				await syncDirectory(dirname(state.markerPath));
+			},
 			cleanup: async () => cleanupTaskWorktree(state),
 		};
 		state.handle = handle;

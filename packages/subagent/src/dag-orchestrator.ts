@@ -729,13 +729,20 @@ export class SubagentDagOrchestrator {
 		if (!run) throw new Error(`Unknown DAG run: ${options.runId}`);
 		if (run.resources.pins === "released") return detailsFromRecord(run);
 		this.dependencies.ledger.beginDagResourceGc(options.runId, this.now());
+		const discardRetained = this.dependencies.ledger
+			.listDagEvents(run.runId)
+			.some((event) => event.type === "run.cleanup_confirmed");
 		for (const task of run.tasks) {
 			await this.workspace().reconcileTaskWorktrees(
 				run.baseline.repositoryRoot,
 				run.runId,
 				task.taskId,
 				options.signal,
+				{ discardRetained },
 			);
+			for (const attempt of task.attemptRecords) {
+				if (attempt.runtime) await cleanupChildRuntimeRoot(attempt.runtime);
+			}
 			await this.workspace().releaseTaskCommitPin(
 				run.baseline.repositoryRoot,
 				run.runId,
@@ -1687,6 +1694,8 @@ export class SubagentDagOrchestrator {
 					}),
 			);
 			worktree = preparedWorktree;
+			// Mark before starting a child so abrupt process death also preserves uncommitted edits.
+			if (claim.role === "writer") await worktree.retainForDisposition?.();
 			if (composition) {
 				await (this.dependencies.releaseMergeCandidateRef ?? releaseMergeCandidateRef)(
 					run.baseline.repositoryRoot,
@@ -2177,7 +2186,11 @@ export class SubagentDagOrchestrator {
 			clearInterval(heartbeatTimer);
 			runtime.active.controller.signal.removeEventListener("abort", onRunAbort);
 			await snapshot?.cleanup().catch(() => undefined);
-			await worktree?.cleanup().catch(() => undefined);
+			if (worktree && claim.role === "writer" && (runtime.active.interrupted || runtime.active.userCancelled)) {
+				await worktree.retainForDisposition?.();
+			} else {
+				await worktree?.cleanup().catch(() => undefined);
+			}
 			if (mutationJournal && mutationJournalCleanupSafe) {
 				await mutationJournal.cleanup().catch(() => undefined);
 			}

@@ -194,6 +194,8 @@ export interface WorktreeHandle {
 	path: string;
 	branch: string;
 	baselineCommit: string;
+	/** Preserve interrupted edits against automatic task reconciliation. */
+	retainForDisposition?(): Promise<void>;
 	cleanup(): Promise<void>;
 }
 

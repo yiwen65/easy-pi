@@ -90,7 +90,13 @@ export interface WorkspaceRouter {
 		expectedCommit?: string,
 		signal?: AbortSignal,
 	): Promise<void>;
-	reconcileTaskWorktrees(repositoryPath: string, runId: string, taskId: string, signal?: AbortSignal): Promise<void>;
+	reconcileTaskWorktrees(
+		repositoryPath: string,
+		runId: string,
+		taskId: string,
+		signal?: AbortSignal,
+		options?: { discardRetained?: boolean },
+	): Promise<void>;
 	createTaskWorktree(options: CreateTaskWorktreeOptions): Promise<WorktreeHandle>;
 	validateWorktreeOwnership: typeof validateWorktreeOwnership;
 	mergeTaskCommits(options: MergeCoordinatorOptions): Promise<IntegrationArtifact>;
@@ -201,9 +207,9 @@ export function createWorkspaceRouter(options: WorkspaceRouterOptions): Workspac
 			if (repo !== undefined) await collectMirrorIfEmpty(options.mirrorRoot, repositoryPath, signal);
 		},
 
-		async reconcileTaskWorktrees(repositoryPath, runId, taskId, signal) {
+		async reconcileTaskWorktrees(repositoryPath, runId, taskId, signal, cleanupOptions) {
 			const repo = await translate(repositoryPath, undefined, signal);
-			await reconcileTaskWorktrees(repo ?? repositoryPath, runId, taskId, signal);
+			await reconcileTaskWorktrees(repo ?? repositoryPath, runId, taskId, signal, cleanupOptions);
 		},
 
 		async createTaskWorktree(worktreeOptions) {
