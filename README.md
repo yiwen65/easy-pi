@@ -1,114 +1,95 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
-</p>
+# easy-pi
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+A native AI coding agent for the terminal.
 
-# Pi Agent Harness
+`easy-pi` keeps Pi's extension and provider APIs familiar while shipping the fork's runtime changes in one installable package. It gives you a focused terminal workflow with file tools, multiple LLM providers, persistent sessions, and native subagent collaboration.
 
-This is the home of the Pi agent harness project including our self extensible coding agent.
+```bash
+npm install -g easy-pi@beta
+epi
+```
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+> The first public release is currently beta: `0.1.0-beta.1`.
 
-To learn more about Pi:
+## What it does
 
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+- **Terminal-first coding** — read, search, edit, write, and run commands from one interactive session.
+- **Multi-provider models** — switch providers and models without changing the workflow.
+- **Persistent sessions** — continue, resume, fork, and inspect work across invocations.
+- **Native subagents** — delegate bounded work with admission control, structured results, cleanup, and isolated workspaces.
+- **Model and effort defaults** — configure independent defaults for spawned subagents.
+- **Codex cache affinity** — preserve cache lineage for supported native preserve/fork flows while keeping child request identities independent.
+- **Extensible runtime** — use Pi-compatible extensions, custom providers, themes, skills, and SDK entry points.
 
-## All Packages
+## Quick start
 
-| Package | Description |
-|---------|-------------|
-| **[@earendil-works/pi-telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, and typed schemas |
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+```bash
+# Install the beta release
+npm install -g easy-pi@beta
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+# Start interactive mode
+epi
 
-## Permissions & Containerization
+# Print mode
+epi -p "List the files in this project and summarize the entry points"
 
-Pi does not include a built-in permission system for restricting filesystem, process, network, or credential access. By default, it runs with the permissions of the user and process that launched it.
+# See available options
+epi --help
+```
 
-If you need stronger boundaries, containerize or sandbox Pi. See [packages/coding-agent/docs/containerization.md](packages/coding-agent/docs/containerization.md) for three patterns:
+Authentication and model configuration are managed locally by the agent. The default user data directory is `~/.epi/agent`; it is separate from Pi's `.pi` data directory.
 
-- **Gondolin extension**: keep `pi` and provider auth on the host while routing built-in tools and `!` commands into a local Linux micro-VM.
-- **Plain Docker**: run the whole `pi` process in a local container for simple isolation.
-- **OpenShell**: run the whole `pi` process in a policy-controlled sandbox.
+## How the runtime is organized
 
-## Contributing
+```text
+prompt
+  │
+  ▼
+ epi CLI ──► agent session ──► provider/model
+    │              │
+    │              ├── persistent session history
+    │              └── native subagent collaboration
+    │
+    └── built-in read / bash / edit / write tools
+```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).  Longer term plans for Pi can also be found in [RFCs](https://rfc.earendil.com/keyword/pi/).
+The npm package bundles the fork's internal runtime packages rather than resolving them from the workspace or silently selecting an upstream runtime version. Internal package names remain compatible with the existing Pi extension ecosystem.
+
+## Pi compatibility
+
+The fork intentionally preserves the existing Pi extension surface and provider package names where possible. Existing extensions should continue to use imports such as:
+
+```ts
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+```
+
+The CLI command is `epi`; the published package is `easy-pi`. Pi-compatible extensions and provider implementations should still be tested against the exact easy-pi beta before production use.
 
 ## Development
 
 ```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+npm install --ignore-scripts
+npm run build:offline
+npm run check
+./test.sh
 ```
 
-## Building standalone binaries from release source
-
-GitHub releases include a versioned source archive covered by the release's `SHA256SUMS` file. Extract it and run the same build script used for the official standalone binaries:
+Build a standalone npm tarball and install it outside the repository:
 
 ```bash
-VERSION="<release-version>"
-tar -xzf "pi-${VERSION}-source.tar.gz"
-cd "pi-${VERSION}"
-./scripts/build-binaries.sh --offline-model-data --platform linux-x64 --out "$PWD/out"
+npm run build:offline
+npm run pack:easy-pi /tmp/easy-pi-pack
+npm install -g /tmp/easy-pi-pack/easy-pi-0.1.0-beta.1.tgz
 ```
 
-The source archive includes the generated provider model data used for the release. `--offline-model-data` builds with that snapshot instead of refreshing it from live provider catalogs. The script still installs dependencies, builds the monorepo, compiles the Bun executable, and stages its runtime assets. Package maintainers who provide dependencies separately can pass `--skip-install --skip-deps`.
+The release workflow is tag-gated. It does not publish from ordinary pushes to `main`.
 
-## Supply-chain hardening
+## Security and permissions
 
-We treat npm dependency changes as reviewed code changes.
+`epi` runs with the permissions of the user who starts it. It is not a sandbox. Use a container or another OS-level isolation boundary when a task needs stronger filesystem, process, network, or credential restrictions.
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
-- Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
-- Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
-
-## Share your OSS coding agent sessions
-
-If you use Pi or other coding agents for open source work, please share your sessions.
-
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
-
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
+Do not commit `.env`, authentication files, `~/.epi` data, or session evidence. See [`packages/coding-agent/docs/containerization.md`](packages/coding-agent/docs/containerization.md) for isolation patterns.
 
 ## License
 
-MIT
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+MIT. See [LICENSE](LICENSE).
