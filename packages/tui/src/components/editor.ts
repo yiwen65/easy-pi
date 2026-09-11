@@ -1365,7 +1365,8 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	private handlePaste(pastedText: string): void {
+	/** Handle a complete bracketed paste after input chunks have been assembled. */
+	protected handlePaste(pastedText: string): void {
 		this.cancelAutocomplete();
 		this.exitHistoryBrowsing();
 		this.lastAction = null;

@@ -1,11 +1,15 @@
 import { Editor, type EditorOptions, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.ts";
+import { pastedImagePath, readPastedImage } from "../../../utils/pasted-image.ts";
 
 /**
  * Custom editor that handles app-level keybindings for coding-agent.
  */
 export class CustomEditor extends Editor {
 	private keybindings: KeybindingsManager;
+	private imagePasteGeneration = 0;
+	private imagePastePending = false;
+	private deferredInput: string[] = [];
 	public actionHandlers: Map<AppKeybinding, () => void> = new Map();
 
 	// Special handlers that can be dynamically replaced
@@ -27,7 +31,45 @@ export class CustomEditor extends Editor {
 		this.actionHandlers.set(action, handler);
 	}
 
+	override setText(text: string): void {
+		// Draft/session replacement must not receive an earlier asynchronous paste.
+		this.imagePasteGeneration++;
+		this.imagePastePending = false;
+		this.deferredInput = [];
+		super.setText(text);
+	}
+
+	protected override handlePaste(text: string): void {
+		const path = pastedImagePath(text);
+		if (!path || this.getText().trimStart().startsWith("!")) {
+			super.handlePaste(text);
+			return;
+		}
+		const generation = ++this.imagePasteGeneration;
+		this.imagePastePending = true;
+		// Preserve input ordering without blocking the UI on filesystem reads.
+		let timeout: ReturnType<typeof setTimeout>;
+		const deadline = new Promise<undefined>((resolve) => {
+			timeout = setTimeout(() => resolve(undefined), 3000);
+		});
+		void Promise.race([readPastedImage(path), deadline]).then((image) => {
+			clearTimeout(timeout);
+			if (generation !== this.imagePasteGeneration) return;
+			if (image) this.insertAttachmentAtCursor("Image", image);
+			else super.handlePaste(text);
+			this.imagePastePending = false;
+			const queued = this.deferredInput;
+			this.deferredInput = [];
+			for (const input of queued) this.handleInput(input);
+			this.tui.requestRender();
+		});
+	}
+
 	handleInput(data: string): void {
+		if (this.imagePastePending) {
+			this.deferredInput.push(data);
+			return;
+		}
 		// Check extension-registered shortcuts first
 		if (this.onExtensionShortcut?.(data)) {
 			return;
