@@ -23,6 +23,8 @@ for (const directory of [join(root, "packages/subagent/dist"), join(product, "no
 assert.equal(typeof native.CollaborationController, "function");
 assert.equal(native.RunLedger, undefined);
 assert.equal(native.createSubagentExtension, undefined);
+assert.throws(() => native.parseCollaborationArguments("spawn_agent", { task_name: "legacy", message: "obsolete" }), { code: "invalid_arguments" });
+assert.deepEqual(native.validateDelegationResult("unstructured retained output", "completed"), { contract: "invalid", acceptance: "not_reviewed" });
 assert.equal(existsSync(join(product, "dist/extensions/product-launcher.js")), false);
 const require = createRequire(join(product, "dist/cli.js"));
 for (const name of ["extension", "ledger", "process-runner", "dag-orchestrator", "worktree", "child-protocol-extension"]) {
@@ -47,17 +49,19 @@ try {
 	let childFinished;
 	const finished = new Promise((resolve) => { childFinished = resolve; });
 	faux.setResponses(Array.from({ length: 12 }, () => (context) => {
-		if (context.systemPrompt?.includes("Collaboration identity: /root/worker.")) {
+		if (context.messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("Current runtime delegation. You are child /root/worker;"))) {
 			childCalls++;
 			childFinished();
 			return fauxAssistantMessage("compiled child completed");
 		}
 		return rootTurns++ === 0
-			? fauxAssistantMessage(fauxToolCall("spawn_agent", { task_name: "worker", message: "offline smoke", fork_turns: "none" }), { stopReason: "toolUse" })
+			? fauxAssistantMessage(fauxToolCall("spawn_agent", { task_name: "worker", delegation: { version: 1, task: { relationship: "continue", objective: "offline smoke", scope: "synthetic data only", material: [], deliverables: ["Acknowledgement"], acceptance: ["No file changes"] }, context: { mode: "isolated" }, capabilities: { tools: "inherit" } } }), { stopReason: "toolUse" })
 			: fauxAssistantMessage("compiled root completed");
 	}));
 	await session.prompt("delegate synthetic work");
-	await finished;
+	let deadline;
+	try { await Promise.race([finished, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Compiled child did not start")), 10000); })]); }
+	finally { clearTimeout(deadline); }
 	assert.equal(childCalls, 1);
 	assert(session.state.messages.some((message) => message.role === "toolResult" && message.toolName === "spawn_agent" && !message.isError));
 	assert.equal(existsSync(join(agentDir, "subagent/state.sqlite")), false);

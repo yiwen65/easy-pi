@@ -92,6 +92,9 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
+	/** Global-only defaults for newly spawned children; omission inherits the caller per field. */
+	subagentModel?: string; // Fully qualified provider/model
+	subagentThinkingLevel?: ThinkingLevel;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -752,6 +755,26 @@ export class SettingsManager {
 	setDefaultThinkingLevel(level: ThinkingLevel): void {
 		this.globalSettings.defaultThinkingLevel = level;
 		this.markModified("defaultThinkingLevel");
+		this.save();
+	}
+
+	getSubagentModel(): string | undefined {
+		return this.globalSettings.subagentModel;
+	}
+
+	setSubagentModel(model: string | undefined): void {
+		this.globalSettings.subagentModel = model;
+		this.markModified("subagentModel");
+		this.save();
+	}
+
+	getSubagentThinkingLevel(): ThinkingLevel | undefined {
+		return this.globalSettings.subagentThinkingLevel;
+	}
+
+	setSubagentThinkingLevel(level: ThinkingLevel | undefined): void {
+		this.globalSettings.subagentThinkingLevel = level;
+		this.markModified("subagentThinkingLevel");
 		this.save();
 	}
 

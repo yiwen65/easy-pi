@@ -2,7 +2,11 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { CollaborationError } from "@easy-pi/subagent/collaboration-contract";
+import {
+	CollaborationError,
+	parseCollaborationArguments,
+	validateDelegation,
+} from "@easy-pi/subagent/collaboration-contract";
 import type { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import type { ChildSessionIdentity } from "@easy-pi/subagent/session-host";
 import type { AgentSession, AgentSessionEvent } from "../core/agent-session.ts";
@@ -270,8 +274,37 @@ export class PiCollaborationMonitor {
 		if (signal?.aborted) throw new CollaborationError("interrupted", "Operator action cancelled before admission");
 		if (action === "send")
 			return `Message accepted: ${await this.controller.send(this.identity, path, text, signal)} (not necessarily consumed)`;
-		if (action === "followup")
-			return `Task accepted: ${await this.controller.followup(this.identity, path, text, signal)}`;
+		if (action === "followup") {
+			const record = this.controller.inspect(this.identity, path);
+			if (["pending", "running", "closed"].includes(record.status))
+				throw new CollaborationError("busy", "Child is not idle");
+			let input: unknown;
+			try {
+				input = JSON.parse(text);
+			} catch {
+				throw new CollaborationError(
+					"invalid_arguments",
+					"Paste followup_task JSON with task, context=existing and capabilities",
+					"invalid_followup",
+				);
+			}
+			if (!input || typeof input !== "object" || Array.isArray(input))
+				throw new CollaborationError("invalid_arguments", "Expected a task contract object", "invalid_followup");
+			const args = parseCollaborationArguments("followup_task", { ...input, target: path });
+			const delegation = validateDelegation({
+				version: 1,
+				task: args.task,
+				capabilities: args.capabilities,
+				context: record.delegation?.context ?? { mode: "fork", turns: "all", prefix: "rebuild" },
+			});
+			const available = this.root
+				.getActiveToolNames()
+				.filter((name) => this.controller.toolAllowed({ ...this.identity, agentPath: path }, name));
+			const tools = args.capabilities.tools === "inherit" ? available : args.capabilities.tools;
+			if (tools.some((name) => !available.includes(name)))
+				throw new CollaborationError("forbidden", "Follow-up cannot expand delegated tools", "tools_unavailable");
+			return `Task accepted: ${await this.controller.followup(this.identity, path, args.task.objective, signal, { delegation, tools })}`;
+		}
 		return `Interrupt finished; previous status: ${await this.controller.interrupt(this.identity, path)}`;
 	}
 	dispose(): void {

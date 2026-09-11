@@ -25,6 +25,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBuiltInExtensions } from "../src/extensions/index.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { currentCollaborationPath, followupArgs, spawnArgs } from "./collaboration-fixture.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -151,9 +152,9 @@ function holdChild(f: Awaited<ReturnType<typeof fixture>>) {
 	});
 	f.faux.setResponses(
 		Array.from({ length: 20 }, () => (context: Context, options) => {
-			if (!context.systemPrompt?.includes("Collaboration identity: /root/worker.")) {
+			if (currentCollaborationPath(context) !== "/root/worker") {
 				return rootTurns++ === 0
-					? tool("spawn_agent", { task_name: "worker", message: "inspect", fork_turns: "none" })
+					? tool("spawn_agent", spawnArgs("worker", "inspect"))
 					: fauxAssistantMessage("root idle");
 			}
 			childTurns++;
@@ -253,7 +254,7 @@ test.each(["git", "non-git"])(
 		expect(child.childTurns).toBe(turns);
 		// Explicit followup, not watching, starts inference on the same logical agent.
 		f.key("\x06");
-		f.key("another task");
+		f.key(JSON.stringify(followupArgs("/root/worker", "another task")));
 		f.key("\r");
 		await vi.waitFor(() => expect(f.text()).toContain("Task accepted"));
 		await vi.waitFor(() => expect(child.childTurns).toBe(turns + 1));
@@ -356,6 +357,32 @@ test("default native children do not rediscover extensions disabled in root", as
 	child.release(fauxAssistantMessage("done"));
 });
 
+test("operator followup diagnostics retain the draft and show a corrective hint without another inference", async () => {
+	const f = await fixture();
+	const child = holdChild(f);
+	await f.session.prompt("delegate");
+	await child.ready;
+	child.release(fauxAssistantMessage("done"));
+	const { command } = await f.show();
+	await vi.waitFor(() => expect(f.text()).toContain("completed"));
+	f.key("\x1b[B");
+	f.key("\r");
+	const calls = f.faux.state.callCount;
+	f.key("\x06");
+	f.key("malformed-draft");
+	f.key("\r");
+	await vi.waitFor(() => expect(f.text()).toContain("invalid_followup"));
+	expect(f.text()).toContain("context=existing");
+	expect(f.text()).toContain("malformed-draft");
+	expect(f.faux.state.callCount).toBe(calls);
+	for (const width of [1, 40, 80, 100])
+		expect(f.panel.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+	f.key("\x1b");
+	f.key("\x1b");
+	f.key("\x1b");
+	await command;
+});
+
 test("root shutdown dismisses the viewer and releases callbacks; configurable panel actions are honored", async () => {
 	const f = await fixture();
 	const child = holdChild(f);
@@ -395,7 +422,7 @@ test("default child tools obey live root permission mode and tool removal while 
 	child.release(tool("write", { path: "disabled.txt", content: "not allowed" }));
 	await vi.waitFor(() => expect(child.childTurns).toBe(3));
 	expect(existsSync(join(f.cwd, "disabled.txt"))).toBe(false);
-	expect(f.renders.some((text) => text.includes("Tool disabled in the live root session"))).toBe(true);
+	expect(f.renders.some((text) => text.includes("Tool denied by live delegation ancestry"))).toBe(true);
 	// The operator surface does not bypass an explicitly disabled collaboration tool either.
 	f.session.setActiveToolsByName(f.session.getActiveToolNames().filter((name) => name !== "send_message"));
 	f.key("\x13");

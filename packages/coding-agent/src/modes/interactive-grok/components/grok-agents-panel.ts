@@ -7,7 +7,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { CollaborationError } from "@easy-pi/subagent/collaboration-contract";
+import { formatCollaborationError } from "@easy-pi/subagent/collaboration-contract";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { PiCollaborationMonitor } from "../../../extensions/pi-collaboration-monitor.ts";
 import type { Theme } from "../../interactive/theme/theme.ts";
@@ -103,7 +103,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 			this.composing = undefined;
 			this.input.setValue("");
 		} catch (error) {
-			this.notice = `Action rejected: ${error instanceof CollaborationError ? error.code : "unavailable"}. Draft retained; nothing is retried automatically.`;
+			this.notice = `Action rejected: ${formatCollaborationError(error)} Draft retained; nothing is retried automatically.`;
 		} finally {
 			this.busy = false;
 			this.focused = this.focus;
@@ -155,6 +155,13 @@ export class GrokAgentsPanel implements Component, Focusable {
 		const framed = width >= 4;
 		const contentWidth = Math.max(1, width - (framed ? 4 : 0));
 		const maxHeight = height - (framed ? 2 : 0);
+		const notice =
+			this.notice || this.busy
+				? wrapTextWithAnsi(oneLine(this.busy ? "Submitting…" : this.notice), contentWidth).slice(
+						0,
+						Math.max(1, Math.min(4, maxHeight - 10)),
+					)
+				: [];
 		const cancelTarget = this.composing ? "cancel action" : this.watching ? "back to list" : "return to main session";
 		const lines = [
 			th.fg("accent", th.bold("Agents — shared workspace")),
@@ -167,7 +174,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 					`${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} watch · ${hint("tui.select.cancel")} root`,
 				),
 			);
-			const available = Math.max(1, maxHeight - lines.length - 1);
+			const available = Math.max(1, maxHeight - lines.length - Math.max(1, notice.length));
 			const start = Math.max(0, this.selected - available + 1);
 			for (const [index, row] of rows.slice(start, start + available).entries()) {
 				const label = `${start + index === this.selected ? ">" : " "} ${row.task_name}  ${row.status}  ${row.loaded ? "loaded" : "unloaded"}${row.task_name === "/root" ? " — return to main session" : ""}`;
@@ -200,7 +207,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 				),
 			);
 			const body = wrapTextWithAnsi(safe(view.text || "Waiting for session activity…"), contentWidth);
-			const room = Math.max(1, maxHeight - lines.length - (this.composing ? 3 : 1));
+			const room = Math.max(1, maxHeight - lines.length - (this.composing ? 2 : 0) - Math.max(1, notice.length));
 			this.scroll = Math.min(this.scroll, Math.max(0, body.length - room));
 			const end = Math.max(room, body.length - this.scroll);
 			lines.push(...body.slice(Math.max(0, end - room), end));
@@ -210,13 +217,13 @@ export class GrokAgentsPanel implements Component, Focusable {
 						"warning",
 						this.composing === "interrupt"
 							? `Interrupt ${view.path}? ${hint("tui.select.confirm")} confirm; edits are retained.`
-							: `${this.composing === "send" ? "Message (does not start idle agent)" : "New task (idle child only)"} → ${view.path}`,
+							: `${this.composing === "send" ? "Message (does not start idle agent)" : "New task JSON (task, context=existing, capabilities)"} → ${view.path}`,
 					),
 				);
 				if (this.composing !== "interrupt") lines.push(...this.input.render(contentWidth));
 			}
 		}
-		if (this.notice || this.busy) lines.push(th.fg("warning", oneLine(this.busy ? "Submitting…" : this.notice)));
+		lines.push(...notice.map((line) => th.fg("warning", line)));
 		// Fill the viewport, including empty rows: this is a focused modal, not
 		// transcript output. Never leave a usable-looking root editor underneath.
 		const body = Array.from({ length: maxHeight }, (_, index) => {

@@ -30,9 +30,30 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
+| `subagentModel` | string | inherit caller | Global-only default `provider/model` for newly spawned Subagents; does not change root or existing children |
+| `subagentThinkingLevel` | string | inherit caller | Global-only default child effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `showCacheMissNotices` | boolean | `false` | Show transcript notices for significant prompt-cache misses and compaction or branch-summary usage |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level. Anthropic, Google, and Bedrock use these natively. OpenAI-compatible models use them when `compat.thinkingTokenBudgetField` (or `supportsThinkingTokenBudget`) is set. |
+
+#### Subagent defaults
+
+In `/settings`, select **Subagent model** or **Subagent effort**. The model submenu searches the current cached catalog of configured providers; opening it does not refresh catalogs or call a model. Each field has **Inherit caller**, which removes that global default independently. An unavailable saved model is retained until explicitly changed; it is not silently replaced.
+
+In easy-pi these values are saved to `~/.epi/agent/settings.json` (or the configured agent directory):
+
+```json
+{
+  "subagentModel": "openai-codex/gpt-5.4",
+  "subagentThinkingLevel": "high"
+}
+```
+
+The example requires that model/provider to be available in your configuration. Remove either key to inherit that field. Project settings and temporary settings overrides do not override these global-only fields.
+
+For each field, precedence is **explicit `spawn_agent` override > global Subagent default > calling agent**. Saving affects subsequent new children immediately, including descendants spawned by already-existing children. Existing children and their followups retain their original model/effort. Other running Pi instances are not hot-synchronized.
+
+Unsupported model/effort combinations are rejected before child admission, not downgraded. Effort choices are independent of the root model, so select a level supported by the intended child model. A differing default also conflicts with `prefix: "preserve"`; explicitly match the caller's model/effort or choose a compatible context policy. No automatic retry or context fallback occurs. See [collaboration.md](collaboration.md).
 
 #### thinkingBudgets
 

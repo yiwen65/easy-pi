@@ -33,6 +33,11 @@ export function registerPiCollaborationRoot(
 		});
 		try {
 			const settings = session.settingsManager;
+			// Share a live root getter, not the child SettingsManager's creation-time snapshot.
+			const getDefaults = () => ({
+				subagentModel: settings.getSubagentModel(),
+				subagentThinkingLevel: settings.getSubagentThinkingLevel(),
+			});
 			const host = createPiChildSessionHost({
 				modelRuntime: session.modelRuntime,
 				noExtensions: true,
@@ -56,12 +61,18 @@ export function registerPiCollaborationRoot(
 				getTools: () => session.getActiveToolNames(),
 				observeSession: (child, native) => monitor!.attach(child, native),
 				registerTools: (child, childPi, getSession) => {
-					registerPiCollaborationTools({ pi: childPi, controller: controller!, identity: child, getSession });
+					registerPiCollaborationTools({
+						pi: childPi,
+						controller: controller!,
+						identity: child,
+						getSession,
+						getDefaults,
+					});
 				},
 			});
 			controller = new CollaborationController({ store, host, agentDir, getPermissions });
 			monitor = new PiCollaborationMonitor(controller, session);
-			registerPiCollaborationTools({ pi, controller, identity, getSession: () => session }).start(ctx);
+			registerPiCollaborationTools({ pi, controller, identity, getSession: () => session, getDefaults }).start(ctx);
 			startupError = undefined;
 		} catch (error) {
 			monitor?.dispose();

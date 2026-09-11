@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Transport } from "@earendil-works/pi-ai";
+import type { Api, Model, Transport } from "@earendil-works/pi-ai";
 import {
 	type Component,
 	Container,
@@ -69,6 +69,9 @@ export interface SettingsConfig {
 	httpIdleTimeoutMs: number;
 	thinkingLevel: ThinkingLevel;
 	availableThinkingLevels: ThinkingLevel[];
+	subagentModel?: string;
+	subagentThinkingLevel?: ThinkingLevel;
+	subagentModels: readonly Model<Api>[];
 	currentTheme: string;
 	terminalTheme: TerminalTheme;
 	availableThemes: string[];
@@ -105,6 +108,8 @@ export interface SettingsCallbacks {
 	onTransportChange: (transport: Transport) => void;
 	onHttpIdleTimeoutMsChange: (timeoutMs: number) => void;
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
+	onSubagentModelChange: (model: string | undefined) => void;
+	onSubagentThinkingLevelChange: (level: ThinkingLevel | undefined) => void;
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
@@ -235,6 +240,69 @@ class SelectSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.selectList.handleInput(data);
+	}
+}
+
+const INHERIT_CALLER = "inherit";
+
+/** Cached catalog only. The main model selector changes root defaults and refreshes the network. */
+class SubagentModelSubmenu extends Container {
+	private readonly list: SettingsList;
+
+	constructor(models: readonly Model<Api>[], current: string, done: (value?: string) => void) {
+		super();
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Subagent model")), 0, 0));
+		this.addChild(
+			new Text(
+				theme.fg("muted", "Global default for new children. /login adds providers; no catalog refresh here."),
+				0,
+				0,
+			),
+		);
+		this.addChild(new Spacer(1));
+		const choices = new Map(models.map((model) => [`${model.provider}/${model.id}`, model]));
+		const items: SettingItem[] = [
+			{
+				id: INHERIT_CALLER,
+				label: "Inherit caller",
+				description: "Use the calling agent's current model unless spawn explicitly overrides it.",
+				currentValue: current === INHERIT_CALLER ? "selected" : "",
+				values: ["select"],
+			},
+			...[...choices]
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([reference, model]) => ({
+					id: reference,
+					label: reference,
+					description: `${reference} — ${model.name}. Effort is independent; unsupported combinations are rejected at spawn.`,
+					currentValue: current === reference ? "selected" : "",
+					values: ["select"],
+				})),
+		];
+		if (current !== INHERIT_CALLER && !choices.has(current))
+			this.addChild(
+				new Text(
+					theme.fg(
+						"warning",
+						"Saved model is unavailable in this catalog. Select a model or inherit; no automatic fallback.",
+					),
+					0,
+					0,
+				),
+			);
+		this.list = new SettingsList(
+			items,
+			6,
+			getSettingsListTheme(),
+			(id) => done(id),
+			() => done(),
+			{ enableSearch: true },
+		);
+		this.addChild(this.list);
+	}
+
+	handleInput(data: string): void {
+		this.list.handleInput(data);
 	}
 }
 
@@ -633,6 +701,42 @@ export class SettingsSelectorComponent extends Container {
 					),
 			},
 			{
+				id: "subagent-model",
+				label: "Subagent model",
+				description:
+					"Global default for new children only. Explicit spawn overrides win; existing children and the root stay unchanged.",
+				currentValue: config.subagentModel === undefined ? INHERIT_CALLER : String(config.subagentModel),
+				submenu: (currentValue, done) => new SubagentModelSubmenu(config.subagentModels, currentValue, done),
+			},
+			{
+				id: "subagent-effort",
+				label: "Subagent effort",
+				description:
+					"Global default for new children. Independent of model; unsupported combinations and preserve conflicts are rejected, never downgraded.",
+				currentValue:
+					config.subagentThinkingLevel === undefined ? INHERIT_CALLER : String(config.subagentThinkingLevel),
+				submenu: (currentValue, done) =>
+					new SelectSubmenu(
+						"Subagent effort",
+						"Choose a supported effort for the child model, or inherit the caller. Explicit spawn overrides win.",
+						[
+							{
+								value: INHERIT_CALLER,
+								label: "Inherit caller",
+								description: "Use the calling agent's current effort",
+							},
+							...Object.entries(THINKING_DESCRIPTIONS).map(([value, description]) => ({
+								value,
+								label: value,
+								description,
+							})),
+						],
+						currentValue,
+						(value) => done(value),
+						() => done(),
+					),
+			},
+			{
 				id: "tui-mode",
 				label: "TUI mode",
 				description: "Interface layout; fullscreen mode is experimental",
@@ -873,6 +977,14 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen-scrollbar":
 						callbacks.onFullscreenScrollbarChange(newValue as ScrollViewScrollbar);
+						break;
+					case "subagent-model":
+						callbacks.onSubagentModelChange(newValue === INHERIT_CALLER ? undefined : newValue);
+						break;
+					case "subagent-effort":
+						callbacks.onSubagentThinkingLevelChange(
+							newValue === INHERIT_CALLER ? undefined : (newValue as ThinkingLevel),
+						);
 						break;
 					case "theme":
 						callbacks.onThemeChange(newValue);
