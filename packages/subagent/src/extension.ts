@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -34,6 +35,7 @@ import {
 	SubagentDagRunError,
 	type TaskControlOptions,
 } from "./dag-orchestrator.ts";
+import { registerDeliveryCleanup } from "./delivery-cleanup.ts";
 import { type DagRunInspection, type ListDagRunsOptions, RunLedger } from "./ledger.ts";
 import {
 	defaultSubagentModelPreferencesPath,
@@ -81,7 +83,7 @@ export interface SubagentDagOrchestratorAdapter {
 	shutdown(): Promise<void>;
 }
 
-export type SubagentOperatorMutation = "resume" | "pause" | "cancel" | "release" | "gc";
+export type SubagentOperatorMutation = "resume" | "pause" | "cancel" | "release" | "gc" | "cleanup";
 
 export interface SubagentOperatorAuthorizationRequest {
 	operation: SubagentOperatorMutation;
@@ -121,6 +123,8 @@ export interface SubagentExtensionOptions
 	createChildHarnessContext?: ChildHarnessContextProvider;
 	/** Disabled unless explicitly configured by the trusted embedding. */
 	retentionPolicy?: SubagentRetentionPolicy;
+	/** Product-owned acknowledged history maintenance; disable in child runtimes. */
+	historyMaintenance?: boolean;
 	/** Test/embedding seam. Production callers normally let the extension build the durable DAG orchestrator. */
 	dagOrchestrator?: SubagentDagOrchestratorAdapter;
 	/** Parent-Harness authority for direct TUI mutations. Missing authority fails closed. */
@@ -1360,6 +1364,27 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 			}
 			return await options.authorizeOperator({ operation, runId, details: dagOrchestrator.inspect(runId) }, ctx);
 		};
+
+		registerDeliveryCleanup(pi, {
+			host: dagOrchestrator,
+			ledger,
+			checkScope: async (runId, ctx) =>
+				assertRunRepository(dagOrchestrator.inspect(runId), ctx.cwd, repositoryRootResolver),
+			authorize: (runId, ctx) => authorizeMutation("cleanup", runId, ctx),
+			authorizeRead: options.authorizeOperatorRead,
+		});
+		if (options.historyMaintenance) {
+			pi.on("session_start", (_event, ctx) => {
+				if (ledgerPath !== ":memory:" && !existsSync(ledgerPath)) return;
+				try {
+					const report = ledger.pruneConfirmedHistory();
+					if (report.overBudget)
+						ctx.ui.notify("Subagent history exceeds 256 MiB; unconfirmed results remain protected.", "warning");
+				} catch {
+					ctx.ui.notify("Subagent history maintenance deferred; task execution was not resumed.", "warning");
+				}
+			});
+		}
 
 		const performCommand = async (
 			action: Exclude<SubagentCommandAction, "list">,

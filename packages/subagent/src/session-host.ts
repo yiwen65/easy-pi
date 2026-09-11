@@ -1,5 +1,5 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Context, Usage } from "@earendil-works/pi-ai";
 import type { PermissionMode } from "@easy-pi/permissions";
 import type { CollaborationMessage, CollaborationStatus, ForkSelection } from "./collaboration-contract.ts";
 
@@ -21,12 +21,25 @@ export interface ChildSessionModel {
 	thinkingLevel: ThinkingLevel;
 }
 
+/** Captured request boundary, without authentication, connection state or raw JSONL. */
+export interface ChildRequestPrefix {
+	model: ChildSessionModel;
+	context: Context;
+	/** Non-secret Codex SSE cache lineage. Never a native session or WebSocket pool identity. */
+	cacheAffinity?: { id: string; key: string };
+}
+
 export interface ChildSessionCreateOptions extends ChildSessionIdentity {
+	/** Cooperative startup cancellation; the controller retains admission until cleanup settles. */
+	signal?: AbortSignal;
 	cwd: string;
 	agentDir: string;
 	model: ChildSessionModel;
 	/** Prepared effective context for a new session only; never a raw transcript. */
 	fork?: AgentMessage[];
+	prefix?: ChildRequestPrefix;
+	/** Live ancestry restriction; rechecked for every tool call, including nested delegation. */
+	toolAllowed?: (name: string) => boolean;
 	/** Storage ownership and historical session validation belong to the team store. */
 	storage: { kind: "memory" } | { kind: "file"; directory: string; sessionFile?: string };
 	getPermissions: () => ChildSessionPermissions;

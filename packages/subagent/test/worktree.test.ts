@@ -73,6 +73,25 @@ afterEach(async () => {
 	await Promise.all(temporaryPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
+it("retains interrupted edits until explicit disposition permits reconciliation", async () => {
+	const root = await makeRepository();
+	const handle = await createTaskWorktree({
+		repositoryPath: root,
+		baselineCommit: await git(root, "rev-parse", "HEAD"),
+		runId: "retain-run",
+		taskId: "writer",
+	});
+	temporaryPaths.push(dirname(handle.path));
+	await writeFile(join(handle.path, "owned", "unfinished.txt"), "undelivered edits\n");
+	expect(handle.retainForDisposition).toBeDefined();
+	await handle.retainForDisposition?.();
+	await handle.retainForDisposition?.();
+	await expect(reconcileTaskWorktrees(root, "retain-run", "writer")).rejects.toThrow(/retained/);
+	expect(await readFile(join(handle.path, "owned", "unfinished.txt"), "utf8")).toBe("undelivered edits\n");
+	await reconcileTaskWorktrees(root, "retain-run", "writer", undefined, { discardRetained: true });
+	await expect(access(handle.path)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 describe("resolveRepositoryRoot", () => {
 	it("throws NotAGitRepositoryError outside a Git working tree", async () => {
 		const root = await mkdtemp(join(tmpdir(), "subagent-nongit-test-"));

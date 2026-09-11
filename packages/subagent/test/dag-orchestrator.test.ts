@@ -17,6 +17,7 @@ import {
 	SubagentDagOrchestrator,
 	SubagentDagRunError,
 } from "../src/dag-orchestrator.ts";
+import { cleanupConfirmedRun } from "../src/delivery-cleanup.ts";
 import { RunLedger } from "../src/ledger.ts";
 import { MergeConflictError } from "../src/merge-coordinator.ts";
 import { ValidationRegistry, validateAndCommitWriterTask } from "../src/quality.ts";
@@ -31,7 +32,7 @@ import type {
 	WriterHandoff,
 } from "../src/types.ts";
 import { SUBAGENT_INFRA_LIMITS } from "../src/types.ts";
-import { pinRunBaseline, pinTaskCommit } from "../src/worktree.ts";
+import { pinRunBaseline, pinTaskCommit, reconcileTaskWorktrees } from "../src/worktree.ts";
 
 const temporaryPaths: string[] = [];
 
@@ -3540,6 +3541,62 @@ describe("SubagentDagOrchestrator", () => {
 		expect(pauseResult.status).toBe("cancelled");
 		expect(cancelResult.status).toBe("cancelled");
 		expect(ledger.getDagRun("pause-cancel-race")?.pausedAt).toBeUndefined();
+		ledger.close();
+	});
+
+	it("preserves an interrupted Writer until the user explicitly discards its result", async () => {
+		const fixture = await repository();
+		const ledger = new RunLedger(":memory:");
+		let ready!: () => void;
+		const started = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		let path = "";
+		let clock = 1000;
+		const orchestrator = new SubagentDagOrchestrator({
+			ledger,
+			now: () => clock,
+			policy: policy({ leaseDurationMs: 30 }),
+			createRunId: () => "retain-writer",
+			runTask: async (options) => {
+				path = options.snapshotPath;
+				await writeFile(join(path, "draft.txt"), "undelivered\n");
+				ready();
+				return new Promise<ChildTaskResult>((resolve) =>
+					options.signal?.addEventListener(
+						"abort",
+						() =>
+							resolve({
+								taskId: options.task.id,
+								role: options.task.role,
+								success: false,
+								terminalReason: "cancelled",
+								usage: usage(),
+								turns: 1,
+							}),
+						{ once: true },
+					),
+				);
+			},
+		});
+		const running = orchestrator
+			.start({
+				repositoryPath: fixture.root,
+				request: request([{ id: "writer", role: "writer", objective: "Draft", ownedPaths: ["draft.txt"] }]),
+			})
+			.catch((error) => error);
+		await started;
+		await expect(orchestrator.shutdown()).rejects.toBeInstanceOf(DagRunInterruptedError);
+		expect(await running).toBeInstanceOf(DagRunInterruptedError);
+		expect(await readFile(join(path, "draft.txt"), "utf8")).toBe("undelivered\n");
+		await expect(reconcileTaskWorktrees(fixture.root, "retain-writer", "writer")).rejects.toThrow(/retained/);
+		clock = 2000;
+		const cleanup = new SubagentDagOrchestrator({ ledger, now: () => clock, policy: policy() });
+		await cleanupConfirmedRun(cleanup, "retain-writer", "discard", (id, intent) =>
+			ledger.confirmDagCleanup(id, intent),
+		);
+		await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(ledger.getDagRun("retain-writer")?.resources.pins).toBe("released");
 		ledger.close();
 	});
 

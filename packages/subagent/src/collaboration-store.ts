@@ -4,7 +4,14 @@ import { basename, dirname, isAbsolute, join, posix } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { COLLABORATION_LIMITS, CollaborationError, validateAgentPath } from "./collaboration-contract.ts";
+import {
+	COLLABORATION_LIMITS,
+	CollaborationError,
+	DelegationSchema,
+	ResultValidationSchema,
+	validateAgentPath,
+	validateDelegation,
+} from "./collaboration-contract.ts";
 
 const ModelSchema = Type.Object(
 	{
@@ -34,6 +41,10 @@ const MessageSchema = Type.Object(
 			Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("interrupted")]),
 		),
 		text: Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes }),
+		delegation: Type.Optional(DelegationSchema),
+		parent: Type.Optional(Type.String()),
+		contextUse: Type.Optional(Type.Union([Type.Literal("initial"), Type.Literal("existing")])),
+		resultValidation: Type.Optional(ResultValidationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -56,6 +67,22 @@ const AgentSchema = Type.Object(
 		taskMessage: Type.Optional(MessageSchema),
 		sessionFile: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9._-]+\\.jsonl$" })),
 		result: Type.Optional(Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes })),
+		delegation: Type.Optional(DelegationSchema),
+		contextBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: COLLABORATION_LIMITS.maxForkBytes })),
+		usage: Type.Optional(
+			Type.Object(
+				{
+					input: Type.Number({ minimum: 0 }),
+					output: Type.Number({ minimum: 0 }),
+					cacheRead: Type.Number({ minimum: 0 }),
+					cacheWrite: Type.Number({ minimum: 0 }),
+				},
+				{ additionalProperties: false },
+			),
+		),
+		// Inherited native catalogs can exceed the model-facing explicit allowlist limit.
+		tools: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true })),
+		resultValidation: Type.Optional(ResultValidationSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -65,7 +92,10 @@ const SnapshotSchema = Type.Object(
 		rootSessionId: Type.String({ minLength: 1 }),
 		cwd: Type.String(),
 		revision: Type.Integer({ minimum: 0 }),
-		agents: Type.Array(AgentSchema, { maxItems: COLLABORATION_LIMITS.maxAgents - 1 }),
+		agents: Type.Array(AgentSchema, {
+			// Closed records are retained for audit; only open agents consume the live team slots.
+			maxItems: COLLABORATION_LIMITS.maxAgents * COLLABORATION_LIMITS.maxPendingMessages,
+		}),
 		messages: Type.Optional(
 			Type.Array(MessageSchema, {
 				maxItems: COLLABORATION_LIMITS.maxAgents * COLLABORATION_LIMITS.maxPendingMessages,
@@ -76,13 +106,19 @@ const SnapshotSchema = Type.Object(
 );
 export type StoredCollaborationAgent = Static<typeof AgentSchema>;
 export type CollaborationSnapshot = Static<typeof SnapshotSchema>;
+export type CollaborationAuthority = Readonly<Pick<StoredCollaborationAgent, "path" | "parent" | "status">> & {
+	readonly tools?: readonly string[];
+};
 
 function validateSnapshot(value: unknown): CollaborationSnapshot {
 	if (!Value.Check(SnapshotSchema, value)) throw new CollaborationError("storage_error", "Invalid team snapshot");
 	if (!isAbsolute(value.cwd)) throw new CollaborationError("storage_error", "Invalid team cwd");
+	if (value.agents.filter((agent) => agent.status !== "closed").length > COLLABORATION_LIMITS.maxAgents - 1)
+		throw new CollaborationError("storage_error", "Team agent limit exceeded");
 	const paths = new Set<string>();
 	const ids = new Set<string>();
 	for (const agent of value.agents) {
+		if (agent.delegation) validateDelegation(agent.delegation);
 		validateAgentPath(agent.path);
 		validateAgentPath(agent.parent);
 		if (
@@ -112,6 +148,8 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 			Buffer.byteLength(message.text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes
 		)
 			throw new CollaborationError("storage_error", "Invalid mailbox message");
+		if (message.delegation) validateDelegation(message.delegation);
+		if (message.parent !== undefined) validateAgentPath(message.parent);
 		messageIds.add(message.id);
 	}
 	for (const message of value.messages ?? []) counts.set(message.to, (counts.get(message.to) ?? 0) + 1);
@@ -144,6 +182,8 @@ export class CollaborationStore {
 	private readonly database: DatabaseSync;
 	private readonly owner = randomUUID();
 	private closed = false;
+	private authority: readonly CollaborationAuthority[] = [];
+	private authorityVersion = -1;
 	readonly directory: string | undefined;
 	readonly rootSessionId: string;
 	readonly cwd: string;
@@ -195,6 +235,7 @@ export class CollaborationStore {
 			}
 			this.database.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
 			try {
+				const version = this.dataVersion();
 				const row = this.readRow();
 				const snapshot = this.decode(row);
 				if (row.owner !== null) {
@@ -213,6 +254,8 @@ export class CollaborationStore {
 				for (const agent of snapshot.agents) {
 					if (agent.status === "pending" || agent.status === "running") agent.status = "interrupted";
 					if (agent.completionPending) {
+						if (agent.delegation)
+							agent.resultValidation = { contract: "not_completed", acceptance: "not_reviewed" };
 						snapshot.messages ??= [];
 						snapshot.messages.push({
 							id: randomUUID(),
@@ -223,6 +266,7 @@ export class CollaborationStore {
 							kind: "result",
 							status: "interrupted",
 							text: "Interrupted controller; inspect retained child history. No task was resumed.",
+							...(agent.resultValidation ? { resultValidation: agent.resultValidation } : {}),
 						});
 						agent.completionPending = false;
 					}
@@ -232,6 +276,7 @@ export class CollaborationStore {
 					.prepare("UPDATE team SET snapshot=?, owner=?, pid=? WHERE id=1")
 					.run(JSON.stringify(snapshot), this.owner, process.pid);
 				this.database.exec("COMMIT");
+				this.cacheAuthority(snapshot, version);
 			} catch (error) {
 				this.database.exec("ROLLBACK");
 				throw error;
@@ -265,6 +310,36 @@ export class CollaborationStore {
 		return this.decode(row);
 	}
 
+	private dataVersion(): number {
+		return Number(this.database.prepare("PRAGMA data_version").get()!.data_version);
+	}
+
+	private cacheAuthority(snapshot: CollaborationSnapshot, version: number): void {
+		this.authority = Object.freeze(
+			snapshot.agents.map(({ path, parent, status, tools }) =>
+				Object.freeze({
+					path,
+					parent,
+					status,
+					...(tools ? { tools: Object.freeze([...tools]) } : {}),
+				}),
+			),
+		);
+		this.authorityVersion = version;
+	}
+
+	/** Small immutable projection; live tool getters are deliberately not cached here. */
+	readAuthority(): readonly CollaborationAuthority[] {
+		if (this.closed) throw new CollaborationError("storage_error", "Team store is closed");
+		const version = this.dataVersion();
+		const row = this.database.prepare("SELECT owner FROM team WHERE id=1").get();
+		if (!row) throw new CollaborationError("storage_error", "Missing team metadata");
+		if (row.owner !== this.owner) throw new CollaborationError("forbidden", "Team ownership was lost");
+		// Another connection changed the database: validate once before reusing a projection.
+		if (version !== this.authorityVersion) this.cacheAuthority(this.read(), version);
+		return this.authority;
+	}
+
 	/** CAS prevents stale callers from overwriting a newer turn or terminal result. */
 	commit(snapshot: CollaborationSnapshot): CollaborationSnapshot {
 		const next = validateSnapshot(snapshot);
@@ -272,6 +347,7 @@ export class CollaborationStore {
 			throw new CollaborationError("forbidden", "Invalid team owner");
 		this.database.exec("BEGIN IMMEDIATE");
 		try {
+			const version = this.dataVersion();
 			const current = this.read();
 			if (current.revision !== next.revision) throw new CollaborationError("busy", "Stale team revision");
 			next.revision++;
@@ -279,6 +355,7 @@ export class CollaborationStore {
 				.prepare("UPDATE team SET snapshot=? WHERE id=1 AND owner=?")
 				.run(JSON.stringify(next), this.owner);
 			this.database.exec("COMMIT");
+			this.cacheAuthority(next, version);
 			return structuredClone(next);
 		} catch (error) {
 			this.database.exec("ROLLBACK");
