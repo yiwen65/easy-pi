@@ -209,6 +209,13 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 */
 	promptCacheKey?: string;
 	/**
+	 * Optional Codex cache-affinity lineage, independent of session/request identity.
+	 * Selects SSE even when a WebSocket transport is preferred; shared WebSocket
+	 * affinity is not supported. cacheRetention: "none" suppresses the cache header.
+	 * Other providers ignore this option. This does not guarantee a cache hit.
+	 */
+	cacheAffinityId?: string;
+	/**
 	 * Optional session identifier for provider request routing, transport affinity,
 	 * and connection reuse. It is also the legacy prompt-cache key when
 	 * `promptCacheKey` is not set. Ignored by providers that don't support it.
