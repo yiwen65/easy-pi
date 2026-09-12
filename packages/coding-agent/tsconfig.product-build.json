@@ -25,6 +25,9 @@
 			"@earendil-works/pi-tui": [
 				"../tui/dist/index.d.ts"
 			],
+			"@easy-pi/grok-tui": [
+				"../grok-tui/dist/index.d.ts"
+			],
 			"@earendil-works/pi-tui/*": [
 				"../tui/dist/*.d.ts",
 				"../tui/dist/components/*.d.ts"

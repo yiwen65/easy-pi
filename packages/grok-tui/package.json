@@ -1,7 +1,7 @@
 {
-	"name": "@earendil-works/pi-grok-tui",
+	"name": "@easy-pi/grok-tui",
 	"version": "0.84.2",
-	"description": "Action-driven terminal runtime for the Pi coding agent",
+	"description": "Action-driven terminal runtime for easy-pi and Pi-compatible coding agents",
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -30,7 +30,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
+		"url": "git+https://github.com/yiwen65/easy-pi.git",
 		"directory": "packages/grok-tui"
 	},
 	"engines": {
