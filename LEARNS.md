@@ -365,3 +365,12 @@
 - Correct approach: 注册 startup 时继承已有 stopping/failure，首次 host.run 前再次检查控制器状态与 startup signal；跳过执行的已接收回合正常终结为 interrupted，不重跑。
 - Prevention: controller 并发回归除异步 host barrier 外，加入 pending/running observer 同步 shutdown 与 running observer abort，断言 create/run 次数和持久状态，不能只断言 abort 被调用。
 - Verified by: 2026-09-11 三项 notification 回归修正前分别出现停止后一次 create、两次场景下意外 run；最小边界检查后三项及 controller 全部32项通过，未调用真实模型。
+
+## Vitest 安全升级——先检查完整依赖树再接受 dedupe 的附带变更
+
+- Wrong approach: 只把各 workspace 的 Vitest pin 从 4.1.9 改到 4.1.11，运行一次 `npm install --ignore-scripts` 后就认为 audit 已清零。
+- Why it failed: `vitest-evals` 的 peer 解析仍在 root 保留 4.1.9，`npm audit` 继续报告 `@vitest/mocker` 和 `vitest`；随后 `npm dedupe` 虽解决了旧 peer，却同时改写了无关 transitive lock 条目。
+- Recognition signal: `npm ls vitest @vitest/mocker @vitest/coverage-v8 --all` 仍显示 4.1.9，或 lock diff 出现与目标依赖无关的 undici/picomatch/workspace metadata 变化。
+- Correct approach: 统一更新直接 pin 后运行 `npm ls` 和全量/production `npm audit`；必要时 `npm dedupe --ignore-scripts`，再逐项审查并恢复无关 lock 变化，最后运行生成 lock checks。
+- Prevention: 安全依赖升级的验收必须同时检查完整树、audit 两种模式和 lock diff，不能只看 manifest 或 npm install 的 summary。
+- Verified by: 2026-09-12 Vitest 4.1.11 升级；初次安装后仍有 2 个 moderate，dedupe 后全量及 production audit 均为 0，代表性测试和 root check 通过。
