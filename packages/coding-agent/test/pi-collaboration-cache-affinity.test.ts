@@ -161,20 +161,6 @@ test("native preserve descendants and cold followups inherit cache lineage, not 
 	});
 	expect(f.root.agent.transport).toBe("auto");
 	expect(f.root.agent.cacheAffinityId).toBeUndefined();
-	await f.tool(
-		child,
-		"spawn_agent",
-		spawnArgs("grandchild", "nested", { mode: "fork", turns: "all", prefix: "preserve" }),
-	);
-	const grandchild = f.children.get("/root/child/grandchild")!;
-	expect(new Set([parentId, child.sessionId, grandchild.sessionId]).size).toBe(3);
-	expect(f.requests.at(-1)).toMatchObject({
-		sessionId: grandchild.sessionId,
-		cacheAffinityId: parentId,
-		promptCacheKey: "logical-parent-key",
-		transport: "sse",
-	});
-	expect(JSON.stringify(grandchild.messages)).not.toContain("logical-parent-key");
 	const childId = child.sessionId;
 	const file = child.sessionFile!;
 	const before = await readFile(file, "utf8");

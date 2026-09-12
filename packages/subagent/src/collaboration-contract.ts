@@ -106,6 +106,10 @@ const ERROR_REASONS = {
 		code: "context_unavailable",
 		hint: "Spawn a fresh isolated or curated child for independent Explore/Verify work.",
 	},
+	nested_delegation: {
+		code: "forbidden",
+		hint: "Nested teams are not supported: team tools are usable by /root only; children see them only through preserved context. Split multi-part work into sibling tasks.",
+	},
 } as const;
 export type CollaborationErrorReason = keyof typeof ERROR_REASONS;
 
@@ -154,13 +158,13 @@ export function formatCollaborationError(error: unknown): string {
 
 const TaskName = Type.String({
 	description:
-		"Unique child name; the child's path is /root/<task_name>. Names persist after failure and after closure: respawning an existing path fails with busy, so reuse the child via followup_task or pick a new name. Closing a retired child frees its team slot but never its name.",
+		"Child name; its path becomes /root/<task_name>. Names are never reusable, even after closure - a reused name fails with busy. Continue an existing child via followup_task.",
 	minLength: 1,
 	maxLength: 64,
 	pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$",
 });
 const Target = Type.String({
-	description: 'Existing child path: absolute "/root/<name>" or relative "../peer" resolved from the sender.',
+	description: 'Existing child path: absolute "/root/<name>" or bare "<name>".',
 	minLength: 1,
 	maxLength: 265,
 });
@@ -286,7 +290,7 @@ export const DelegationContextSchema = Type.Union([
 export type DelegationContext = Static<typeof DelegationContextSchema>;
 export const DelegationSchema = Type.Object(
 	{
-		version: Type.Literal(1, { description: "Contract version; must be exactly 1." }),
+		version: Type.Literal(1, { description: "Contract version." }),
 		task: DelegationTaskSchema,
 		context: DelegationContextSchema,
 		capabilities: DelegationCapabilitiesSchema,
@@ -404,7 +408,7 @@ export const CollaborationSchemas = {
 			model: Type.Optional(
 				Type.String({
 					description:
-						'Optional child model override as "provider/model" (e.g. "openai-codex/gpt-6-astra"). Omit to inherit the Subagent default or the caller model. Unavailable models fail the spawn.',
+						'Model override as "provider/model" (e.g. "openai-codex/gpt-6-astra"); omit to inherit the subagent default or caller model. Unavailable models fail the spawn.',
 					minLength: 3,
 					maxLength: 256,
 					pattern: "^[^/\\s]+/[^\\s]+$",
@@ -444,6 +448,9 @@ export const CollaborationSchemas = {
 	close_agent: Type.Object({ target: Target }, { additionalProperties: false }),
 	list_agents: Type.Object({ path_prefix: Type.Optional(Target) }, { additionalProperties: false }),
 } as const;
+
+/** Team-management tool names. Never delegated: child agents hold no team tools. */
+export const COLLABORATION_TEAM_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(CollaborationSchemas));
 
 export type CollaborationToolName = keyof typeof CollaborationSchemas;
 export type CollaborationArguments = {
