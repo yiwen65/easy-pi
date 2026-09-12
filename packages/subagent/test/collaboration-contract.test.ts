@@ -166,9 +166,9 @@ describe("delegation result validation", () => {
 	});
 
 	test("tolerates one markdown fence and prose around the object", () => {
-		expect(validateDelegationResult("```json\n" + valid + "\n```", "completed").contract).toBe("valid");
-		expect(validateDelegationResult("```\n" + valid + "\n```", "completed").contract).toBe("valid");
-		expect(validateDelegationResult("Result:\n" + valid + "\n(end of report)", "completed").contract).toBe("valid");
+		expect(validateDelegationResult(`\`\`\`json\n${valid}\n\`\`\``, "completed").contract).toBe("valid");
+		expect(validateDelegationResult(`\`\`\`\n${valid}\n\`\`\``, "completed").contract).toBe("valid");
+		expect(validateDelegationResult(`Result:\n${valid}\n(end of report)`, "completed").contract).toBe("valid");
 	});
 
 	test("still rejects non-JSON, oversized and non-completed results", () => {
