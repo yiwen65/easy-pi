@@ -70,26 +70,9 @@ runtime package names remain compatible by design.
 
 ## Runtime shape
 
-```text
-                 ┌─────────────────────┐
-                 │      epi CLI         │
-                 └──────────┬──────────┘
-                            │
-                 ┌──────────▼──────────┐
-                 │    Agent session    │
-                 └──────┬─────────┬────┘
-                        │         │
-              ┌─────────▼───┐ ┌───▼─────────────┐
-              │ tools       │ │ model provider  │
-              │ read/bash/  │ │ multi-provider  │
-              │ edit/write  │ └─────────────────┘
-              └─────────────┘
-                        │
-                 ┌──────▼─────────────┐
-                 │ native subagents   │
-                 │ bounded + isolated │
-                 └────────────────────┘
-```
+<p align="center">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="easy-pi runtime architecture: the epi CLI routes prompts through an agent session to built-in tools, model providers, persistent sessions, and native subagents">
+</p>
 
 The npm package bundles the fork's internal runtime packages. An installed `easy-pi`
 therefore does not silently resolve a modified runtime from the workspace or fall
