@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">easy-pi runtime architecture</title>
+  <desc id="desc">The epi CLI routes prompts through a coding-agent session to built-in tools, model providers, persistent sessions, and native subagents.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="1" stop-color="#0b1220"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#7dd3fc"/>
+    </marker>
+    <style>
+      .label { font: 600 22px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; fill: #f8fafc; }
+      .small { font: 17px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #cbd5e1; }
+      .muted { font: 16px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; fill: #94a3b8; }
+      .box { fill: #172235; stroke: #334155; stroke-width: 2; }
+      .accent { fill: #102b3e; stroke: #38bdf8; stroke-width: 2; }
+      .line { fill: none; stroke: #7dd3fc; stroke-width: 2.5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" rx="28" fill="url(#bg)"/>
+  <text x="64" y="64" class="small" fill="#7dd3fc">EASY-PI / RUNTIME MAP</text>
+  <text x="64" y="106" class="label" font-size="34">One terminal loop, four runtime boundaries</text>
+  <text x="64" y="136" class="muted">Prompt in → inspect and act → preserve context → delegate bounded work</text>
+
+  <g aria-label="CLI layer">
+    <rect x="64" y="188" width="224" height="100" rx="16" class="accent"/>
+    <text x="88" y="230" class="label">epi CLI</text>
+    <text x="88" y="260" class="small">interactive / print / rpc</text>
+  </g>
+
+  <g aria-label="session layer">
+    <rect x="394" y="168" width="300" height="140" rx="16" class="box"/>
+    <text x="424" y="214" class="label">Agent session</text>
+    <text x="424" y="247" class="small">coding-agent</text>
+    <text x="424" y="278" class="muted">prompt, state, queue, context</text>
+  </g>
+
+  <path d="M288 238H384" class="line"/>
+
+  <g aria-label="tools">
+    <rect x="64" y="374" width="224" height="112" rx="16" class="box"/>
+    <text x="88" y="418" class="label">Built-in tools</text>
+    <text x="88" y="449" class="small">read · bash · edit · write</text>
+    <text x="88" y="474" class="muted">repository changes</text>
+  </g>
+  <path d="M430 308L250 364" class="line"/>
+
+  <g aria-label="models">
+    <rect x="394" y="374" width="300" height="112" rx="16" class="box"/>
+    <text x="424" y="418" class="label">Model runtime</text>
+    <text x="424" y="449" class="small">agent → ai → providers</text>
+    <text x="424" y="474" class="muted">streaming and model switching</text>
+  </g>
+  <path d="M544 308V364" class="line"/>
+
+  <g aria-label="persistence">
+    <rect x="800" y="168" width="300" height="140" rx="16" class="box"/>
+    <text x="830" y="214" class="label">Persistent sessions</text>
+    <text x="830" y="247" class="small">continue · resume · fork</text>
+    <text x="830" y="278" class="muted">local history and cache lineage</text>
+  </g>
+  <path d="M704 238H790" class="line"/>
+
+  <g aria-label="subagents">
+    <rect x="800" y="374" width="300" height="112" rx="16" class="accent"/>
+    <text x="830" y="418" class="label">Native subagents</text>
+    <text x="830" y="449" class="small">bounded · structured · isolated</text>
+    <text x="830" y="474" class="muted">subagent collaboration runtime</text>
+  </g>
+  <path d="M694 294L810 364" class="line"/>
+
+  <text x="64" y="530" class="small">easy-pi bundles the fork runtime; Pi-compatible extension names remain stable.</text>
+</svg>
