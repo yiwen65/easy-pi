@@ -190,6 +190,7 @@
 - 2026-09-12: T-001, T-002 and T-003 completed after focused build/test/pack evidence; T-004 started for final repository checks and scope review.
 - 2026-09-12: Full repository check passed; only pre-existing non-blocking lint infos were reported and unrelated formatting changes were restored.
 - 2026-09-12: Final scope/status review passed; no publish, tag, session restart, forbidden test execution, or unrelated dirty-file cleanup occurred.
+- 2026-09-12: Implementation committed as `279a00766` (`feat(coding-agent): align Grok TUI package namespace`).
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
