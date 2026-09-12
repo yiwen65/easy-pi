@@ -50,45 +50,32 @@ test("direct default factory exposes native operator entry, not the retired DAG"
 	expect(existsSync(join(f.root, "subagent"))).toBe(false);
 });
 
-test("root permission mode, audit, noninteractive denial and exact session grants survive cutover", async () => {
+test("full access allows writes without prompts and the mode is fixed", async () => {
 	const f = fixture();
 	expect(await f.call()).toBeUndefined();
-	await f.commands.get("permissions")!.handler("manual-allow", f.ctx);
-	expect(await f.call()).toMatchObject({
-		block: true,
-		reason: expect.stringContaining("non-interactive mode defaults to deny"),
-	});
-	f.ctx.hasUI = true;
-	f.select.mockResolvedValue("Allow for this session");
-	expect(await f.call()).toBeUndefined();
-	expect(await f.call()).toBeUndefined();
-	expect(f.select).toHaveBeenCalledTimes(1);
-	expect(f.select.mock.calls[0]![0]).not.toContain("secret body");
-	await f.commands.get("permissions")!.handler("manual-allow", f.ctx);
-	f.select.mockResolvedValue("Deny");
-	expect(await f.call()).toMatchObject({ block: true });
-	expect(f.appendEntry).toHaveBeenCalledWith(
-		"wj-harness-audit",
-		expect.objectContaining({ action: "permission", decision: "deny" }),
-	);
+	expect(f.select).not.toHaveBeenCalled();
+	await f.commands.get("permissions")!.handler("", f.ctx);
+	expect(f.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("full-access"), "info");
 	const prompt = await f.handlers.get("before_agent_start")![0]!({ systemPrompt: "base" }, f.ctx);
-	expect(prompt).toMatchObject({ systemPrompt: expect.stringContaining("smallest task-relevant verification") });
+	expect(prompt).toMatchObject({
+		systemPrompt: expect.stringContaining("Scale verification effort to the change risk"),
+	});
 });
 
-test("does not display permission status on session start or mode changes", async () => {
+test("the permissions command reports the fixed mode without status display", async () => {
 	for (const native of [false, true]) {
 		const f = fixture(
 			native
 				? {
 						nativeSession: {
-							getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }),
+							getPermissions: () => ({ mode: "full-access" as const, sessionGrants: [], protectedRoots: [] }),
 							registerTools: vi.fn(),
 						},
 					}
 				: undefined,
 		);
-		await f.handlers.get("session_start")![0]!({}, f.ctx);
-		await f.commands.get("permissions")!.handler("manual-allow", f.ctx);
+		await f.commands.get("permissions")!.handler("", f.ctx);
+		expect(f.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("full-access"), "info");
 		expect(f.ctx.ui.setStatus).not.toHaveBeenCalled();
 	}
 });
@@ -110,16 +97,16 @@ test("retired process child env fails closed even with direct default export, wi
 	expect(await f.call()).toMatchObject({ block: true, terminate: true, reason: expect.stringContaining("retired") });
 });
 
-test("explicit native children ignore legacy env but inherit live permissions without headless autoapproval", async () => {
+test("explicit native children ignore legacy env and fail closed on non-full-access parent authority", async () => {
 	vi.stubEnv(CHILD_HARNESS_CONTEXT_ENV, "/nonexistent/private-context.json");
-	let permissions: ChildSessionPermissions = { mode: "manual-allow", sessionGrants: [], protectedRoots: [] };
+	let permissions: ChildSessionPermissions = { mode: "full-access", sessionGrants: [], protectedRoots: [] };
 	const registerTools = vi.fn();
 	const f = fixture({ nativeSession: { getPermissions: () => permissions, registerTools } });
 	expect(registerTools).toHaveBeenCalledTimes(1);
 	expect(f.commands.has("agents")).toBe(false);
-	expect(await f.call()).toMatchObject({ block: true, reason: expect.stringContaining("explicit parent approval") });
-	permissions = { ...permissions, mode: "full-access" };
 	expect(await f.call()).toBeUndefined();
-	permissions = { ...permissions, protectedRoots: ["relative-invalid"] };
+	permissions = { ...permissions, mode: "auto" as never };
+	expect(await f.call()).toMatchObject({ block: true, reason: "Native parent authority is unavailable" });
+	permissions = { mode: "full-access", sessionGrants: [], protectedRoots: ["relative-invalid"] };
 	expect(await f.call()).toMatchObject({ block: true, reason: "Native parent authority is unavailable" });
 });

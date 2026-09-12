@@ -158,10 +158,10 @@ test("independent native sessions share the model runtime, not identities, histo
 	expect(existsSync(join(f.root, "agent", "subagent", "state.sqlite"))).toBe(false);
 });
 
-test("native manual permissions do not inherit the legacy headless auto-approval bypass", async () => {
+test("native children run under full access and fail closed on legacy parent modes", async () => {
 	const f = await fixture();
 	const allowed = await f.create("full", full);
-	let mode: ChildSessionPermissions["mode"] = "manual-allow";
+	let mode: ChildSessionPermissions["mode"] = "full-access";
 	const restricted = await f.create("restricted", () => ({ mode, sessionGrants: [], protectedRoots: [f.cwd] }));
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("write", { path: "allowed.txt", content: "shared" }), {
@@ -172,50 +172,35 @@ test("native manual permissions do not inherit the legacy headless auto-approval
 	await allowed.session.run("write allowed");
 	expect(await readFile(join(f.cwd, "allowed.txt"), "utf8")).toBe("shared");
 	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("write", { path: "denied.txt", content: "no" }), { stopReason: "toolUse" }),
-		fauxAssistantMessage("denied"),
-	]);
-	await restricted.session.run("write denied");
-	expect(toolError(restricted.session)).toBe(true);
-	expect(existsSync(join(f.cwd, "denied.txt"))).toBe(false);
-	mode = "full-access";
-	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("write", { path: "later.txt", content: "yes" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("write", { path: "also-allowed.txt", content: "yes" }), {
+			stopReason: "toolUse",
+		}),
 		fauxAssistantMessage("done"),
 	]);
-	await restricted.session.run("root explicitly changed policy");
-	expect(await readFile(join(f.cwd, "later.txt"), "utf8")).toBe("yes");
-	mode = "manual-allow";
+	await restricted.session.run("write under full access");
+	expect(await readFile(join(f.cwd, "also-allowed.txt"), "utf8")).toBe("yes");
+	// A legacy or otherwise non-full-access parent mode fails the child's tools closed.
+	mode = "auto" as never;
 	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("write", { path: "after-revoke.txt", content: "no" }), {
+		fauxAssistantMessage(fauxToolCall("write", { path: "denied.txt", content: "no" }), {
 			stopReason: "toolUse",
 		}),
 		fauxAssistantMessage("denied"),
 	]);
-	await restricted.session.run("write after revocation");
-	expect(existsSync(join(f.cwd, "after-revoke.txt"))).toBe(false);
+	await restricted.session.run("write after mode regression");
+	expect(toolError(restricted.session)).toBe(true);
+	expect(existsSync(join(f.cwd, "denied.txt"))).toBe(false);
 });
 
-test("inherited exact grants stay local; full access still protects the shared root", async () => {
+test("full access children write freely; catastrophic deletion still protects the shared root", async () => {
 	const f = await fixture();
-	const grant = `tool:write:path:${join(f.cwd, "granted.txt")}`;
-	const a = await f.create("granted", () => ({
-		mode: "manual-allow",
-		sessionGrants: [grant],
-		protectedRoots: [f.cwd],
-	}));
-	const b = await f.create("ungranted", () => ({ mode: "manual-allow", sessionGrants: [], protectedRoots: [f.cwd] }));
+	const a = await f.create("a", () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [f.cwd] }));
 	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("write", { path: "granted.txt", content: "a" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("write", { path: "shared.txt", content: "a" }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("done"),
 	]);
-	await a.session.run("use exact grant");
-	f.faux.setResponses([
-		fauxAssistantMessage(fauxToolCall("write", { path: "granted.txt", content: "b" }), { stopReason: "toolUse" }),
-		fauxAssistantMessage("denied"),
-	]);
-	await b.session.run("do not inherit peer grant");
-	expect(await readFile(join(f.cwd, "granted.txt"), "utf8")).toBe("a");
+	await a.session.run("write shared");
+	expect(await readFile(join(f.cwd, "shared.txt"), "utf8")).toBe("a");
 	const c = await f.create("full", () => ({ ...full(), protectedRoots: [f.cwd] }));
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall("bash", { command: `rm -rf '${f.cwd}'` }), { stopReason: "toolUse" }),
@@ -223,12 +208,12 @@ test("inherited exact grants stay local; full access still protects the shared r
 	]);
 	await c.session.run("test protected deletion");
 	expect(toolError(c.session)).toBe(true);
-	expect(existsSync(join(f.cwd, "granted.txt"))).toBe(true);
+	expect(existsSync(join(f.cwd, "shared.txt"))).toBe(true);
 });
 
 test("task text does not execute slash commands or change child permission authority", async () => {
 	const f = await fixture();
-	const child = await f.create("literal", () => ({ mode: "manual-allow", sessionGrants: [], protectedRoots: [] }));
+	const child = await f.create("literal", () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }));
 	let captured: Context | undefined;
 	f.faux.setResponses([
 		(context) => {
@@ -237,7 +222,7 @@ test("task text does not execute slash commands or change child permission autho
 		},
 	]);
 	await child.session.run("/permissions full-access");
-	expect(captured?.systemPrompt).toContain("Permission mode is manual-allow");
+	expect(captured?.systemPrompt).toContain("Permission mode is full-access");
 	expect(JSON.stringify(captured?.messages)).toContain("/permissions full-access");
 });
 

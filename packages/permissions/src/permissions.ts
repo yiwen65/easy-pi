@@ -6,8 +6,8 @@ import {
 	validateExternalMutationJournalPolicy,
 } from "./external-mutation-journal.ts";
 
-export type PermissionMode = "auto" | "full-access" | "manual-allow";
-export type PermissionDecision = "allow" | "ask" | "deny";
+export type PermissionMode = "full-access";
+export type PermissionDecision = "allow" | "deny";
 
 export const CHILD_HARNESS_CONTEXT_VERSION = 2 as const;
 export const CHILD_HARNESS_CONTEXT_ENV = "WJ_CHILD_CONTEXT_FILE";
@@ -55,7 +55,6 @@ export interface PermissionRequest {
 export interface PermissionOutcome {
 	decision: PermissionDecision;
 	reason: string;
-	grantKey?: string;
 }
 
 function expandKnownPathVariables(token: string, cwd: string, variables?: ReadonlyMap<string, string>): string {
@@ -680,7 +679,7 @@ export function canonicalizeProspectivePath(path: string, cwd: string): string {
 }
 
 function validPermissionMode(value: unknown): value is PermissionMode {
-	return value === "auto" || value === "full-access" || value === "manual-allow";
+	return value === "full-access";
 }
 
 function absolutePathList(value: unknown, field: string, cwd: string): string[] {
@@ -762,100 +761,11 @@ export function createChildHarnessContext(options: CreateChildHarnessContextOpti
 	});
 }
 
-function inheritedWriteAllowed(request: PermissionRequest): boolean {
-	if (request.toolName !== "write" && request.toolName !== "edit") return false;
-	const rawPath = request.input.path;
-	if (typeof rawPath !== "string") return false;
-	const target = canonicalizeProspectivePath(rawPath, request.cwd);
-	return (request.inheritedWriteRoots ?? []).some((root) =>
-		isWithin(target, canonicalizeProspectivePath(root, request.cwd)),
-	);
-}
-
-function requestedExternalWritePaths(input: Record<string, unknown>, cwd: string): string[] {
-	if (input.operation !== undefined && input.operation !== "start" && input.operation !== "expand") return [];
-	if (!Array.isArray(input.tasks)) return [];
-	const paths: string[] = [];
-	for (const task of input.tasks) {
-		if (!task || typeof task !== "object" || Array.isArray(task)) continue;
-		const record = task as Record<string, unknown>;
-		if (!Array.isArray(record.externalOwnedPaths)) continue;
-		for (const path of record.externalOwnedPaths) {
-			if (typeof path !== "string" || !isAbsolute(path)) continue;
-			const canonical = canonicalizeProspectivePath(path, cwd);
-			if (!paths.includes(canonical)) paths.push(canonical);
-		}
-	}
-	return paths.sort();
-}
-
-function structuredPathGrantKey(request: PermissionRequest): string | undefined {
-	if (request.toolName !== "write" && request.toolName !== "edit") return undefined;
-	const path = request.input.path;
-	if (typeof path !== "string") return undefined;
-	return `tool:${request.toolName}:path:${canonicalizeProspectivePath(path, request.cwd)}`;
-}
-
 export function decidePermission(request: PermissionRequest): PermissionOutcome {
 	const command =
 		request.toolName === "bash" && typeof request.input.command === "string" ? request.input.command : "";
 	const bash =
 		request.toolName === "bash" ? assessBash(command, request.cwd, request.protectedRoots ?? []) : undefined;
-	const rawToolPath = request.input.path;
-	const builtInMutationOutsideWorkspace =
-		(request.toolName === "write" || request.toolName === "edit") &&
-		typeof rawToolPath === "string" &&
-		!isWithin(
-			canonicalizeProspectivePath(rawToolPath, request.cwd),
-			canonicalizeProspectivePath(request.cwd, request.cwd),
-		);
-
 	if (bash?.hardDenyReason) return { decision: "deny", reason: bash.hardDenyReason };
-
-	if (request.mode === "full-access") return { decision: "allow", reason: "Full Access mode" };
-	if (inheritedWriteAllowed(request)) {
-		return { decision: "allow", reason: "Inherited parent write grant" };
-	}
-
-	const externalWritePaths =
-		request.toolName === "subagent" ? requestedExternalWritePaths(request.input, request.cwd) : [];
-	if (externalWritePaths.length > 0) {
-		const grantKey = `subagent:external-write:${JSON.stringify(externalWritePaths)}`;
-		return request.sessionGrants.has(grantKey)
-			? { decision: "allow", reason: "Session grant for exact external writer roots", grantKey }
-			: {
-					decision: "ask",
-					reason: `External writer requests irreversible host writes to: ${externalWritePaths.join(", ")}`,
-					grantKey,
-				};
-	}
-
-	if (request.mode === "manual-allow" && (request.toolName === "write" || request.toolName === "edit")) {
-		const grantKey = structuredPathGrantKey(request);
-		return grantKey && request.sessionGrants.has(grantKey)
-			? { decision: "allow", reason: `Session grant for this ${request.toolName} scope`, grantKey }
-			: {
-					decision: "ask",
-					reason: `Manual Allow requires confirmation for ${request.toolName}`,
-					...(grantKey ? { grantKey } : {}),
-				};
-	}
-
-	if (
-		request.mode === "auto" &&
-		builtInMutationOutsideWorkspace &&
-		typeof rawToolPath === "string" &&
-		isWithin(canonicalizeProspectivePath(rawToolPath, request.cwd), canonicalizeProspectivePath("/tmp", request.cwd))
-	) {
-		return { decision: "allow", reason: "Auto allows built-in writes and edits under /tmp" };
-	}
-
-	if (builtInMutationOutsideWorkspace) {
-		const grantKey = `${structuredPathGrantKey(request)}:outside-workspace`;
-		return request.sessionGrants.has(grantKey)
-			? { decision: "allow", reason: "Session grant for this operation outside the workspace", grantKey }
-			: { decision: "ask", reason: "Built-in write/edit targets a path outside the workspace", grantKey };
-	}
-
-	return { decision: "allow", reason: "Allowed by current mode" };
+	return { decision: "allow", reason: "Full Access mode" };
 }

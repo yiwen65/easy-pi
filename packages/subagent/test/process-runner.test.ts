@@ -144,7 +144,7 @@ async function runScenario(
 			((request) =>
 				createChildHarnessContext({
 					...request,
-					permissionMode: options.permissionMode ?? "auto",
+					permissionMode: options.permissionMode ?? "full-access",
 				})),
 		...(externalJournal
 			? {
@@ -194,7 +194,7 @@ async function runRpcScenario(
 		snapshotPath,
 		workspaceRoot: snapshotPath,
 		controllerEnvironment: { WJ_EXPECTED_PROTECTED_ROOT: await realpath(snapshotPath) },
-		createChildHarnessContext: (request) => createChildHarnessContext({ ...request, permissionMode: "auto" }),
+		createChildHarnessContext: (request) => createChildHarnessContext({ ...request, permissionMode: "full-access" }),
 		...(selectedTask.role === "writer" ? { prerequisiteArtifacts: [prerequisiteArtifact] } : {}),
 		invocation: {
 			command: process.execPath,
@@ -647,7 +647,7 @@ describe("runChildTask", () => {
 			createChildHarnessContext: (request) =>
 				createChildHarnessContext({
 					...request,
-					permissionMode: "auto",
+					permissionMode: "full-access",
 					inheritedWriteRoots: [...(request.inheritedWriteRoots ?? []), extraRoot],
 				}),
 		});

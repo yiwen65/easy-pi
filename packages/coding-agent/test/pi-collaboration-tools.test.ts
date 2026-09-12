@@ -60,7 +60,7 @@ async function fixture(
 	});
 	const settings = { compaction: { enabled: false }, retry: { enabled: false } };
 	const getPermissions = (): ChildSessionPermissions => ({
-		mode: "manual-allow",
+		mode: "full-access",
 		sessionGrants: [],
 		protectedRoots: [cwd],
 	});
@@ -219,7 +219,7 @@ test("all six tools execute through native root/child sessions, wait sees comple
 	const childContexts = captures.filter((context) => currentCollaborationPath(context) === "/root/worker");
 	expect(childContexts).toHaveLength(2);
 	expect(JSON.stringify(childContexts[1].messages)).toContain("/permissions full-access");
-	expect(childContexts[1].systemPrompt).toContain("Permission mode is manual-allow");
+	expect(childContexts[1].systemPrompt).toContain("Permission mode is full-access");
 	const count = f.faux.state.callCount;
 	await f.controller.send(f.identity, "worker", "idle after interrupt");
 	expect(f.faux.state.callCount).toBe(count);

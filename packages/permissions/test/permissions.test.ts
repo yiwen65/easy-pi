@@ -14,150 +14,42 @@ import {
 
 const cwd = "/tmp/wj-workspace";
 
-function decision(
-	mode: "auto" | "full-access" | "manual-allow",
-	toolName: string,
-	input: Record<string, unknown>,
-	grants: ReadonlySet<string> = new Set(),
-) {
-	return decidePermission({
-		mode,
-		toolName,
-		input,
-		cwd,
-		sessionGrants: grants,
-	});
+function decision(toolName: string, input: Record<string, unknown>) {
+	return decidePermission({ mode: "full-access", toolName, input, cwd, sessionGrants: new Set() });
 }
 
-test("three modes have distinct edit behavior", () => {
-	assert.equal(decision("auto", "write", { path: "a.ts" }).decision, "allow");
-	assert.equal(decision("full-access", "edit", { path: "a.ts" }).decision, "allow");
-	const manual = decision("manual-allow", "write", { path: "a.ts" });
-	assert.equal(manual.decision, "ask");
-	assert.equal(
-		decision("manual-allow", "write", { path: "a.ts" }, new Set([manual.grantKey ?? ""])).decision,
-		"allow",
-	);
-	assert.equal(decision("manual-allow", "write", { path: "b.ts" }, new Set([manual.grantKey ?? ""])).decision, "ask");
-	assert.equal(decision("manual-allow", "edit", { path: "a.ts" }, new Set([manual.grantKey ?? ""])).decision, "ask");
-});
-
-test("Auto asks before built-in writes or edits leave the workspace", () => {
-	const outsideWrite = decision("auto", "write", { path: join(homedir(), "wj-outside.txt"), content: "x" });
-	assert.equal(outsideWrite.decision, "ask");
-	assert.ok(outsideWrite.grantKey);
-	assert.equal(
-		decision(
-			"auto",
-			"write",
-			{ path: join(homedir(), "wj-outside.txt"), content: "x" },
-			new Set([outsideWrite.grantKey ?? ""]),
-		).decision,
-		"allow",
-	);
-	assert.equal(
-		decision("auto", "edit", {
-			path: join(homedir(), "wj-outside.txt"),
-			edits: [{ oldText: "x", newText: "y" }],
-		}).decision,
-		"ask",
-	);
-	assert.equal(decision("auto", "write", { path: "inside.txt", content: "x" }).decision, "allow");
-	assert.equal(
-		decision("full-access", "write", { path: join(homedir(), "wj-outside.txt"), content: "x" }).decision,
-		"allow",
-	);
-});
-
-test("Auto and Manual Allow permit non-write tools without prompts", () => {
-	const command = "git push origin main";
-	assert.equal(decision("auto", "bash", { command }).decision, "allow");
-	assert.equal(decision("manual-allow", "bash", { command }).decision, "allow");
-	assert.equal(decision("full-access", "bash", { command }).decision, "allow");
-	assert.equal(decision("auto", "deploy_widget", { target: "staging" }).decision, "allow");
-	assert.equal(decision("manual-allow", "deploy_widget", { target: "staging" }).decision, "allow");
-});
-
-test("Manual Allow asks for structured writes while Subagent operations inherit the session mode", () => {
-	assert.equal(decision("manual-allow", "bash", { command: "git status" }).decision, "allow");
-	assert.equal(decision("manual-allow", "deploy_widget", { target: "staging" }).decision, "allow");
-	assert.equal(
-		decision("manual-allow", "subagent", { tasks: [{ id: "inspect", objective: "Inspect" }] }).decision,
-		"allow",
-	);
-	assert.equal(decision("manual-allow", "subagent", { operation: "inspect", runId: "run-1" }).decision, "allow");
-	const writerInput = {
-		tasks: [{ id: "write", objective: "Implement parser", ownedPaths: ["src"] }],
-	};
-	// Subagent has no bespoke gate: writer DAGs and operator mutations follow the session mode.
-	assert.equal(decision("manual-allow", "subagent", writerInput).decision, "allow");
-	assert.equal(decision("auto", "subagent", writerInput).decision, "allow");
-	assert.equal(decision("full-access", "subagent", writerInput).decision, "allow");
-	for (const operation of [
-		"resume",
-		"pause",
-		"cancel",
-		"release",
-		"gc",
-		"message",
-		"follow_up",
-		"interrupt",
-	] as const) {
-		assert.equal(decision("manual-allow", "subagent", { operation, runId: "run-1" }).decision, "allow");
-	}
-	assert.equal(decision("full-access", "subagent", { operation: "resume", runId: "run-1" }).decision, "allow");
-	assert.equal(decision("manual-allow", "subagent", { operation: "diff", runId: "run-1" }).decision, "allow");
-	assert.equal(decision("manual-allow", "write", { path: "a.ts" }).decision, "ask");
-	assert.equal(decision("manual-allow", "edit", { path: "a.ts" }).decision, "ask");
-});
-
-test("external-writer Subagent requests require exact grants outside Full Access", () => {
-	const input = {
-		tasks: [
-			{
-				id: "publish",
-				objective: "Publish",
-				externalOwnedPaths: ["/tmp/wj-external-b", "/tmp/wj-external-a"],
-			},
-		],
-	};
-	const automatic = decision("auto", "subagent", input);
-	assert.equal(automatic.decision, "ask");
-	assert.match(automatic.reason, /irreversible host writes/);
-	assert.ok(automatic.grantKey);
-	assert.equal(decision("manual-allow", "subagent", input).decision, "ask");
-	assert.equal(decision("full-access", "subagent", input).decision, "allow");
-	assert.equal(decision("auto", "subagent", input, new Set([automatic.grantKey ?? ""])).decision, "allow");
-	const different = structuredClone(input);
-	different.tasks[0]!.externalOwnedPaths = ["/tmp/wj-external-c"];
-	assert.equal(decision("auto", "subagent", different, new Set([automatic.grantKey ?? ""])).decision, "ask");
+test("Full Access allows routine writes, edits and non-write tools without prompts", () => {
+	assert.equal(decision("write", { path: "a.ts" }).decision, "allow");
+	assert.equal(decision("edit", { path: "a.ts" }).decision, "allow");
+	assert.equal(decision("write", { path: join(homedir(), "wj-outside.txt"), content: "x" }).decision, "allow");
+	assert.equal(decision("bash", { command: "git push origin main" }).decision, "allow");
+	assert.equal(decision("deploy_widget", { target: "staging" }).decision, "allow");
+	assert.equal(decision("subagent", { tasks: [{ id: "write", objective: "Implement" }] }).decision, "allow");
+	assert.equal(decision("subagent", { operation: "inspect", runId: "run-1" }).decision, "allow");
 });
 
 test("catastrophic deletion refusals remain active in Full Access", () => {
-	assert.equal(decision("auto", "bash", { command: "rm -rf /" }).decision, "deny");
-	assert.equal(decision("manual-allow", "bash", { command: "rm -rf /" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "rm -rf /" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "rm -rf ./*" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "rm -rf *" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "rm -rf $PWD/*" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "rm -rf .." }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "find . -delete" }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf /" }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf ./*" }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf *" }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf $PWD/*" }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf .." }).decision, "deny");
+	assert.equal(decision("bash", { command: "find . -delete" }).decision, "deny");
 	assert.equal(
-		decision("full-access", "bash", { command: 'find "$PWD" -depth -exec rmdir {} \\; -o -exec rm -f {} \\;' })
-			.decision,
+		decision("bash", { command: 'find "$PWD" -depth -exec rmdir {} \\; -o -exec rm -f {} \\;' }).decision,
 		"deny",
 	);
-	assert.equal(decision("full-access", "bash", { command: "cd .. && rm -rf wj-workspace" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "bash -c 'rm -rf $PWD'" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "git clean -fdx" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "git clean -fd -- ." }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "git -C . clean -fdx" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "git clean -fdx -- ':(top)'" }).decision, "deny");
-	assert.equal(decision("full-access", "bash", { command: "git clean -fd -- generated" }).decision, "allow");
-	assert.equal(decision("full-access", "bash", { command: "git clean -ndx" }).decision, "allow");
-	assert.equal(decision("full-access", "bash", { command: "printenv" }).decision, "allow");
-	assert.equal(decision("full-access", "read", { path: ".env" }).decision, "allow");
-	assert.equal(decision("full-access", "read", { path: ".env.example" }).decision, "allow");
+	assert.equal(decision("bash", { command: "cd .. && rm -rf wj-workspace" }).decision, "deny");
+	assert.equal(decision("bash", { command: "bash -c 'rm -rf $PWD'" }).decision, "deny");
+	assert.equal(decision("bash", { command: "git clean -fdx" }).decision, "deny");
+	assert.equal(decision("bash", { command: "git clean -fd -- ." }).decision, "deny");
+	assert.equal(decision("bash", { command: "git -C . clean -fdx" }).decision, "deny");
+	assert.equal(decision("bash", { command: "git clean -fdx -- ':(top)'" }).decision, "deny");
+	assert.equal(decision("bash", { command: "git clean -fd -- generated" }).decision, "allow");
+	assert.equal(decision("bash", { command: "git clean -ndx" }).decision, "allow");
+	assert.equal(decision("bash", { command: "printenv" }).decision, "allow");
+	assert.equal(decision("read", { path: ".env" }).decision, "allow");
+	assert.equal(decision("read", { path: ".env.example" }).decision, "allow");
 });
 
 test("catastrophic deletion breaker ignores unresolved targets and non-executable shell text", () => {
@@ -179,7 +71,7 @@ test("catastrophic deletion breaker ignores unresolved targets and non-executabl
 		'git clean -fdx -- "$pathspec"',
 	];
 	for (const command of allowed) {
-		assert.equal(decision("full-access", "bash", { command }).decision, "allow", command);
+		assert.equal(decision("bash", { command }).decision, "allow", command);
 	}
 
 	const denied = [
@@ -191,14 +83,14 @@ test("catastrophic deletion breaker ignores unresolved targets and non-executabl
 		"git clean -fdx -- :/",
 	];
 	for (const command of denied) {
-		assert.equal(decision("full-access", "bash", { command }).decision, "deny", command);
+		assert.equal(decision("bash", { command }).decision, "deny", command);
 	}
 });
 
 test("catastrophic deletion variable tracking cannot be poisoned by ordinary arguments or prefix assignments", () => {
 	const commands = ['d=/; echo d=./generated; find "$d" -delete', 'd=/; d=./generated find "$d" -delete'];
 	for (const command of commands) {
-		assert.equal(decision("full-access", "bash", { command }).decision, "deny", command);
+		assert.equal(decision("bash", { command }).decision, "deny", command);
 	}
 });
 
@@ -209,10 +101,10 @@ test("Full Access permits env-file consumption and direct environment reads", ()
 		"node --env-file .env test/run.mjs",
 		"node --env-file=.env test/run.mjs -p",
 		"node --env-file=.env -- ./-p",
-		"node --env-file-if-exists=../.env.local ./node_modules/vitest/dist/cli.js --run test/example.test.ts",
+		"node --env-file=.env -- ./node_modules/vitest/dist/cli.js --run test/example.test.ts",
 	];
 	for (const command of allowed) {
-		assert.equal(decision("full-access", "bash", { command }).decision, "allow", command);
+		assert.equal(decision("bash", { command }).decision, "allow", command);
 	}
 
 	const directReads = [
@@ -226,7 +118,7 @@ test("Full Access permits env-file consumption and direct environment reads", ()
 		"node --env-file=.env --interactive",
 	];
 	for (const command of directReads) {
-		assert.equal(decision("full-access", "bash", { command }).decision, "allow", command);
+		assert.equal(decision("bash", { command }).decision, "allow", command);
 	}
 });
 
@@ -238,94 +130,56 @@ test("Full Access permits credential paths in direct, shell, and custom tools", 
 		join(homedir(), ".docker", "config.json"),
 	];
 	for (const path of credentialPaths) {
-		assert.equal(decision("full-access", "read", { path }).decision, "allow");
-		assert.equal(decision("full-access", "bash", { command: `cat ${path}` }).decision, "allow");
+		assert.equal(decision("read", { path }).decision, "allow");
+		assert.equal(decision("bash", { command: `cat ${path}` }).decision, "allow");
 	}
-	assert.equal(
-		decision("full-access", "bash", { command: 'AUTH=$HOME/.pi/agent/auth.json; cat "$AUTH"' }).decision,
-		"allow",
-	);
-	assert.equal(
-		decision("full-access", "fetch_file", { target: join(homedir(), ".pi", "agent", "auth.json") }).decision,
-		"allow",
-	);
-	assert.equal(
-		decision("full-access", "fetch_file", { target: join(homedir(), ".aws", "credentials") }).decision,
-		"allow",
-	);
-	assert.equal(
-		decision("full-access", "write", { path: "notes.txt", content: "Mention .env safely" }).decision,
-		"allow",
-	);
+	assert.equal(decision("bash", { command: 'AUTH=$HOME/.pi/agent/auth.json; cat "$AUTH"' }).decision, "allow");
+	assert.equal(decision("fetch_file", { target: join(homedir(), ".pi", "agent", "auth.json") }).decision, "allow");
+	assert.equal(decision("fetch_file", { target: join(homedir(), ".aws", "credentials") }).decision, "allow");
+	assert.equal(decision("write", { path: "notes.txt", content: "Mention .env safely" }).decision, "allow");
 });
 
-test("Full Access permits sensitive path reads and edits; other write-mode rules remain", () => {
-	assert.equal(decision("full-access", "read", { path: ".env" }).decision, "allow");
+test("Full Access permits sensitive path reads and edits", () => {
+	assert.equal(decision("read", { path: ".env" }).decision, "allow");
 	assert.equal(
-		decision("full-access", "edit", {
-			path: ".env",
-			edits: [{ oldText: "PORT=3000", newText: "PORT=4000" }],
-		}).decision,
+		decision("edit", { path: ".env", edits: [{ oldText: "PORT=3000", newText: "PORT=4000" }] }).decision,
 		"allow",
 	);
-	assert.equal(decision("auto", "write", { path: ".env", content: "PORT=3000" }).decision, "allow");
-	assert.equal(decision("full-access", "write", { path: ".env", content: "PORT=3000" }).decision, "allow");
-	assert.equal(decision("manual-allow", "write", { path: ".env", content: "PORT=3000" }).decision, "ask");
+	assert.equal(decision("write", { path: ".env", content: "PORT=3000" }).decision, "allow");
 });
 
-test("Auto allows shell commands without classifying ordinary risk", () => {
-	assert.equal(decision("auto", "bash", { command: "git status" }).decision, "allow");
-	assert.equal(decision("auto", "bash", { command: "npm run check" }).decision, "allow");
-	assert.equal(decision("auto", "bash", { command: "curl https://example.com" }).decision, "allow");
-});
-
-test("Child WJ context preserves Parent decisions across every permission mode", () => {
-	for (const mode of ["auto", "full-access", "manual-allow"] as const) {
-		const childContext = createChildHarnessContext({
-			cwd,
-			permissionMode: mode,
-			sessionGrants: ["existing-grant"],
-			protectedRoots: [],
+test("Child WJ context preserves Parent decisions", () => {
+	const childContext = createChildHarnessContext({
+		cwd,
+		permissionMode: "full-access",
+		sessionGrants: ["existing-grant"],
+		protectedRoots: [],
+	});
+	for (const [toolName, input] of [
+		["bash", { command: "pwd" }],
+		["subagent", { operation: "inspect", runId: "nested" }],
+		["read", { path: "/tmp/shared/reference.ts" }],
+		["write", { path: "/tmp/shared/output.ts", content: "x" }],
+		["deploy_widget", { target: "staging" }],
+	] as const) {
+		const common = {
+			mode: childContext.permissionMode,
+			toolName,
+			input,
+			cwd: childContext.cwd,
+			sessionGrants: new Set(childContext.sessionGrants),
+		};
+		const parent = decidePermission(common);
+		const child = decidePermission({
+			...common,
+			protectedRoots: childContext.protectedRoots,
+			inheritedWriteRoots: childContext.inheritedWriteRoots,
 		});
-		for (const [toolName, input] of [
-			["bash", { command: "pwd" }],
-			["subagent", { operation: "inspect", runId: "nested" }],
-			["read", { path: "/tmp/shared/reference.ts" }],
-			["write", { path: "/tmp/shared/output.ts", content: "x" }],
-			["deploy_widget", { target: "staging" }],
-		] as const) {
-			const common = {
-				mode: childContext.permissionMode,
-				toolName,
-				input,
-				cwd: childContext.cwd,
-				sessionGrants: new Set(childContext.sessionGrants),
-			};
-			const parent = decidePermission(common);
-			const child = decidePermission({
-				...common,
-				protectedRoots: childContext.protectedRoots,
-				inheritedWriteRoots: childContext.inheritedWriteRoots,
-			});
-			assert.deepEqual(child, parent, `${mode}/${toolName} diverged between Parent and Child`);
-		}
+		assert.deepEqual(child, parent, `${toolName} diverged between Parent and Child`);
 	}
 });
 
-test("WJ inherited write roots and protected roots apply without a Child-specific policy", () => {
-	const approvedRoot = "/tmp/wj-approved-output";
-	for (const mode of ["auto", "manual-allow"] as const) {
-		const inheritedWrite = decidePermission({
-			mode,
-			toolName: "write",
-			input: { path: join(approvedRoot, "result.txt"), content: "x" },
-			cwd,
-			sessionGrants: new Set(),
-			inheritedWriteRoots: [approvedRoot],
-		});
-		assert.equal(inheritedWrite.decision, "allow", `${mode} prompted twice for an inherited write root`);
-	}
-
+test("protected roots deny catastrophic deletion", () => {
 	const sourceWorkspace = "/tmp/wj-source-workspace";
 	const protectedDelete = decidePermission({
 		mode: "full-access",
@@ -342,7 +196,7 @@ test("Child Harness context validates the inherited WJ snapshot without delegate
 	const context = validateChildHarnessContext({
 		schemaVersion: 2,
 		cwd,
-		permissionMode: "manual-allow",
+		permissionMode: "full-access",
 		sessionGrants: ["grant-a", "grant-a"],
 		protectedRoots: ["/tmp/wj-source"],
 		inheritedWriteRoots: [],
@@ -350,7 +204,7 @@ test("Child Harness context validates the inherited WJ snapshot without delegate
 	assert.deepEqual(context, {
 		schemaVersion: 2,
 		cwd: canonicalizeProspectivePath(cwd, cwd),
-		permissionMode: "manual-allow",
+		permissionMode: "full-access",
 		sessionGrants: ["grant-a"],
 		protectedRoots: [canonicalizeProspectivePath("/tmp/wj-source", cwd)],
 		inheritedWriteRoots: [],
@@ -367,7 +221,7 @@ test("Child Harness external write grants require a non-overlapping private jour
 			validateChildHarnessContext({
 				schemaVersion: 2,
 				cwd,
-				permissionMode: "auto",
+				permissionMode: "full-access",
 				sessionGrants: [],
 				protectedRoots: [],
 				inheritedWriteRoots: ["/tmp/wj-external-output"],
@@ -387,7 +241,7 @@ test("Child Harness external write grants require a non-overlapping private jour
 				validateChildHarnessContext({
 					schemaVersion: 2,
 					cwd,
-					permissionMode: "auto",
+					permissionMode: "full-access",
 					sessionGrants: [],
 					protectedRoots: [],
 					inheritedWriteRoots: [dirname(journal.policy.path)],
@@ -429,37 +283,6 @@ test("prospective path canonicalization detects symlink escapes", async () => {
 			canonicalizeProspectivePath("link/new.ts", join(root, "workspace")),
 			join(canonicalOutside, "new.ts"),
 		);
-		assert.equal(
-			decidePermission({
-				mode: "manual-allow",
-				toolName: "write",
-				input: { path: join(canonicalOutside, "escape", "new.ts") },
-				cwd: join(root, "workspace"),
-				sessionGrants: new Set(),
-				inheritedWriteRoots: [canonicalOutside],
-			}).decision,
-			"ask",
-			"a symlink escape must not consume an inherited write-root grant",
-		);
-	} finally {
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-test("Auto allows /tmp writes and edits but not prefix lookalikes or symlink escapes", async () => {
-	const root = await mkdtemp("/tmp/wj-auto-permissions-");
-	try {
-		await symlink(homedir(), join(root, "escape"));
-		const canonicalRoot = await realpath(root);
-		for (const tool of ["write", "edit"]) {
-			for (const path of [join(root, "new.txt"), join(canonicalRoot, "new.txt")]) {
-				assert.equal(decision("auto", tool, { path }).decision, "allow");
-				assert.equal(decision("manual-allow", tool, { path }).decision, "ask");
-			}
-			for (const path of ["/tmp-lookalike/new.txt", "/tmp/../wj-outside.txt", join(root, "escape", "new.txt")]) {
-				assert.equal(decision("auto", tool, { path }).decision, "ask", path);
-			}
-		}
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

@@ -38,7 +38,7 @@ async function registeredProtocol(handoff?: TestHandoffPolicy): Promise<{
 		JSON.stringify({
 			schemaVersion: 2,
 			cwd: root,
-			permissionMode: "auto",
+			permissionMode: "full-access",
 			sessionGrants: [],
 			protectedRoots: [root],
 			inheritedWriteRoots: [],
