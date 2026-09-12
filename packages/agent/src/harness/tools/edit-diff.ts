@@ -280,25 +280,98 @@ function countOccurrences(content: string, oldText: string): number {
 	return exactOccurrences || findBlankLineTolerantMatches(fuzzyContent, fuzzyOldText).length;
 }
 
-function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
-	if (totalEdits === 1) {
-		return new Error(
-			`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
-		);
+const ERROR_PREVIEW_MAX = 80;
+const ERROR_MAX_ANCHORS = 50;
+
+function previewLine(line: string): string {
+	return line.length > ERROR_PREVIEW_MAX ? `${line.slice(0, ERROR_PREVIEW_MAX - 3)}...` : line;
+}
+
+/**
+ * Explain why oldText matched nothing. Matching normalizes whitespace and
+ * quote/dash variants, so a not-found failure means differences beyond those.
+ * Locate the first diverging line against the file's actual lines.
+ */
+function diagnoseNoMatch(content: string, oldText: string): string {
+	const contentLines = content.split("\n");
+	const oldLines = oldText.split("\n");
+	const firstLine = oldLines[0] ?? "";
+	const anchors: number[] = [];
+	for (let i = 0; i < contentLines.length && anchors.length < ERROR_MAX_ANCHORS; i++) {
+		if (contentLines[i] === firstLine) anchors.push(i);
 	}
-	return new Error(
-		`Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.`,
+	if (anchors.length === 0) {
+		return `The first line of oldText ("${previewLine(firstLine)}") does not appear anywhere in the file. Re-read the file to verify the text.`;
+	}
+	let bestAnchor = anchors[0];
+	let bestMatched = 0;
+	for (const anchor of anchors) {
+		let matched = 0;
+		while (
+			matched < oldLines.length &&
+			anchor + matched < contentLines.length &&
+			contentLines[anchor + matched] === oldLines[matched]
+		) {
+			matched++;
+		}
+		if (matched > bestMatched) {
+			bestMatched = matched;
+			bestAnchor = anchor;
+		}
+	}
+	const divergeLine = bestAnchor + bestMatched;
+	const actual = divergeLine < contentLines.length ? `"${previewLine(contentLines[divergeLine])}"` : "end of file";
+	return (
+		`Nearest region starts at line ${bestAnchor + 1}; first difference at oldText line ${bestMatched + 1} ` +
+		`(file line ${divergeLine + 1}): oldText has "${previewLine(oldLines[bestMatched] ?? "")}", file has ${actual}. ` +
+		`Re-read that region and retry with the verbatim text.`
 	);
 }
 
-function getDuplicateError(path: string, editIndex: number, totalEdits: number, occurrences: number): Error {
+/** 1-indexed starting line of each occurrence, computed in fuzzy-matching space (line structure is preserved). */
+function findOccurrenceLines(content: string, oldText: string, cap = 5): number[] {
+	const fuzzyContent = normalizeForFuzzyMatch(content);
+	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+	const lines: number[] = [];
+	let index = fuzzyContent.indexOf(fuzzyOldText);
+	while (index !== -1 && lines.length < cap) {
+		lines.push(fuzzyContent.slice(0, index).split("\n").length);
+		index = fuzzyContent.indexOf(fuzzyOldText, index + 1);
+	}
+	return lines;
+}
+
+function getNotFoundError(
+	path: string,
+	editIndex: number,
+	totalEdits: number,
+	content: string,
+	oldText: string,
+): Error {
+	const diagnostic = diagnoseNoMatch(content, oldText);
+	if (totalEdits === 1) {
+		return new Error(`Could not find the exact text in ${path}. ${diagnostic}`);
+	}
+	return new Error(`Could not find edits[${editIndex}] in ${path}. ${diagnostic}`);
+}
+
+function getDuplicateError(
+	path: string,
+	editIndex: number,
+	totalEdits: number,
+	occurrences: number,
+	content: string,
+	oldText: string,
+): Error {
+	const lines = findOccurrenceLines(content, oldText);
+	const location = lines.length > 0 ? ` (lines ${lines.join(", ")}${occurrences > lines.length ? ", …" : ""})` : "";
 	if (totalEdits === 1) {
 		return new Error(
-			`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+			`Found ${occurrences} occurrences of the text in ${path}${location}. The text must be unique. Please provide more context to make it unique.`,
 		);
 	}
 	return new Error(
-		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`,
+		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}${location}. Each oldText must be unique. Please provide more context to make it unique.`,
 	);
 }
 
@@ -352,12 +425,12 @@ export function applyEditsToNormalizedContent(
 		const edit = normalizedEdits[i];
 		const matchResult = fuzzyFindText(replacementBaseContent, edit.oldText);
 		if (!matchResult.found) {
-			throw getNotFoundError(path, i, normalizedEdits.length);
+			throw getNotFoundError(path, i, normalizedEdits.length, normalizedContent, edit.oldText);
 		}
 
 		const occurrences = countOccurrences(replacementBaseContent, edit.oldText);
 		if (occurrences > 1) {
-			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
+			throw getDuplicateError(path, i, normalizedEdits.length, occurrences, replacementBaseContent, edit.oldText);
 		}
 
 		matchedEdits.push({
