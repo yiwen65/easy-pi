@@ -32,6 +32,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `subagentModel` | string | inherit caller | Global-only default `provider/model` for newly spawned Subagents; does not change root or existing children |
 | `subagentThinkingLevel` | string | inherit caller | Global-only default child effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `subagentEnabled` | boolean | `true` | Team collaboration tools (`spawn_agent` and peers). `false` removes the seven tools, the collaboration contract, and the agents panel from new sessions; existing team history remains inspectable |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `showCacheMissNotices` | boolean | `false` | Show transcript notices for significant prompt-cache misses and compaction or branch-summary usage |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level. Anthropic, Google, and Bedrock use these natively. OpenAI-compatible models use them when `compat.thinkingTokenBudgetField` (or `supportsThinkingTokenBudget`) is set. |

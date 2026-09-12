@@ -50,6 +50,15 @@ test("direct default factory exposes native operator entry, not the retired DAG"
 	expect(existsSync(join(f.root, "subagent"))).toBe(false);
 });
 
+test("collaboration=false omits the agents command, team bindings, and contract hook", async () => {
+	const f = fixture({ collaboration: false });
+	expect([...f.commands.keys()].sort()).toEqual(["permissions"]);
+	expect(f.tools).toEqual(["request_user_input"]);
+	expect(f.handlers.get("session_start") ?? []).toHaveLength(0);
+	const prompt = await f.handlers.get("before_agent_start")![0]!({ systemPrompt: "base" }, f.ctx);
+	expect(prompt).toMatchObject({ systemPrompt: expect.stringContaining("easy-pi execution contract") });
+});
+
 test("full access allows writes without prompts and the mode is fixed", async () => {
 	const f = fixture();
 	expect(await f.call()).toBeUndefined();
