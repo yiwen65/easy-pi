@@ -14,7 +14,7 @@ const QuestionSchema = Type.Object({
 });
 
 const RequestUserInputSchema = Type.Object({
-	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 3 }),
+	questions: Type.Array(QuestionSchema, { minItems: 1 }),
 });
 
 interface QuestionOption {
@@ -42,6 +42,20 @@ export interface UserInputResult {
 
 const CUSTOM_OPTION = "Type a custom answer";
 
+/** Render questions as plain text for the non-interactive fallback. */
+function formatQuestionsAsText(questions: Question[]): string {
+	return questions
+		.map((question, index) => {
+			const lines = [`${index + 1}. [${question.header}] ${question.question}`];
+			for (const option of question.options) {
+				lines.push(`   - ${option.label} — ${option.description}`);
+			}
+			lines.push("   - (or answer in your own words)");
+			return lines.join("\n");
+		})
+		.join("\n\n");
+}
+
 export async function collectUserInput(ctx: ExtensionContext, questions: Question[]): Promise<UserInputResult> {
 	if (!ctx.hasUI) return { status: "input_required", answers: [] };
 	const answers: UserInputAnswer[] = [];
@@ -68,13 +82,21 @@ export function registerRequestUserInput(pi: ExtensionAPI): void {
 		name: "request_user_input",
 		label: "Request User Input",
 		description:
-			"Ask one to three structured questions with clickable choices and a custom-answer path. Use only when a material user decision is required.",
+			'Ask structured questions with selectable options. Use only for material user decisions, and ask exactly as many questions as those decisions require — no padding. A custom free-text answer path is appended automatically — do not add an "Other" option. When no interactive UI is available, the questions are returned as text — present them in plain text and end the turn; the caller (user or parent agent) answers in a follow-up. If the user cancels, the result says so — respect it instead of retrying. Returns answers as "id: answer" lines.',
 		promptSnippet: "Ask structured clarification questions",
 		parameters: RequestUserInputSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = await collectUserInput(ctx, params.questions);
 			if (result.status === "input_required") {
-				throw new Error("input_required: interactive UI is unavailable");
+				return {
+					content: [
+						{
+							type: "text",
+							text: `No interactive UI is available. Ask these questions in plain text and wait for the user's reply:\n\n${formatQuestionsAsText(params.questions)}`,
+						},
+					],
+					details: result,
+				};
 			}
 			if (result.status === "cancelled") {
 				return {
