@@ -4,6 +4,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	assertAgentTransition,
 	COLLABORATION_LIMITS,
+	COLLABORATION_TEAM_TOOL_NAMES,
 	type CollaborationAgentView,
 	CollaborationError,
 	type CollaborationMessage,
@@ -222,6 +223,19 @@ export class CollaborationController {
 			this.assertReady();
 			if (signal?.aborted) throw new CollaborationError("interrupted", "Spawn was cancelled before admission");
 			this.assertCaller(caller);
+			if (caller.agentPath !== "/root")
+				throw new CollaborationError("forbidden", "Only /root may create agents", "nested_delegation");
+			const requestedTools = delegation?.capabilities.tools;
+			if (requestedTools && requestedTools !== "inherit") {
+				const teamTools = requestedTools.filter((name) => COLLABORATION_TEAM_TOOL_NAMES.has(name));
+				if (teamTools.length > 0)
+					throw new CollaborationError(
+						"forbidden",
+						"Team tools are usable by /root only; omit them from capabilities.tools",
+						"nested_delegation",
+						teamTools,
+					);
+			}
 			const snapshot = this.store.read();
 			const path = childAgentPath(caller.agentPath, taskName);
 			if (snapshot.agents.some((agent) => agent.path === path))
@@ -275,6 +289,19 @@ export class CollaborationController {
 		return this.serialize(() => {
 			this.assertReady();
 			if (signal?.aborted) throw new CollaborationError("interrupted", "Followup was cancelled before admission");
+			if (caller.agentPath !== "/root")
+				throw new CollaborationError("forbidden", "Only /root may direct agents", "nested_delegation");
+			const requestedTools = delegation?.capabilities.tools;
+			if (requestedTools && requestedTools !== "inherit") {
+				const teamTools = requestedTools.filter((name) => COLLABORATION_TEAM_TOOL_NAMES.has(name));
+				if (teamTools.length > 0)
+					throw new CollaborationError(
+						"forbidden",
+						"Team tools are usable by /root only; omit them from capabilities.tools",
+						"nested_delegation",
+						teamTools,
+					);
+			}
 			const record = this.target(caller, target);
 			if (
 				this.active.has(record.path) ||
@@ -648,7 +675,7 @@ export class CollaborationController {
 	}
 
 	/**
-	 * Retire a settled descendant: history and the record remain inspectable, the team slot and the
+	 * Retire a settled child agent: history and the record remain inspectable, the team slot and the
 	 * native session are released, and the name is never reusable. Closed agents are terminal.
 	 */
 	async close(caller: ChildSessionIdentity, target: string): Promise<CollaborationStatus> {

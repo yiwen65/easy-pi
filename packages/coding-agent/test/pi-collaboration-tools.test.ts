@@ -345,38 +345,30 @@ test("failed ack stops provider execution and keeps the message for explicit rec
 	expect(resumed.controller.pending(f.identity)).toEqual([]);
 });
 
-test("native nested spawn and peer messaging stay in one team without waking the idle root", async () => {
-	const f = await fixture();
-	let parentStep = 0;
-	let leafStep = 0;
+test("child agents carry team tools in context but cannot use them", async () => {
+	const children: AgentSession[] = [];
+	const f = await fixture(undefined, [], (session) => children.push(session));
 	let rootStep = 0;
+	let workerStep = 0;
 	f.faux.setResponses(
 		Array.from({ length: 12 }, () => (context: Context) => {
-			if (currentCollaborationPath(context) === "/root/parent/leaf") {
-				if (leafStep++ === 0) return tool("send_message", { target: "../..", message: "nested finding" });
-				return fauxAssistantMessage("leaf complete");
+			if (currentCollaborationPath(context) === "/root/worker") {
+				if (workerStep++ === 0) return tool("spawn_agent", spawnArgs("leaf", "nested work"));
+				return fauxAssistantMessage("worker complete");
 			}
-			if (currentCollaborationPath(context) === "/root/parent") {
-				if (parentStep++ === 0) return tool("spawn_agent", spawnArgs("leaf", "nested work"));
-				return fauxAssistantMessage("parent complete");
-			}
-			if (rootStep++ === 0) return tool("spawn_agent", spawnArgs("parent", "delegate once"));
+			if (rootStep++ === 0) return tool("spawn_agent", spawnArgs("worker", "flat work"));
 			return fauxAssistantMessage("root idle");
 		}),
 	);
-	await f.session.prompt("nested collaboration");
+	await f.session.prompt("flat team");
 	await f.controller.settled();
-	expect(f.controller.list(f.identity).map((agent) => agent.task_name)).toEqual(["/root/parent", "/root/parent/leaf"]);
+	// The worker's spawn attempt is rejected and no nested agent is created.
+	expect(f.controller.list(f.identity).map((agent) => agent.task_name)).toEqual(["/root/worker"]);
 	expect(f.store.read().agents.every((agent) => agent.status === "completed")).toBe(true);
-	const count = f.faux.state.callCount;
-	expect(rootStep).toBe(2);
-	const pendingOrIngested = JSON.stringify([
-		f.controller.pending(f.identity),
-		f.manager.buildSessionContext().messages,
-	]);
-	expect(pendingOrIngested).toContain("nested finding");
-	await f.controller.send({ ...f.identity, agentPath: "/root/parent/leaf" }, "/root", "after root is idle");
-	expect(f.faux.state.callCount).toBe(count);
+	// Team tools stay visible in child contexts so preserved prefixes remain byte-identical.
+	expect(children).toHaveLength(1);
+	expect(children[0]!.getActiveToolNames()).toEqual(expect.arrayContaining(["spawn_agent"]));
+	expect(JSON.stringify(children[0]!.agent.state.messages)).toContain("nested_delegation");
 });
 
 test("native user steering wakes wait without polling or cancelling a child", async () => {

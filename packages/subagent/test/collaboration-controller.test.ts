@@ -97,13 +97,12 @@ test("a completed turn can accept explicit followup; opening a controller never 
 	expect(f.runs).toEqual(["first", "second"]);
 });
 
-test("nested calls share capacity and references cannot cross root identities", async () => {
+test("child callers cannot create or direct agents and identity guards still hold", async () => {
 	const f = fixture();
 	await f.controller.spawn(caller, "parent", "parent", model);
 	const child = { ...caller, agentPath: "/root/parent" };
-	await f.controller.spawn(child, "one", "one", model);
-	await f.controller.spawn(child, "two", "two", model);
-	await expect(f.controller.spawn(child, "three", "three", model)).rejects.toThrow(/execution limit/);
+	await expect(f.controller.spawn(child, "one", "one", model)).rejects.toThrow(/Only \/root may create agents/);
+	await expect(f.controller.followup(child, "parent", "nested")).rejects.toThrow(/Only \/root may direct agents/);
 	await expect(f.controller.spawn({ ...caller, rootSessionId: "other" }, "x", "x", model)).rejects.toThrow(
 		/another root/,
 	);
@@ -338,40 +337,41 @@ test("unknown snapshots and symlink paths are rejected without overwriting sourc
 	expect(readFileSync(unrelated, "utf8")).toBe("not sqlite");
 });
 
-test("delegated capability ceilings include live ancestors and cannot be widened on followup", async () => {
+test("team tools are never delegated and capability ceilings cannot be widened on followup", async () => {
 	const f = fixture();
-	let rootTools = ["read", "bash", "spawn_agent"];
+	const rootTools = ["read", "bash", "spawn_agent"];
 	f.controller.bindTools(caller, () => rootTools);
-	const admission = { delegation: delegation({ capabilities: { tools: ["read", "spawn_agent"] } }), tools: rootTools };
-	await f.controller.spawn(caller, "parent", "inspect", model, [], undefined, admission);
-	const parent = { ...caller, agentPath: "/root/parent" };
-	expect(f.controller.toolAllowed(parent, "bash")).toBe(false);
-	await f.controller.spawn(parent, "leaf", "inspect", model, [], undefined, {
+	// Explicitly naming a team tool is rejected even though /root holds it.
+	await expect(
+		f.controller.spawn(caller, "bad", "inspect", model, [], undefined, {
+			delegation: delegation({ capabilities: { tools: ["read", "spawn_agent"] } }),
+			tools: rootTools,
+		}),
+	).rejects.toThrow(/Team tools are usable by \/root only/);
+	// "inherit" keeps the child's ceiling within the caller's live set.
+	await f.controller.spawn(caller, "sib", "inspect", model, [], undefined, {
 		delegation: delegation(),
 		tools: rootTools,
 	});
-	const leaf = { ...caller, agentPath: "/root/parent/leaf" };
-	expect(f.controller.toolAllowed(leaf, "read")).toBe(true);
-	expect(f.controller.toolAllowed(leaf, "bash")).toBe(false);
-	let parentTools = ["read", "spawn_agent"];
-	const unbind = f.controller.bindTools(parent, () => parentTools);
-	parentTools = ["spawn_agent"];
-	expect(f.controller.toolAllowed(leaf, "read")).toBe(false);
-	parentTools = ["read", "spawn_agent"];
-	rootTools = ["spawn_agent"];
-	expect(f.controller.toolAllowed(leaf, "read")).toBe(false);
-	rootTools = ["read", "bash", "spawn_agent"];
-	unbind();
+	const sib = { ...caller, agentPath: "/root/sib" };
+	expect(f.controller.toolAllowed(sib, "bash")).toBe(true);
+	f.finishes.get(sib.agentPath)?.({ status: "completed", text: "done" });
+	// A ceiling set at spawn cannot be widened by a later followup.
+	await f.controller.spawn(caller, "parent", "inspect", model, [], undefined, {
+		delegation: delegation({ capabilities: { tools: ["read"] } }),
+		tools: rootTools,
+	});
+	const parent = { ...caller, agentPath: "/root/parent" };
+	expect(f.controller.toolAllowed(parent, "read")).toBe(true);
+	expect(f.controller.toolAllowed(parent, "bash")).toBe(false);
 	f.finishes.get(parent.agentPath)?.({ status: "completed", text: "done" });
-	f.finishes.get(leaf.agentPath)?.({ status: "completed", text: "done" });
 	await f.controller.settled();
 	await expect(f.controller.followup(caller, "parent", "old plain task")).rejects.toThrow(/explicit task/);
-	await f.controller.followup(caller, "parent", "narrow", undefined, {
-		delegation: delegation({ capabilities: { tools: ["read"] } }),
+	await f.controller.followup(caller, "parent", "widen attempt", undefined, {
+		delegation: delegation({ capabilities: { tools: ["read", "bash"] } }),
 		tools: ["read", "bash"],
 	});
 	expect(f.controller.toolAllowed(parent, "bash")).toBe(false);
-	expect(f.controller.toolAllowed(leaf, "spawn_agent")).toBe(false);
 });
 
 test("task/result contracts persist and final return targets creation parent rather than later sender", async () => {
@@ -388,9 +388,9 @@ test("task/result contracts persist and final return targets creation parent rat
 	await f.controller.spawn(caller, "peer", "peer", model, [], undefined, admission);
 	f.finishes.get("/root/peer")?.({ status: "completed", text: "peer done" });
 	await f.controller.settled();
-	await f.controller.followup({ ...caller, agentPath: "/root/peer" }, "/root/a", "new task", undefined, admission);
+	await f.controller.followup(caller, "/root/a", "new task", undefined, admission);
 	expect(f.store.read().agents[0].taskMessage).toMatchObject({
-		from: "/root/peer",
+		from: "/root",
 		parent: "/root",
 		contextUse: "existing",
 		delegation: admission.delegation,
@@ -763,19 +763,15 @@ test("authority reads detect external database changes and ownership loss withou
 	}
 });
 
-test("unloading a narrowed ancestor cannot restore descendant tool authority", async () => {
+test("unbinding after live narrowing persists the reduced tool authority", async () => {
 	const f = fixture(true);
 	const admission = { delegation: delegation(), tools: ["read", "bash"] };
 	await f.controller.spawn(caller, "parent", "parent", model, [], undefined, admission);
 	const parent = { ...caller, agentPath: "/root/parent" };
-	await f.controller.spawn(parent, "leaf", "leaf", model, [], undefined, admission);
-	const leaf = { ...caller, agentPath: "/root/parent/leaf" };
-	let tools = ["read", "bash"];
-	const detach = f.controller.bindTools(parent, () => tools);
-	tools = ["read"];
-	expect(f.controller.toolAllowed(leaf, "bash")).toBe(false);
+	expect(f.controller.toolAllowed(parent, "bash")).toBe(true);
+	const detach = f.controller.bindTools(parent, () => ["read"]);
 	detach();
-	expect(f.controller.toolAllowed(leaf, "bash")).toBe(false);
+	expect(f.controller.toolAllowed(parent, "bash")).toBe(false);
 	expect(f.store.read().agents[0].tools).toEqual(["read"]);
 	await f.controller.shutdown();
 	const restored = new CollaborationStore({ path: join(f.cwd, "registry.sqlite"), rootSessionId: "team", cwd: f.cwd });
@@ -808,31 +804,18 @@ test("close retires a settled descendant, releases its slot and session, and nev
 	await expect(f.controller.spawn(caller, "another", "task", model)).rejects.toThrow(/agent limit/);
 });
 
-test("close requires settled leaf descendants and stays idempotent and terminal", async () => {
+test("close requires a settled child and stays idempotent and terminal", async () => {
 	const f = fixture();
-	await f.controller.spawn(caller, "parent", "parent", model);
-	f.finishes.get("/root/parent")?.({ status: "completed", text: "parent done" });
+	await f.controller.spawn(caller, "a", "a", model);
+	await expect(f.controller.close(caller, "a")).rejects.toThrow(/Interrupt a running child/);
+	await f.controller.interrupt(caller, "a");
 	await f.controller.settled();
-	const parent = { ...caller, agentPath: "/root/parent" };
-	await f.controller.spawn(parent, "kid", "kid", model);
-	await f.controller.spawn(caller, "peer", "peer", model);
-	await expect(f.controller.close(parent, ".")).rejects.toThrow(/itself/);
-	await expect(f.controller.close(parent, "..")).rejects.toThrow(/Unknown child/);
-	await expect(f.controller.close(parent, "/root/peer")).rejects.toThrow(/descendants/);
-	await expect(f.controller.close(parent, "kid")).rejects.toThrow(/Interrupt a running child/);
-	// A settled parent with an open child is blocked by its subtree, not by its own status.
-	await expect(f.controller.close(caller, "parent")).rejects.toThrow(/Close descendants/);
-	// `settled()` waits on every active agent, so both running children must be interrupted first.
-	await f.controller.interrupt(parent, "kid");
-	await f.controller.interrupt(caller, "peer");
-	await f.controller.settled();
-	expect(await f.controller.close(parent, "kid")).toBe("interrupted");
-	await expect(f.controller.send(caller, "parent/kid", "hello")).rejects.toThrow(/Unknown receiving agent/);
+	expect(await f.controller.close(caller, "a")).toBe("interrupted");
+	await expect(f.controller.send(caller, "a", "hello")).rejects.toThrow(/Unknown receiving agent/);
 	await expect(
-		f.controller.followup(caller, "parent/kid", "again", undefined, { delegation: delegation(), tools: ["read"] }),
+		f.controller.followup(caller, "a", "again", undefined, { delegation: delegation(), tools: ["read"] }),
 	).rejects.toThrow(/follow-up/);
-	expect(await f.controller.close(caller, "parent")).toBe("completed");
-	expect(await f.controller.close(caller, "parent")).toBe("closed");
-	await expect(f.controller.spawn(caller, "parent", "task", model)).rejects.toThrow(/already exists/);
+	expect(await f.controller.close(caller, "a")).toBe("closed");
+	await expect(f.controller.spawn(caller, "a", "task", model)).rejects.toThrow(/already exists/);
 	await expect(f.controller.close(caller, "/root/missing")).rejects.toThrow(/Unknown child/);
 });
