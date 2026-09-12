@@ -296,6 +296,42 @@ describe("Coding Agent Tools", () => {
 			).rejects.toThrow(/Could not find the exact text/);
 		});
 
+		it("should report the first diverging line when text is not found", async () => {
+			const testFile = join(testDir, "edit-diverge.txt");
+			writeFileSync(testFile, "alpha\nbeta\ngamma\n");
+
+			await expect(
+				editTool.execute("test-call-diverge", {
+					path: testFile,
+					edits: [{ oldText: "beta\nGAMMA", newText: "x" }],
+				}),
+			).rejects.toThrow(/first difference at oldText line 2 \(file line 3\): oldText has "GAMMA", file has "gamma"/);
+		});
+
+		it("should report when the first line of oldText is absent", async () => {
+			const testFile = join(testDir, "edit-anchor.txt");
+			writeFileSync(testFile, "alpha\nbeta\n");
+
+			await expect(
+				editTool.execute("test-call-anchor", {
+					path: testFile,
+					edits: [{ oldText: "nonexistent line\nbeta", newText: "x" }],
+				}),
+			).rejects.toThrow(/first line of oldText \("nonexistent line"\) does not appear/);
+		});
+
+		it("should include occurrence line numbers for duplicate matches", async () => {
+			const testFile = join(testDir, "edit-duplicate-lines.txt");
+			writeFileSync(testFile, "x\n\nx\n");
+
+			await expect(
+				editTool.execute("test-call-dup-lines", {
+					path: testFile,
+					edits: [{ oldText: "x", newText: "y" }],
+				}),
+			).rejects.toThrow(/Found 2 occurrences of the text .* \(lines 1, 3\)/);
+		});
+
 		it("should include ENOENT when the edit target does not exist", async () => {
 			const missingFile = join(testDir, "missing.txt");
 

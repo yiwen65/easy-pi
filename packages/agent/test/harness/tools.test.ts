@@ -373,6 +373,36 @@ describe("AgentHarness tools", () => {
 			).rejects.toThrow(/Found 3 occurrences/);
 		});
 
+		it("reports the first diverging line when text is not found", async () => {
+			const context = createContext();
+			getOrThrow(await context.env.writeFile("edit.txt", "alpha\nbeta\ngamma\n"));
+
+			await expect(
+				createEditTool().execute(
+					"edit-diverge",
+					{ path: "edit.txt", edits: [{ oldText: "beta\nGAMMA", newText: "x" }] },
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/first difference at oldText line 2 \(file line 3\): oldText has "GAMMA", file has "gamma"/);
+		});
+
+		it("includes occurrence line numbers for duplicate target text", async () => {
+			const context = createContext();
+			getOrThrow(await context.env.writeFile("edit.txt", "x\n\nx\n"));
+
+			await expect(
+				createEditTool().execute(
+					"edit-dup-lines",
+					{ path: "edit.txt", edits: [{ oldText: "x", newText: "y" }] },
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/\(lines 1, 3\)/);
+		});
+
 		it("tolerates stale blank-line counts in oldText", async () => {
 			const context = createContext();
 			getOrThrow(await context.env.writeFile("edit.txt", "before\n\nafter\n"));
