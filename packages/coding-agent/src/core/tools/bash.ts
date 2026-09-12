@@ -50,7 +50,7 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 type BashSchema = ReturnType<typeof createCoreBashTool>["parameters"];
 
 export const bashToolSystemPromptContribution = {
-	snippet: "Execute bash commands (ls, grep, find, etc.)",
+	snippet: "Execute bash commands (ls, rg, find, etc.)",
 	guidelines: ["You can inspect PI_* environment variables for current model and session details."],
 } as const;
 
