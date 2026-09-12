@@ -9,7 +9,10 @@ const repoRoot = resolve(scriptDir, "..");
 const codingAgentDir = join(repoRoot, "packages/coding-agent");
 const rootLockfilePath = join(repoRoot, "package-lock.json");
 const shrinkwrapPath = join(codingAgentDir, "npm-shrinkwrap.json");
-const internalPackagePrefix = "@earendil-works/pi-";
+const internalPackagePrefixes = ["@earendil-works/pi-", "@easy-pi/"];
+function isInternalPackageName(name) {
+	return internalPackagePrefixes.some((prefix) => name.startsWith(prefix));
+}
 const bundledNames = new Set(readJson(join(codingAgentDir, "package.json")).bundleDependencies ?? []);
 const allowedInstallScriptPackages = new Map([
 	["@google/genai@1.52.0", "preinstall is a no-op in the published package"],
@@ -139,7 +142,7 @@ function getInternalWorkspaces(lockPackages) {
 		if (!lockPath.startsWith("packages/") || lockPath.includes("/node_modules/") || !entry.name || !entry.version) {
 			continue;
 		}
-		if (!entry.name.startsWith(internalPackagePrefix) && !bundledNames.has(entry.name)) {
+		if (!isInternalPackageName(entry.name) && !bundledNames.has(entry.name)) {
 			continue;
 		}
 

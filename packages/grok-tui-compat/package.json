@@ -1,0 +1,36 @@
+{
+	"name": "@earendil-works/pi-grok-tui",
+	"version": "0.84.2",
+	"description": "Compatibility entry point for @easy-pi/grok-tui",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json",
+		"test": "node --test test/*.test.ts",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@easy-pi/grok-tui": "0.84.2"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yiwen65/easy-pi.git",
+		"directory": "packages/grok-tui-compat"
+	},
+	"license": "MIT"
+}

@@ -11,7 +11,10 @@ const outputDir = join(codingAgentDir, "install-lock");
 const rootLockfilePath = join(repoRoot, "package-lock.json");
 const outputPackageJsonPath = join(outputDir, "package.json");
 const outputLockfilePath = join(outputDir, "package-lock.json");
-const internalPackagePrefix = "@earendil-works/pi-";
+const internalPackagePrefixes = ["@earendil-works/pi-", "@easy-pi/"];
+function isInternalPackageName(name) {
+	return internalPackagePrefixes.some((prefix) => name.startsWith(prefix));
+}
 const bundledNames = new Set(readJson(join(codingAgentDir, "package.json")).bundleDependencies ?? []);
 const installPackageName = "@earendil-works/pi-coding-agent-install";
 const allowedInstallScriptPackages = new Map([
@@ -146,7 +149,7 @@ function getInternalWorkspaces(lockPackages) {
 		if (!lockPath.startsWith("packages/") || lockPath.includes("/node_modules/") || !entry.name || !entry.version) {
 			continue;
 		}
-		if (!entry.name.startsWith(internalPackagePrefix) && !bundledNames.has(entry.name)) {
+		if (!isInternalPackageName(entry.name) && !bundledNames.has(entry.name)) {
 			continue;
 		}
 
@@ -300,7 +303,7 @@ function validateGeneratedFiles(installerPackageJson, installLock, internalNames
 		if (entry.dev || entry.devOptional || entry.extraneous) {
 			errors.push(`${lockPath || "root"} contains dev/extraneous metadata`);
 		}
-		if (packageName?.startsWith(internalPackagePrefix) && entry.version !== installerPackageJson.version) {
+		if (packageName && isInternalPackageName(packageName) && entry.version !== installerPackageJson.version) {
 			errors.push(`${lockPath} internal package version ${entry.version} does not match ${installerPackageJson.version}`);
 		}
 		if (entry.hasInstallScript) {

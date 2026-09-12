@@ -16,7 +16,7 @@ const internal = [
 	["packages/ai", "@earendil-works/pi-ai"],
 	["packages/agent", "@earendil-works/pi-agent-core"],
 	["packages/client", "@earendil-works/pi-client"],
-	["packages/grok-tui", "@earendil-works/pi-grok-tui"],
+	["packages/grok-tui", "@easy-pi/grok-tui"],
 	["packages/protocol", "@earendil-works/pi-protocol"],
 	["packages/server", "@earendil-works/pi-server"],
 	["packages/tui", "@earendil-works/pi-tui"],

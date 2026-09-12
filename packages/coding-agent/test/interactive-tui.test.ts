@@ -1,6 +1,6 @@
-import { GrokTuiRuntime, GrokViewportTuiRuntime } from "@earendil-works/pi-grok-tui";
 import type { Component, Terminal, TUI } from "@earendil-works/pi-tui";
 import { Container, isViewportTUI, Text, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
+import { GrokTuiRuntime, GrokViewportTuiRuntime } from "@easy-pi/grok-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";

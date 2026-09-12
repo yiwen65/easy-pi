@@ -16,7 +16,6 @@ import {
 	type Model,
 	type Usage,
 } from "@earendil-works/pi-ai/compat";
-import { createGrokTuiRuntime } from "@earendil-works/pi-grok-tui";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -50,6 +49,7 @@ import {
 	TuiMainScreen,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { createGrokTuiRuntime } from "@easy-pi/grok-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
 import {
