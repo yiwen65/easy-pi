@@ -95,6 +95,8 @@ export interface Settings {
 	/** Global-only defaults for newly spawned children; omission inherits the caller per field. */
 	subagentModel?: string; // Fully qualified provider/model
 	subagentThinkingLevel?: ThinkingLevel;
+	/** Team collaboration tools (spawn_agent and peers); default: true. */
+	subagentEnabled?: boolean;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -775,6 +777,16 @@ export class SettingsManager {
 	setSubagentThinkingLevel(level: ThinkingLevel | undefined): void {
 		this.globalSettings.subagentThinkingLevel = level;
 		this.markModified("subagentThinkingLevel");
+		this.save();
+	}
+
+	getSubagentEnabled(): boolean {
+		return this.globalSettings.subagentEnabled ?? true;
+	}
+
+	setSubagentEnabled(enabled: boolean | undefined): void {
+		this.globalSettings.subagentEnabled = enabled;
+		this.markModified("subagentEnabled");
 		this.save();
 	}
 

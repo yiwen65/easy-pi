@@ -186,7 +186,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			agentDir,
 			settingsManager,
-			extensionFactories: createBuiltInExtensions(agentDir),
+			extensionFactories: createBuiltInExtensions(agentDir, {
+				collaboration: settingsManager.getSubagentEnabled(),
+			}),
 		});
 		await resourceLoader.reload();
 		time("resourceLoader.reload");

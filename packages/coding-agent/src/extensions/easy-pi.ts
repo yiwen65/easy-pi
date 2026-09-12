@@ -29,6 +29,8 @@ function sanitizeUiText(value: string, preserveNewlines = false): string {
 export interface EasyPiHarnessOptions {
 	/** Root-owned storage; defaults to the easy-pi agent directory. */
 	agentDir?: string;
+	/** Team collaboration tools (spawn_agent and peers). Default: on. */
+	collaboration?: boolean;
 	/** Explicit native-session capability; bypasses legacy process env and DAG registration. */
 	nativeSession?: {
 		getPermissions: () => ChildSessionPermissions;
@@ -107,7 +109,7 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 
 		if (options.nativeSession) {
 			options.nativeSession.registerTools(pi);
-		} else {
+		} else if (options.collaboration !== false) {
 			registerPiCollaborationRoot(pi, options.agentDir ?? getAgentDir(), () => ({
 				mode: "full-access",
 				sessionGrants: [],

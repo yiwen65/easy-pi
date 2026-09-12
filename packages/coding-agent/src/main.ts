@@ -568,7 +568,12 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
-	const extensionFactories = [...createBuiltInExtensions(getAgentDir()), ...(options?.extensionFactories ?? [])];
+	const extensionFactories = [
+		...createBuiltInExtensions(getAgentDir(), {
+			collaboration: SettingsManager.create(process.cwd(), getAgentDir()).getSubagentEnabled(),
+		}),
+		...(options?.extensionFactories ?? []),
+	];
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
