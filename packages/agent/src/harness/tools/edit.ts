@@ -17,20 +17,18 @@ import type { ExecutionToolContext } from "./tool-context.ts";
 const replaceEditSchema = Type.Object(
 	{
 		oldText: Type.String({
-			description:
-				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+			description: "Exact text to replace; unique and non-overlapping within this call.",
 		}),
-		newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		newText: Type.String({ description: "Replacement text." }),
 	},
 	{},
 );
 
 const editSchema = Type.Object(
 	{
-		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+		path: Type.String({ description: "File path (relative or absolute)" }),
 		edits: Type.Array(replaceEditSchema, {
-			description:
-				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+			description: "One or more targeted replacements.",
 		}),
 	},
 	{},
@@ -96,7 +94,7 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+			"Edit a single file by exact text replacement. Each edits[].oldText is matched against the original file (not applied incrementally) and must match a unique, non-overlapping region; minor whitespace or quote differences are normalized during matching. Merge changes to the same or nearby lines into one edit. Keep oldText as small as possible while still unique — do not pad with unchanged regions. Before sending, verify each oldText is verbatim content you observed in the file, not content you intend to create. A call fails when an oldText matches zero or multiple regions: the error reports the first diverging line or the duplicate locations; re-read and retry with a unique verbatim excerpt.",
 		parameters: editSchema,
 		prepareArguments: prepareEditArguments,
 		async execute(_toolCallId, input, signal, _onUpdate, { env }) {

@@ -13,13 +13,13 @@ import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const writeSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
+	path: Type.String({ description: "File path (relative or absolute)" }),
 	content: Type.String({ description: "Content to write to the file" }),
 });
 
 export const writeToolSystemPromptContribution = {
 	snippet: "Create or overwrite files",
-	guidelines: ["Use write only for new files or complete rewrites."],
+	guidelines: [],
 } as const;
 
 export type WriteToolInput = Static<typeof writeSchema>;
@@ -193,7 +193,7 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+			"Write content to a file. Creates the file and parent directories if needed; overwrites existing files. Use only for new files or complete rewrites — for partial changes use edit.",
 		promptSnippet: writeToolSystemPromptContribution.snippet,
 		promptGuidelines: [...writeToolSystemPromptContribution.guidelines],
 		parameters: writeSchema,

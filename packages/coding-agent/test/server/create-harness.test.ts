@@ -235,8 +235,8 @@ describe("coding-agent Harness construction", () => {
 			try {
 				const initialPrompt = await resolveSystemPrompt(configuredSystemPrompt);
 				expect(initialPrompt).toContain("- read: Read file contents");
-				expect(initialPrompt).toContain("- bash: Execute bash commands (ls, grep, find, etc.)");
-				expect(initialPrompt).toContain("- edit: Make precise file edits with exact text replacement");
+				expect(initialPrompt).toContain("- bash: Execute bash commands (ls, rg, find, etc.)");
+				expect(initialPrompt).toContain("- edit: Precise file edits via exact text replacement");
 				expect(initialPrompt).toContain("- write: Create or overwrite files");
 
 				await created.harness.setActiveTools(["write"]);

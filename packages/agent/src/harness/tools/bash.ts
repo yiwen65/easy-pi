@@ -19,7 +19,7 @@ const BASH_UPDATE_THROTTLE_MS = 100;
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	cwd: Type.Optional(Type.String({ description: "Initial working directory (defaults to the session cwd)" })),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (no default)" })),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -77,7 +77,7 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in an initial working directory. Returns stdout and stderr with structured exit status; nonzero exits, signals, timeouts, and cancellation are tool errors. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first), with full output saved to a temp file. Optional cwd and timeout in seconds. cwd is not a sandbox.`,
+		description: `Execute a bash command and return stdout, stderr, and a structured exit status; nonzero exits, signals, timeouts, and cancellation are tool errors. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; full output is saved to a temp file. A nonexistent cwd or a timeout fails the call and the error names the cause. cwd is not a sandbox.`,
 		parameters: bashSchema,
 		replay: "never",
 		async execute(_toolCallId, { command, cwd, timeout }, signal, onUpdate, context) {
