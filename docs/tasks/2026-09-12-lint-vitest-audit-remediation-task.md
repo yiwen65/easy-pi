@@ -147,6 +147,7 @@
 - 2026-09-12: 代表性 Vitest/coverage 测试通过；eval workspace 首次使用默认配置无测试文件，改用 `vitest.test.config.ts` 后 6/6 通过。
 - 2026-09-12: T-003 完成；完整仓库 check、双 audit、lock 检查和 diff 检查通过，未运行冻结测试路径。
 - 2026-09-12: Implementation committed as `209a011fd` (`fix: remediate lint and Vitest audit findings`).
+- 2026-09-12: Reusable dependency-tree lesson recorded in `LEARNS.md`, committed as `b621f5610`.
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
