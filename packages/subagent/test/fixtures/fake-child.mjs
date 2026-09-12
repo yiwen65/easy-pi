@@ -128,7 +128,7 @@ function verifyInvocation() {
 	} else if (policy.mutationJournal !== undefined) {
 		die("non-external task received a mutation journal");
 	}
-	const expectedPermissionMode = scenario === "permission-mode" ? "full-access" : "auto";
+	const expectedPermissionMode = "full-access";
 	if (policy.permissionMode !== expectedPermissionMode) die("parent permission mode was not propagated");
 	const expectedTaskId = external ? "external-1" : writer ? "writer-1" : "task-1";
 	if (policy.handoff?.protocolVersion !== 2 || policy.handoff?.taskId !== expectedTaskId) {

@@ -12,7 +12,7 @@ import { createSubmitHandoffSchema } from "../src/handoff.ts";
 const baseProfile = {
 	workspaceRoot: "/workspace/project",
 	role: "scout" as const,
-	permissionMode: "auto" as const,
+	permissionMode: "full-access" as const,
 	childModel: { provider: "openai-codex", model: "gpt-5.6-luna", thinkingLevel: "high" as const },
 };
 
@@ -35,7 +35,6 @@ describe("Subagent prompt-cache affinity", () => {
 		const variants = [
 			{ ...baseProfile, workspaceRoot: "/workspace/other" },
 			{ ...baseProfile, role: "reviewer" as const },
-			{ ...baseProfile, permissionMode: "full-access" as const },
 			{ ...baseProfile, childModel: { provider: "openai", model: "gpt-5.6" } },
 		];
 

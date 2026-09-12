@@ -3,18 +3,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { CHILD_HARNESS_CONTEXT_ENV, decidePermission, type PermissionMode } from "@easy-pi/permissions";
 import type { ChildSessionPermissions } from "@easy-pi/subagent/session-host";
 import { getAgentDir } from "../config.ts";
-import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "../core/extensions/types.ts";
+import type { ExtensionAPI, ToolCallEvent } from "../core/extensions/types.ts";
 import { registerPiCollaborationRoot } from "./pi-collaboration-root.ts";
 import { registerRequestUserInput } from "./questionnaire.ts";
 
 const AUDIT_ENTRY = "wj-harness-audit";
-const PERMISSION_TARGET_CAP = 240;
-const MODE_OPTIONS: Array<{ mode: PermissionMode; label: string }> = [
-	{ mode: "auto", label: "Auto — low-risk writes automatic; other tools allowed" },
-	{ mode: "full-access", label: "Full Access — no permission prompts" },
-	{ mode: "manual-allow", label: "Manual Allow — write/edit ask; other tools allowed" },
-];
-
 interface AuditRecord {
 	timestamp: string;
 	action: "mode" | "permission";
@@ -31,37 +24,6 @@ function inputRecord(event: ToolCallEvent): Record<string, unknown> {
 function sanitizeUiText(value: string, preserveNewlines = false): string {
 	const safe = value.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "");
 	return preserveNewlines ? safe : safe.replace(/[\t\n]+/g, " ");
-}
-
-function redactPermissionText(value: string): string {
-	const redacted = sanitizeUiText(value)
-		.replace(/(authorization\s*:\s*bearer\s+)\S+/gi, "$1[redacted]")
-		.replace(/((?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)\s*=\s*)\S+/gi, "$1[redacted]")
-		.replace(/(--(?:token|secret|password|api-key)\s+)\S+/gi, "$1[redacted]")
-		.replace(/:\/\/([^\s/:]+):([^\s@]+)@/g, "://$1:[redacted]@");
-	return redacted.length <= PERMISSION_TARGET_CAP ? redacted : `${redacted.slice(0, PERMISSION_TARGET_CAP - 1)}…`;
-}
-
-function permissionPreview(value: unknown, key = "", depth = 0): unknown {
-	if (/(?:authorization|credential|password|passwd|private.?key|secret|token|content)/i.test(key)) return "[redacted]";
-	if (typeof value === "string") return redactPermissionText(value);
-	if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-	if (depth >= 2) return "[nested]";
-	if (Array.isArray(value)) return value.slice(0, 5).map((item) => permissionPreview(item, key, depth + 1));
-	if (!value || typeof value !== "object") return String(value);
-	return Object.fromEntries(
-		Object.entries(value)
-			.sort(([left], [right]) => left.localeCompare(right))
-			.slice(0, 8)
-			.map(([entryKey, item]) => [entryKey, permissionPreview(item, entryKey, depth + 1)]),
-	);
-}
-
-function permissionTarget(event: ToolCallEvent): string {
-	const input = inputRecord(event);
-	if (event.toolName === "bash" && typeof input.command === "string") return redactPermissionText(input.command);
-	if (typeof input.path === "string") return redactPermissionText(input.path);
-	return redactPermissionText(JSON.stringify(permissionPreview(input)));
 }
 
 export interface EasyPiHarnessOptions {
@@ -89,7 +51,7 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 			if (!options.nativeSession) return undefined;
 			const permissions = options.nativeSession.getPermissions();
 			if (
-				!MODE_OPTIONS.some((option) => option.mode === permissions.mode) ||
+				permissions.mode !== "full-access" ||
 				!Array.isArray(permissions.sessionGrants) ||
 				!permissions.sessionGrants.every((grant) => typeof grant === "string") ||
 				!Array.isArray(permissions.protectedRoots) ||
@@ -101,14 +63,11 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 			return structuredClone(permissions);
 		};
 		readNativePermissions();
-		const sessionGrants = new Set<string>();
-		let permissionMode: PermissionMode = "full-access";
-		let permissionPromptQueue = Promise.resolve();
 
 		const audit = (record: Omit<AuditRecord, "timestamp" | "mode">) => {
 			pi.appendEntry<AuditRecord>(AUDIT_ENTRY, {
 				timestamp: new Date().toISOString(),
-				mode: permissionMode,
+				mode: "full-access",
 				...record,
 			});
 		};
@@ -126,127 +85,55 @@ export function createEasyPiHarness(options: EasyPiHarnessOptions = {}): (pi: Ex
 		});
 
 		pi.registerCommand("permissions", {
-			description: "Show or change the easy-pi permission mode",
-			async handler(args, ctx) {
-				if (options.nativeSession) {
-					ctx.ui.notify("This agent inherits live parent permissions; change them in the root session.", "info");
-					return;
-				}
-				const requested = args.trim();
-				let nextMode: PermissionMode | undefined;
-				if (requested) nextMode = MODE_OPTIONS.find((option) => option.mode === requested)?.mode;
-				if (requested && !nextMode) {
-					ctx.ui.notify(`Unknown permission mode: ${redactPermissionText(requested)}`, "error");
-					return;
-				}
-				if (!nextMode) {
-					const selected = await ctx.ui.select(
-						`Permission mode: ${permissionMode}`,
-						MODE_OPTIONS.map((option) => option.label),
-					);
-					if (!selected) return;
-					nextMode = MODE_OPTIONS.find((option) => option.label === selected)?.mode;
-				}
-				if (!nextMode) return;
-				permissionMode = nextMode;
-				sessionGrants.clear();
-				audit({ action: "mode", reason: `Mode changed to ${nextMode}` });
-				if (nextMode === "manual-allow") {
-					ctx.ui.notify("Manual Allow prompts for write/edit; other tools are allowed.", "info");
-				}
+			description: "Show the easy-pi permission mode",
+			async handler(_args, ctx) {
+				ctx.ui.notify("Permission mode: full-access (the only permission mode)", "info");
 			},
 		});
 
 		registerRequestUserInput(pi);
 
-		pi.on("session_start", () => {
-			permissionMode = "full-access";
-			sessionGrants.clear();
-		});
-
 		pi.on("before_agent_start", (event) => {
 			const contract = [
 				"easy-pi execution contract:",
-				`- Permission mode is ${readNativePermissions()?.mode ?? permissionMode}. Pi tools run with the permissions of the Pi process.`,
+				"- Permission mode is full-access (the only mode). Pi tools run with the permissions of the Pi process.",
 				"- Full Access allows credential reads and suppresses permission prompts, but retains best-effort catastrophic-deletion checks. This is not an OS sandbox.",
-				"- Run the smallest task-relevant verification justified by the change risk; avoid meaningless checks for simple tasks. If verification is unavailable, state why and report the remaining risk honestly.",
+				// Verification floor: complements the template's Working rules (which a custom SYSTEM.md replaces).
+				// Keep this bullet scoped to risk calibration; the template owns timing and reporting.
+				"- Scale verification effort to the change risk; skip checks that cannot catch a meaningful failure for simple tasks. If verification is unavailable, state why and report the remaining risk honestly.",
 			].join("\n");
 			return { systemPrompt: `${event.systemPrompt}\n\n${contract}` };
 		});
-
-		async function requestPermission(ctx: ExtensionContext, event: ToolCallEvent, reason: string, grantKey?: string) {
-			let release: () => void = () => undefined;
-			const previous = permissionPromptQueue;
-			permissionPromptQueue = new Promise<void>((done) => {
-				release = done;
-			});
-			await previous;
-			try {
-				const scope = "Session scope: this exact displayed operation/contract in this working directory";
-				const selected = await ctx.ui.select(
-					sanitizeUiText(
-						`${event.toolName} requires permission\n${reason}\nTarget: ${permissionTarget(event)}\n${scope}`,
-						true,
-					),
-					["Allow once", "Allow for this session", "Deny"],
-				);
-				if (selected === "Allow for this session" && grantKey) sessionGrants.add(grantKey);
-				return selected === "Allow once" || selected === "Allow for this session";
-			} finally {
-				release();
-			}
-		}
 
 		if (options.nativeSession) {
 			options.nativeSession.registerTools(pi);
 		} else {
 			registerPiCollaborationRoot(pi, options.agentDir ?? getAgentDir(), () => ({
-				mode: permissionMode,
-				sessionGrants: [...sessionGrants],
+				mode: "full-access",
+				sessionGrants: [],
 				protectedRoots: [],
 			}));
 		}
 
-		pi.on("tool_call", async (event, ctx) => {
+		pi.on("tool_call", (event, ctx) => {
 			let nativePermissions: ChildSessionPermissions | undefined;
 			try {
 				nativePermissions = readNativePermissions();
 			} catch {
 				return { block: true, reason: "Native parent authority is unavailable" };
 			}
-			if (nativePermissions) permissionMode = nativePermissions.mode;
 			const outcome = decidePermission({
-				mode: permissionMode,
+				mode: "full-access",
 				toolName: event.toolName,
 				input: inputRecord(event),
 				cwd: ctx.cwd,
-				sessionGrants: nativePermissions ? new Set(nativePermissions.sessionGrants) : sessionGrants,
+				sessionGrants: nativePermissions ? new Set(nativePermissions.sessionGrants) : new Set(),
 				...(nativePermissions ? { protectedRoots: nativePermissions.protectedRoots } : {}),
 			});
 
 			if (outcome.decision === "deny") {
 				audit({ action: "permission", decision: "deny", tool: event.toolName, reason: outcome.reason });
 				return { block: true, reason: outcome.reason };
-			}
-			if (outcome.decision === "ask") {
-				if (options.nativeSession) {
-					const reason = `${outcome.reason}; explicit parent approval is required`;
-					audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
-					return { block: true, reason };
-				}
-				if (!ctx.hasUI) {
-					const reason = `${outcome.reason}; non-interactive mode defaults to deny`;
-					audit({ action: "permission", decision: "deny", tool: event.toolName, reason });
-					return { block: true, reason };
-				}
-				const allowed = await requestPermission(ctx, event, outcome.reason, outcome.grantKey);
-				audit({
-					action: "permission",
-					decision: allowed ? "allow" : "deny",
-					tool: event.toolName,
-					reason: outcome.reason,
-				});
-				if (!allowed) return { block: true, reason: "Blocked by user" };
 			}
 			return undefined;
 		});

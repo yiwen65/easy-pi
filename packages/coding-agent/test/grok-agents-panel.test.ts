@@ -404,23 +404,17 @@ test("root shutdown dismisses the viewer and releases callbacks; configurable pa
 	expect(f.renders).toHaveLength(renders);
 });
 
-test("default child tools obey live root permission mode and tool removal while the viewer is open", async () => {
+test("default child tools obey live tool removal while the viewer is open", async () => {
 	const f = await fixture();
 	const child = holdChild(f);
-	await f.session.prompt("/permissions manual-allow");
 	await f.session.prompt("delegate");
 	await child.ready;
 	const { command } = await f.show();
 	f.key("\x1b[B");
 	f.key("\r");
-	child.release(tool("write", { path: "denied.txt", content: "not allowed" }));
-	await vi.waitFor(() => expect(child.childTurns).toBe(2));
-	expect(existsSync(join(f.cwd, "denied.txt"))).toBe(false);
-	expect(f.renders.some((text) => text.includes("explicit parent approval is required"))).toBe(true);
-	await f.session.prompt("/permissions full-access");
 	f.session.setActiveToolsByName(f.session.getActiveToolNames().filter((name) => name !== "write"));
 	child.release(tool("write", { path: "disabled.txt", content: "not allowed" }));
-	await vi.waitFor(() => expect(child.childTurns).toBe(3));
+	await vi.waitFor(() => expect(child.childTurns).toBe(2));
 	expect(existsSync(join(f.cwd, "disabled.txt"))).toBe(false);
 	expect(f.renders.some((text) => text.includes("Tool denied by live delegation ancestry"))).toBe(true);
 	// The operator surface does not bypass an explicitly disabled collaboration tool either.
