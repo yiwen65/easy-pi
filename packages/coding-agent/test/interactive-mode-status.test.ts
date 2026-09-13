@@ -934,7 +934,7 @@ describe("InteractiveMode update notices", () => {
 		showPackageUpdateNotification.call(context, ["pi-web-access"]);
 
 		const output = normalizeRenderedOutput(chatContainer, 100);
-		expect(output).toBe("Package updates available: 1 package · Run pi update --extensions");
+		expect(output).toBe("Package updates available: 1 package · Run easy-pi update --extensions");
 		expect(output).not.toMatch(/[╭╮╰╯│]/u);
 		expect(requestRender).toHaveBeenCalledOnce();
 	});

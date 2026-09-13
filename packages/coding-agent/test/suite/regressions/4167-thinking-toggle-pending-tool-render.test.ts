@@ -51,6 +51,10 @@ type RenderSessionContextThis = {
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
 	createToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
+	createRoutedToolComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
+	addToolComponentToChat(component: ToolExecutionComponent, toolName: string, args: unknown): void;
+	flushPendingSkillMentions(): void;
+	completeCurrentTurnThinking(): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
 };
@@ -87,6 +91,16 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 				createToolExecutionComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
 			}
 		).createToolExecutionComponent,
+		createRoutedToolComponent: (
+			InteractiveMode.prototype as unknown as {
+				createRoutedToolComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
+			}
+		).createRoutedToolComponent,
+		addToolComponentToChat(component: ToolExecutionComponent, _toolName: string, _toolArgs: unknown) {
+			chatContainer.addChild(component);
+		},
+		flushPendingSkillMentions() {},
+		completeCurrentTurnThinking() {},
 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
 			.renderSessionItems,
 		addMessageToChat(message: AgentMessage) {

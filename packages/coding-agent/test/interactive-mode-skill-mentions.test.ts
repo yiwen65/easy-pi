@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { createSkillPromptMessage } from "../src/core/messages.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 type SkillMentionHarness = {
@@ -79,8 +79,8 @@ describe("InteractiveMode skill mention presentation", () => {
 		expect(userRows).toHaveLength(1);
 		const renderedWithAnsi = harness.chatContainer.render(100).join("\n");
 		const rendered = stripAnsi(renderedWithAnsi);
-		expect(renderedWithAnsi).toContain("\x1b[38;2;138;190;183mcode-debug");
-		expect(renderedWithAnsi).toContain("\x1b[38;2;138;190;183mcode-performance");
+		expect(renderedWithAnsi).toContain(`${theme.getFgAnsi("accent")}code-debug`);
+		expect(renderedWithAnsi).toContain(`${theme.getFgAnsi("accent")}code-performance`);
 		expect(rendered).toContain("code-debug code-performance explain the slowdown");
 		expect(rendered).not.toContain("[skill]");
 		expect(addToHistory).toHaveBeenCalledWith("/skill:code-debug /skill:code-performance explain the slowdown");
