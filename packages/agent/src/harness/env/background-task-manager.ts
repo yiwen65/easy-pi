@@ -21,6 +21,7 @@ export { isTerminalTaskStatus } from "./background-task-types.ts";
 
 export const DEFAULT_BACKGROUND_TIMEOUT_MS = 600_000;
 export const DEFAULT_STOP_GRACE_MS = 5_000;
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 /** Preview reads come from a bounded in-memory tail; the log file always holds the full output. */
 const TAIL_BUFFER_BYTES = 128 * 1024;
 
@@ -39,6 +40,14 @@ export interface BackgroundTaskManagerOptions {
 	generateId?: () => string;
 }
 
+export interface BackgroundTaskShutdownReport {
+	complete: boolean;
+	completed: string[];
+	failed: string[];
+	timedOut: string[];
+	remaining: string[];
+}
+
 interface ManagedTask {
 	record: BackgroundTaskRecord;
 	child?: ChildProcess;
@@ -50,6 +59,8 @@ interface ManagedTask {
 	stopRequested: boolean;
 	timedOut: boolean;
 	waiters: Array<() => void>;
+	settledPromise: Promise<void>;
+	resolveSettled: () => void;
 }
 
 function appendTail(tail: string, chunk: string): string {
@@ -73,6 +84,8 @@ export class BackgroundTaskManager {
 	private readonly now: () => number;
 	private readonly generateId: () => string;
 	private counter = 0;
+	private accepting = true;
+	private shutdownPromise?: Promise<BackgroundTaskShutdownReport>;
 
 	constructor(options: BackgroundTaskManagerOptions) {
 		this.shell = options.shell;
@@ -90,6 +103,9 @@ export class BackgroundTaskManager {
 		command: string,
 		options: { cwd: string; env?: NodeJS.ProcessEnv; inheritEnv?: boolean; timeoutMs?: number },
 	): Promise<Result<BackgroundTaskRecord, ExecutionError>> {
+		if (!this.accepting) {
+			return err(new ExecutionError("aborted", "Background task manager is shutting down"));
+		}
 		try {
 			await access(options.cwd, constants.F_OK);
 		} catch (error) {
@@ -98,6 +114,9 @@ export class BackgroundTaskManager {
 		}
 		const shell = await this.shell();
 		if (!shell.ok) return shell;
+		if (!this.accepting) {
+			return err(new ExecutionError("aborted", "Background task manager is shutting down"));
+		}
 		const managed = this.createTask(command, options.cwd, false, options.timeoutMs);
 		let child: ChildProcess;
 		try {
@@ -125,6 +144,9 @@ export class BackgroundTaskManager {
 	 * Output produced before the promotion is not part of the task log.
 	 */
 	adopt(handle: NodePromotedProcess, meta: { command: string; cwd: string; timeoutMs?: number }): string {
+		if (!this.accepting) {
+			throw new Error("Background task manager is shutting down");
+		}
 		const managed = this.createTask(meta.command, meta.cwd, true, meta.timeoutMs);
 		handle.detach();
 		this.attach(managed, handle.child);
@@ -210,22 +232,68 @@ export class BackgroundTaskManager {
 		});
 	}
 
-	/** Best-effort shutdown: kill every remaining task process immediately. */
-	async cleanup(): Promise<void> {
-		for (const managed of this.tasks.values()) {
-			if (managed.timeoutId) clearTimeout(managed.timeoutId);
-			if (managed.stopGraceId) clearTimeout(managed.stopGraceId);
-			if (managed.record.pid !== undefined && !isTerminalTaskStatus(managed.record.status)) {
-				killNodeProcessTree(managed.record.pid);
+	/** Wait for owned processes and output writers to settle after requesting shutdown. */
+	async shutdown(options?: { timeoutMs?: number }): Promise<BackgroundTaskShutdownReport> {
+		if (this.shutdownPromise) return this.shutdownPromise;
+		this.accepting = false;
+		const timeoutMs = options?.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+		this.shutdownPromise = (async () => {
+			const tasks = [...this.tasks.values()];
+			for (const managed of tasks) {
+				if (managed.timeoutId) clearTimeout(managed.timeoutId);
+				if (!isTerminalTaskStatus(managed.record.status)) await this.stop(managed.record.id);
 			}
-			managed.logStream?.destroy();
+			const settled = Promise.all(tasks.map((managed) => managed.settledPromise));
+			let timedOut = false;
+			let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([
+				settled,
+				new Promise<void>((resolve) => {
+					deadlineTimer = setTimeout(() => {
+						timedOut = true;
+						resolve();
+					}, timeoutMs);
+				}),
+			]);
+			if (deadlineTimer) clearTimeout(deadlineTimer);
+			const completed: string[] = [];
+			const failed: string[] = [];
+			const timedOutIds: string[] = [];
+			const remaining: string[] = [];
+			for (const managed of tasks) {
+				if (!isTerminalTaskStatus(managed.record.status)) {
+					remaining.push(managed.record.id);
+					if (timedOut) timedOutIds.push(managed.record.id);
+				} else if (managed.record.status === "failed") {
+					failed.push(managed.record.id);
+				} else if (managed.record.status === "timed_out") {
+					timedOutIds.push(managed.record.id);
+				} else {
+					completed.push(managed.record.id);
+				}
+			}
+			return { complete: remaining.length === 0, completed, failed, timedOut: timedOutIds, remaining };
+		})();
+		return this.shutdownPromise;
+	}
+
+	/** Backward-compatible cleanup that now waits for owned output and processes. */
+	async cleanup(): Promise<void> {
+		const report = await this.shutdown();
+		if (report.complete) {
+			this.tasks.clear();
+			this.shutdownPromise = undefined;
+			this.accepting = true;
 		}
-		this.tasks.clear();
 	}
 
 	private createTask(command: string, cwd: string, promoted: boolean, timeoutMs?: number): ManagedTask {
 		const id = this.generateId();
 		const outputPath = join(this.logDir, `pi-bash-${id}-${randomUUID().slice(0, 8)}.log`);
+		let resolveSettled = () => {};
+		const settledPromise = new Promise<void>((resolve) => {
+			resolveSettled = resolve;
+		});
 		const managed: ManagedTask = {
 			record: {
 				id,
@@ -241,6 +309,8 @@ export class BackgroundTaskManager {
 			stopRequested: false,
 			timedOut: false,
 			waiters: [],
+			settledPromise,
+			resolveSettled,
 		};
 		managed.logStream = createWriteStream(outputPath, { flags: "w" });
 		managed.logStream.on("error", () => {});
@@ -322,7 +392,13 @@ export class BackgroundTaskManager {
 		managed.record.exitCode = exitCode;
 		managed.record.signal = signal;
 		if (error !== undefined) managed.record.error = error;
-		managed.logStream?.end();
+		if (managed.logStream) {
+			managed.logStream.once("finish", managed.resolveSettled);
+			managed.logStream.once("error", managed.resolveSettled);
+			managed.logStream.end();
+		} else {
+			managed.resolveSettled();
+		}
 		const snapshot = { ...managed.record };
 		for (const waiter of managed.waiters.splice(0)) waiter();
 		for (const listener of this.terminalListeners) {

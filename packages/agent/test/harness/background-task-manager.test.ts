@@ -142,6 +142,8 @@ describe("BackgroundTaskManager", () => {
 		);
 		const settled = await waitTerminal(manager, task.id);
 		expect(settled.status).toBe("timed_out");
+		const report = await manager.shutdown();
+		expect(report.timedOut).toContain(task.id);
 		await manager.cleanup();
 	});
 
@@ -181,6 +183,31 @@ describe("BackgroundTaskManager", () => {
 		await manager.stop(slow.id);
 		await waitTerminal(manager, slow.id);
 		await manager.cleanup();
+	});
+
+	it("shutdown waits for process and writer settlement and reports ownership", async () => {
+		const { manager } = createManager({ stopGraceMs: 50 });
+		const task = getOrThrow(
+			await manager.start("setTimeout(() => {}, 60_000);", { cwd: createTempDir(), env: { ...process.env } }),
+		);
+
+		const report = await manager.shutdown({ timeoutMs: 2_000 });
+		expect(report.complete).toBe(true);
+		expect(report.remaining).toEqual([]);
+		expect([...report.completed, ...report.failed]).toContain(task.id);
+		await manager.cleanup();
+	});
+
+	it("rejects new tasks after shutdown starts", async () => {
+		const { manager } = createManager();
+		const report = await manager.shutdown({ timeoutMs: 100 });
+		expect(report.complete).toBe(true);
+
+		const started = await manager.start("process.stdout.write('x');", {
+			cwd: createTempDir(),
+			env: { ...process.env },
+		});
+		expect(started).toMatchObject({ ok: false, error: { code: "aborted" } });
 	});
 
 	it("rejects start for a nonexistent cwd and unknown task lookups", async () => {

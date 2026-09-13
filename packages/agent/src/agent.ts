@@ -13,7 +13,9 @@ import {
 	runAgentLoop,
 	runAgentLoopContinue,
 } from "./agent-loop.ts";
+import { RunScope } from "./run-scope.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
+import { createToolPlan } from "./tool-plan.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -110,6 +112,8 @@ export interface AgentOptions {
 	onResponse?: SimpleStreamOptions["onResponse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	admitToolCall?: AgentLoopConfig["admitToolCall"];
+	executionScheduler?: AgentLoopConfig["executionScheduler"];
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
@@ -119,6 +123,7 @@ export interface AgentOptions {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	onProviderContext?: (model: Model<any>, context: Context) => void;
+	onExecutionEvent?: AgentLoopConfig["onExecutionEvent"];
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	promptCacheKey?: string;
@@ -169,8 +174,7 @@ class PendingMessageQueue {
 
 type ActiveRun = {
 	promise: Promise<void>;
-	resolve: () => void;
-	abortController: AbortController;
+	scope: RunScope;
 };
 
 /**
@@ -192,6 +196,7 @@ export class Agent {
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
 	public onProviderContext?: (model: Model<any>, context: Context) => void;
+	public onExecutionEvent?: AgentLoopConfig["onExecutionEvent"];
 	public beforeToolCall?: (
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
@@ -200,6 +205,8 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public admitToolCall?: AgentLoopConfig["admitToolCall"];
+	public executionScheduler?: AgentLoopConfig["executionScheduler"];
 	public shouldStopAfterTurn?: (
 		context: ShouldStopAfterTurnContext,
 		signal?: AbortSignal,
@@ -212,6 +219,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	private nextRunGeneration = 0;
+	private nextToolPlanRevision = 0;
 	/** Logical provider prompt-cache grouping key, independent from transport affinity. */
 	public promptCacheKey?: string;
 	/** Codex SSE cache-affinity lineage; never the native or connection identity. */
@@ -238,8 +247,11 @@ export class Agent {
 		this.onPayload = runtimeOptions.onPayload;
 		this.onResponse = runtimeOptions.onResponse;
 		this.onProviderContext = runtimeOptions.onProviderContext;
+		this.onExecutionEvent = runtimeOptions.onExecutionEvent;
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
+		this.admitToolCall = runtimeOptions.admitToolCall;
+		this.executionScheduler = runtimeOptions.executionScheduler;
 		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
@@ -338,12 +350,17 @@ export class Agent {
 
 	/** Active abort signal for the current run, if any. */
 	get signal(): AbortSignal | undefined {
-		return this.activeRun?.abortController.signal;
+		return this.activeRun?.scope.signal;
+	}
+
+	/** Stable identity of the current run, if one is active. */
+	get runId(): string | undefined {
+		return this.activeRun?.scope.runId;
 	}
 
 	/** Abort the current run, if one is active. */
 	abort(): void {
-		this.activeRun?.abortController.abort();
+		this.activeRun?.scope.requestCancel();
 	}
 
 	/**
@@ -461,10 +478,12 @@ export class Agent {
 	}
 
 	private createContextSnapshot(): AgentContext {
+		const toolPlan = createToolPlan(this._state.tools, ++this.nextToolPlanRevision, this.activeRun?.scope.runId);
 		return {
 			systemPrompt: this._state.systemPrompt,
 			messages: this._state.messages.slice(),
-			tools: this._state.tools.slice(),
+			tools: [...toolPlan.tools],
+			toolPlan,
 		};
 	}
 
@@ -474,6 +493,11 @@ export class Agent {
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			runId: this.activeRun?.scope.runId,
+			admitEffect: () => {
+				const scope = this.activeRun?.scope;
+				return scope?.canAdmit() ?? false;
+			},
 			promptCacheKey: this.promptCacheKey,
 			cacheAffinityId: this.cacheAffinityId,
 			sessionId: this.sessionId,
@@ -485,6 +509,8 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
+			admitToolCall: this.admitToolCall,
+			executionScheduler: this.executionScheduler,
 			shouldStopAfterTurn: shouldStopAfterTurn
 				? async (context) => await shouldStopAfterTurn(context, this.signal)
 				: undefined,
@@ -501,6 +527,7 @@ export class Agent {
 			transformContext: this.transformContext,
 			getSystemPrompt: () => this._state.systemPrompt,
 			onProviderContext: this.onProviderContext,
+			onExecutionEvent: this.onExecutionEvent,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
@@ -518,21 +545,22 @@ export class Agent {
 			throw new Error("Agent is already processing.");
 		}
 
-		const abortController = new AbortController();
-		let resolvePromise = () => {};
-		const promise = new Promise<void>((resolve) => {
-			resolvePromise = resolve;
+		const scope = new RunScope({
+			runId: `run-${++this.nextRunGeneration}`,
+			generation: this.nextRunGeneration,
 		});
-		this.activeRun = { promise, resolve: resolvePromise, abortController };
+		scope.activate();
+		const promise = scope.waitForSettled();
+		this.activeRun = { promise, scope };
 
 		this._state.isStreaming = true;
 		this._state.streamingMessage = undefined;
 		this._state.errorMessage = undefined;
 
 		try {
-			await executor(abortController.signal);
+			await executor(scope.signal);
 		} catch (error) {
-			await this.handleRunFailure(error, abortController.signal.aborted);
+			await this.handleRunFailure(error, scope.signal.aborted);
 		} finally {
 			this.finishRun();
 		}
@@ -560,8 +588,9 @@ export class Agent {
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
-		this.activeRun?.resolve();
+		const activeRun = this.activeRun;
 		this.activeRun = undefined;
+		activeRun?.scope.settle();
 	}
 
 	/**
@@ -611,7 +640,7 @@ export class Agent {
 				break;
 		}
 
-		const signal = this.activeRun?.abortController.signal;
+		const signal = this.activeRun?.scope.signal;
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}

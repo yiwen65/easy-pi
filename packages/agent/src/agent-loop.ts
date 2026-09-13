@@ -11,6 +11,7 @@ import {
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import { fingerprintAssistantTurn, fingerprintToolResult, NO_PROGRESS_REPEAT_LIMIT } from "./no-progress.ts";
+import { createStepSnapshot } from "./step-snapshot.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -26,6 +27,24 @@ import type {
 import { AgentToolError } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+type ExecutionEvent = Parameters<NonNullable<AgentLoopConfig["onExecutionEvent"]>>[0];
+
+function reportExecution(config: AgentLoopConfig, event: ExecutionEvent): void {
+	reportExecutionObserver(config.onExecutionEvent, event);
+}
+
+function reportExecutionObserver(observer: AgentLoopConfig["onExecutionEvent"], event: ExecutionEvent): void {
+	try {
+		observer?.(event);
+	} catch {
+		// Diagnostics cannot change execution.
+	}
+}
+
+function monotonicNow(): number {
+	return globalThis.performance?.now() ?? Date.now();
+}
 
 /**
  * Start an agent loop with a new prompt message.
@@ -170,6 +189,7 @@ async function runLoop(
 	/** Progress fingerprints of consecutive tool-call turns in this run. */
 	let lastTurnFingerprint: string | undefined;
 	let turnFingerprintRepeats = 0;
+	let stepNumber = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -215,6 +235,15 @@ async function runLoop(
 				currentContext.systemPrompt = resolveSystemPrompt(currentContext.systemPrompt, config);
 			}
 
+			// Bind the exact context, model, and tool handlers for this provider step.
+			const stepSnapshot = createStepSnapshot(currentContext, config, ++stepNumber);
+			currentContext = stepSnapshot.context;
+			config = {
+				...config,
+				model: stepSnapshot.model,
+				stepId: stepSnapshot.stepId,
+				toolPlanRevision: stepSnapshot.toolPlan.revision,
+			};
 			// Stream assistant response
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
 			newMessages.push(message);
@@ -338,6 +367,27 @@ export async function buildProviderContext(
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
  */
+function createAbortedAssistantMessage(config: AgentLoopConfig): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "aborted",
+		errorMessage: "Operation aborted",
+		timestamp: Date.now(),
+	};
+}
+
 async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
@@ -351,7 +401,18 @@ async function streamAssistantResponse(
 	// at the same provider-request boundary.
 	llmContext.systemPrompt = resolveSystemPrompt(llmContext.systemPrompt ?? "", config);
 	try {
-		config.onProviderContext?.(config.model, llmContext);
+		config.onProviderContext?.(config.model, {
+			systemPrompt: llmContext.systemPrompt,
+			messages: structuredClone(llmContext.messages),
+			tools: llmContext.tools?.map((tool) => {
+				const agentTool = tool as AgentTool;
+				return {
+					...tool,
+					parameters: structuredClone(tool.parameters),
+					...(agentTool.contract ? { contract: structuredClone(agentTool.contract) } : {}),
+				};
+			}),
+		});
 	} catch {
 		// Observability must never block or mutate a provider request.
 	}
@@ -360,11 +421,62 @@ async function streamAssistantResponse(
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		signal,
+	const reportProviderResult = (message: AssistantMessage, startedAt: number): void => {
+		const outcome =
+			message.stopReason === "aborted" ? "cancelled" : message.stopReason === "error" ? "failed" : "succeeded";
+		reportExecution(config, {
+			phase: "provider_request",
+			runId: config.runId,
+			stepId: config.stepId,
+			toolPlanRevision: config.toolPlanRevision,
+			outcome,
+			reason: outcome === "cancelled" ? "provider aborted" : outcome === "failed" ? "provider error" : undefined,
+			durationMs: monotonicNow() - startedAt,
+		});
+	};
+
+	if (signal?.aborted || (config.admitEffect && !config.admitEffect())) {
+		const abortedMessage = createAbortedAssistantMessage(config);
+		reportExecution(config, {
+			phase: "provider_request",
+			runId: config.runId,
+			stepId: config.stepId,
+			toolPlanRevision: config.toolPlanRevision,
+			outcome: "cancelled",
+			reason: "cancelled before provider request",
+		});
+		await emit({ type: "message_start", message: abortedMessage });
+		await emit({ type: "message_end", message: abortedMessage });
+		return abortedMessage;
+	}
+
+	const providerStartedAt = monotonicNow();
+	reportExecution(config, {
+		phase: "provider_request",
+		runId: config.runId,
+		stepId: config.stepId,
+		toolPlanRevision: config.toolPlanRevision,
+		outcome: "started",
 	});
+	let response: Awaited<ReturnType<StreamFn>>;
+	try {
+		response = await streamFunction(config.model, llmContext, {
+			...config,
+			apiKey: resolvedApiKey,
+			signal,
+		});
+	} catch (error) {
+		reportExecution(config, {
+			phase: "provider_request",
+			runId: config.runId,
+			stepId: config.stepId,
+			toolPlanRevision: config.toolPlanRevision,
+			outcome: "failed",
+			reason: "provider request failed",
+			durationMs: monotonicNow() - providerStartedAt,
+		});
+		throw error;
+	}
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
@@ -401,6 +513,7 @@ async function streamAssistantResponse(
 			case "done":
 			case "error": {
 				const finalMessage = await response.result();
+				reportProviderResult(finalMessage, providerStartedAt);
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
 				} else {
@@ -416,6 +529,7 @@ async function streamAssistantResponse(
 	}
 
 	const finalMessage = await response.result();
+	reportProviderResult(finalMessage, providerStartedAt);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {
@@ -472,7 +586,9 @@ async function executeToolCalls(
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+		(tc) =>
+			(currentContext.toolPlan?.bindings[tc.name] ?? currentContext.tools?.find((t) => t.name === tc.name))
+				?.executionMode === "sequential",
 	);
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
@@ -513,7 +629,18 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(
+				preparation,
+				signal,
+				emit,
+				config.admitEffect,
+				config.admitToolCall,
+				config.runId,
+				config.stepId,
+				config.toolPlanRevision,
+				config.executionScheduler,
+				config.onExecutionEvent,
+			);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -575,7 +702,18 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(
+				preparation,
+				signal,
+				emit,
+				config.admitEffect,
+				config.admitToolCall,
+				config.runId,
+				config.stepId,
+				config.toolPlanRevision,
+				config.executionScheduler,
+				config.onExecutionEvent,
+			);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -659,7 +797,8 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+	const tool =
+		currentContext.toolPlan?.bindings[toolCall.name] ?? currentContext.tools?.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
 			kind: "immediate",
@@ -742,8 +881,158 @@ async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	admitEffect?: () => boolean,
+	admitToolCall?: AgentLoopConfig["admitToolCall"],
+	runId?: string,
+	stepId?: string,
+	toolPlanRevision?: number,
+	executionScheduler?: AgentLoopConfig["executionScheduler"],
+	onExecutionEvent?: AgentLoopConfig["onExecutionEvent"],
 ): Promise<ExecutedToolCallOutcome> {
-	if (signal?.aborted) {
+	const startedAt = monotonicNow();
+	if (admitToolCall) {
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "tool_admission",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "started",
+		});
+		let admission: Awaited<ReturnType<NonNullable<AgentLoopConfig["admitToolCall"]>>>;
+		try {
+			admission = await admitToolCall({
+				runId,
+				toolCall: prepared.toolCall,
+				tool: prepared.tool,
+				args: prepared.args,
+				signal,
+			});
+		} catch (error) {
+			reportExecutionObserver(onExecutionEvent, {
+				phase: "tool_admission",
+				runId,
+				stepId,
+				toolPlanRevision,
+				toolCallId: prepared.toolCall.id,
+				toolName: prepared.toolCall.name,
+				outcome: "failed",
+				reason: "tool admission failed",
+				durationMs: monotonicNow() - startedAt,
+			});
+			throw error;
+		}
+		if (admission?.allow === false) {
+			const reason = admission.reason ?? "Tool execution was denied";
+			reportExecutionObserver(onExecutionEvent, {
+				phase: "tool_admission",
+				runId,
+				stepId,
+				toolPlanRevision,
+				toolCallId: prepared.toolCall.id,
+				toolName: prepared.toolCall.name,
+				outcome: "denied",
+				reason,
+				durationMs: monotonicNow() - startedAt,
+			});
+			reportExecutionObserver(onExecutionEvent, {
+				phase: "execution_result",
+				runId,
+				stepId,
+				toolPlanRevision,
+				toolCallId: prepared.toolCall.id,
+				toolName: prepared.toolCall.name,
+				outcome: "denied",
+				reason,
+				durationMs: monotonicNow() - startedAt,
+			});
+			return {
+				result: createErrorToolResult(reason),
+				isError: true,
+			};
+		}
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "tool_admission",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "succeeded",
+			durationMs: monotonicNow() - startedAt,
+		});
+	}
+
+	const schedulerStartedAt = monotonicNow();
+	if (executionScheduler) {
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "scheduler_wait",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "started",
+		});
+	}
+	const lease = await executionScheduler?.acquire(prepared.tool.executionResource, signal);
+	if (executionScheduler && !lease) {
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "scheduler_wait",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "cancelled",
+			reason: "cancelled while waiting for execution resources",
+			durationMs: monotonicNow() - schedulerStartedAt,
+		});
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "execution_result",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "cancelled",
+			reason: "cancelled while waiting for execution resources",
+			durationMs: monotonicNow() - startedAt,
+		});
+		return {
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		};
+	}
+	if (executionScheduler) {
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "scheduler_wait",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "succeeded",
+			durationMs: monotonicNow() - schedulerStartedAt,
+		});
+	}
+
+	const admitted = admitEffect ? admitEffect() : true;
+	if (signal?.aborted || !admitted) {
+		lease?.release();
+		const reason = signal?.aborted ? "Operation aborted" : "Execution admission denied";
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "execution_result",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "cancelled",
+			reason,
+			durationMs: monotonicNow() - startedAt,
+		});
 		return {
 			result: createErrorToolResult("Operation aborted"),
 			isError: true,
@@ -752,6 +1041,16 @@ async function executePreparedToolCall(
 
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
+	const executionStartedAt = monotonicNow();
+	reportExecutionObserver(onExecutionEvent, {
+		phase: "tool_execution",
+		runId,
+		stepId,
+		toolPlanRevision,
+		toolCallId: prepared.toolCall.id,
+		toolName: prepared.toolCall.name,
+		outcome: "started",
+	});
 
 	try {
 		const result = await prepared.tool.execute(
@@ -775,10 +1074,31 @@ async function executePreparedToolCall(
 		);
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "execution_result",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "succeeded",
+			durationMs: monotonicNow() - executionStartedAt,
+		});
 		return { result, isError: false };
 	} catch (error) {
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
+		reportExecutionObserver(onExecutionEvent, {
+			phase: "execution_result",
+			runId,
+			stepId,
+			toolPlanRevision,
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			outcome: "failed",
+			reason: "tool execution failed",
+			durationMs: monotonicNow() - executionStartedAt,
+		});
 		return {
 			result: createErrorToolResult(
 				error instanceof Error ? error.message : String(error),
@@ -788,6 +1108,7 @@ async function executePreparedToolCall(
 		};
 	} finally {
 		acceptingUpdates = false;
+		lease?.release();
 	}
 }
 

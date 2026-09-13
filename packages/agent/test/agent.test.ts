@@ -377,6 +377,35 @@ describe("Agent", () => {
 		expect(receivedSignal?.aborted).toBe(true);
 	});
 
+	it("does not start a provider request after preflight cancellation", async () => {
+		const transformStarted = createDeferred();
+		const releaseTransform = createDeferred();
+		let providerCalls = 0;
+		const agent = new Agent({
+			transformContext: async (messages) => {
+				transformStarted.resolve();
+				await releaseTransform.promise;
+				return messages;
+			},
+			streamFn: () => {
+				providerCalls++;
+				throw new Error("provider should not start after cancellation");
+			},
+		});
+
+		const promptPromise = agent.prompt("cancel during preparation");
+		await transformStarted.promise;
+		const runId = agent.runId;
+		agent.abort();
+		releaseTransform.resolve();
+		await promptPromise;
+
+		expect(providerCalls).toBe(0);
+		expect(runId).toBeDefined();
+		expect(agent.runId).toBeUndefined();
+		expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+	});
+
 	it("should ignore tool updates after the tool execution settles", async () => {
 		const toolSchema = Type.Object({});
 		let delayedUpdate: AgentToolUpdateCallback<{ status: string }> | undefined;

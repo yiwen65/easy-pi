@@ -283,6 +283,13 @@ export interface ModelCycleResult {
 }
 
 /** Session statistics for /session command */
+export interface SessionShutdownReport {
+	complete: boolean;
+	failedResources: string[];
+	timedOutResources: string[];
+	remainingResources: string[];
+}
+
 export interface SessionStats {
 	sessionFile: string | undefined;
 	sessionId: string;
@@ -397,6 +404,8 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _baseToolDefinitionsOverride?: Record<string, ToolDefinition<any, any>>;
 	private _disposed = false;
+	private _lifecycleGeneration = 1;
+	private _shutdownPromise?: Promise<SessionShutdownReport>;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -765,6 +774,7 @@ export class AgentSession {
 					messages: projectionChangedDuringCallback ? this.agent.state.messages.slice() : previousContext.messages,
 					systemPrompt: baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
+					toolPlan: undefined,
 				},
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
@@ -1104,31 +1114,54 @@ export class AgentSession {
 		}
 	}
 
-	/**
-	 * Remove all listeners and disconnect from agent.
-	 * Call this when completely done with the session.
-	 */
-	dispose(): void {
-		if (this._disposed) return;
-		this._disposed = true;
-		try {
-			this.abortRetry();
-			this.abortCompaction();
-			this.abortBranchSummary();
-			this.abortBash();
-			this.agent.abort();
-		} catch {
-			// Dispose must succeed even if an abort hook throws.
-		}
+	/** Awaitable shutdown report for the resources owned by this session. */
+	async shutdown(): Promise<SessionShutdownReport> {
+		if (this._shutdownPromise) return this._shutdownPromise;
+		this._shutdownPromise = (async () => {
+			if (!this._disposed) {
+				this._disposed = true;
+				this._lifecycleGeneration++;
+				try {
+					this.abortRetry();
+					this.abortCompaction();
+					this.abortBranchSummary();
+					this.abortBash();
+					this.agent.abort();
+				} catch {
+					// Shutdown must continue even if an abort hook throws.
+				}
 
-		this._extensionRunner.invalidate(
-			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-		);
-		this._disconnectFromAgent();
-		this._eventListeners = [];
-		this._backgroundTaskNotifications.dispose();
-		void this._backgroundTaskManager?.cleanup();
-		cleanupSessionResources(this.sessionId);
+				this._extensionRunner.invalidate(
+					"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+				);
+				this._disconnectFromAgent();
+				this._eventListeners = [];
+				this._backgroundTaskNotifications.dispose();
+			}
+
+			await this.abort();
+			let backgroundReport:
+				| { complete: boolean; failed: string[]; timedOut: string[]; remaining: string[] }
+				| undefined;
+			if (this._backgroundTaskManager?.shutdown) {
+				backgroundReport = await this._backgroundTaskManager.shutdown();
+			} else {
+				await this._backgroundTaskManager?.cleanup();
+			}
+			cleanupSessionResources(this.sessionId);
+			return {
+				complete: backgroundReport?.complete ?? true,
+				failedResources: backgroundReport?.failed ?? [],
+				timedOutResources: backgroundReport?.timedOut ?? [],
+				remainingResources: backgroundReport?.remaining ?? [],
+			};
+		})();
+		return this._shutdownPromise;
+	}
+
+	/** Begin shutdown without changing the synchronous public disposal contract. */
+	dispose(): void {
+		void this.shutdown();
 	}
 
 	// =========================================================================
@@ -1337,6 +1370,9 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (this._disposed) {
+			throw new Error("AgentSession is disposed");
+		}
 		this._isAgentRunActive = true;
 		try {
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
@@ -1400,6 +1436,10 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		if (this._disposed) {
+			throw new Error("AgentSession is disposed");
+		}
+		const promptGeneration = this._lifecycleGeneration;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1553,6 +1593,10 @@ export class AgentSession {
 
 		if (!messages) {
 			return;
+		}
+		if (this._disposed || promptGeneration !== this._lifecycleGeneration) {
+			preflightResult?.(false);
+			throw new Error("AgentSession was replaced while preparing the prompt");
 		}
 
 		preflightResult?.(true);

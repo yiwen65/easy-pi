@@ -14,6 +14,9 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { AgentExecutionObserver } from "./execution-events.ts";
+import type { ResourceRequest, ResourceScheduler } from "./resource-scheduler.ts";
+import type { ToolPlan } from "./tool-plan.ts";
 
 /**
  * Stream function used by the agent loop. `Models.streamSimple` satisfies
@@ -95,6 +98,21 @@ export interface AfterToolCallResult {
 }
 
 /** Context passed to `beforeToolCall`. */
+export interface ToolAdmissionContext {
+	/** Stable run identity, when the call belongs to an Agent run. */
+	readonly runId?: string;
+	readonly toolCall: AgentToolCall;
+	readonly tool: AgentTool<any>;
+	readonly args: unknown;
+	readonly signal?: AbortSignal;
+}
+
+export interface ToolAdmissionResult {
+	/** Set false to reject the final execution target. Omitted means allow. */
+	allow?: boolean;
+	reason?: string;
+}
+
 export interface BeforeToolCallContext {
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
@@ -213,6 +231,25 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Observe the exact logical context after transforms and immediately before the provider call. */
 	onProviderContext?: (model: Model<any>, context: Context) => void;
+
+	/** Stable run identity for internal diagnostics and host-owned admission. */
+	runId?: string;
+	/** Current provider step identity for internal diagnostics. */
+	stepId?: string;
+	toolPlanRevision?: number;
+	/** Optional redacted execution observer. Exceptions do not affect the run. */
+	onExecutionEvent?: AgentExecutionObserver;
+
+	/** Synchronous final admission check immediately before a provider or tool starts. */
+	admitEffect?: () => boolean;
+
+	/** Host-owned asynchronous policy check, followed by the synchronous final admission check. */
+	admitToolCall?: (
+		context: ToolAdmissionContext,
+	) => ToolAdmissionResult | undefined | Promise<ToolAdmissionResult | undefined>;
+
+	/** Optional bounded scheduler shared by cooperating Agent instances. */
+	executionScheduler?: ResourceScheduler;
 
 	/**
 	 * Resolves an API key dynamically for each LLM call.
@@ -463,6 +500,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * If omitted, the default execution mode applies.
 	 */
 	executionMode?: ToolExecutionMode;
+	/** Optional bounded scheduler resource used by host-coordinated execution. */
+	executionResource?: ResourceRequest;
 }
 
 /** Context snapshot passed into the low-level agent loop. */
@@ -473,6 +512,8 @@ export interface AgentContext {
 	messages: AgentMessage[];
 	/** Tools available for this run. */
 	tools?: AgentTool<any>[];
+	/** Immutable schema/handler binding for the current provider step. */
+	toolPlan?: ToolPlan;
 }
 
 /**

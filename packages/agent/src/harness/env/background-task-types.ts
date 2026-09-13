@@ -39,6 +39,13 @@ export interface BackgroundTaskManagerLike {
 	readOutput(id: string, maxBytes?: number): Result<BackgroundTaskOutput, ExecutionError>;
 	onStart(listener: (task: BackgroundTaskRecord) => void): () => void;
 	onTerminal(listener: (task: BackgroundTaskRecord) => void): () => void;
+	shutdown?(options?: { timeoutMs?: number }): Promise<{
+		complete: boolean;
+		completed: string[];
+		failed: string[];
+		timedOut: string[];
+		remaining: string[];
+	}>;
 	cleanup(): Promise<void>;
 }
 
