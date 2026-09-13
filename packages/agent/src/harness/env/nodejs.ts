@@ -33,6 +33,7 @@ import {
 	type TextRangeReadResult,
 	toError,
 } from "../types.ts";
+import { BackgroundTaskManager } from "./background-task-manager.ts";
 import { killNodeProcessTree, NodeProcessExecutor } from "./node-process-executor.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -290,6 +291,12 @@ export interface NodeExecutionEnvOptions {
 	shellEnv?: NodeJS.ProcessEnv;
 	onProcessStart?: (pid: number) => void;
 	onProcessEnd?: (pid: number) => void;
+	/** Background task runtime bound in milliseconds. Defaults to 600s; 0 disables the timeout. */
+	backgroundTaskTimeoutMs?: number;
+	/** Directory for background task output logs. Defaults to the OS temp directory. */
+	backgroundTaskLogDir?: string;
+	/** Shared background task manager instance. Default: a new manager owned by this environment. */
+	backgroundTasks?: BackgroundTaskManager;
 }
 
 export class NodeExecutionEnv implements ExecutionEnv {
@@ -297,6 +304,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	private shellPath?: string;
 	private shellEnv?: NodeJS.ProcessEnv;
 	private readonly processExecutor: NodeProcessExecutor;
+	readonly backgroundTasks: BackgroundTaskManager;
 
 	constructor(options: NodeExecutionEnvOptions) {
 		this.cwd = options.cwd;
@@ -306,6 +314,17 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			onProcessStart: options.onProcessStart,
 			onProcessEnd: options.onProcessEnd,
 		});
+		this.backgroundTasks =
+			options.backgroundTasks ??
+			new BackgroundTaskManager({
+				shell: async () => {
+					const config = await getShellConfig(this.shellPath);
+					return config.ok ? ok({ ...config.value }) : config;
+				},
+				resolveEnv: (env, inheritEnv) => getShellEnv(this.shellEnv, env, inheritEnv),
+				defaultTimeoutMs: options.backgroundTaskTimeoutMs,
+				logDir: options.backgroundTaskLogDir,
+			});
 	}
 
 	async absolutePath(path: string): Promise<Result<string, FileError>> {
@@ -360,6 +379,9 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			abortSignal: options?.abortSignal,
 			onStdout: forwardStdout,
 			onStderr: forwardStderr,
+			promoteOnTimeout: options?.promoteOnTimeout
+				? { adopt: (handle) => this.backgroundTasks.adopt(handle, { command, cwd }) }
+				: undefined,
 		});
 		try {
 			const stdoutTail = stdoutDecoder.decode();
@@ -379,6 +401,14 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				return err(new ExecutionError("timeout", `timeout:${options?.timeout}`, execution.error));
 			}
 			return execution;
+		}
+		if (execution.value.promotedTaskId !== undefined) {
+			return ok({
+				stdout,
+				stderr,
+				exitCode: -1,
+				promotedTaskId: execution.value.promotedTaskId,
+			});
 		}
 		return ok({
 			stdout,
@@ -685,6 +715,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async cleanup(): Promise<void> {
+		await this.backgroundTasks.cleanup();
 		await this.processExecutor.cleanup();
 	}
 }

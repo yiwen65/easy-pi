@@ -15,15 +15,28 @@ import { resolveWorkspacePath } from "./workspace-policy.ts";
 
 const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000;
 const BASH_UPDATE_THROTTLE_MS = 100;
+const DEFAULT_FOREGROUND_TIMEOUT_SECONDS = 60;
+const MAX_FOREGROUND_TIMEOUT_SECONDS = 300;
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	cwd: Type.Optional(Type.String({ description: "Initial working directory (defaults to the session cwd)" })),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (no default)" })),
+	timeout: Type.Optional(
+		Type.Number({
+			description:
+				"Timeout in seconds. Foreground: defaults apply when the host enables promotion; background: overrides the background runtime bound.",
+		}),
+	),
+	run_in_background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Run in the background and return a task ID immediately instead of blocking (default false). Manage with task_list, task_output, task_stop, and wait_for.",
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
-export type BashTerminationReason = "exit" | "signal" | "timeout" | "aborted";
+export type BashTerminationReason = "exit" | "signal" | "timeout" | "aborted" | "promoted";
 
 export interface BashToolDetails {
 	command: string;
@@ -36,6 +49,8 @@ export interface BashToolDetails {
 	durationMs: number;
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	/** Set when the command is running as a background task (started via run_in_background or promoted on timeout). */
+	backgroundTaskId?: string;
 }
 
 export interface BashExecution {
@@ -59,6 +74,15 @@ export interface BashToolOptions<TContext extends ExecutionToolContext = Executi
 		execution: BashExecution,
 		options: ShellCaptureOptions,
 	) => Promise<Result<ShellCaptureResult, ExecutionError>>;
+	/**
+	 * Kimi-style foreground promotion: when the execution environment supports background tasks,
+	 * foreground commands default to `foregroundTimeoutSeconds` (60) up to `maxForegroundTimeoutSeconds`
+	 * (300), and a timed-out command keeps running as a background task instead of being killed.
+	 */
+	promotion?: {
+		foregroundTimeoutSeconds?: number;
+		maxForegroundTimeoutSeconds?: number;
+	};
 }
 
 function validateTimeout(timeout: number | undefined): void {
@@ -74,16 +98,33 @@ function validateTimeout(timeout: number | undefined): void {
 export function createBashTool<TContext extends ExecutionToolContext = ExecutionToolContext>(
 	options?: BashToolOptions<TContext>,
 ): AgentHarnessTool<TContext, typeof bashSchema, BashToolDetails> {
+	const foregroundTimeoutSeconds = options?.promotion?.foregroundTimeoutSeconds ?? DEFAULT_FOREGROUND_TIMEOUT_SECONDS;
+	const maxForegroundTimeoutSeconds =
+		options?.promotion?.maxForegroundTimeoutSeconds ?? MAX_FOREGROUND_TIMEOUT_SECONDS;
+	const description =
+		`Execute a bash command and return stdout, stderr, and a structured exit status; nonzero exits, signals, timeouts, and cancellation are tool errors. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; full output is saved to a temp file. A nonexistent cwd fails the call and the error names the cause. cwd is not a sandbox.` +
+		(options?.promotion
+			? ` A foreground command that runs longer than ${foregroundTimeoutSeconds}s (explicit timeout, max ${maxForegroundTimeoutSeconds}s) is not killed: it keeps running as a background task and the call returns its task ID.`
+			: " A timeout fails the call.") +
+		" Set run_in_background=true to return a task ID immediately; manage background tasks with task_list, task_output, task_stop, and wait_for.";
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command and return stdout, stderr, and a structured exit status; nonzero exits, signals, timeouts, and cancellation are tool errors. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; full output is saved to a temp file. A nonexistent cwd or a timeout fails the call and the error names the cause. cwd is not a sandbox.`,
+		description,
 		parameters: bashSchema,
 		replay: "never",
-		async execute(_toolCallId, { command, cwd, timeout }, signal, onUpdate, context) {
+		async execute(_toolCallId, { command, cwd, timeout, run_in_background }, signal, onUpdate, context) {
 			if (!command.trim()) throw new ExecutionToolError("INVALID_INPUT", "command must not be empty.");
 			validateTimeout(timeout);
 			const { env } = context;
+			const backgroundTasks = env.backgroundTasks;
+			const promotionActive = options?.promotion !== undefined && backgroundTasks !== undefined;
+			if (promotionActive && !run_in_background && timeout !== undefined && timeout > maxForegroundTimeoutSeconds) {
+				throw new ExecutionToolError(
+					"INVALID_INPUT",
+					`timeout exceeds the ${maxForegroundTimeoutSeconds}s foreground maximum; use run_in_background for longer commands.`,
+				);
+			}
 			let executionCwd = cwd ?? env.cwd;
 			if (!options?.capture || context.workspacePolicy) {
 				const resolved = await resolveWorkspacePath(env, cwd ?? ".", "read", context.workspacePolicy, signal);
@@ -116,6 +157,41 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				timedOut: false,
 				durationMs: 0,
 			};
+			if (run_in_background) {
+				if (!backgroundTasks) {
+					throw new ExecutionToolError(
+						"UNSUPPORTED",
+						"Background tasks are not supported by this execution environment.",
+					);
+				}
+				const started = await backgroundTasks.start(execution.command, {
+					cwd: execution.cwd,
+					env: execution.env,
+					inheritEnv: execution.inheritEnv,
+					timeoutMs: timeout !== undefined ? timeout * 1000 : undefined,
+				});
+				if (!started.ok) {
+					throw new ExecutionToolError(
+						started.error.code === "not_found" ? "NOT_FOUND" : "SPAWN_ERROR",
+						started.error.message,
+					);
+				}
+				const task = started.value;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Background task ${task.id} started (pid ${task.pid ?? "unknown"}).\nOutput log: ${task.outputPath}\nUse task_output to inspect output, wait_for to block until it finishes, task_stop to terminate it.`,
+						},
+					],
+					details: {
+						...initialDetails,
+						durationMs: Date.now() - startedAt,
+						backgroundTaskId: task.id,
+						fullOutputPath: task.outputPath,
+					},
+				};
+			}
 			let getLatestProgress: (() => ShellCaptureProgress) | undefined;
 			let updateTimer: ReturnType<typeof setTimeout> | undefined;
 			let updateDirty = false;
@@ -162,7 +238,8 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					cwd: execution.cwd,
 					env: execution.env,
 					inheritEnv: execution.inheritEnv,
-					timeout,
+					timeout: promotionActive ? (timeout ?? foregroundTimeoutSeconds) : timeout,
+					promoteOnTimeout: promotionActive || undefined,
 					abortSignal: signal,
 					returnExecutionErrors: true,
 					onChunk: (_chunk, getProgress) => {
@@ -179,6 +256,25 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				getLatestProgress = () => capture;
 				updateDirty = true;
 				emitOutputUpdate();
+
+				if (capture.promotedTaskId !== undefined) {
+					const promotedDetails: BashToolDetails = {
+						...initialDetails,
+						terminationReason: "promoted",
+						timedOut: true,
+						durationMs: Date.now() - startedAt,
+						truncation: capture.truncation.truncated ? capture.truncation : undefined,
+						fullOutputPath: capture.fullOutputPath,
+						backgroundTaskId: capture.promotedTaskId,
+					};
+					const manager = backgroundTasks;
+					const task = manager?.get(capture.promotedTaskId);
+					const note = `Command exceeded the ${promotionActive ? (timeout ?? foregroundTimeoutSeconds) : timeout}s foreground limit and was promoted to background task ${capture.promotedTaskId}; it is still running.${task ? `\nOutput log: ${task.outputPath}` : ""}\nUse task_output to inspect output, wait_for to wait for completion, task_stop to terminate it.`;
+					return {
+						content: [{ type: "text", text: `${capture.output ? `${capture.output}\n\n` : ""}[${note}]` }],
+						details: promotedDetails,
+					};
+				}
 
 				const cancelled = capture.cancelled || signal?.aborted === true;
 				const timedOut = !cancelled && capture.executionError?.code === "timeout";

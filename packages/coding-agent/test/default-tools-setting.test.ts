@@ -63,7 +63,19 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
+		).toEqual([
+			"bash",
+			"edit",
+			"find",
+			"grep",
+			"ls",
+			"read",
+			"task_list",
+			"task_output",
+			"task_stop",
+			"wait_for",
+			"write",
+		]);
 		expect(session.getActiveToolNames()).toEqual(["grep", "find"]);
 		expect(session.systemPrompt).toContain("- grep:");
 		expect(session.systemPrompt).not.toContain("- read:");
@@ -129,6 +141,25 @@ describe("defaultTools setting", () => {
 		toolLessSession.dispose();
 	});
 
+	it("activates background task tools when the configured list enables bash", async () => {
+		const session = await createSession(["bash", "read"]);
+		expect(session.getActiveToolNames().sort()).toEqual([
+			"bash",
+			"read",
+			"task_list",
+			"task_output",
+			"task_stop",
+			"wait_for",
+		]);
+		expect(session.systemPrompt).toContain("run_in_background");
+		session.dispose();
+
+		// explicit exclusion still wins over the bash-surface completion
+		const excluded = await createSession(["bash"], { excludeTools: ["task_stop", "wait_for"] });
+		expect(excluded.getActiveToolNames().sort()).toEqual(["bash", "task_list", "task_output"]);
+		excluded.dispose();
+	});
+
 	it("applies through service-based session creation", async () => {
 		const settingsManager = SettingsManager.inMemory({ defaultTools: ["ls"] });
 		const services = await createAgentSessionServices({ cwd: tempDir, agentDir, settingsManager });
@@ -143,7 +174,19 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
+		).toEqual([
+			"bash",
+			"edit",
+			"find",
+			"grep",
+			"ls",
+			"read",
+			"task_list",
+			"task_output",
+			"task_stop",
+			"wait_for",
+			"write",
+		]);
 		expect(session.getActiveToolNames()).toEqual(["ls"]);
 		session.dispose();
 	});

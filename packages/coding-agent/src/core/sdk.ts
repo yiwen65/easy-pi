@@ -19,6 +19,7 @@ import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
 import {
+	BACKGROUND_TASK_TOOL_NAMES,
 	createBashTool,
 	createCodingTools,
 	createEditTool,
@@ -74,6 +75,12 @@ export interface CreateAgentSessionOptions {
 	excludeTools?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
+
+	/**
+	 * Background bash tasks. `promotion` enables Kimi-style foreground promotion (60s default,
+	 * 300s max, promote on timeout). Keep it off for print/SDK-style automation. Default: off.
+	 */
+	backgroundBash?: { promotion?: boolean };
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -252,13 +259,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames = ["read", "bash", "edit", "write"];
+	const defaultActiveToolNames = ["read", "bash", "edit", "write", ...BACKGROUND_TASK_TOOL_NAMES];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
+	// Background task management tools are part of the bash feature surface: a configured
+	// defaultTools list that enables bash gets them too (excludeTools can still remove them).
+	const effectiveConfiguredToolNames = configuredDefaultToolNames?.includes("bash")
+		? [
+				...configuredDefaultToolNames,
+				...BACKGROUND_TASK_TOOL_NAMES.filter((name) => !configuredDefaultToolNames.includes(name)),
+			]
+		: configuredDefaultToolNames;
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
 	const initialActiveToolNames = (
-		options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? defaultActiveToolNames))
+		options.tools ?? (options.noTools ? [] : (effectiveConfiguredToolNames ?? defaultActiveToolNames))
 	).filter((name) => !excludedToolNameSet?.has(name));
 
 	let agent: Agent;
@@ -398,6 +413,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		backgroundBash: options.backgroundBash,
 	});
 	bindNativeSession(session);
 	const extensionsResult = resourceLoader.getExtensions();

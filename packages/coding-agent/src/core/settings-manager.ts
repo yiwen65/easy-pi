@@ -111,6 +111,7 @@ export interface Settings {
 	quietStartup?: boolean;
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
+	backgroundBashTaskTimeoutSeconds?: number; // Background bash task runtime bound in seconds; default: 600; 0 = no timeout
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
@@ -952,6 +953,13 @@ export class SettingsManager {
 
 	getShellCommandPrefix(): string | undefined {
 		return this.settings.shellCommandPrefix;
+	}
+
+	/** Background bash task runtime bound in seconds. Default: 600 (10 minutes); 0 disables the timeout. */
+	getBackgroundBashTaskTimeoutSeconds(): number {
+		const value = this.settings.backgroundBashTaskTimeoutSeconds;
+		if (value === undefined || !Number.isFinite(value) || value < 0) return 600;
+		return value;
 	}
 
 	setShellCommandPrefix(prefix: string | undefined): void {

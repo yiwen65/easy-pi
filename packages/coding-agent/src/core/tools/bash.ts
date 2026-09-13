@@ -18,7 +18,7 @@ import {
 	type ShellCaptureResult,
 	type WorkspacePolicy,
 } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv, NodeProcessExecutor } from "@earendil-works/pi-agent-core/node";
+import { type BackgroundTaskManager, NodeExecutionEnv, NodeProcessExecutor } from "@earendil-works/pi-agent-core/node";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
@@ -51,7 +51,10 @@ type BashSchema = ReturnType<typeof createCoreBashTool>["parameters"];
 
 export const bashToolSystemPromptContribution = {
 	snippet: "Execute bash commands (ls, rg, find, etc.)",
-	guidelines: ["You can inspect PI_* environment variables for current model and session details."],
+	guidelines: [
+		"You can inspect PI_* environment variables for current model and session details.",
+		"For long-running commands (builds, servers, watch mode, long test suites), prefer run_in_background=true over raising the timeout; follow up with wait_for or task_output instead of polling.",
+	],
 } as const;
 
 export type { BashToolDetails, BashToolInput } from "@earendil-works/pi-agent-core";
@@ -66,7 +69,7 @@ export interface BashOperations {
 	 * @param command The command to execute
 	 * @param cwd Working directory
 	 * @param options Execution options
-	 * @returns Promise resolving to exit code (null if killed)
+	 * @returns Promise resolving to exit code (null if killed); `promotedTaskId` is set when the command timed out and was promoted to a background task
 	 */
 	exec: (
 		command: string,
@@ -76,8 +79,10 @@ export interface BashOperations {
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
+			/** When true, a timeout keeps the command running as a background task instead of killing it. */
+			promoteOnTimeout?: boolean;
 		},
-	) => Promise<{ exitCode: number | null; signal?: string }>;
+	) => Promise<{ exitCode: number | null; signal?: string; promotedTaskId?: string }>;
 }
 
 /**
@@ -86,13 +91,16 @@ export interface BashOperations {
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+export function createLocalBashOperations(options?: {
+	shellPath?: string;
+	backgroundTasks?: BackgroundTaskManager;
+}): BashOperations {
 	const processExecutor = new NodeProcessExecutor({
 		onProcessStart: trackDetachedChildPid,
 		onProcessEnd: untrackDetachedChildPid,
 	});
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
+		exec: async (command, cwd, { onData, signal, timeout, env, promoteOnTimeout }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
 				throw new Error("aborted");
@@ -115,8 +123,15 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				abortSignal: signal,
 				onStdout: forwardData,
 				onStderr: forwardData,
+				promoteOnTimeout:
+					promoteOnTimeout && options?.backgroundTasks
+						? { adopt: (handle) => options.backgroundTasks!.adopt(handle, { command, cwd }) }
+						: undefined,
 			});
 			if (result.ok) {
+				if (result.value.promotedTaskId !== undefined) {
+					return { exitCode: null, promotedTaskId: result.value.promotedTaskId };
+				}
 				if (signal?.aborted) throw new Error("aborted");
 				return { exitCode: result.value.exitCode, signal: result.value.signal ?? undefined };
 			}
@@ -192,6 +207,13 @@ export interface BashToolOptions {
 	exposeSessionEnvironment?: boolean;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/** Shared background task manager; enables run_in_background and is required for promotion. */
+	backgroundTasks?: BackgroundTaskManager;
+	/** Kimi-style foreground promotion (60s default / 300s max, promote on timeout). Requires backgroundTasks. */
+	promotion?: {
+		foregroundTimeoutSeconds?: number;
+		maxForegroundTimeoutSeconds?: number;
+	};
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -325,6 +347,7 @@ async function captureBashOperations(
 	let exitCode: number | undefined;
 	let exitSignal: string | undefined;
 	let executionError: ExecutionError | undefined;
+	let promotedTaskId: string | undefined;
 	let cancelled = false;
 	const progress = (): ShellCaptureProgress => {
 		const snapshot = output.snapshot({ persistIfTruncated: true });
@@ -347,8 +370,10 @@ async function captureBashOperations(
 				signal: options.abortSignal,
 				timeout: options.timeout,
 				env: execution.env,
+				promoteOnTimeout: options.promoteOnTimeout,
 			});
-			exitCode = result.exitCode ?? undefined;
+			promotedTaskId = result.promotedTaskId;
+			exitCode = result.promotedTaskId !== undefined ? undefined : (result.exitCode ?? undefined);
 			exitSignal = result.signal;
 		} catch (error) {
 			const cause = error instanceof Error ? error : new Error(String(error));
@@ -378,6 +403,7 @@ async function captureBashOperations(
 			cancelled,
 			truncated: snapshot.truncation.truncated,
 			executionError,
+			...(promotedTaskId !== undefined ? { promotedTaskId } : {}),
 		});
 	} catch (error) {
 		return err(
@@ -397,13 +423,20 @@ export function createBashToolDefinition(
 	if (options?.operations && options.executionEnv) throw new Error("Choose BashOperations or executionEnv, not both.");
 	const env =
 		options?.executionEnv ??
-		new NodeExecutionEnv({ cwd: options?.operations ? cwd : resolve(cwd), shellPath: options?.shellPath });
+		new NodeExecutionEnv({
+			cwd: options?.operations ? cwd : resolve(cwd),
+			shellPath: options?.shellPath,
+			backgroundTasks: options?.backgroundTasks,
+		});
 	const ops =
 		options?.operations ??
-		(options?.executionEnv ? undefined : createLocalBashOperations({ shellPath: options?.shellPath }));
+		(options?.executionEnv
+			? undefined
+			: createLocalBashOperations({ shellPath: options?.shellPath, backgroundTasks: options?.backgroundTasks }));
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
 	const tool = createCoreBashTool<ExecutionToolContext & { extensionContext?: ExtensionContext }>({
 		commandPrefix: options?.commandPrefix,
+		promotion: options?.backgroundTasks ? options?.promotion : undefined,
 		prepare: async (execution, context, signal) => {
 			if (ops && !options?.operations) {
 				execution.cwd = getOrThrow(await env.absolutePath(execution.cwd, signal));

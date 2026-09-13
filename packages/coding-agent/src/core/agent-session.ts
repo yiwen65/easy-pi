@@ -24,6 +24,8 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
+import { ok } from "@earendil-works/pi-agent-core";
+import { BackgroundTaskManager } from "@earendil-works/pi-agent-core/node";
 import { contentText } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
@@ -49,9 +51,11 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { getShellConfig, getShellEnv } from "../utils/shell.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { BackgroundTaskNotifications } from "./background-task-notifications.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -129,8 +133,9 @@ import { buildSkillPromptExpansion } from "./skill-invocations.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import { BACKGROUND_TASK_TOOL_NAMES, createBackgroundTaskToolDefinitions } from "./tools/background-tasks.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { createAllToolDefinitions, createBashToolDefinition } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -234,6 +239,11 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * Background bash tasks. `promotion` enables Kimi-style foreground promotion (60s default,
+	 * 300s max, promote on timeout); it should stay off for print/SDK-style automation.
+	 */
+	backgroundBash?: { promotion?: boolean };
 	/**
 	 * Session-native compaction checkpoint configuration. The `hfCompaction` name is
 	 * retained as a source-compatible option for callers. Default: off.
@@ -398,6 +408,11 @@ export class AgentSession {
 
 	private _modelRuntime: ModelRuntime;
 
+	/** Shared background bash task manager. Survives reloads; created lazily on first tool build. */
+	private _backgroundTaskManager?: BackgroundTaskManager;
+	private readonly _backgroundBashPromotion: boolean;
+	private readonly _backgroundTaskNotifications = new BackgroundTaskNotifications();
+
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
@@ -425,12 +440,14 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._baseToolDefinitionsOverride = config.baseToolDefinitionsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._backgroundBashPromotion = config.backgroundBash?.promotion === true;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._installBackgroundTaskNotificationTransform();
 
 		// Default-on (EPIC-CCTX-001): the subsystem is pi's default compaction.
 		// Explicit config or PI_HF_COMPACTION overrides; "off" disables compaction.
@@ -648,6 +665,21 @@ export class AgentSession {
 			);
 		}
 		return checkpointAfter !== checkpointBefore ? this.agent.state.messages.slice() : messages;
+	}
+
+	/**
+	 * Inject pending background task terminal notifications at the next provider request boundary.
+	 * Mirrors the collaboration mailbox pattern: persist first, append once, never repeat.
+	 */
+	private _installBackgroundTaskNotificationTransform(): void {
+		const previous = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const added = await this._backgroundTaskNotifications.drain((message) =>
+				this.sendCustomMessage(message, { triggerTurn: false }),
+			);
+			const projected = added.length > 0 ? [...messages, ...added] : messages;
+			return previous ? previous(projected, signal) : projected;
+		};
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1094,6 +1126,8 @@ export class AgentSession {
 		);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		this._backgroundTaskNotifications.dispose();
+		void this._backgroundTaskManager?.cleanup();
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -2894,6 +2928,31 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
+	/** Number of queued background task notifications (diagnostics/tests). */
+	get pendingBackgroundTaskNotificationCount(): number {
+		return this._backgroundTaskNotifications.pendingCount;
+	}
+
+	/** True when a background task's terminal result was consumed via wait_for. */
+	isBackgroundTaskNotificationConsumed(taskId: string): boolean {
+		return this._backgroundTaskNotifications.isConsumed(taskId);
+	}
+
+	private _getOrCreateBackgroundTaskManager(): BackgroundTaskManager {
+		this._backgroundTaskManager ??= new BackgroundTaskManager({
+			shell: async () => ok(getShellConfig(this.settingsManager.getShellPath())),
+			resolveEnv: (env, inheritEnv) => (inheritEnv ? { ...getShellEnv(), ...env } : env),
+			defaultTimeoutMs: this.settingsManager.getBackgroundBashTaskTimeoutSeconds() * 1000,
+		});
+		this._backgroundTaskNotifications.bind(this._backgroundTaskManager);
+		return this._backgroundTaskManager;
+	}
+
+	/** Shared background bash task manager, present once the built-in bash tool has been built. */
+	get backgroundTasks(): BackgroundTaskManager | undefined {
+		return this._backgroundTaskManager;
+	}
+
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -2902,7 +2961,7 @@ export class AgentSession {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const baseToolDefinitions = this._baseToolDefinitionsOverride
+		const baseToolDefinitions: Record<string, ToolDefinition<any, any>> = this._baseToolDefinitionsOverride
 			? this._baseToolDefinitionsOverride
 			: this._baseToolsOverride
 				? Object.fromEntries(
@@ -2915,6 +2974,20 @@ export class AgentSession {
 						read: { autoResizeImages },
 						bash: { commandPrefix: shellCommandPrefix, shellPath },
 					});
+		if (!this._baseToolDefinitionsOverride && !this._baseToolsOverride) {
+			const backgroundTasks = this._getOrCreateBackgroundTaskManager();
+			baseToolDefinitions.bash = createBashToolDefinition(this._cwd, {
+				commandPrefix: shellCommandPrefix,
+				shellPath,
+				backgroundTasks,
+				promotion: this._backgroundBashPromotion ? {} : undefined,
+			});
+			for (const definition of createBackgroundTaskToolDefinitions(this._cwd, backgroundTasks, {
+				onWaitForSettled: (taskId) => this._backgroundTaskNotifications.markConsumedByWaitFor(taskId),
+			})) {
+				baseToolDefinitions[definition.name] = definition;
+			}
+		}
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -2943,7 +3016,7 @@ export class AgentSession {
 			? Object.keys(this._baseToolDefinitionsOverride)
 			: this._baseToolsOverride
 				? Object.keys(this._baseToolsOverride)
-				: ["read", "bash", "edit", "write"];
+				: ["read", "bash", "edit", "write", ...BACKGROUND_TASK_TOOL_NAMES];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

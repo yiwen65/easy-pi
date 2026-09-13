@@ -374,3 +374,30 @@
 - Correct approach: 统一更新直接 pin 后运行 `npm ls` 和全量/production `npm audit`；必要时 `npm dedupe --ignore-scripts`，再逐项审查并恢复无关 lock 变化，最后运行生成 lock checks。
 - Prevention: 安全依赖升级的验收必须同时检查完整树、audit 两种模式和 lock diff，不能只看 manifest 或 npm install 的 summary。
 - Verified by: 2026-09-12 Vitest 4.1.11 升级；初次安装后仍有 2 个 moderate，dedupe 后全量及 production audit 均为 0，代表性测试和 root check 通过。
+
+## `packages/*` 新增导出后 CLI 子进程测试挂掉——vitest 别名不到子进程,先重建对应包 dist
+
+- Wrong approach: 给 `packages/agent` 增加新导出(如 BackgroundTaskManager)并改 coding-agent 源码引用后,只跑 vitest 套件就认为 CLI 路径安全。
+- Why it failed: vitest 经 `vitest.base.ts` 别名把工作区包解析到 src,但 session-id-readonly/startup-session-name 等测试 spawn 的 CLI 子进程走 node_modules → `packages/agent/dist`(无别名);stale dist 没有新导出,import 直接抛错,子进程 exit 1 且测试用 `stdio: ignore` 吞掉 stderr,表象像 CLI 逻辑回归。
+- Recognition signal: 进程级 CLI 测试 exit code 1 而无明显原因;`npx tsgo` 与 vitest 全绿;手动用 `node --import tsx src/cli.ts ...` 复现才看到真实的 import 错误。
+- Correct approach: 改了 `packages/agent`(或其他被 CLI 子进程 import 的包)的导出面后,先 `cd packages/<pkg> && npm run build` 再跑 CLI 子进程测试。
+- Prevention: 新增跨包导出时,把"重建被依赖包 dist + 跑一个 CLI 子进程测试"列入验收;诊断 CLI 子进程失败时先手动复现拿到 stderr,不要从测试断言反推。
+- Verified by: 2026-09-13 background task 特性,session-id-readonly 与 startup-session-name 两个测试在重建 packages/agent dist 前 exit 1、重建后 4/4 通过;vitest 全程绿掩盖了该问题。
+
+## 真实 provider 评测 subagent——kimi-coding 并发额度会让 root 回合静默死亡
+
+- Wrong approach: 在 kimi-coding/k3 上跑 root+child 协作链路评测(或任何子代理场景)。
+- Why it failed: 子代理开始推理后,root 的继续请求必然撞上 403 permission_error("concurrent request limit");该状态码不在重试分类里,root 回合以 `assistant(error)[empty]` 静默终结,表象像模型不遵守指令。
+- Recognition signal: 消息轨迹末尾出现 `assistant(error)[empty]`;errorMessage 为 `403 ... "concurrent request limit"`;会话单独推理正常、叠加子代理即挂。
+- Correct approach: subagent/多会话并发评测用 openai-codex(gpt-6-astra); diagnosing 模型"不听话"先 dump 消息轨迹与 stopReason,再怀疑指令遵循。
+- Prevention: 真实 provider 测试文件默认 provider 设为 openai-codex;如未来要为 kimi-coding 支持子代理并发,候选修复是在 pi-ai `provider-retry` 加 `403 + /concurrent request limit/i` 的限定重试分类(2026-09-13 已实现过并按用户指示回退,见 subagent-real-provider 任务文档)。
+- Verified by: 2026-09-13 subagent-real-provider 任务;k3 两次复现 403 轨迹,openai-codex 四场景全过。
+
+## macOS 的 ps 没有 etimes——进程启动时间探测改用 etime 解析
+
+- Wrong approach: 用 `ps -o etimes= -p <pid>` 取进程启动秒数(PID 复用防护需要)。
+- Why it failed: macOS(BSD)ps 不支持 etimes 关键字,直接报 "keyword not found",防护静默退化为纯 kill 探测,测试报出相反的 busy/interrupted 结果。
+- Recognition signal: BSD ps 输出 "etimes: keyword not found";防护分支看似写了却不生效。
+- Correct approach: 用 `ps -o etime=`(两类系统都有)并解析 `[[dd-]hh:]mm:ss`;win32 直接返回 undefined 走降级路径。
+- Prevention: 任何 ps 关键字用法先在本机 `ps -o <kw>=` 验证再写进代码;POSIX 与 BSD 的 ps 关键字集差异大。
+- Verified by: 2026-09-13 collaboration-store PID 复用防护;etime 版本测试 37/37(含复用/存活/迁移三用例)通过。

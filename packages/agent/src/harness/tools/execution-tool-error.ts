@@ -5,6 +5,8 @@ export type ExecutionToolErrorCode =
 	| "PERMISSION_DENIED"
 	| "OUTSIDE_WORKSPACE"
 	| "SYMLINK_ESCAPE"
+	| "UNSUPPORTED"
+	| "SPAWN_ERROR"
 	| "ABORTED";
 
 /** Stable errors from execution tools and their optional path policy. */
