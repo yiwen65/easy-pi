@@ -5,7 +5,7 @@
 - Easy-pi root: `/Users/w/Projects/easy-pi/pi`
 - Implementation worktree: `/Users/w/Projects/easy-pi/pi-runtime-p00-p01`
 - Starting HEAD: `dba1626064e8fd5339c18d7430355c985e2956e9`
-- Current HEAD / branch: `42a1d34ed` / `my-pi`
+- Current HEAD / branch: `874481a1d` / `my-pi`
 - Codex reference root / HEAD: `/Users/w/Projects/easy-pi/codex` / `36f0dbe796d9bb1a18a0fc0640ed08b3e1d54564`
 - Execution scope: P00-P08
 - No Codex files, real APIs, credentials, dependencies, lockfiles, push, release, approval UI, OS sandbox, or permission mode changes were used.
@@ -22,7 +22,7 @@
 | P05 | passed | Host-owned asynchronous tool admission followed by final synchronous admission | Denied calls never invoke handlers; cancellation remains a tool-result outcome | `42a1d34ed` |
 | P06 | passed | Bounded shared/exclusive `ResourceScheduler` and optional per-tool resource declarations | Scheduler tests cover bounded slots, shared leases, queued cancellation, and Agent parallel-tool bounding | `42a1d34ed` |
 | P07 | passed | Redacted execution events with run/step/plan correlation and provider/tool/scheduler terminal outcomes | Execution observer assertions cover denied admission and step/plan correlation | `42a1d34ed` |
-| P08 | partial / blocked | Integration verification and delivery documentation | `npm run check` passed. Full `./test.sh` reached all workspaces but coding-agent retains 51 failures also present on the unchanged `dba162606` baseline; targeted runtime suites pass. | `42a1d34ed`; follow-up test characterization pending |
+| P08 | partial / blocked | Integration verification and delivery documentation | `npm run check` passed. Full `./test.sh` reached all workspaces but coding-agent retains 51 failures also present on the unchanged `dba162606` baseline; targeted runtime suites pass. | `42a1d34ed`, `874481a1d` |
 
 ## Runtime boundaries delivered
 
