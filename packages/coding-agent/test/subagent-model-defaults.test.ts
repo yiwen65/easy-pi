@@ -3,7 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { CollaborationResults } from "@easy-pi/subagent/collaboration-contract";
 import { afterEach, expect, test, vi } from "vitest";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
@@ -88,15 +88,11 @@ async function fixture(defaults: Partial<Settings> = {}) {
 		session.dispose();
 	});
 	const captures: Array<{ path: string; model: string; effort: string }> = [];
-	const nested = new Map<string, Record<string, unknown>[]>();
 	faux.setResponses(
 		Array.from({ length: 30 }, () => (context, options, _state, model) => {
 			const path = currentCollaborationPath(context);
 			captures.push({ path, model: model.id, effort: options?.reasoning ?? "off" });
-			const action = nested.get(path)?.shift();
-			return action
-				? fauxAssistantMessage(fauxToolCall("spawn_agent", action), { stopReason: "toolUse" })
-				: fauxAssistantMessage("done");
+			return fauxAssistantMessage("done");
 		}),
 	);
 	const call = (name: string, args: Record<string, unknown>) =>
@@ -108,7 +104,7 @@ async function fixture(defaults: Partial<Settings> = {}) {
 			expect(list.agents.find((agent) => agent.task_name === path)?.status).toBe("completed");
 		});
 	};
-	return { session, settingsManager, modelRuntime, faux, captures, nested, call, idle };
+	return { session, settingsManager, modelRuntime, faux, captures, call, idle };
 }
 
 test.each([
@@ -151,23 +147,23 @@ test.each([
 	},
 );
 
-test("existing child retains its model/effort while nested spawn reads changed live global defaults", async () => {
+test("existing child retains its model/effort while future root spawn reads changed live global defaults", async () => {
 	const f = await fixture({ subagentModel: "defaults-faux/one", subagentThinkingLevel: "low" });
 	await f.call("spawn_agent", spawnArgs("parent", "first"));
 	await f.idle("/root/parent");
 	f.settingsManager.setSubagentModel("defaults-faux/two");
 	f.settingsManager.setSubagentThinkingLevel("high");
-	f.nested.set("/root/parent", [spawnArgs("leaf", "nested")]);
 	await f.call("followup_task", followupArgs("parent", "delegate now"));
-	await f.idle("/root/parent/leaf");
 	await f.idle("/root/parent");
+	await f.call("spawn_agent", spawnArgs("fresh", "fresh defaults"));
+	await f.idle("/root/fresh");
 	expect(
 		f.captures
 			.filter(({ path }) => path === "/root/parent")
 			.every(({ model, effort }) => model === "one" && effort === "low"),
 	).toBe(true);
-	expect(f.captures.find(({ path }) => path === "/root/parent/leaf")).toEqual({
-		path: "/root/parent/leaf",
+	expect(f.captures.find(({ path }) => path === "/root/fresh")).toEqual({
+		path: "/root/fresh",
 		model: "two",
 		effort: "high",
 	});
