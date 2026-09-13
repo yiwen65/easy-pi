@@ -186,6 +186,29 @@ describe("AgentHarness budgets, progress, retry, pause (T-004)", () => {
 		expect(result.value.error.code).toBe("no_progress");
 	});
 
+	it("stops with no_progress when repeats differ only in volatile provider fields and prose", async () => {
+		const session = createSession();
+		let turn = 0;
+		const { harness } = await createHarness(
+			session,
+			scripted(() => {
+				turn += 1;
+				const message = toolCallMessage({ ...call, id: `call-${turn}` });
+				message.content.unshift({ type: "text", text: `narration for attempt ${turn}` });
+				message.responseId = `resp-${turn}`;
+				message.usage = { ...usage, input: turn, totalTokens: turn + 1 };
+				return message;
+			}),
+			{
+				tools: [failingTool()],
+			},
+		);
+		const result = await harness.prompt("loop");
+		expect(result.ok).toBe(true);
+		if (!result.ok || result.value.kind !== "failed") throw new Error("expected failed");
+		expect(result.value.error.code).toBe("no_progress");
+	});
+
 	it("retries a transient provider error with a bounded backoff and one logical result", async () => {
 		const session = createSession();
 		const { harness } = await createHarness(
