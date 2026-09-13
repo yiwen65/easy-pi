@@ -743,6 +743,13 @@ async function executePreparedToolCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
+	if (signal?.aborted) {
+		return {
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		};
+	}
+
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
 

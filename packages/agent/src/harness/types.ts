@@ -1,6 +1,7 @@
 import type { SimpleStreamOptions, Transport } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "../types.ts";
+import type { BackgroundTaskManagerLike } from "./env/background-task-types.ts";
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
 export type Result<TValue, TError> = { ok: true; value: TValue } | { ok: false; error: TError };
@@ -365,5 +366,5 @@ export interface Shell {
 /** Filesystem and process execution environment used by the harness. */
 export interface ExecutionEnv extends FileSystem, Shell {
 	/** Background bash task support. Absent on hosts that only run foreground commands. */
-	readonly backgroundTasks?: import("./env/background-task-manager.ts").BackgroundTaskManager;
+	readonly backgroundTasks?: BackgroundTaskManagerLike;
 }

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExecutionError, err, ok, type Result, toError } from "../types.ts";
 import { sanitizeBinaryOutput, trimToLastUtf8Bytes } from "../utils/shell-output.ts";
+import { type BackgroundTaskOutput, type BackgroundTaskRecord, isTerminalTaskStatus } from "./background-task-types.ts";
 import {
 	killNodeProcessTree,
 	type NodeProcessShellConfig,
@@ -15,35 +16,13 @@ import {
 	terminateNodeProcessTree,
 } from "./node-process-executor.ts";
 
+export type { BackgroundTaskOutput, BackgroundTaskRecord, BackgroundTaskStatus } from "./background-task-types.ts";
+export { isTerminalTaskStatus } from "./background-task-types.ts";
+
 export const DEFAULT_BACKGROUND_TIMEOUT_MS = 600_000;
 export const DEFAULT_STOP_GRACE_MS = 5_000;
 /** Preview reads come from a bounded in-memory tail; the log file always holds the full output. */
 const TAIL_BUFFER_BYTES = 128 * 1024;
-
-export type BackgroundTaskStatus = "running" | "stopping" | "succeeded" | "failed" | "timed_out" | "stopped";
-
-export interface BackgroundTaskRecord {
-	id: string;
-	command: string;
-	cwd: string;
-	status: BackgroundTaskStatus;
-	pid?: number;
-	startedAt: number;
-	endedAt?: number;
-	exitCode?: number | null;
-	signal?: string | null;
-	outputPath: string;
-	promoted: boolean;
-	error?: string;
-}
-
-export interface BackgroundTaskOutput {
-	/** Sanitized tail preview of at most the requested bytes. */
-	output: string;
-	outputPath: string;
-	totalBytes: number;
-	truncated: boolean;
-}
 
 export interface BackgroundTaskManagerOptions {
 	/** Resolve the shell configuration used for tasks started directly in the background. */
@@ -71,10 +50,6 @@ interface ManagedTask {
 	stopRequested: boolean;
 	timedOut: boolean;
 	waiters: Array<() => void>;
-}
-
-export function isTerminalTaskStatus(status: BackgroundTaskStatus): boolean {
-	return status !== "running" && status !== "stopping";
 }
 
 function appendTail(tail: string, chunk: string): string {

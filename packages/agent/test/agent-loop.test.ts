@@ -658,6 +658,143 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executed).toEqual([[{ oldText: "before", newText: "after" }]]);
 	});
 
+	it("does not execute prepared tools after parallel preflight is cancelled", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		let releaseSecondPreflight: (() => void) | undefined;
+		const secondPreflightReleased = new Promise<void>((resolve) => {
+			releaseSecondPreflight = resolve;
+		});
+		let secondPreflightReached: () => void = () => {};
+		const secondPreflightStarted = new Promise<void>((resolve) => {
+			secondPreflightReached = resolve;
+		});
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async ({ toolCall }) => {
+				if (toolCall.id === "tool-2") {
+					secondPreflightReached();
+					await secondPreflightReleased;
+				}
+				return undefined;
+			},
+		};
+		let streamCalls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: streamCalls++ === 0 ? "toolUse" : "stop",
+					message:
+						streamCalls === 1
+							? createAssistantMessage(
+									[
+										{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+										{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+									],
+									"toolUse",
+								)
+							: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			});
+			return stream;
+		};
+		const abortController = new AbortController();
+		const stream = agentLoop(
+			[createUserMessage("echo both")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			config,
+			abortController.signal,
+			streamFn,
+		);
+
+		await secondPreflightStarted;
+		abortController.abort();
+		releaseSecondPreflight?.();
+		await stream.result();
+
+		expect(executed).toEqual([]);
+	});
+
+	it("does not start a later sequential tool after cancellation and preserves the started signal", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		let receivedSignal: AbortSignal | undefined;
+		let releaseFirstTool: (() => void) | undefined;
+		const firstToolReleased = new Promise<void>((resolve) => {
+			releaseFirstTool = resolve;
+		});
+		let firstToolStarted: () => void = () => {};
+		const firstToolStartedPromise = new Promise<void>((resolve) => {
+			firstToolStarted = resolve;
+		});
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			execute: async (_toolCallId, params, signal) => {
+				receivedSignal = signal;
+				executed.push(params.value);
+				if (params.value === "first") {
+					firstToolStarted();
+					await firstToolReleased;
+				}
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const abortController = new AbortController();
+		const controlledStream = agentLoop(
+			[createUserMessage("echo sequentially")],
+			{ systemPrompt: "", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter, toolExecution: "sequential" },
+			abortController.signal,
+			() => {
+				const response = new MockAssistantStream();
+				queueMicrotask(() =>
+					response.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+								{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+							],
+							"toolUse",
+						),
+					}),
+				);
+				return response;
+			},
+		);
+
+		await firstToolStartedPromise;
+		abortController.abort();
+		releaseFirstTool?.();
+		await controlledStream.result();
+
+		expect(executed).toEqual(["first"]);
+		expect(receivedSignal?.aborted).toBe(true);
+	});
+
 	it("should emit tool_execution_end in completion order but persist tool results in source order", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		let firstResolved = false;

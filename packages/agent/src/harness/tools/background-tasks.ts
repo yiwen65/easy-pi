@@ -1,9 +1,9 @@
 import { type Static, Type } from "typebox";
 import {
-	type BackgroundTaskManager,
+	type BackgroundTaskManagerLike,
 	type BackgroundTaskRecord,
 	isTerminalTaskStatus,
-} from "../env/background-task-manager.ts";
+} from "../env/background-task-types.ts";
 import type { AgentHarnessTool } from "../types.ts";
 import { formatSize } from "../utils/truncate.ts";
 import { ExecutionToolError } from "./execution-tool-error.ts";
@@ -61,7 +61,7 @@ export interface WaitForDetails {
 	timedOut: boolean;
 }
 
-function requireManager(context: ExecutionToolContext): BackgroundTaskManager {
+function requireManager(context: ExecutionToolContext): BackgroundTaskManagerLike {
 	const manager = context.env.backgroundTasks;
 	if (!manager) {
 		throw new ExecutionToolError("UNSUPPORTED", "Background tasks are not supported by this execution environment.");
