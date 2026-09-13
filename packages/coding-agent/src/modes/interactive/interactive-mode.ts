@@ -168,6 +168,13 @@ import {
 	type StatusIndicator,
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
+import {
+	collaborationToolTarget,
+	SUBAGENT_TOOL_NAMES,
+	SubagentGroupComponent,
+	SubagentOpsLineComponent,
+	SubagentTranscriptRouter,
+} from "./components/subagent-group.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
@@ -585,7 +592,8 @@ export class InteractiveMode {
 	private streamingMessage: AssistantMessage | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
-	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private pendingTools = new Map<string, ToolExecutionComponent | SubagentOpsLineComponent>();
+	private subagentRouter!: SubagentTranscriptRouter;
 	private grokTurnStartedAt: number | undefined = undefined;
 	private currentTurnThinkingGroup: GrokThinkingTurnGroupComponent | undefined = undefined;
 	private currentTurnToolGroup: GrokToolTurnGroupComponent | undefined = undefined;
@@ -779,7 +787,21 @@ export class InteractiveMode {
 	 * (one compact line by default); independent tools remain direct chat children.
 	 * Legacy mode keeps every tool as a direct chat child.
 	 */
-	private addToolComponentToChat(component: ToolExecutionComponent): void {
+	/** Collaboration tools join their child's group; targetless ones render as compact ops lines. */
+	private createRoutedToolComponent(
+		toolName: string,
+		toolCallId: string,
+		args: unknown,
+	): ToolExecutionComponent | SubagentOpsLineComponent {
+		if (SUBAGENT_TOOL_NAMES.has(toolName) && !collaborationToolTarget(toolName, args)) {
+			return new SubagentOpsLineComponent(toolName, args);
+		}
+		return this.createToolExecutionComponent(toolName, toolCallId, args);
+	}
+
+	private addToolComponentToChat(component: ToolExecutionComponent, toolName: string, args: unknown): void {
+		this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
+		if (this.subagentRouter.handleTool(toolName, args, component)) return;
 		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent && component.canUseTurnGroup()) {
 			let group = this.currentTurnToolGroup;
 			if (!group || !this.chatContainer.children.includes(group)) {
@@ -843,6 +865,7 @@ export class InteractiveMode {
 			}
 		}
 		this.chatContainer.clear();
+		this.subagentRouter?.clear();
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
 		this.pendingSkillMentions = [];
@@ -3440,12 +3463,9 @@ export class InteractiveMode {
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
 							if (!this.pendingTools.has(content.id)) {
-								const component = this.createToolExecutionComponent(
-									content.name,
-									content.id,
-									content.arguments,
-								);
-								this.addToolComponentToChat(component);
+								const component = this.createRoutedToolComponent(content.name, content.id, content.arguments);
+								if (component instanceof SubagentOpsLineComponent) this.chatContainer.addChild(component);
+								else this.addToolComponentToChat(component, content.name, content.arguments);
 								this.pendingTools.set(content.id, component);
 							} else {
 								const component = this.pendingTools.get(content.id);
@@ -3520,8 +3540,9 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
-					component = this.createToolExecutionComponent(event.toolName, event.toolCallId, event.args);
-					this.addToolComponentToChat(component);
+					component = this.createRoutedToolComponent(event.toolName, event.toolCallId, event.args);
+					if (component instanceof SubagentOpsLineComponent) this.chatContainer.addChild(component);
+					else this.addToolComponentToChat(component, event.toolName, event.args);
 					this.pendingTools.set(event.toolCallId, component);
 				}
 				component.markExecutionStarted();
@@ -3828,6 +3849,8 @@ export class InteractiveMode {
 				}
 				this.flushPendingSkillMentions();
 				if (message.display) {
+					this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
+					if (this.subagentRouter.handleMailboxMessage(message)) break;
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(
 						message,
@@ -3896,7 +3919,7 @@ export class InteractiveMode {
 		this.currentTurnToolGroup = undefined;
 		this.pendingSkillMentions = [];
 		this.pendingSkillMentionsPopulateHistory = false;
-		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+		const renderedPendingTools = new Map<string, ToolExecutionComponent | SubagentOpsLineComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
@@ -3927,8 +3950,9 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
-						const component = this.createToolExecutionComponent(content.name, content.id, content.arguments);
-						this.addToolComponentToChat(component);
+						const component = this.createRoutedToolComponent(content.name, content.id, content.arguments);
+						if (component instanceof SubagentOpsLineComponent) this.chatContainer.addChild(component);
+						else this.addToolComponentToChat(component, content.name, content.arguments);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -4432,6 +4456,8 @@ export class InteractiveMode {
 		} else if (target.component instanceof GrokThinkingTurnGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow);
 		} else if (target.component instanceof GrokToolTurnGroupComponent) {
+			toggled = target.component.handleOverviewClick(localRow, width);
+		} else if (target.component instanceof SubagentGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow, width);
 		} else if (target.component instanceof GrokToolExecutionComponent) {
 			toggled = target.component.handleOverviewClick(localRow);

@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from "../core/extensions/types.ts
 import { GrokAgentsPanel } from "../modes/interactive-grok/components/grok-agents-panel.ts";
 import { getNativeSession } from "./native-session-binding.ts";
 import { createPiChildSessionHost } from "./pi-child-session-host.ts";
-import { PiCollaborationMonitor } from "./pi-collaboration-monitor.ts";
+import { type AgentListRow, type AgentRowState, PiCollaborationMonitor } from "./pi-collaboration-monitor.ts";
 import { registerPiCollaborationTools } from "./pi-collaboration-tools.ts";
 
 /** Product root only. Factory discovery opens no resources; session_start owns the team. */
@@ -21,6 +21,49 @@ export function registerPiCollaborationRoot(
 	let startupError: string | undefined;
 	let panelOpen = false;
 	let stopped = false;
+	let toastCtx: ExtensionContext | undefined;
+	let toastTimer: ReturnType<typeof setTimeout> | undefined;
+	let toastQueue: AgentListRow[] = [];
+	const settledStates = new Map<string, AgentRowState>();
+	let settledSeeded = false;
+
+	/** Toast child terminal transitions, but only while the operator is not already watching the panel. */
+	const trackTerminalToasts = (): void => {
+		if (!monitor) return;
+		const rows = monitor.list().filter((row) => row.task_name !== "/root");
+		if (!settledSeeded) {
+			settledSeeded = true;
+			for (const row of rows) settledStates.set(row.task_name, row.state);
+			return;
+		}
+		for (const row of rows) {
+			const previous = settledStates.get(row.task_name);
+			settledStates.set(row.task_name, row.state);
+			const terminal = row.state === "completed" || row.state === "failed" || row.state === "interrupted";
+			const wasActive = previous === "running" || previous === "idle" || previous === "pending";
+			if (!terminal || !wasActive) continue;
+			toastQueue.push(row);
+		}
+		if (toastQueue.length > 0 && !toastTimer) {
+			toastTimer = setTimeout(() => {
+				toastTimer = undefined;
+				const settled = toastQueue.splice(0);
+				if (!toastCtx || toastCtx.mode !== "tui" || panelOpen) return;
+				if (settled.length === 1) {
+					const row = settled[0];
+					const word = row.state === "completed" ? "done" : row.state;
+					const level = row.state === "completed" ? "info" : row.state === "failed" ? "error" : "warning";
+					toastCtx.ui.notify(`${row.task_name} ${word} — /agents to inspect`, level);
+					return;
+				}
+				const failed = settled.filter((row) => row.state === "failed").length;
+				toastCtx.ui.notify(
+					`${settled.length} agents settled${failed > 0 ? `, ${failed} failed` : ""} — /agents to inspect`,
+					failed > 0 ? "error" : "info",
+				);
+			}, 400);
+		}
+	};
 	const start = (ctx: ExtensionContext, recoverInterruptedOwner = false) => {
 		if (controller || stopped) return;
 		const session = getNativeSession(ctx.sessionManager);
@@ -72,6 +115,7 @@ export function registerPiCollaborationRoot(
 			});
 			controller = new CollaborationController({ store, host, agentDir, getPermissions });
 			monitor = new PiCollaborationMonitor(controller, session);
+			monitor.subscribe(trackTerminalToasts);
 			registerPiCollaborationTools({ pi, controller, identity, getSession: () => session, getDefaults }).start(ctx);
 			startupError = undefined;
 		} catch (error) {
@@ -83,6 +127,7 @@ export function registerPiCollaborationRoot(
 		}
 	};
 	pi.on("session_start", (_event, ctx) => {
+		toastCtx = ctx;
 		try {
 			start(ctx);
 		} catch (error) {
@@ -95,6 +140,10 @@ export function registerPiCollaborationRoot(
 	});
 	pi.on("session_shutdown", async () => {
 		stopped = true;
+		toastCtx = undefined;
+		if (toastTimer) clearTimeout(toastTimer);
+		toastTimer = undefined;
+		toastQueue = [];
 		monitor?.dispose();
 		await controller?.shutdown();
 	});
@@ -114,7 +163,13 @@ export function registerPiCollaborationRoot(
 				return;
 			}
 			if (!monitor) {
-				ctx.ui.notify(`Native agents unavailable: ${startupError ?? "not started"}`, "error");
+				const remedy =
+					startupError === "interrupted"
+						? " Run /agents recover to adopt the interrupted team (recovery never resumes tasks)."
+						: startupError === "busy"
+							? " Another live process owns this team; close it or use that session."
+							: "";
+				ctx.ui.notify(`Native agents unavailable: ${startupError ?? "not started"}.${remedy}`, "error");
 				return;
 			}
 			if (ctx.mode !== "tui") {
