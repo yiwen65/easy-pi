@@ -355,13 +355,14 @@ const OPENAI_TOOL_SEARCH_MODEL_IDS = new Set([
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
+	"gpt-6-astra",
 ]);
 // Public OpenAI documents additional_tools for applications that load tools
 // outside the normal tool-search flow. Codex currently uses the input item for
 // its Responses Lite GPT-5.6 models.
 // https://developers.openai.com/api/docs/guides/tools-tool-search#add-tools-at-a-specific-point-in-the-input
 const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = OPENAI_TOOL_SEARCH_MODEL_IDS;
-const OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+const OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"]);
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272000;
 const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
 	"gpt-5.4",
@@ -2606,6 +2607,22 @@ async function generateModels() {
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
+		{
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			// Matches the published pi.dev catalog entry for this model (long-context
+			// tier at 272k: input x2, output x1.5, cacheRead/cacheWrite x2). Thinking
+			// cannot be disabled; minimal maps to low; xhigh/max are native efforts.
+			cost: withOpenAiLongContextPricing({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }),
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+			thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh", max: "max" },
+		},
 		{
 			id: "gpt-5.3-codex-spark",
 			name: "GPT-5.3 Codex Spark",
