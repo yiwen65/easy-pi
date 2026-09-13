@@ -31,13 +31,22 @@ function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
 		.map((model) => ({ ...model, provider: providerId }));
 }
 
+/** IDs of the generated (bundled) baseline models a remote overlay is merged onto. */
+type BaselineIds = ReadonlySet<string>;
+
 function remoteModels(
 	entry: ModelsStoreEntry | undefined,
 	localGeneratedAt: number | undefined,
+	baselineIds: BaselineIds,
 ): readonly Model<Api>[] {
 	if (!entry) return [];
 	if (localGeneratedAt !== undefined && (entry.lastModified === undefined || entry.lastModified <= localGeneratedAt)) {
-		return [];
+		// The generated catalog is at least as new as this snapshot, so it wins
+		// collisions. It can still lag the snapshot's model set (a regeneration
+		// built from a hand-maintained list while the remote catalog already added
+		// a model, for example), so models the generated catalog does not know
+		// remain visible instead of being dropped.
+		return entry.models.filter((model) => !baselineIds.has(model.id));
 	}
 	return entry.models;
 }
@@ -49,13 +58,16 @@ export function withRemoteCatalog(
 	localGeneratedAt?: number,
 ): Provider {
 	let dynamicModels: readonly Model<Api>[] = [];
+	const baselineIds: BaselineIds = new Set(provider.getModels().map((model) => model.id));
 
 	return {
 		...provider,
 		getModels: () => mergeModels(provider.getModels(), dynamicModels),
 		refreshModels: async (context) => {
 			const stored = context.stored;
-			const restored = remoteModels(stored, localGeneratedAt).filter((model) => model.provider === provider.id);
+			const restored = remoteModels(stored, localGeneratedAt, baselineIds).filter(
+				(model) => model.provider === provider.id,
+			);
 			if (
 				!(await context.publish({
 					update: () => {
@@ -125,7 +137,7 @@ export function withRemoteCatalog(
 				lastModified: Number.isNaN(lastModified) ? 0 : lastModified,
 				etag: response.headers.get("etag") ?? undefined,
 			};
-			const published = remoteModels(entry, localGeneratedAt);
+			const published = remoteModels(entry, localGeneratedAt, baselineIds);
 			await context.publish({
 				persist: entry,
 				update: () => {

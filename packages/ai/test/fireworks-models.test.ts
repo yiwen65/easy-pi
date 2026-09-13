@@ -37,15 +37,16 @@ describe("Fireworks models", () => {
 		});
 	});
 
-	it("registers the Fire Pass turbo router model", () => {
+	it("registers router models with their API routing and base URL", () => {
+		// models.dev dropped the Fire Pass turbo router; pin a current router id.
 		const model = getModels("fireworks").find(
-			(candidate) => candidate.id.startsWith("accounts/fireworks/routers/") && candidate.id.endsWith("-turbo"),
+			(candidate) => candidate.id === "accounts/fireworks/routers/glm-5p3-fast",
 		);
 
 		expect(model).toBeDefined();
 		expect(model?.api).toBe("anthropic-messages");
 		expect(model?.baseUrl).toBe("https://api.fireworks.ai/inference");
-		expect(model?.input).toEqual(["text", "image"]);
+		expect(model?.input).toEqual(["text"]);
 	});
 
 	it("aligns GLM 5.2 Fast with GLM 5.2's OpenAI-compatible config", () => {

@@ -98,9 +98,17 @@ describe("remote catalog provider", () => {
 		const localGeneratedAt = Date.parse("2026-07-23T10:00:00.000Z");
 		const newerHeader = new Date(localGeneratedAt + 60_000).toUTCString();
 		const responses = [
-			new Response(JSON.stringify({ old: model("old") }), {
-				headers: { "last-modified": new Date(localGeneratedAt - 60_000).toUTCString() },
-			}),
+			new Response(
+				// The stale snapshot renames "static" and adds "old": bundled must win
+				// the collision while "old" still surfaces.
+				JSON.stringify({
+					static: { ...model("static"), name: "stale static" },
+					old: model("old"),
+				}),
+				{
+					headers: { "last-modified": new Date(localGeneratedAt - 60_000).toUTCString() },
+				},
+			),
 			new Response(JSON.stringify({ newer: model("newer") }), {
 				headers: { "last-modified": newerHeader },
 			}),
@@ -110,11 +118,33 @@ describe("remote catalog provider", () => {
 		const store = new InMemoryModelsStore();
 
 		await refreshProvider(provider, store);
-		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static"]);
+		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "old"]);
+		expect(provider.getModels().find((entry) => entry.id === "static")?.name).toBe("static");
 
 		await refreshProvider(provider, store, { force: true });
 		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "newer"]);
 		expect(await store.read(provider.id)).toMatchObject({ lastModified: Date.parse(newerHeader) });
+	});
+
+	it("restores snapshot-only models from a stale stored catalog without network", async () => {
+		// Regression: a generated catalog regenerated *after* the stored snapshot
+		// must not hide models only the snapshot knows (gpt-6-astra vanishing from
+		// openai-codex). A stale overlay may not override bundled definitions, but
+		// snapshot-only ids stay visible even when no network is available.
+		const provider = testProvider(Date.parse("2026-09-12T20:37:00.000Z"));
+		const store = new InMemoryModelsStore();
+		const storedAt = Date.parse("2026-09-10T20:33:00.000Z");
+		await store.write(provider.id, {
+			models: [model("gpt-6-astra")],
+			checkedAt: storedAt,
+			lastModified: storedAt,
+		});
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+		await refreshProvider(provider, store, { allowNetwork: false });
+
+		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "gpt-6-astra"]);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
 	it("revalidates a stored catalog with its etag and keeps the overlay on 304", async () => {
