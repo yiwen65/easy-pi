@@ -506,7 +506,7 @@ Pi is aggressively extensible so it doesn't have to dictate your workflow. Featu
 
 **No built-in to-dos.** They confuse models. Use a TODO.md file, or build your own with [extensions](#extensions).
 
-**No background bash.** Use tmux. Full observability, direct interaction.
+**Background bash tasks (this fork).** Long-running commands can run in the background: `bash(run_in_background=true)` returns a task ID immediately, and in interactive mode a foreground command that exceeds 60s (explicit timeout, max 300s) is not killed — it keeps running as a background task. Manage tasks with `task_list`, `task_output` (≤32KB tail preview plus the full log path), `task_stop` (SIGTERM, then SIGKILL after 5s), and `wait_for` (block up to 600s). Task completion is reported as a synthetic message at the next request boundary, the status bar shows the active task count, and `/tasks` opens a read-only panel. Background runtime is bounded by the `backgroundBashTaskTimeoutSeconds` setting (default 600, `0` = no timeout). For full isolation and persistence beyond the session, use tmux or containers.
 
 Read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) for the full rationale.
 

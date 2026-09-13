@@ -20,6 +20,8 @@ export interface ShellCaptureResult extends ShellCaptureProgress {
 	cancelled: boolean;
 	truncated: boolean;
 	executionError?: ExecutionError;
+	/** Set when the command timed out and was promoted to a background task; output captured so far remains in `output`. */
+	promotedTaskId?: string;
 }
 
 function toExecutionError(error: unknown): ExecutionError {
@@ -41,7 +43,11 @@ export function sanitizeBinaryOutput(str: string): string {
 		.join("");
 }
 
-function trimToLastUtf8Bytes(text: string, maxBytes: number, encoder: { encode(input?: string): Uint8Array }): string {
+export function trimToLastUtf8Bytes(
+	text: string,
+	maxBytes: number,
+	encoder: { encode(input?: string): Uint8Array },
+): string {
 	const bytes = encoder.encode(text);
 	if (bytes.byteLength <= maxBytes) return text;
 	let start = bytes.byteLength - maxBytes;
@@ -152,6 +158,7 @@ export async function executeShellWithCapture(
 			timeout: options?.timeout,
 			abortSignal: options?.abortSignal,
 			captureOutput: false,
+			promoteOnTimeout: options?.promoteOnTimeout,
 			onStdout: onChunk,
 			onStderr: onChunk,
 		});
@@ -186,8 +193,9 @@ export async function executeShellWithCapture(
 		const cancelled = options?.abortSignal?.aborted ?? false;
 		return ok({
 			...progress,
-			exitCode: cancelled ? undefined : result.value.exitCode,
+			exitCode: cancelled || result.value.promotedTaskId !== undefined ? undefined : result.value.exitCode,
 			...(result.value.signal ? { signal: result.value.signal } : {}),
+			...(result.value.promotedTaskId !== undefined ? { promotedTaskId: result.value.promotedTaskId } : {}),
 			cancelled,
 			truncated: progress.truncation.truncated,
 		});

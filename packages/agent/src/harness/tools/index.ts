@@ -1,4 +1,19 @@
 export {
+	createBackgroundTaskTools,
+	createTaskListTool,
+	createTaskOutputTool,
+	createTaskStopTool,
+	createWaitForTool,
+	type TaskListDetails,
+	type TaskListInput,
+	type TaskOutputDetails,
+	type TaskOutputInput,
+	type TaskStopDetails,
+	type TaskStopInput,
+	type WaitForDetails,
+	type WaitForInput,
+} from "./background-tasks.ts";
+export {
 	type BashExecution,
 	type BashPrepare,
 	type BashTerminationReason,

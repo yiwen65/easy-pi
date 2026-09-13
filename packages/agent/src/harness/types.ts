@@ -163,6 +163,7 @@ export type ExecutionErrorCode =
 	| "shell_unavailable"
 	| "spawn_error"
 	| "callback_error"
+	| "not_found"
 	| "unknown";
 
 /** Error returned by {@link ExecutionEnv.exec}. */
@@ -336,6 +337,11 @@ export interface ShellExecOptions {
 	onStdout?: (chunk: string) => void;
 	/** Called with stderr chunks as they are produced. */
 	onStderr?: (chunk: string) => void;
+	/**
+	 * When true and the command exceeds `timeout`, keep it running as a background task instead of
+	 * terminating it; the result then carries `promotedTaskId`. Hosts without background task support ignore this.
+	 */
+	promoteOnTimeout?: boolean;
 }
 
 /** Settled foreground shell result. A signal is additive metadata; exitCode remains numeric for existing hosts. */
@@ -344,6 +350,8 @@ export interface ShellExecResult {
 	stderr: string;
 	exitCode: number;
 	signal?: string;
+	/** Present when the command timed out and was promoted to a background task; `exitCode` is then the -1 sentinel and no signal is set. */
+	promotedTaskId?: string;
 }
 
 /** Shell execution capability used by the harness. */
@@ -355,4 +363,7 @@ export interface Shell {
 }
 
 /** Filesystem and process execution environment used by the harness. */
-export interface ExecutionEnv extends FileSystem, Shell {}
+export interface ExecutionEnv extends FileSystem, Shell {
+	/** Background bash task support. Absent on hosts that only run foreground commands. */
+	readonly backgroundTasks?: import("./env/background-task-manager.ts").BackgroundTaskManager;
+}

@@ -302,6 +302,8 @@ pi --exclude-tools ask_question
 
 Pi keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+It intentionally does not include built-in MCP, permission popups, plan mode, or to-dos. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+
+Background bash tasks are built in (this fork): `bash(run_in_background=true)` starts a command in the background and returns a task ID; in interactive mode a foreground command exceeding 60s (explicit timeout, max 300s) is promoted to a background task instead of being killed. Tasks are managed with the `task_list`, `task_output`, `task_stop`, and `wait_for` tools; completion is reported at the next request boundary; the status bar and the read-only `/tasks` panel show active tasks. The `backgroundBashTaskTimeoutSeconds` setting bounds background runtime (default 600, `0` = no timeout).
 
 For the full rationale, read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/).

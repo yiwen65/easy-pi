@@ -1,4 +1,8 @@
 export {
+	BACKGROUND_TASK_TOOL_NAMES,
+	createBackgroundTaskToolDefinitions,
+} from "./background-tasks.ts";
+export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
