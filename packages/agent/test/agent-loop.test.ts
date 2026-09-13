@@ -306,10 +306,50 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(observed).toHaveLength(1);
 		expect(observed[0]?.model).toBe(config.model);
-		expect(observed[0]?.context).toBe(streamedContext);
+		expect(observed[0]?.context).not.toBe(streamedContext);
+		expect(observed[0]?.context).toEqual(streamedContext);
 		expect(observed[0]?.context.systemPrompt).toBe("authoritative system prompt");
 		expect(observed[0]?.context.messages).toHaveLength(1);
 		expect(observed[0]?.context.messages[0]).toMatchObject({ role: "user", content: "new" });
+	});
+
+	it("isolates provider context observer mutations from the request", async () => {
+		let streamedSystemPrompt = "";
+		let streamedUserText = "";
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			onProviderContext: (_model, providerContext) => {
+				providerContext.systemPrompt = "observer mutation";
+				const message = providerContext.messages[0];
+				if (message?.role === "user") message.content = "observer mutation";
+			},
+		};
+		const streamFn: NonNullable<Parameters<typeof agentLoop>[4]> = (_model, providerContext) => {
+			streamedSystemPrompt = providerContext.systemPrompt ?? "";
+			const message = providerContext.messages[0];
+			if (message?.role === "user") streamedUserText = typeof message.content === "string" ? message.content : "";
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "Response" }]),
+				});
+			});
+			return stream;
+		};
+
+		await agentLoop(
+			[createUserMessage("request")],
+			{ systemPrompt: "system", messages: [], tools: [] },
+			config,
+			undefined,
+			streamFn,
+		).result();
+
+		expect(streamedSystemPrompt).toBe("system");
+		expect(streamedUserText).toBe("request");
 	});
 
 	it("does not block the provider request when context observation fails", async () => {

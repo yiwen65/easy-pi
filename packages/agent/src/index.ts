@@ -43,6 +43,7 @@ export {
 export * from "./agent.ts";
 // Loop functions
 export * from "./agent-loop.ts";
+export * from "./execution-events.ts";
 export * from "./harness/agent-harness.ts";
 export {
 	type BranchPreparation,
@@ -141,8 +142,12 @@ export * from "./harness/utils/shell-output.ts";
 export * from "./harness/utils/truncate.ts";
 // Proxy utilities
 export * from "./proxy.ts";
+export * from "./resource-scheduler.ts";
+export * from "./run-scope.ts";
 export * from "./search/index.ts";
+export * from "./step-snapshot.ts";
 // Stream defaults
 export { setDefaultStreamFn } from "./stream-fn.ts";
+export * from "./tool-plan.ts";
 // Types
 export * from "./types.ts";

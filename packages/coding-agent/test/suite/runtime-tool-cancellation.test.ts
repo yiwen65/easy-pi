@@ -74,4 +74,36 @@ describe("runtime tool cancellation", () => {
 		expect(executed).toEqual([]);
 		expect(harness.session.isStreaming).toBe(false);
 	});
+
+	it("does not start a provider request after AgentSession preflight cancellation", async () => {
+		let releaseTransform: (() => void) | undefined;
+		const transformReleased = new Promise<void>((resolve) => {
+			releaseTransform = resolve;
+		});
+		let transformStarted: () => void = () => {};
+		const transformStartedPromise = new Promise<void>((resolve) => {
+			transformStarted = resolve;
+		});
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("provider should not run")]);
+		const previousTransform = harness.session.agent.transformContext;
+		harness.session.agent.transformContext = async (messages, signal) => {
+			transformStarted();
+			await transformReleased;
+			return previousTransform ? previousTransform(messages, signal) : messages;
+		};
+
+		const promptPromise = harness.session.prompt("cancel during provider preparation");
+		await transformStartedPromise;
+		harness.session.agent.abort();
+		releaseTransform?.();
+		await promptPromise;
+
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.eventsOfType("message_end").at(-1)?.message).toMatchObject({
+			role: "assistant",
+			stopReason: "aborted",
+		});
+	});
 });
