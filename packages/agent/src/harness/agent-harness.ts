@@ -13,6 +13,7 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai";
 import { validateToolArguments } from "@earendil-works/pi-ai";
+import { fingerprintAssistantTurn, fingerprintToolResult } from "../no-progress.ts";
 import { getDefaultStreamFn } from "../stream-fn.ts";
 import type {
 	AgentMessage,
@@ -1934,41 +1935,20 @@ function errorToolResult(toolCall: AgentToolCall, message: string): ToolResultMe
 }
 
 /**
- * Stable projection of an entry for no-progress fingerprinting. Only the
- * repeated action and its outcome count: tool calls reduce to name +
- * arguments, tool results to name + error flag + model-visible content.
- * Provider-assigned ids, thinking/text signatures, usage, and timestamps
- * change on every request even when the model repeats the exact same plan,
- * and assistant prose is excluded because a looping model rephrases it while
- * repeating the same tool call (e.g. `bash true` with fresh narration).
+ * Stable projection of an entry for no-progress fingerprinting, built on the
+ * shared turn/result projections in no-progress.ts. Only the repeated action
+ * and its outcome count; provider-assigned ids, signatures, usage, and
+ * timestamps change on every request, and assistant prose is excluded because
+ * a looping model rephrases it while repeating the same tool call.
  */
 function fingerprintEntry(entry: Entry): string {
 	if (entry.type !== "message") return entry.type;
 	const message = entry.message;
 	if (message.role === "assistant") {
-		const calls = message.content
-			.filter((block): block is AgentToolCall => block.type === "toolCall")
-			.map((call) => ({ name: call.name, arguments: call.arguments, namespace: call.namespace }));
-		return JSON.stringify({
-			role: message.role,
-			stopReason: message.stopReason,
-			errorMessage: message.errorMessage,
-			terminate: entry.terminate,
-			calls,
-		});
+		return `${entry.terminate ? "T" : ""}A:${fingerprintAssistantTurn(message)}`;
 	}
 	if (message.role === "toolResult") {
-		const content = message.content.map((block) =>
-			block.type === "text"
-				? { type: block.type, text: block.text }
-				: { type: block.type, mimeType: block.mimeType },
-		);
-		return JSON.stringify({
-			role: message.role,
-			toolName: message.toolName,
-			isError: message.isError,
-			content,
-		});
+		return `R:${fingerprintToolResult(message)}`;
 	}
 	const { timestamp: _timestamp, ...rest } = message as unknown as Record<string, unknown>;
 	return JSON.stringify(rest);

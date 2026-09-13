@@ -10,6 +10,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import { fingerprintAssistantTurn, fingerprintToolResult, NO_PROGRESS_REPEAT_LIMIT } from "./no-progress.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
@@ -166,6 +167,9 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
+	/** Progress fingerprints of consecutive tool-call turns in this run. */
+	let lastTurnFingerprint: string | undefined;
+	let turnFingerprintRepeats = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -251,6 +255,30 @@ async function runLoop(
 				context: currentContext,
 				newMessages,
 			};
+
+			// No-progress guard: a tool-call turn whose action and outcomes are
+			// byte-identical to the two preceding turns is a stuck loop (e.g. the
+			// model repeating `bash true`). End the run with an explicit error
+			// instead of burning tokens until the user aborts.
+			if (hasMoreToolCalls && toolCalls.length > 0) {
+				const fingerprint = [fingerprintAssistantTurn(message), ...toolResults.map(fingerprintToolResult)].join(
+					"\n",
+				);
+				if (fingerprint === lastTurnFingerprint) turnFingerprintRepeats += 1;
+				else {
+					lastTurnFingerprint = fingerprint;
+					turnFingerprintRepeats = 1;
+				}
+				if (turnFingerprintRepeats >= NO_PROGRESS_REPEAT_LIMIT) {
+					const stopMessage = noProgressStopMessage(config, toolCalls);
+					currentContext.messages.push(stopMessage);
+					newMessages.push(stopMessage);
+					await emit({ type: "message_start", message: stopMessage });
+					await emit({ type: "message_end", message: stopMessage });
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+			}
 
 			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {
 				await emit({ type: "agent_end", messages: newMessages });
@@ -807,6 +835,35 @@ function createErrorToolResult(message: string, details: unknown = {}): AgentToo
 	return {
 		content: [{ type: "text", text: message }],
 		details,
+	};
+}
+
+/**
+ * Terminal assistant message for a run stopped by the no-progress guard.
+ * stopReason "error" routes through the existing failure surfacing path; the
+ * wording matches no retryable provider-error pattern, so AgentSession will
+ * not auto-retry it.
+ */
+function noProgressStopMessage(config: AgentLoopConfig, toolCalls: AgentToolCall[]): AssistantMessage {
+	const names = [...new Set(toolCalls.map((call) => call.name))].join(", ");
+	const text = `Stopped: no progress. ${names} returned identical results to identical arguments ${NO_PROGRESS_REPEAT_LIMIT} turns in a row. The agent is stuck in a loop; change the approach or the arguments.`;
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "error",
+		errorMessage: text,
+		timestamp: Date.now(),
 	};
 }
 

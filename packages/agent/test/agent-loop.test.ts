@@ -1686,3 +1686,94 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(messages[0].role).toBe("assistant");
 	});
 });
+
+describe("no-progress guard", () => {
+	function createLoopHarness(options: { toolResultText: (turn: number) => string }) {
+		const toolSchema = Type.Object({ command: Type.String() });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "bash",
+			label: "Bash",
+			description: "Run a command",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.command);
+				return {
+					content: [{ type: "text" as const, text: options.toolResultText(executed.length) }],
+					details: {},
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		// Real providers assign fresh tool call ids, thinking signatures, and usage
+		// on every request; the guard must see through all of them.
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				turn += 1;
+				const message = createAssistantMessage(
+					[
+						{ type: "thinking", thinking: `narration for attempt ${turn}` },
+						{ type: "toolCall", id: `call-${turn}`, name: "bash", arguments: { command: "true" } },
+					],
+					"toolUse",
+				);
+				message.usage = { ...createUsage(), input: turn, totalTokens: turn };
+				message.responseId = `resp-${turn}`;
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+		return { executed, context, config, streamFn };
+	}
+
+	it("stops with an explicit error after three identical tool-call turns", async () => {
+		const { executed, context, config, streamFn } = createLoopHarness({ toolResultText: () => "(no output)" });
+		const stream = agentLoop([createUserMessage("loop")], context, config, undefined, streamFn);
+		const messages = await stream.result();
+
+		expect(executed).toEqual(["true", "true", "true"]);
+		const last = messages[messages.length - 1];
+		expect(last.role).toBe("assistant");
+		if (last.role !== "assistant") return;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toContain("no progress");
+	});
+
+	it("keeps running when identical calls produce different results", async () => {
+		const {
+			executed,
+			context,
+			config,
+			streamFn: loopStreamFn,
+		} = createLoopHarness({
+			toolResultText: (turn) => `output ${turn}`,
+		});
+		let calls = 0;
+		const streamFn: typeof loopStreamFn = () => {
+			calls += 1;
+			if (calls > 4) {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return stream;
+			}
+			return loopStreamFn();
+		};
+		const stream = agentLoop([createUserMessage("loop")], context, config, undefined, streamFn);
+		const messages = await stream.result();
+
+		expect(executed).toHaveLength(4);
+		const last = messages[messages.length - 1];
+		expect(last.role).toBe("assistant");
+		if (last.role !== "assistant") return;
+		expect(last.stopReason).toBe("stop");
+	});
+});
