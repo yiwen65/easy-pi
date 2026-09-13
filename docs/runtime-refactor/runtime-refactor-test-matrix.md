@@ -20,9 +20,9 @@ Results use `pass`, `fail`, `baseline_fail`, `not_run`, or `not_applicable`; loc
 | O01 | I07/I12 | Redacted execution events correlate provider/tool outcomes with run, step, and plan IDs | pass | Execution admission observer assertions | Darwin arm64 |
 | S01 | I11 | Existing provider/model/cache-affinity characterization suite | pass | Coding-agent targeted runtime/session suite; no provider network | Darwin arm64 |
 | CHECK | I12 | Repository type, format, import, shrinkwrap, install-lock, and browser smoke checks | pass | `npm run check` (exit 0; formatter changes reviewed) | Darwin arm64 |
-| FOCUSED-AGENT | I12 | Agent runtime focused regression set | pass | 6 files, 66 tests passed | Darwin arm64 |
+| FOCUSED-AGENT | I12 | Agent runtime focused regression set | pass | 7 files, 80 tests passed | Darwin arm64 |
 | FOCUSED-SESSION | I12 | Session/runtime focused regression set | pass | 4 files, 18 tests passed | Darwin arm64 |
-| SUITE | I12 | Isolated full `./test.sh` | fail / baseline environment blocker | Two runs completed. Targeted packages pass, but the workspace coding-agent full suite reports 52 unrelated environment/source-fixture failures and cannot be used as a clean P08 gate; full log is in `/var/folders/rb/jccv7g0d5gnf20hz77wy08jw0000gnf/T/pi-bash-task-21-af007290.log` (path may be cleaned by the host). | Darwin arm64 |
+| SUITE | I12 | Isolated full `./test.sh` | fail / baseline blocker | Current `my-pi` run: coding-agent reports 17 failed files / 51 failed tests / 2,253 passed / 56 skipped. Unchanged `dba162606` baseline reports the same 17 files / 51 failed tests, so these failures are outside the runtime-refactor files. | Darwin arm64 |
 
 ## P02-P08 evidence summary
 
@@ -35,6 +35,6 @@ Results use `pass`, `fail`, `baseline_fail`, `not_run`, or `not_applicable`; loc
 
 ## Validation gaps and residual risks
 
-- The complete workspace test script is not green in this isolated worktree because the full coding-agent suite depends on unrelated generated/UI fixtures and has existing behavioral failures; the changed runtime's targeted suites are green.
+- The complete workspace test script is not green because the coding-agent suite has 51 pre-existing failures across package-manager/resource-loader/UI/subagent/session-message tests; the changed runtime's targeted suites are green.
 - Tests ran on Darwin arm64 only. Windows process-group behavior, non-cooperating in-process extension code, and real provider transports were not exercised.
 - The runtime cannot force-stop arbitrary JavaScript extensions that bypass the supplied abort signal and host execution environment.
