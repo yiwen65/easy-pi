@@ -290,7 +290,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
-		expect(sawSteeringMessage).toBe(true);
+		// Cancellation seals new provider admission. The queued steering message is
+		// consumed by the aborted run but is not sent after cancellation.
+		expect(sawSteeringMessage).toBe(false);
+		expect(session.getSteeringMessages()).toEqual([]);
 	});
 
 	it("should allow prompt() after previous completes", async () => {
