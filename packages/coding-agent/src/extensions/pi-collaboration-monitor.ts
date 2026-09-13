@@ -47,11 +47,34 @@ interface RuntimePreview {
 	tools: Map<string, string>;
 	phase: string;
 }
+
+/** Normalized agent lifecycle for display; the raw store status stays in {@link AgentListRow.status}. */
+export type AgentRowState = "pending" | "running" | "idle" | "completed" | "failed" | "interrupted" | "closed";
+
+export interface AgentListRow {
+	task_name: string;
+	/** Legacy composite string (store status plus live phase), kept for the non-TUI JSON dump. */
+	status: string;
+	state: AgentRowState;
+	loaded: boolean;
+	model: string;
+	/** First line of the delegated task text, when available. */
+	objective?: string;
+	/** First line of the delivered result, when the agent settled. */
+	resultSummary?: string;
+	/** Last monitor-observed activity (status/loaded change or live session event). */
+	lastActivityAt?: number;
+}
+
 export interface AgentRuntimeView {
 	path: string;
 	status: string;
+	state: AgentRowState;
 	loaded: boolean;
 	model: string;
+	objective?: string;
+	resultSummary?: string;
+	lastActivityAt?: number;
 	sessionFile?: string;
 	text: string;
 }
@@ -67,6 +90,7 @@ export class PiCollaborationMonitor {
 	private closed = false;
 	private children: ReturnType<CollaborationController["list"]>;
 	private readonly records = new Map<string, ReturnType<CollaborationController["inspect"]>>();
+	private readonly activity = new Map<string, number>();
 	get isClosed(): boolean {
 		return this.closed;
 	}
@@ -78,7 +102,16 @@ export class PiCollaborationMonitor {
 		this.subscriptions.add(
 			controller.subscribe(() => {
 				try {
+					const previous = new Map(
+						this.children.map((child) => [child.task_name, `${child.status}:${child.loaded}`]),
+					);
 					this.children = controller.list(this.identity);
+					const now = Date.now();
+					for (const child of this.children) {
+						if (previous.get(child.task_name) !== `${child.status}:${child.loaded}`) {
+							this.activity.set(child.task_name, now);
+						}
+					}
 				} catch {
 					this.dispose();
 					return;
@@ -112,7 +145,9 @@ export class PiCollaborationMonitor {
 			phase: "idle",
 		};
 		this.previews.set(identity.agentPath, preview);
+		this.activity.set(identity.agentPath, Date.now());
 		const update = (event: AgentSessionEvent) => {
+			this.activity.set(identity.agentPath, Date.now());
 			switch (event.type) {
 				case "message_update":
 					preview.partial = messageText(event.message);
@@ -182,27 +217,79 @@ export class PiCollaborationMonitor {
 		this.changed();
 		return detach;
 	}
-	list() {
+	private recordFor(path: string): ReturnType<CollaborationController["inspect"]> | undefined {
+		if (path === "/root") return undefined;
+		if (!this.records.has(path)) {
+			try {
+				this.records.set(path, this.controller.inspect(this.identity, path));
+			} catch {
+				return undefined;
+			}
+		}
+		return this.records.get(path);
+	}
+
+	private firstLine(text: string | undefined): string | undefined {
+		if (!text) return undefined;
+		const line = text.split("\n", 1)[0].trim();
+		return line.length > 120 ? `${line.slice(0, 117)}...` : line || undefined;
+	}
+
+	private modelText(path: string): string {
+		const record = this.recordFor(path);
+		return record
+			? `${record.model.provider}/${record.model.id} (${record.model.thinkingLevel})`
+			: `${this.root.model?.provider ?? "?"}/${this.root.model?.id ?? "?"} (${this.root.thinkingLevel})`;
+	}
+
+	private childState(child: { task_name: string; status: string; loaded: boolean }): AgentRowState {
+		if (child.status === "running" || child.status === "pending") {
+			if (!child.loaded) return "pending";
+			const phase = this.previews.get(child.task_name)?.phase;
+			return phase === "running" ? "running" : "idle";
+		}
+		return child.status as AgentRowState;
+	}
+
+	list(): AgentListRow[] {
 		if (this.closed) throw new Error("Team monitor closed");
+		const rootRow: AgentListRow = {
+			task_name: "/root",
+			status: this.root.isStreaming ? "running" : "idle",
+			state: this.root.isStreaming ? "running" : "idle",
+			loaded: true,
+			model: `${this.root.model?.provider ?? "?"}/${this.root.model?.id ?? "?"} (${this.root.thinkingLevel})`,
+			lastActivityAt: this.activity.get("/root"),
+		};
 		return [
-			{ task_name: "/root", status: this.root.isStreaming ? "running" : "idle", loaded: true },
-			...this.children.map((child) => ({ ...child })),
+			rootRow,
+			...this.children.map((child) => {
+				const record = this.recordFor(child.task_name);
+				return {
+					...child,
+					state: this.childState(child),
+					model: this.modelText(child.task_name),
+					objective: this.firstLine(record?.taskMessage?.text),
+					resultSummary: this.firstLine(record?.result),
+					lastActivityAt: this.activity.get(child.task_name),
+				};
+			}),
 		];
 	}
 	view(path: string): AgentRuntimeView {
 		const row = this.list().find((item) => item.task_name === path);
 		if (!row) throw new Error("Unknown agent");
-		if (path !== "/root" && !this.records.has(path))
-			this.records.set(path, this.controller.inspect(this.identity, path));
-		const record = this.records.get(path);
+		const record = this.recordFor(path);
 		const preview = this.previews.get(path);
 		return {
 			path,
 			status: `${row.status}${preview ? ` / ${preview.phase}` : ""}`,
+			state: row.state,
 			loaded: row.loaded,
-			model: record
-				? `${record.model.provider}/${record.model.id} (${record.model.thinkingLevel})`
-				: `${this.root.model?.provider ?? "?"}/${this.root.model?.id ?? "?"} (${this.root.thinkingLevel})`,
+			model: row.model,
+			objective: row.objective,
+			resultSummary: row.resultSummary,
+			lastActivityAt: row.lastActivityAt,
 			sessionFile: record?.sessionPath ?? (path === "/root" ? this.root.sessionFile : undefined),
 			text: preview
 				? bound([preview.text, preview.partial, ...preview.tools.values()].filter(Boolean).join("\n\n"))

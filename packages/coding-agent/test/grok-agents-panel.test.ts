@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
 	type AssistantMessage,
 	type Context,
@@ -190,7 +191,7 @@ test("default Grok command observes live native child; message/busy/interrupt ta
 	expect(await f.capture()).toContain("Agents — shared workspace");
 	f.terminalKey("\x1b[B");
 	f.key("\r");
-	expect(f.text()).toContain("running");
+	expect(f.text()).toContain("Running");
 	expect(f.text()).toContain("grok-agents-faux");
 	// Passive send does not start a second child turn or put text in root history.
 	f.key("\x13");
@@ -206,10 +207,10 @@ test("default Grok command observes live native child; message/busy/interrupt ta
 	expect(f.text()).toContain("busy-draft");
 	f.key("\x1b");
 	f.key("\x0b");
-	expect(f.text()).toContain("Interrupt /root/worker?");
+	expect(f.text()).toContain("Interrupt /root/worker?"); // consequence text added
 	f.key("\r");
 	await vi.waitFor(() => expect(f.text()).toContain("Interrupt finished"));
-	expect(f.text()).toContain("interrupted");
+	expect(f.text()).toContain("Interrupted");
 	expect(JSON.stringify(f.session.messages)).toBe(rootMessages);
 	expect(child.rootTurns).toBe(2);
 	expect(await f.capture()).toContain("/root/worker");
@@ -233,11 +234,13 @@ test.each(["git", "non-git"])(
 		f.key("\r");
 		// Root and child use the same actual built-in write tool and working directory.
 		child.release(tool("write", { path: "shared.txt", content: "shared edit" }));
-		await vi.waitFor(() => expect(f.renders.some((text) => text.includes("tool write running"))).toBe(true));
+		await vi.waitFor(() =>
+			expect(f.renders.some((text) => text.includes("⚙ write") && text.includes("running"))).toBe(true),
+		);
 		await vi.waitFor(() => expect(child.childTurns).toBe(2));
 		expect(await readFile(join(f.cwd, "shared.txt"), "utf8")).toBe("shared edit");
 		child.release(fauxAssistantMessage("live 中文 output\u001b[?1049l safe"));
-		await vi.waitFor(() => expect(f.text()).toContain("completed"));
+		await vi.waitFor(() => expect(f.text()).toContain("Done"));
 		expect(f.renders.some((text) => text.includes("live 中文 output"))).toBe(true);
 		expect(f.text()).not.toContain("\x1b[?1049l");
 		f.key("\x1b");
@@ -246,11 +249,13 @@ test.each(["git", "non-git"])(
 		await f.restart();
 		const turns = child.childTurns;
 		const reopened = await f.show();
-		expect(f.text()).toContain("unloaded");
 		f.key("\x1b[B");
 		f.key("\r");
-		await vi.waitFor(() => expect(f.text()).toContain("retained history"));
-		expect(f.text()).toContain("live 中文 output");
+		// loaded state is detail-view metadata: the History line reports it after inspecting.
+		// The retained preview loads from disk almost immediately; assert the settled state,
+		// not the transient "no preview yet" fallback.
+		await vi.waitFor(() => expect(f.text()).toContain("not loaded"));
+		await vi.waitFor(() => expect(f.text()).toContain("live 中文 output"));
 		expect(child.childTurns).toBe(turns);
 		// Explicit followup, not watching, starts inference on the same logical agent.
 		f.key("\x06");
@@ -264,7 +269,7 @@ test.each(["git", "non-git"])(
 		await reopened.command;
 		expect(await readFile(join(f.cwd, "shared.txt"), "utf8")).toBe("shared edit");
 		const active = await f.show();
-		expect(f.text()).toContain("running");
+		expect(f.text()).toContain("Running");
 		f.key("\x1b[B");
 		f.key("\r");
 		f.key("\x0b");
@@ -290,7 +295,7 @@ test.each(["version", "oversized", "symlink"])(
 		await child.ready;
 		child.release(fauxAssistantMessage("retained answer"));
 		const showing = await f.show();
-		await vi.waitFor(() => expect(f.text()).toContain("completed"));
+		await vi.waitFor(() => expect(f.text()).toContain("Done"));
 		f.key("\x1b");
 		await showing.command;
 		const team = join(f.cwd, "agent", "teams", f.session.sessionId);
@@ -325,6 +330,138 @@ test.each(["version", "oversized", "symlink"])(
 		await reopened.command;
 	},
 );
+
+test("list rows show objectives, actions work from the list, and nothing closes the panel implicitly", async () => {
+	const f = await fixture();
+	const child = holdChild(f);
+	await f.session.prompt("delegate");
+	await child.ready;
+	const { command } = await f.show();
+
+	// header counts, objective subline, and the explicit root marker
+	expect(f.text()).toContain("1 running");
+	expect(f.text()).toContain("inspect");
+	expect(f.text()).toContain("you are here");
+
+	// Enter on /root must not close the panel (no implicit close)
+	f.key("\r");
+	await Promise.resolve();
+	expect(f.panel).toBeDefined();
+	expect(f.text()).toContain("Agents — shared workspace");
+
+	// actions are available from the list on the selected child
+	f.key("\x1b[B");
+	f.key("\x13");
+	expect(f.text()).toContain("won't start an idle agent");
+	expect(f.text()).toContain("/root/worker");
+	f.key("\x1b");
+
+	// interrupt explains the consequence before confirming
+	f.key("\x0b");
+	expect(f.text()).toContain("Interrupt /root/worker?");
+	expect(f.text()).toContain("history is kept");
+	f.key("\x1b");
+
+	// cycling with alt+arrows never closes the panel, even with a single child
+	f.key("\r");
+	await vi.waitFor(() => expect(f.text()).toContain("conversation"));
+	f.key("\x1b[1;3C");
+	f.key("\x1b[1;3D");
+	await Promise.resolve();
+	expect(f.panel).toBeDefined();
+	expect(f.text()).toContain("/root/worker");
+
+	f.key("\x1b");
+	f.key("\x1b");
+	await command;
+	child.release(fauxAssistantMessage("done"));
+});
+
+test("settled rows show the result summary and detail follows the newest activity", async () => {
+	const f = await fixture();
+	const child = holdChild(f);
+	await f.session.prompt("delegate");
+	await child.ready;
+	child.release(fauxAssistantMessage(Array.from({ length: 120 }, (_, i) => `worker line ${i}`).join("\n")));
+	const { command } = await f.show();
+	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	// settled row carries the result first line
+	expect(f.text()).toContain("worker line 0");
+
+	f.key("\x1b[B");
+	f.key("\r");
+	await vi.waitFor(() => expect(f.text()).toContain("[latest]"));
+	expect(f.text()).toContain("worker line 119");
+
+	f.key("\x1b[5~"); // page up detaches from follow mode
+	await vi.waitFor(() => expect(f.text()).toMatch(/\[\d+%/));
+	f.key("\x1b[F"); // End reattaches
+	await vi.waitFor(() => expect(f.text()).toContain("[latest]"));
+
+	f.key("\x1b");
+	f.key("\x1b");
+	await command;
+});
+
+test("child terminal toast fires when the panel is closed and stays silent while it is open", async () => {
+	const f = await fixture();
+	const child = holdChild(f);
+	await f.session.prompt("delegate");
+	await child.ready;
+
+	// panel closed: completion raises a toast
+	child.release(fauxAssistantMessage("first done"));
+	await vi.waitFor(
+		() => expect(f.notices.some((notice) => notice.includes("/root/worker") && notice.includes("done"))).toBe(true),
+		{ timeout: 5_000 },
+	);
+
+	// panel open: the next settle stays silent
+	const opened = await f.show();
+	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	f.key("\x1b[B");
+	f.key("\x06");
+	f.key(JSON.stringify(followupArgs("/root/worker", "second task")));
+	f.key("\r");
+	await vi.waitFor(() => expect(f.text()).toContain("Task accepted"));
+	await vi.waitFor(() => expect(child.childTurns).toBe(2));
+	child.release(fauxAssistantMessage("second done"));
+	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	await new Promise((resolve) => setTimeout(resolve, 700));
+	expect(f.notices.filter((notice) => notice.includes("/root/worker"))).toHaveLength(1);
+
+	// the followup was composed from the list view, so a single Esc closes the panel
+	f.key("\x1b");
+	await opened.command;
+});
+
+test("/agents with a dead team owner explains the recovery path", async () => {
+	const f = await fixture();
+	const child = holdChild(f);
+	await f.session.prompt("delegate");
+	await child.ready;
+	child.release(fauxAssistantMessage("done"));
+
+	// Simulate the previous owner dying without a clean shutdown: owner row left behind.
+	await f.restart(async () => {
+		const registry = join(f.cwd, "agent", "teams", f.session.sessionId, "registry.sqlite");
+		const db = new DatabaseSync(registry);
+		db.prepare("UPDATE team SET owner=?, pid=?").run("dead-owner", 999999);
+		db.close();
+	});
+	await f.session.prompt("/agents");
+	expect(
+		f.notices.some(
+			(notice) => notice.includes("Native agents unavailable: interrupted") && notice.includes("/agents recover"),
+		),
+	).toBe(true);
+
+	// recovery adopts the team and the panel works again
+	const recovering = f.session.prompt("/agents recover");
+	await vi.waitFor(() => expect(f.panel).toBeDefined());
+	f.key("\x1b");
+	await recovering;
+});
 
 test("a retired legacy child environment cannot silently become an unrestricted native root", async () => {
 	let f: Awaited<ReturnType<typeof fixture>>;
@@ -364,7 +501,7 @@ test("operator followup diagnostics retain the draft and show a corrective hint 
 	await child.ready;
 	child.release(fauxAssistantMessage("done"));
 	const { command } = await f.show();
-	await vi.waitFor(() => expect(f.text()).toContain("completed"));
+	await vi.waitFor(() => expect(f.text()).toContain("Done"));
 	f.key("\x1b[B");
 	f.key("\r");
 	const calls = f.faux.state.callCount;
@@ -393,9 +530,9 @@ test("root shutdown dismisses the viewer and releases callbacks; configurable pa
 	f.key("\r");
 	f.keys.setUserBindings({ "app.agents.message": "ctrl+m" });
 	f.key("\x13");
-	expect(f.text()).not.toContain("Message (does not start idle agent)");
+	expect(f.text()).not.toContain("won't start an idle agent");
 	f.key("\r");
-	expect(f.text()).toContain("Message (does not start idle agent)");
+	expect(f.text()).toContain("won't start an idle agent");
 	await f.session.extensionRunner.emit({ type: "session_shutdown", reason: "new" });
 	await command;
 	expect(f.panel).toBeUndefined();

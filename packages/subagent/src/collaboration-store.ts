@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
@@ -172,6 +173,35 @@ interface Row {
 	snapshot: string;
 	owner: string | null;
 	pid: number | null;
+	owner_started_at?: number | null;
+}
+
+/**
+ * Process start time of `pid` in epoch milliseconds, via elapsed-time probing. Undefined when the
+ * platform cannot answer (win32, ps failure): callers then fall back to the kill(pid, 0) probe.
+ * Guards against PID reuse: a recycled pid necessarily starts later than the recorded owner.
+ */
+function probeProcessStartMs(pid: number): number | undefined {
+	if (process.platform === "win32") return undefined;
+	try {
+		// ps etime renders [[dd-]hh:]mm:ss; etimes is not portable (absent on macOS).
+		const out = execFileSync("ps", ["-o", "etime=", "-p", String(pid)], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		const match = out.match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+		if (!match) return undefined;
+		const seconds =
+			Number(match[1] ?? 0) * 86_400 + Number(match[2] ?? 0) * 3_600 + Number(match[3]) * 60 + Number(match[4]);
+		return Date.now() - seconds * 1000;
+	} catch {
+		return undefined;
+	}
+}
+
+/** This process's own start time in epoch milliseconds (second-resolution tolerance is fine). */
+function ownProcessStartMs(): number {
+	return Date.now() - Math.floor(process.uptime() * 1000);
 }
 
 /**
@@ -222,7 +252,7 @@ export class CollaborationStore {
 		try {
 			if (fresh) {
 				this.database.exec(
-					"CREATE TABLE team (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL, owner TEXT, pid INTEGER)",
+					"CREATE TABLE team (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL, owner TEXT, pid INTEGER, owner_started_at INTEGER)",
 				);
 				const snapshot: CollaborationSnapshot = {
 					version: 1,
@@ -231,7 +261,16 @@ export class CollaborationStore {
 					revision: 0,
 					agents: [],
 				};
-				this.database.prepare("INSERT INTO team VALUES (1, ?, NULL, NULL)").run(JSON.stringify(snapshot));
+				this.database.prepare("INSERT INTO team VALUES (1, ?, NULL, NULL, NULL)").run(JSON.stringify(snapshot));
+			} else {
+				// Older registries predate the PID-reuse guard column; add it in place.
+				const columns = this.database
+					.prepare("PRAGMA table_info(team)")
+					.all()
+					.map((column) => (column as { name: string }).name);
+				if (!columns.includes("owner_started_at")) {
+					this.database.exec("ALTER TABLE team ADD COLUMN owner_started_at INTEGER");
+				}
 			}
 			this.database.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
 			try {
@@ -246,6 +285,11 @@ export class CollaborationStore {
 						process.kill(row.pid!, 0);
 					} catch (error) {
 						if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+					}
+					if (alive && row.owner_started_at !== null && row.owner_started_at !== undefined) {
+						// PID-reuse guard: a recycled pid starts later than the recorded owner process.
+						const startedAt = probeProcessStartMs(row.pid!);
+						if (startedAt !== undefined && Math.abs(startedAt - row.owner_started_at) > 10_000) alive = false;
 					}
 					if (alive) throw new CollaborationError("busy", "Team is owned by a live controller");
 					if (!options.recoverInterruptedOwner)
@@ -273,8 +317,8 @@ export class CollaborationStore {
 				}
 				snapshot.revision++;
 				this.database
-					.prepare("UPDATE team SET snapshot=?, owner=?, pid=? WHERE id=1")
-					.run(JSON.stringify(snapshot), this.owner, process.pid);
+					.prepare("UPDATE team SET snapshot=?, owner=?, pid=?, owner_started_at=? WHERE id=1")
+					.run(JSON.stringify(snapshot), this.owner, process.pid, ownProcessStartMs());
 				this.database.exec("COMMIT");
 				this.cacheAuthority(snapshot, version);
 			} catch (error) {
@@ -289,9 +333,9 @@ export class CollaborationStore {
 
 	private readRow(): Row {
 		if (this.closed) throw new CollaborationError("storage_error", "Team store is closed");
-		const row = this.database.prepare("SELECT snapshot, owner, pid FROM team WHERE id=1").get() as unknown as
-			| Row
-			| undefined;
+		const row = this.database
+			.prepare("SELECT snapshot, owner, pid, owner_started_at FROM team WHERE id=1")
+			.get() as unknown as Row | undefined;
 		if (!row) throw new CollaborationError("storage_error", "Missing team metadata");
 		return row;
 	}
@@ -366,7 +410,9 @@ export class CollaborationStore {
 	close(): void {
 		if (this.closed) return;
 		try {
-			this.database.prepare("UPDATE team SET owner=NULL, pid=NULL WHERE id=1 AND owner=?").run(this.owner);
+			this.database
+				.prepare("UPDATE team SET owner=NULL, pid=NULL, owner_started_at=NULL WHERE id=1 AND owner=?")
+				.run(this.owner);
 		} finally {
 			this.closed = true;
 			this.database.close();

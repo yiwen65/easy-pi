@@ -7,8 +7,8 @@ import type { Context, Tool } from "@earendil-works/pi-ai";
 import {
 	COLLABORATION_LIMITS,
 	CollaborationError,
-	type DelegationContext,
 	DELIVER_RESULT_TOOL_NAME,
+	type DelegationContext,
 } from "@easy-pi/subagent/collaboration-contract";
 import type { ChildRequestPrefix } from "@easy-pi/subagent/session-host";
 import type { AgentSession } from "../core/agent-session.ts";

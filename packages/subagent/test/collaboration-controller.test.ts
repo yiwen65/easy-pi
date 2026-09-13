@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -203,6 +203,81 @@ test("a failed durable update stops other executions instead of retrying or admi
 	await expect(f.controller.settled()).rejects.toThrow(/persist/);
 	await expect(f.controller.spawn(caller, "c", "third", model)).rejects.toThrow(/operator inspection/);
 	expect(f.runs).toEqual(["first"]);
+});
+
+test("a recycled pid with a mismatched start time is treated as a dead owner", () => {
+	const cwd = root();
+	const path = join(cwd, "registry.sqlite");
+	const store = new CollaborationStore({ path, cwd, rootSessionId: "team" });
+	store.close();
+	// PID reuse: the recorded pid now belongs to an unrelated live process whose start time
+	// does not match the recorded owner's start time — the dead owner must not look alive.
+	const reused = spawn("sleep", ["30"], { stdio: "ignore" });
+	cleanups.push(() => {
+		try {
+			reused.kill("SIGKILL");
+		} catch {
+			// already gone
+		}
+	});
+	const db = new DatabaseSync(path);
+	db.prepare("UPDATE team SET owner='reused', pid=?, owner_started_at=?").run(reused.pid!, Date.now() - 3_600_000);
+	db.close();
+	expect(() => new CollaborationStore({ path, cwd, rootSessionId: "team" })).toThrow(/Explicit recovery/);
+	const recovered = new CollaborationStore({ path, cwd, rootSessionId: "team", recoverInterruptedOwner: true });
+	cleanups.push(() => recovered.close());
+});
+
+test("a live pid with a matching start time is still a busy owner", () => {
+	const cwd = root();
+	const path = join(cwd, "registry.sqlite");
+	const store = new CollaborationStore({ path, cwd, rootSessionId: "team" });
+	store.close();
+	const live = spawn("sleep", ["30"], { stdio: "ignore" });
+	cleanups.push(() => {
+		try {
+			live.kill("SIGKILL");
+		} catch {
+			// already gone
+		}
+	});
+	const db = new DatabaseSync(path);
+	db.prepare("UPDATE team SET owner='alive', pid=?, owner_started_at=?").run(live.pid!, Date.now());
+	db.close();
+	expect(() => new CollaborationStore({ path, cwd, rootSessionId: "team" })).toThrow(/live controller/);
+});
+
+test("registries predating the owner_started_at column migrate in place", () => {
+	const cwd = root();
+	const path = join(cwd, "registry.sqlite");
+	// An old-format registry has no owner_started_at column; opening it must add the column.
+	const db = new DatabaseSync(path);
+	db.exec("CREATE TABLE team (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL, owner TEXT, pid INTEGER)");
+	db.prepare("INSERT INTO team VALUES (1, ?, NULL, NULL)").run(
+		JSON.stringify({ version: 1, rootSessionId: "team", cwd: realpathSync(cwd), revision: 0, agents: [] }),
+	);
+	db.close();
+	const store = new CollaborationStore({ path, cwd, rootSessionId: "team" });
+	// The store holds no open transaction after init; a second connection can verify the schema.
+	const verify = new DatabaseSync(path, { readOnly: true });
+	const columns = (verify.prepare("PRAGMA table_info(team)").all() as Array<{ name: string }>).map((c) => c.name);
+	expect(columns).toContain("owner_started_at");
+	const acquired = verify.prepare("SELECT owner, pid, owner_started_at FROM team").get() as {
+		owner: string | null;
+		pid: number | null;
+		owner_started_at: number | null;
+	};
+	expect(acquired.owner).not.toBeNull();
+	expect(acquired.owner_started_at).toEqual(expect.any(Number));
+	verify.close();
+	store.close();
+	const after = new DatabaseSync(path, { readOnly: true });
+	const released = after.prepare("SELECT owner, owner_started_at FROM team").get() as {
+		owner: string | null;
+		owner_started_at: number | null;
+	};
+	expect(released).toMatchObject({ owner: null, owner_started_at: null });
+	after.close();
 });
 
 test("a dead owner's running state requires explicit recovery and becomes interrupted", () => {
