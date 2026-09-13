@@ -1190,9 +1190,9 @@ export class AgentHarness implements AgentLane {
 	}
 
 	/**
-	 * No-progress detection: fingerprint the newest turn (assistant message plus
-	 * its tool results, without ids/timestamps). Three identical consecutive
-	 * fingerprints mean the model is repeating a plan that produces no new state.
+	 * No-progress detection: fingerprint the newest turn (the assistant's tool
+	 * calls plus their results). Three identical consecutive fingerprints mean
+	 * the model is repeating an action that produces no new state.
 	 */
 	private async detectNoProgress(): Promise<boolean> {
 		const branch = await this.durableSession.findEntriesOnBranch({ start: this.laneLeaf ?? undefined });
@@ -1205,14 +1205,7 @@ export class AgentHarness implements AgentLane {
 		if (!assistant || assistant.type !== "message" || assistant.message.role !== "assistant") {
 			return false;
 		}
-		const signature = turn
-			.map((entry) => {
-				if (entry.type !== "message") return entry.type;
-				const message = entry.message as unknown as Record<string, unknown>;
-				const { timestamp: _timestamp, ...rest } = message;
-				return JSON.stringify(rest);
-			})
-			.join("\n");
+		const signature = turn.map((entry) => fingerprintEntry(entry)).join("\n");
 		if (signature === this.lastFingerprint) {
 			this.fingerprintRepeats += 1;
 		} else {
@@ -1938,6 +1931,47 @@ function errorToolResult(toolCall: AgentToolCall, message: string): ToolResultMe
 		isError: true,
 		timestamp: Date.now(),
 	};
+}
+
+/**
+ * Stable projection of an entry for no-progress fingerprinting. Only the
+ * repeated action and its outcome count: tool calls reduce to name +
+ * arguments, tool results to name + error flag + model-visible content.
+ * Provider-assigned ids, thinking/text signatures, usage, and timestamps
+ * change on every request even when the model repeats the exact same plan,
+ * and assistant prose is excluded because a looping model rephrases it while
+ * repeating the same tool call (e.g. `bash true` with fresh narration).
+ */
+function fingerprintEntry(entry: Entry): string {
+	if (entry.type !== "message") return entry.type;
+	const message = entry.message;
+	if (message.role === "assistant") {
+		const calls = message.content
+			.filter((block): block is AgentToolCall => block.type === "toolCall")
+			.map((call) => ({ name: call.name, arguments: call.arguments, namespace: call.namespace }));
+		return JSON.stringify({
+			role: message.role,
+			stopReason: message.stopReason,
+			errorMessage: message.errorMessage,
+			terminate: entry.terminate,
+			calls,
+		});
+	}
+	if (message.role === "toolResult") {
+		const content = message.content.map((block) =>
+			block.type === "text"
+				? { type: block.type, text: block.text }
+				: { type: block.type, mimeType: block.mimeType },
+		);
+		return JSON.stringify({
+			role: message.role,
+			toolName: message.toolName,
+			isError: message.isError,
+			content,
+		});
+	}
+	const { timestamp: _timestamp, ...rest } = message as unknown as Record<string, unknown>;
+	return JSON.stringify(rest);
 }
 
 function syntheticAbortedMessage(model: Model<Api>): AssistantMessage {
