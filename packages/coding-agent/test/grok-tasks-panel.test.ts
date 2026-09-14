@@ -227,17 +227,16 @@ test("/tasks opens a read-only panel with live list, detail watch and clean clos
 	await open.command;
 });
 
-test("terminal failures raise an error toast and an unread badge; opening /tasks clears it", async () => {
+test("terminal failures raise no transcript toast, only the unread badge; opening /tasks clears it", async () => {
 	const f = await fixture();
 	const manager = f.session.backgroundTasks!;
 
 	const failed = await manager.start("exit 3", { cwd: f.cwd });
 	const failedId = failed.ok ? failed.value.id : "";
 	await manager.wait(failedId, 10_000);
-	await vi.waitFor(
-		() => expect(f.notices.some((notice) => notice.type === "error" && notice.message.includes(failedId))).toBe(true),
-		{ timeout: 5_000 },
-	);
+	// terminal events never produce transcript toasts; the folding task block is the single surface
+	await new Promise((resolve) => setTimeout(resolve, 700));
+	expect(f.notices.filter((notice) => notice.message.includes(failedId))).toEqual([]);
 	// no active tasks left, so the badge carries the unread failure on its own
 	await vi.waitFor(() => expect(f.statusCalls.at(-1)).toEqual(["bg-tasks", "✗ 1 failed"]));
 

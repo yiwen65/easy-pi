@@ -164,8 +164,10 @@ export class SubagentGroupComponent extends Container {
 	private state: SubagentState = "running";
 	private objective: string | undefined;
 	private resultSummary: string | undefined;
-	private firstSeenAt = Date.now();
-	private settledAt: number | undefined;
+	/** Delegation time (spawn); injected from the persisted message timestamp when rebuilt from history. */
+	private startedAt: number | undefined;
+	/** Terminal time (result delivered, interrupted, or closed). */
+	private endedAt: number | undefined;
 	private readonly results: ResultMember[] = [];
 	readonly agentPath: string;
 
@@ -175,35 +177,49 @@ export class SubagentGroupComponent extends Container {
 	}
 
 	/** Register a collaboration tool execution belonging to this child. */
-	addTool(toolName: string, component: ToolExecutionComponent, args: unknown): void {
-		if (this.members().length === 0) this.firstSeenAt = Date.now();
+	addTool(toolName: string, component: ToolExecutionComponent, args: unknown, at?: number): void {
 		if (toolName === "spawn_agent") {
 			this.objective ??= spawnObjective(args);
+			this.startedAt = at ?? Date.now();
 			this.state = "running";
-			this.settledAt = undefined;
+			this.endedAt = undefined;
 		} else if (toolName === "interrupt_agent") {
 			this.state = "interrupted";
-			this.settledAt = Date.now();
+			this.endedAt = at ?? Date.now();
 		} else if (toolName === "close_agent") {
 			this.state = "closed";
-			this.settledAt = Date.now();
+			this.endedAt = at ?? Date.now();
 		} else if (toolName === "followup_task") {
 			if (this.state !== "running") {
 				this.state = "running";
-				this.settledAt = undefined;
+				this.endedAt = undefined;
 			}
+		}
+		// A rejected spawn never creates a child: reflect the tool failure instead of hanging at Running.
+		if (toolName === "spawn_agent") {
+			type UpdateResult = ToolExecutionComponent["updateResult"];
+			const original = component.updateResult.bind(component) as UpdateResult;
+			component.updateResult = ((result: Parameters<UpdateResult>[0], isPartial?: boolean) => {
+				if (!isPartial && result.isError) {
+					this.state = "failed";
+					this.endedAt = Date.now();
+					const text = (result.content ?? []).map((part) => part.text ?? "").join(" ");
+					this.resultSummary = oneLine(text).slice(0, 96) || "spawn failed";
+				}
+				return original(result, isPartial as never);
+			}) as ToolExecutionComponent["updateResult"];
 		}
 		this.addChild(component);
 		component.setExpanded(this.expanded);
 	}
 
 	/** Register a delivered mailbox result belonging to this child. */
-	addMailboxResult(envelope: MailboxEnvelope): void {
+	addMailboxResult(envelope: MailboxEnvelope, at?: number): void {
 		const { contract, raw } = parseDeliverResult(envelope.text);
 		if (envelope.status === "completed") this.state = "completed";
 		else if (envelope.status === "failed") this.state = "failed";
 		else if (envelope.status === "interrupted") this.state = "interrupted";
-		this.settledAt = Date.now();
+		this.endedAt = at ?? Date.now();
 		this.resultSummary = contract?.summary ? oneLine(contract.summary) : oneLine(raw);
 		if (this.resultSummary.length > 96) this.resultSummary = `${this.resultSummary.slice(0, 93)}...`;
 		this.results.push({ envelope, contract, raw, at: Date.now() });
@@ -217,9 +233,10 @@ export class SubagentGroupComponent extends Container {
 		return this.children.filter((child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent);
 	}
 
+	/** Work duration: delegation → completion (or now while still running). */
 	private elapsed(now: number): string {
-		if (this.settledAt !== undefined) return `${durationText(now - this.settledAt)} ago`;
-		return durationText(now - this.firstSeenAt);
+		const start = this.startedAt ?? now;
+		return durationText((this.endedAt ?? now) - start);
 	}
 
 	private headerLines(width: number, now: number): string[] {
@@ -250,7 +267,6 @@ export class SubagentGroupComponent extends Container {
 				status,
 				validation?.contract ? `contract: ${validation.contract}` : undefined,
 				validation?.outcome ? `outcome: ${validation.outcome}` : undefined,
-				validation?.acceptance ? `acceptance: ${validation.acceptance}` : undefined,
 			]
 				.filter(Boolean)
 				.join(" · ");
@@ -350,96 +366,31 @@ export class SubagentTranscriptRouter {
 	}
 
 	/** Collaboration tool executions join their child's group. Returns true when routed. */
-	handleTool(toolName: string, args: unknown, component: ToolExecutionComponent): boolean {
+	handleTool(toolName: string, args: unknown, component: ToolExecutionComponent, at?: number): boolean {
 		if (!SUBAGENT_TOOL_NAMES.has(toolName)) return false;
 		const target = collaborationToolTarget(toolName, args);
 		if (!target) return false;
-		this.groupFor(target).addTool(toolName, component, args);
+		this.groupFor(target).addTool(toolName, component, args, at);
 		return true;
 	}
 
 	/** Mailbox results join the sender child's group. Returns true when routed. */
-	handleMailboxMessage(message: { customType?: string; display?: boolean; content: unknown }): boolean {
+	handleMailboxMessage(message: {
+		customType?: string;
+		display?: boolean;
+		content: unknown;
+		timestamp?: number;
+	}): boolean {
 		if (message.customType !== "epi-collaboration-message" || message.display === false) return false;
 		const envelope = parseMailboxEnvelope(message.content);
 		const path = normalizeAgentPath(envelope?.from);
 		if (!envelope || !path) return false;
-		this.groupFor(path).addMailboxResult(envelope);
+		this.groupFor(path).addMailboxResult(envelope, message.timestamp);
 		return true;
 	}
 
 	/** Test/introspection access to current groups in creation order. */
 	currentGroups(): SubagentGroupComponent[] {
 		return [...this.groups.values()];
-	}
-}
-
-/**
- * Team-scope collaboration operations (wait_agent, list_agents) have no single child to group
- * under; they render as one compact branded line and never expand.
- */
-export class SubagentOpsLineComponent extends Text {
-	private readonly toolName: string;
-	private argsSummary = "";
-	private resultSummary: string | undefined;
-	private failed = false;
-
-	constructor(toolName: string, args: unknown) {
-		super("", 1, 0);
-		this.toolName = toolName;
-		this.updateArgs(args);
-	}
-
-	private summarizeArgs(args: unknown): string {
-		const record = (args ?? {}) as Record<string, unknown>;
-		if (this.toolName === "wait_agent" && typeof record.timeout_ms === "number") {
-			return ` ${Math.round(record.timeout_ms / 1000)}s`;
-		}
-		if (this.toolName === "list_agents" && typeof record.path_prefix === "string") {
-			return ` ${record.path_prefix}`;
-		}
-		return "";
-	}
-
-	updateArgs(args: unknown): void {
-		this.argsSummary = this.summarizeArgs(args);
-		this.refresh();
-	}
-
-	updateResult(result: { content?: unknown; isError?: boolean }): void {
-		const text = Array.isArray(result.content)
-			? result.content
-					.map((part) => part as { type?: string; text?: string })
-					.filter((part) => part.type === "text")
-					.map((part) => part.text ?? "")
-					.join("\n")
-			: "";
-		this.failed = result.isError === true;
-		if (this.failed) {
-			this.resultSummary = oneLine(text || "error");
-		} else if (this.toolName === "wait_agent") {
-			this.resultSummary = text.trim() ? " · notified" : " · timeout";
-		} else {
-			const firstLine = oneLine(text.split("\n", 1)[0] ?? "");
-			this.resultSummary = firstLine ? ` · ${firstLine}` : "";
-		}
-		if (this.resultSummary && this.resultSummary.length > 96) {
-			this.resultSummary = `${this.resultSummary.slice(0, 93)}...`;
-		}
-		this.refresh();
-	}
-
-	setArgsComplete(): void {}
-	markExecutionStarted(): void {}
-	setExpanded(_expanded: boolean): void {}
-
-	private refresh(): void {
-		const summaryText = this.resultSummary ?? "";
-		const status = this.failed
-			? theme.fg("error", summaryText)
-			: this.resultSummary
-				? theme.fg("dim", summaryText)
-				: "";
-		this.setText(theme.fg("muted", `⇄ subagent · ${this.toolName}${this.argsSummary}`) + status);
 	}
 }

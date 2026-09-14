@@ -133,6 +133,7 @@ import { PiSessionPort } from "../interactive-grok/pi-session-port.ts";
 import { findPromptJumpTarget } from "../interactive-grok/prompt-navigation.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { BackgroundTaskGroupComponent } from "./components/background-task-group.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -172,7 +173,6 @@ import {
 	collaborationToolTarget,
 	SUBAGENT_TOOL_NAMES,
 	SubagentGroupComponent,
-	SubagentOpsLineComponent,
 	SubagentTranscriptRouter,
 } from "./components/subagent-group.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
@@ -592,8 +592,9 @@ export class InteractiveMode {
 	private streamingMessage: AssistantMessage | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
-	private pendingTools = new Map<string, ToolExecutionComponent | SubagentOpsLineComponent>();
+	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private subagentRouter!: SubagentTranscriptRouter;
+	private backgroundTaskGroup: BackgroundTaskGroupComponent | undefined;
 	private grokTurnStartedAt: number | undefined = undefined;
 	private currentTurnThinkingGroup: GrokThinkingTurnGroupComponent | undefined = undefined;
 	private currentTurnToolGroup: GrokToolTurnGroupComponent | undefined = undefined;
@@ -787,21 +788,24 @@ export class InteractiveMode {
 	 * (one compact line by default); independent tools remain direct chat children.
 	 * Legacy mode keeps every tool as a direct chat child.
 	 */
-	/** Collaboration tools join their child's group; targetless ones render as compact ops lines. */
+	/** Collaboration tools join their child's group; team-scope ones produce no transcript surface. */
 	private createRoutedToolComponent(
 		toolName: string,
 		toolCallId: string,
 		args: unknown,
-	): ToolExecutionComponent | SubagentOpsLineComponent {
-		if (SUBAGENT_TOOL_NAMES.has(toolName) && !collaborationToolTarget(toolName, args)) {
-			return new SubagentOpsLineComponent(toolName, args);
-		}
+	): ToolExecutionComponent | undefined {
+		if (SUBAGENT_TOOL_NAMES.has(toolName) && !collaborationToolTarget(toolName, args)) return undefined;
 		return this.createToolExecutionComponent(toolName, toolCallId, args);
 	}
 
-	private addToolComponentToChat(component: ToolExecutionComponent, toolName: string, args: unknown): void {
+	private addToolComponentToChat(
+		component: ToolExecutionComponent,
+		toolName: string,
+		args: unknown,
+		at?: number,
+	): void {
 		this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
-		if (this.subagentRouter.handleTool(toolName, args, component)) return;
+		if (this.subagentRouter.handleTool(toolName, args, component, at)) return;
 		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent && component.canUseTurnGroup()) {
 			let group = this.currentTurnToolGroup;
 			if (!group || !this.chatContainer.children.includes(group)) {
@@ -866,6 +870,8 @@ export class InteractiveMode {
 		}
 		this.chatContainer.clear();
 		this.subagentRouter?.clear();
+		this.backgroundTaskGroup?.dispose();
+		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
 		this.pendingSkillMentions = [];
@@ -3464,9 +3470,10 @@ export class InteractiveMode {
 						if (content.type === "toolCall") {
 							if (!this.pendingTools.has(content.id)) {
 								const component = this.createRoutedToolComponent(content.name, content.id, content.arguments);
-								if (component instanceof SubagentOpsLineComponent) this.chatContainer.addChild(component);
-								else this.addToolComponentToChat(component, content.name, content.arguments);
-								this.pendingTools.set(content.id, component);
+								if (component) {
+									this.addToolComponentToChat(component, content.name, content.arguments);
+									this.pendingTools.set(content.id, component);
+								}
 							} else {
 								const component = this.pendingTools.get(content.id);
 								if (component) {
@@ -3540,10 +3547,11 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
-					component = this.createRoutedToolComponent(event.toolName, event.toolCallId, event.args);
-					if (component instanceof SubagentOpsLineComponent) this.chatContainer.addChild(component);
-					else this.addToolComponentToChat(component, event.toolName, event.args);
-					this.pendingTools.set(event.toolCallId, component);
+					const created = this.createRoutedToolComponent(event.toolName, event.toolCallId, event.args);
+					if (!created) break;
+					this.addToolComponentToChat(created, event.toolName, event.args);
+					this.pendingTools.set(event.toolCallId, created);
+					component = created;
 				}
 				component.markExecutionStarted();
 				this.ui.requestRender();
@@ -3564,6 +3572,21 @@ export class InteractiveMode {
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
+					this.ui.requestRender();
+				}
+				// Bash calls that started or promoted to a background task surface the folding task block.
+				const taskId = (event.result as { details?: { backgroundTaskId?: string } } | undefined)?.details
+					?.backgroundTaskId;
+				if (taskId && this.session.backgroundTasks) {
+					if (!this.backgroundTaskGroup) {
+						this.backgroundTaskGroup = new BackgroundTaskGroupComponent(this.session.backgroundTasks, () =>
+							this.ui.requestRender(),
+						);
+						this.backgroundTaskGroup.setExpanded(this.toolOutputExpanded);
+					}
+					// Peer of the turn tool group: always the latest transcript line, never nested in tools.
+					this.chatContainer.removeChild(this.backgroundTaskGroup);
+					this.chatContainer.addChild(this.backgroundTaskGroup);
 					this.ui.requestRender();
 				}
 				break;
@@ -3849,6 +3872,9 @@ export class InteractiveMode {
 				}
 				this.flushPendingSkillMentions();
 				if (message.display) {
+					// Background task terminal notifications feed the model context only; humans track
+					// tasks via the folding transcript group and /tasks panel instead of raw messages.
+					if (message.customType === "pi-background-task") break;
 					this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
 					if (this.subagentRouter.handleMailboxMessage(message)) break;
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
@@ -3919,7 +3945,7 @@ export class InteractiveMode {
 		this.currentTurnToolGroup = undefined;
 		this.pendingSkillMentions = [];
 		this.pendingSkillMentionsPopulateHistory = false;
-		const renderedPendingTools = new Map<string, ToolExecutionComponent | SubagentOpsLineComponent>();
+		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
@@ -3951,8 +3977,8 @@ export class InteractiveMode {
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
 						const component = this.createRoutedToolComponent(content.name, content.id, content.arguments);
-						if (component instanceof SubagentOpsLineComponent) this.chatContainer.addChild(component);
-						else this.addToolComponentToChat(component, content.name, content.arguments);
+						if (!component) continue;
+						this.addToolComponentToChat(component, content.name, content.arguments, message.timestamp);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
@@ -4456,6 +4482,8 @@ export class InteractiveMode {
 		} else if (target.component instanceof GrokThinkingTurnGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow);
 		} else if (target.component instanceof GrokToolTurnGroupComponent) {
+			toggled = target.component.handleOverviewClick(localRow, width);
+		} else if (target.component instanceof BackgroundTaskGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow, width);
 		} else if (target.component instanceof SubagentGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow, width);

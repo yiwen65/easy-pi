@@ -9,7 +9,6 @@ import {
 	parseDeliverResult,
 	parseMailboxEnvelope,
 	SubagentGroupComponent,
-	SubagentOpsLineComponent,
 	SubagentTranscriptRouter,
 	spawnObjective,
 } from "../src/modes/interactive/components/subagent-group.ts";
@@ -33,7 +32,7 @@ const CONTRACT = {
 	risks: ["residual risk one"],
 	outcome: "succeeded",
 	summary: "Benchmark verdict: no proven cost; all 35 runs completed.",
-	resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+	resultValidation: { contract: "valid", outcome: "succeeded" },
 };
 
 const ENVELOPE = {
@@ -44,7 +43,7 @@ const ENVELOPE = {
 	kind: "result",
 	status: "completed",
 	text: JSON.stringify(CONTRACT),
-	resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+	resultValidation: { contract: "valid", outcome: "succeeded" },
 };
 
 describe("subagent display parsing", () => {
@@ -86,9 +85,31 @@ describe("SubagentGroupComponent", () => {
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("/root/term-bench");
 		expect(lines[0]).toContain("Done");
-		expect(lines[0]).toContain("ago");
 		expect(lines[0]).toContain("no proven cost");
 		expect(lines[0]).not.toContain('"artifacts"');
+	});
+
+	it("shows work duration (delegation to completion), not time-since-completion", () => {
+		const group = new SubagentGroupComponent("/root/w");
+		const startedAt = Date.now() - 65_000;
+		group.addTool(
+			"spawn_agent",
+			makeTool("spawn_agent", {}),
+			{ delegation: { task: { objective: "probe" } } },
+			startedAt,
+		);
+		group.addMailboxResult(ENVELOPE, startedAt + 65_000);
+		const header = group.render(100).join("\n");
+		expect(header).toContain("1m5s");
+		expect(header).not.toContain("ago");
+	});
+
+	it("resume: history timestamps anchor duration, not the rebuild time", () => {
+		const group = new SubagentGroupComponent("/root/w");
+		const delegated = Date.now() - 3_600_000; // an hour ago in real history
+		group.addTool("spawn_agent", makeTool("spawn_agent", {}), {}, delegated);
+		group.addMailboxResult(ENVELOPE, delegated + 125_000);
+		expect(group.render(100).join("\n")).toContain("2m5s");
 	});
 
 	it("expands into contract partitions with validation and untrusted marker", () => {
@@ -97,7 +118,7 @@ describe("SubagentGroupComponent", () => {
 		group.setExpanded(true);
 		const text = group.render(100).join("\n");
 		expect(text).toContain("contract: valid");
-		expect(text).toContain("acceptance: not_reviewed");
+		expect(text).not.toContain("acceptance");
 		expect(text).toContain("Benchmark verdict: no proven cost");
 		expect(text).toContain("artifacts:");
 		expect(text).toContain("/tmp/a — first artifact");
@@ -124,6 +145,26 @@ describe("SubagentGroupComponent", () => {
 		expect(group.handleOverviewClick(0, 100)).toBe(true); // collapse
 		// collapsed: only row 0 is actionable
 		expect(group.handleOverviewClick(3, 100)).toBe(false);
+	});
+
+	it("a rejected spawn shows Failed with the reason instead of hanging at Running", () => {
+		const group = new SubagentGroupComponent("/root/w");
+		const tool = makeTool("spawn_agent", { task_name: "w" });
+		group.addTool("spawn_agent", tool, { delegation: { task: { objective: "probe" } } });
+		expect(group.render(100).join("\n")).toContain("Running");
+		tool.updateResult({
+			content: [
+				{
+					type: "text",
+					text: "Collaboration tool failed: forbidden / tools_unavailable. Offending values: laser_beam.",
+				},
+			],
+			isError: true,
+		});
+		const header = group.render(100).join("\n");
+		expect(header).toContain("Failed");
+		expect(header).toContain("tools_unavailable");
+		expect(header).not.toContain("Running");
 	});
 
 	it("renders within width at narrow and wide sizes", () => {
@@ -194,24 +235,5 @@ describe("SubagentTranscriptRouter", () => {
 		router.handleTool("spawn_agent", { task_name: "a" }, makeTool("spawn_agent", {}));
 		router.clear();
 		expect(router.currentGroups()).toHaveLength(0);
-	});
-});
-
-describe("SubagentOpsLineComponent", () => {
-	beforeEach(() => initTheme("dark"));
-
-	it("renders a single branded line that reflects its result", () => {
-		const wait = new SubagentOpsLineComponent("wait_agent", { timeout_ms: 60_000 });
-		expect(wait.render(100).join("")).toContain("⇄ subagent · wait_agent 60s");
-		wait.updateResult({ content: [{ type: "text", text: "mailbox received" }] });
-		expect(wait.render(100).join("")).toContain("notified");
-
-		const list = new SubagentOpsLineComponent("list_agents", {});
-		list.updateResult({ content: [{ type: "text", text: "/root/a running" }] });
-		expect(list.render(100).join("")).toContain("/root/a running");
-
-		const failing = new SubagentOpsLineComponent("wait_agent", {});
-		failing.updateResult({ content: [{ type: "text", text: "interrupted" }], isError: true });
-		expect(failing.render(100).join("")).toContain("interrupted");
 	});
 });

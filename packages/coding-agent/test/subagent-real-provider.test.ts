@@ -158,15 +158,15 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 				)
 				.join(",");
 			console.log("[real-subagent] tool calls:", toolNames || "(none)");
-			console.log("[real-subagent] spawn results:", toolResultTexts(session, "spawn_agent").join(" | ").slice(0, 400));
+			console.log(
+				"[real-subagent] spawn results:",
+				toolResultTexts(session, "spawn_agent").join(" | ").slice(0, 400),
+			);
 			console.log("[real-subagent] root reply:", lastAssistantText(messages).slice(0, 300));
 			for (const message of messages) {
 				const stop = (message as { stopReason?: string }).stopReason;
 				if (stop === "error") {
-					console.log(
-						"[real-subagent] error message:",
-						JSON.stringify(message).slice(0, 800),
-					);
+					console.log("[real-subagent] error message:", JSON.stringify(message).slice(0, 800));
 				}
 			}
 			console.log(
@@ -176,9 +176,9 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 						const stop = (message as { stopReason?: string }).stopReason;
 						const kinds =
 							message.role === "assistant"
-								? (((message as { content?: Array<{ type: string }> }).content ?? [])
+								? ((message as { content?: Array<{ type: string }> }).content ?? [])
 										.map((block) => block.type)
-										.join("+") || "empty")
+										.join("+") || "empty"
 								: "";
 						return `${message.role}${stop ? `(${stop})` : ""}${kinds ? `[${kinds}]` : ""}`;
 					})
