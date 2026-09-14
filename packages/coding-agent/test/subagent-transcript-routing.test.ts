@@ -1,9 +1,6 @@
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-	SubagentGroupComponent,
-	SubagentOpsLineComponent,
-} from "../src/modes/interactive/components/subagent-group.ts";
+import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -17,7 +14,7 @@ const CONTRACT = {
 	outcome: "succeeded",
 	artifacts: ["/tmp/probe — fixture artifact"],
 	checks: [],
-	resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+	resultValidation: { contract: "valid", outcome: "succeeded" },
 };
 const ENVELOPE = {
 	id: "m-1",
@@ -79,8 +76,8 @@ function fakeMode() {
 
 function spawnTool(mode: any, name: string, id: string, args: unknown) {
 	const component = mode.createRoutedToolComponent(name, id, args);
-	if (component instanceof SubagentOpsLineComponent) mode.chatContainer.addChild(component);
-	else mode.addToolComponentToChat(component, name, args);
+	if (!component) return undefined;
+	mode.addToolComponentToChat(component, name, args);
 	mode.pendingTools.set(id, component);
 	return component;
 }
@@ -88,7 +85,7 @@ function spawnTool(mode: any, name: string, id: string, args: unknown) {
 describe("subagent transcript routing", () => {
 	beforeEach(() => initTheme("dark"));
 
-	it("groups child-bound tools under one block and keeps wait/list as compact ops lines", () => {
+	it("groups child-bound tools under one block and hides team-scope operations", () => {
 		const mode = fakeMode();
 		spawnTool(mode, "spawn_agent", "c1", {
 			task_name: "worker",
@@ -113,11 +110,12 @@ describe("subagent transcript routing", () => {
 		);
 		expect(standaloneCollab).toHaveLength(0);
 
-		// team-scope operations render as branded compact lines, never grouped
-		const opsLines = mode.chatContainer.children.filter(
-			(child: unknown) => child instanceof SubagentOpsLineComponent,
-		);
-		expect(opsLines).toHaveLength(2);
+		// team-scope operations produce no transcript entries at all
+		expect(
+			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent),
+		).toHaveLength(1);
+		expect(mode.pendingTools.has("c3")).toBe(false);
+		expect(mode.pendingTools.has("c4")).toBe(false);
 		// regular tools still render standalone
 		expect(mode.chatContainer.children.some((child: unknown) => child instanceof ToolExecutionComponent)).toBe(true);
 	});
