@@ -1,3 +1,4 @@
+import { cloneToolSchema } from "./tool-schema.ts";
 import type { AgentTool } from "./types.ts";
 
 export interface ToolPlan {
@@ -5,16 +6,6 @@ export interface ToolPlan {
 	readonly identity: string;
 	readonly tools: readonly AgentTool[];
 	readonly bindings: Readonly<Record<string, AgentTool>>;
-}
-
-function cloneSchema(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(cloneSchema);
-	if (value && typeof value === "object") {
-		const clone: Record<string, unknown> = {};
-		for (const [key, child] of Object.entries(value)) clone[key] = cloneSchema(child);
-		return clone;
-	}
-	return value;
 }
 
 function freezeSchema(value: unknown): void {
@@ -29,9 +20,9 @@ export function createToolPlan(tools: readonly AgentTool[], revision: number, id
 	for (const tool of tools) {
 		const plannedTool = {
 			...tool,
-			parameters: cloneSchema(tool.parameters),
-			...(tool.contract ? { contract: cloneSchema(tool.contract) } : {}),
-			...(tool.executionResource ? { executionResource: cloneSchema(tool.executionResource) } : {}),
+			parameters: cloneToolSchema(tool.parameters),
+			...(tool.contract ? { contract: cloneToolSchema(tool.contract) } : {}),
+			...(tool.executionResource ? { executionResource: cloneToolSchema(tool.executionResource) } : {}),
 		} as AgentTool;
 		freezeSchema(plannedTool.parameters);
 		freezeSchema(plannedTool.contract);
