@@ -13,6 +13,7 @@ import {
 import { fingerprintAssistantTurn, fingerprintToolResult, NO_PROGRESS_REPEAT_LIMIT } from "./no-progress.ts";
 import { createStepSnapshot } from "./step-snapshot.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
+import { cloneToolSchema } from "./tool-schema.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -408,8 +409,8 @@ async function streamAssistantResponse(
 				const agentTool = tool as AgentTool;
 				return {
 					...tool,
-					parameters: structuredClone(tool.parameters),
-					...(agentTool.contract ? { contract: structuredClone(agentTool.contract) } : {}),
+					parameters: cloneToolSchema(tool.parameters),
+					...(agentTool.contract ? { contract: cloneToolSchema(agentTool.contract) } : {}),
 				};
 			}),
 		});

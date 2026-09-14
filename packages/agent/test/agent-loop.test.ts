@@ -316,6 +316,8 @@ describe("agentLoop with AgentMessage", () => {
 	it("isolates provider context observer mutations from the request", async () => {
 		let streamedSystemPrompt = "";
 		let streamedUserText = "";
+		let streamedToolType = "";
+		const toolSchema = Type.Object({ value: Type.String() });
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
@@ -323,12 +325,20 @@ describe("agentLoop with AgentMessage", () => {
 				providerContext.systemPrompt = "observer mutation";
 				const message = providerContext.messages[0];
 				if (message?.role === "user") message.content = "observer mutation";
+				const parameters = providerContext.tools?.[0]?.parameters as {
+					properties?: { value?: { type?: string } };
+				};
+				if (parameters.properties?.value) parameters.properties.value.type = "number";
 			},
 		};
 		const streamFn: NonNullable<Parameters<typeof agentLoop>[4]> = (_model, providerContext) => {
 			streamedSystemPrompt = providerContext.systemPrompt ?? "";
 			const message = providerContext.messages[0];
 			if (message?.role === "user") streamedUserText = typeof message.content === "string" ? message.content : "";
+			const parameters = providerContext.tools?.[0]?.parameters as {
+				properties?: { value?: { type?: string } };
+			};
+			streamedToolType = parameters.properties?.value?.type ?? "";
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				stream.push({
@@ -342,7 +352,19 @@ describe("agentLoop with AgentMessage", () => {
 
 		await agentLoop(
 			[createUserMessage("request")],
-			{ systemPrompt: "system", messages: [], tools: [] },
+			{
+				systemPrompt: "system",
+				messages: [],
+				tools: [
+					{
+						name: "echo",
+						label: "Echo",
+						description: "Echo",
+						parameters: toolSchema,
+						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+					},
+				],
+			},
 			config,
 			undefined,
 			streamFn,
@@ -350,6 +372,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(streamedSystemPrompt).toBe("system");
 		expect(streamedUserText).toBe("request");
+		expect(streamedToolType).toBe("string");
 	});
 
 	it("does not block the provider request when context observation fails", async () => {
