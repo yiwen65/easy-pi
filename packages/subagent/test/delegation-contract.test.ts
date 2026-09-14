@@ -3,16 +3,21 @@ import { validateDelegation, validateDelegationResult } from "../src/collaborati
 import { delegation } from "./delegation-fixture.ts";
 
 describe("explicit delegation contract", () => {
-	test("requires all task boundaries and clones mutable input", () => {
+	test("requires only the task objective and clones mutable input; optional layers default", () => {
 		const input = delegation();
 		const parsed = validateDelegation(input);
-		input.task.material.push("later");
-		expect(parsed.task.material).toEqual([]);
-		for (const key of ["version", "task", "context", "capabilities"] as const) {
-			const invalid: Record<string, unknown> = { ...delegation() };
-			delete invalid[key];
-			expect(() => validateDelegation(invalid)).toThrow(/Invalid delegation/);
+		input.task.objective = "mutated after";
+		expect(parsed.task.objective).toBe("Inspect parser");
+		// Optional layers are filled with canonical defaults rather than rejected.
+		for (const key of ["version", "context", "capabilities"] as const) {
+			const relaxed: Record<string, unknown> = { ...delegation() };
+			delete relaxed[key];
+			expect(() => validateDelegation(relaxed)).not.toThrow();
 		}
+		// The objective remains required.
+		const noTask: Record<string, unknown> = { ...delegation() };
+		delete noTask.task;
+		expect(() => validateDelegation(noTask)).toThrow(/Invalid delegation/);
 		expect(() => validateDelegation({ message: "Old task" })).toThrow();
 	});
 	test("independent judgment cannot inherit parent conversation", () => {
@@ -50,46 +55,29 @@ describe("explicit delegation contract", () => {
 			),
 		).toThrow(/range/);
 	});
-	test.each(["artifacts", "evidence", "checks", "risks"])(
-		"keeps %s as bounded nonblank string citations, not structured objects",
-		(field) => {
-			const result = { summary: "Done", outcome: "succeeded", artifacts: [], evidence: [], checks: [], risks: [] };
-			const verdict = (items: unknown[]) =>
-				validateDelegationResult(JSON.stringify({ ...result, [field]: items }), "completed");
-			expect(verdict(["evidence.txt:1 sha256=verified; 8+9=17"])).toMatchObject({
-				contract: "valid",
-				acceptance: "not_reviewed",
+	test("the result contract is summary + outcome; removed sections are rejected", () => {
+		const valid = { summary: "Done with findings inline", outcome: "succeeded" };
+		expect(validateDelegationResult(JSON.stringify(valid), "completed")).toMatchObject({
+			contract: "valid",
+		});
+		for (const field of ["artifacts", "evidence", "checks", "risks"]) {
+			expect(validateDelegationResult(JSON.stringify({ ...valid, [field]: ["observed"] }), "completed")).toEqual({
+				contract: "invalid",
 			});
-			for (const value of [
-				{ path: "evidence.txt", sha256: "a".repeat(64), observation: "8+9=17" },
-				17,
-				null,
-				[],
-				"",
-				"   ",
-			])
-				expect(verdict([value])).toEqual({ contract: "invalid", acceptance: "not_reviewed" });
-			expect(verdict(Array(16).fill("observed"))).toMatchObject({ contract: "valid" });
-			expect(verdict(Array(17).fill("observed"))).toMatchObject({ contract: "invalid" });
-			expect(verdict(["a".repeat(2048)])).toMatchObject({ contract: "valid" });
-			expect(verdict(["a".repeat(2049)])).toMatchObject({ contract: "invalid" });
-			// Each string fits its schema bound, but the final UTF-8 JSON exceeds the turn-result budget.
-			expect(verdict(["界".repeat(2000), "界".repeat(2000)])).toMatchObject({ contract: "invalid" });
-		},
-	);
+		}
+		// The byte budget still applies to the complete result text.
+		expect(
+			validateDelegationResult(JSON.stringify({ ...valid, summary: "界".repeat(4000) }), "completed"),
+		).toMatchObject({ contract: "invalid" });
+	});
 	test("validates output format without certifying claims or discarding text", () => {
 		const text = JSON.stringify({
 			summary: "Done",
 			outcome: "succeeded",
-			artifacts: [],
-			evidence: [],
-			checks: [],
-			risks: [],
 		});
 		expect(validateDelegationResult(text, "completed")).toEqual({
 			contract: "valid",
 			outcome: "succeeded",
-			acceptance: "not_reviewed",
 		});
 		// Markdown fences and prose around the object are tolerated by extractResultJson;
 		// see the fence-tolerance cases in collaboration-contract.test.ts.

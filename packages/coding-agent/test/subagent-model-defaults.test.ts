@@ -108,44 +108,22 @@ async function fixture(defaults: Partial<Settings> = {}) {
 }
 
 test.each([
-	{ defaults: {}, overrides: {}, model: "one", effort: "medium" },
+	{ defaults: {}, model: "one", effort: "medium" },
 	{
 		defaults: { subagentModel: "defaults-faux/two", subagentThinkingLevel: "high" },
-		overrides: {},
 		model: "two",
 		effort: "high",
 	},
-	{ defaults: { subagentModel: "defaults-faux/two" }, overrides: {}, model: "two", effort: "medium" },
-	{ defaults: { subagentThinkingLevel: "low" }, overrides: {}, model: "one", effort: "low" },
-	{
-		defaults: { subagentModel: "defaults-faux/two", subagentThinkingLevel: "high" },
-		overrides: { model: "defaults-faux/one" },
-		model: "one",
-		effort: "high",
-	},
-	{
-		defaults: { subagentModel: "defaults-faux/two", subagentThinkingLevel: "high" },
-		overrides: { reasoning_effort: "off" },
-		model: "two",
-		effort: "off",
-	},
-	{
-		defaults: { subagentModel: "defaults-faux/two", subagentThinkingLevel: "high" },
-		overrides: { model: "defaults-faux/one", reasoning_effort: "low" },
-		model: "one",
-		effort: "low",
-	},
-])(
-	"spawn resolves independent defaults/overrides to $model/$effort",
-	async ({ defaults, overrides, model, effort }) => {
-		const f = await fixture(defaults as Partial<Settings>);
-		await f.call("spawn_agent", { ...spawnArgs("worker", "inspect"), ...overrides });
-		await f.idle("/root/worker");
-		expect(f.captures).toEqual([{ path: "/root/worker", model, effort }]);
-		expect(f.session.model?.id).toBe("one");
-		expect(f.session.thinkingLevel).toBe("medium");
-	},
-);
+	{ defaults: { subagentModel: "defaults-faux/two" }, model: "two", effort: "medium" },
+	{ defaults: { subagentThinkingLevel: "low" }, model: "one", effort: "low" },
+])("spawn resolves user subagent settings to $model/$effort", async ({ defaults, model, effort }) => {
+	const f = await fixture(defaults as Partial<Settings>);
+	await f.call("spawn_agent", spawnArgs("worker", "inspect"));
+	await f.idle("/root/worker");
+	expect(f.captures).toEqual([{ path: "/root/worker", model, effort }]);
+	expect(f.session.model?.id).toBe("one");
+	expect(f.session.thinkingLevel).toBe("medium");
+});
 
 test("existing child retains its model/effort while future root spawn reads changed live global defaults", async () => {
 	const f = await fixture({ subagentModel: "defaults-faux/one", subagentThinkingLevel: "low" });
@@ -189,16 +167,15 @@ test.each([
 		await expect(f.call("spawn_agent", spawnArgs("bad", "must not run"))).rejects.toThrow(reason);
 		expect(f.faux.state.callCount).toBe(0);
 		expect((await f.call("list_agents", {})).details).toEqual({ agents: [] });
-		await f.call("spawn_agent", {
-			...spawnArgs("override", "valid override"),
-			model: "defaults-faux/one",
-			reasoning_effort: "off" satisfies ThinkingLevel,
-		});
+		// Recovery comes from fixing the settings, not from a per-call override.
+		f.settingsManager.setSubagentModel("defaults-faux/one");
+		f.settingsManager.setSubagentThinkingLevel("off");
+		await f.call("spawn_agent", spawnArgs("override", "valid after settings fix"));
 		await f.idle("/root/override");
 	},
 );
 
-test("preserve rejects a global model/effort conflict without fallback, but explicit matching overrides work", async () => {
+test("preserve rejects a global model/effort conflict without fallback, but matching settings work", async () => {
 	const f = await fixture();
 	await f.session.prompt("capture a canonical parent prefix");
 	f.settingsManager.setSubagentModel("defaults-faux/two");
@@ -207,7 +184,10 @@ test("preserve rejects a global model/effort conflict without fallback, but expl
 	const before = f.faux.state.callCount;
 	await expect(f.call("spawn_agent", args)).rejects.toThrow("prefix_model_changed");
 	expect(f.faux.state.callCount).toBe(before);
-	await f.call("spawn_agent", { ...args, model: "defaults-faux/one", reasoning_effort: "medium" });
+	// Matching the prefix now comes from aligning the user settings, not per-call overrides.
+	f.settingsManager.setSubagentModel("defaults-faux/one");
+	f.settingsManager.setSubagentThinkingLevel("medium");
+	await f.call("spawn_agent", args);
 	await f.idle("/root/preserved");
 	expect(f.captures.at(-1)).toEqual({ path: "/root/preserved", model: "one", effort: "medium" });
 });

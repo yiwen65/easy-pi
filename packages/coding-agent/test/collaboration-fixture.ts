@@ -2,28 +2,20 @@ import type { Context } from "@earendil-works/pi-ai";
 import type { Delegation, DelegationContext } from "@easy-pi/subagent/collaboration-contract";
 
 export function taskContract(objective: string): Delegation["task"] {
-	return {
-		relationship: "continue",
-		objective,
-		scope: "Synthetic fixture only",
-		material: [],
-		deliverables: ["Report result"],
-		acceptance: ["Use the supplied fixture"],
-	};
+	// The wire contract needs only the free-text objective; relationship defaults to continue.
+	return { relationship: "continue", objective };
 }
 export function spawnArgs(task_name: string, objective: string, context: DelegationContext = { mode: "isolated" }) {
+	// Flat wire shape: no delegation wrapper; context/capabilities sit beside task.
 	return {
 		task_name,
-		delegation: {
-			version: 1 as const,
-			task: taskContract(objective),
-			context,
-			capabilities: { tools: "inherit" as const },
-		},
+		task: taskContract(objective),
+		context,
+		tools: "inherit" as const,
 	};
 }
 export function followupArgs(target: string, objective: string) {
-	return { target, task: taskContract(objective), context: "existing", capabilities: { tools: "inherit" } };
+	return { target, task: taskContract(objective), tools: "inherit" };
 }
 export function currentCollaborationPath(context: Context): string {
 	for (const message of [...context.messages].reverse()) {

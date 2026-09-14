@@ -58,10 +58,9 @@ function readCacheAffinity(value: unknown): ChildRequestPrefix["cacheAffinity"] 
 
 // Keep the model-visible contract in sync with validation, appended to each task (not the shared prefix).
 const DELIVER_RESULT_TOOL_DESCRIPTION =
-	"Deliver this child's final result to its creation parent. Call it exactly once when the task is done; a later call replaces the earlier one. Parameters are the version-1 delegation result contract. artifacts, evidence, checks and risks are arrays of nonblank text citations, not objects. The complete result must fit 8192 UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.";
+	"Deliver this child's final result to its creation parent. Call it exactly once when the task is done; a later call replaces the earlier one. Only summary (complete result text) and outcome (honest verdict) are required. The complete result must fit 8192 UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.";
 const DELEGATION_RESULT_INSTRUCTIONS = [
-	"Deliver the final result by calling the deliver_result tool exactly once with the contracted fields; a later call replaces the delivered result.",
-	"artifacts, evidence, checks and risks are arrays of nonblank strings, not objects, numbers or null. Use [] when there are no items. Evidence entries must be text citations, not curated reference objects; describe observed paths, ranges, versions/hashes and findings in each string.",
+	"Deliver the final result by calling the deliver_result tool exactly once: only summary and outcome are required - put key outputs, evidence (paths/line ranges/version hashes) and residual risks in the summary text. A later call replaces the delivered result.",
 	`The complete result must fit ${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks to fill an array.`,
 	"If deliver_result is unavailable, return one final JSON object matching the deliver_result schema as your final text, without fences, surrounding prose or extra fields. This final output is returned automatically; do not call any other handoff tool. Execution completion and valid JSON are not acceptance.",
 ].join("\n");

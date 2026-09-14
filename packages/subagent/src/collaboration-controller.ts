@@ -449,8 +449,7 @@ export class CollaborationController {
 					this.update(record.path, (current) => {
 						current.status = abort.signal.aborted ? "interrupted" : "failed";
 						current.completionPending = false;
-						if (current.delegation)
-							current.resultValidation = { contract: "not_completed", acceptance: "not_reviewed" };
+						if (current.delegation) current.resultValidation = { contract: "not_completed" };
 					});
 				});
 				if (abort.signal.aborted) throw new CollaborationError("interrupted", "Startup cancelled");

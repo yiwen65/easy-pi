@@ -298,8 +298,7 @@ export class CollaborationStore {
 				for (const agent of snapshot.agents) {
 					if (agent.status === "pending" || agent.status === "running") agent.status = "interrupted";
 					if (agent.completionPending) {
-						if (agent.delegation)
-							agent.resultValidation = { contract: "not_completed", acceptance: "not_reviewed" };
+						if (agent.delegation) agent.resultValidation = { contract: "not_completed" };
 						snapshot.messages ??= [];
 						snapshot.messages.push({
 							id: randomUUID(),

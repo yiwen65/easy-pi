@@ -455,7 +455,7 @@ test("task/result contracts persist and final return targets creation parent rat
 	await f.controller.spawn(caller, "a", "initial", model, [], undefined, admission);
 	f.finishes.get("/root/a")?.({ status: "completed", text: "unstructured retained answer" });
 	await f.controller.settled();
-	expect(f.store.read().agents[0].resultValidation).toEqual({ contract: "invalid", acceptance: "not_reviewed" });
+	expect(f.store.read().agents[0].resultValidation).toEqual({ contract: "invalid" });
 	expect(f.controller.pending(caller)[0]).toMatchObject({
 		text: "unstructured retained answer",
 		resultValidation: { contract: "invalid" },
@@ -472,19 +472,15 @@ test("task/result contracts persist and final return targets creation parent rat
 	});
 	expect(f.store.read().agents[0].resultValidation).toBeUndefined();
 	const answer = JSON.stringify({
-		summary: "Verified format only",
+		summary: "Verified format only; not independently reviewed",
 		outcome: "partial",
-		artifacts: [],
-		evidence: [],
-		checks: [],
-		risks: ["Not independently reviewed"],
 	});
 	f.finishes.get("/root/a")?.({ status: "completed", text: answer });
 	await f.controller.settled();
 	expect(f.controller.pending(caller).at(-1)).toMatchObject({
 		from: "/root/a",
 		to: "/root",
-		resultValidation: { contract: "valid", outcome: "partial", acceptance: "not_reviewed" },
+		resultValidation: { contract: "valid", outcome: "partial" },
 	});
 	const runs = [...f.runs];
 	await f.controller.shutdown();

@@ -28,11 +28,11 @@ import {
 const MESSAGE_TYPE = "epi-collaboration-message";
 const descriptions: Record<CollaborationToolName, string> = {
 	spawn_agent:
-		"Start a named child agent in the shared cwd under the version-1 delegation contract (task <= 8192 UTF-8 bytes total). Context routing: continue usually forks (the child sees the caller's compressed effective history, which may carry sensitive text); explore/verify require isolated or curated context; extract must name its dataset in task.material. Delegate minimum sufficient authority - exclude bash and other write-capable tools for read-only tasks. All agents share cwd; coordinate edits. Model/effort resolve independently (explicit > subagent default > caller); unsupported combinations fail, never downgrade. Children cannot delegate further - split multi-part work into sibling tasks. Creation is not completion, acceptance, or a cache hit; field-level rules are enforced by the parameter schema.",
+		"Start a named child agent in the shared cwd. Minimal form: task needs only objective (relationship defaults to continue; context derives from it - continue forks this conversation, explore/verify stay isolated, extract requires curated references naming the dataset; capabilities default to inherit). The full version-1 contract remains accepted (task <= 8192 UTF-8 bytes total). Context note: fork shows the child the caller's compressed effective history, which may carry sensitive text. Delegate minimum sufficient authority - exclude bash and other write-capable tools for read-only tasks. All agents share cwd; coordinate edits. Child model and effort come from the user's subagent settings, falling back to your own; they cannot be set per call. Children cannot delegate further - split multi-part work into sibling tasks. Creation is not completion, acceptance, or a cache hit; field-level rules are enforced by the parameter schema.",
 	send_message:
 		"Persist a message to an agent in this root team (target: /root/<name>). Does not start or resume an idle agent; accepted is not consumed. Grants no permissions.",
 	followup_task:
-		"Start an idle child's next task with the same delegation contract as spawn_agent, context=existing. Retains the child's history - cannot provide fresh independent judgment. capabilities can only narrow. Running children reject busy. Results return to the creation parent, not necessarily this sender. No rollback or automatic acceptance.",
+		"Start an idle child's next task; task needs only objective (tools default to inherit like spawn_agent). Retains the child's history - cannot provide fresh independent judgment. tools can only narrow. Running children reject busy. Results return to the creation parent, not necessarily this sender. No rollback or automatic acceptance.",
 	wait_agent:
 		"Wait for this agent's mailbox or user input (not a list of task IDs). Timeout does not cancel children. Mailbox contents are injected at the next model request boundary.",
 	interrupt_agent:
@@ -243,15 +243,14 @@ export function registerPiCollaborationTools(options: {
 								subagentModel: session.settingsManager.getSubagentModel(),
 								subagentThinkingLevel: session.settingsManager.getSubagentThinkingLevel(),
 							};
-							const reference = args.model ?? defaults.subagentModel;
+							const reference = defaults.subagentModel;
 							const model: ChildSessionModel = {
 								provider: ctx.model.provider,
 								id: ctx.model.id,
 								thinkingLevel:
-									args.reasoning_effort ??
-									(defaults.subagentThinkingLevel === undefined
+									defaults.subagentThinkingLevel === undefined
 										? session.thinkingLevel
-										: defaults.subagentThinkingLevel),
+										: defaults.subagentThinkingLevel,
 							};
 							if (reference !== undefined) {
 								if (
@@ -281,18 +280,25 @@ export function registerPiCollaborationTools(options: {
 									"Requested child effort is unsupported",
 									"effort_unsupported",
 								);
-							const delegation = validateDelegation(args.delegation);
+							const delegation = validateDelegation({
+								task: args.task,
+								context: args.context,
+								tools: args.tools,
+							});
 							const available = session
 								.getActiveToolNames()
 								.filter((name) => controller.toolAllowed(identity, name));
+							// Names are already namespace-normalized by validateDelegation.
 							const tools =
 								delegation.capabilities.tools === "inherit" ? available : delegation.capabilities.tools;
-							if (tools.some((name) => !available.includes(name)))
+							const offending = tools.filter((name) => !available.includes(name));
+							if (offending.length > 0)
 								throw new CollaborationError(
 									"forbidden",
-									"Delegation cannot add unavailable tools",
+									`Delegation cannot add unavailable tools. Available: ${available.join(", ")}`,
 									"tools_unavailable",
-									tools.filter((name) => !available.includes(name)),
+									offending,
+									available,
 								);
 							let fork: AgentMessage[] = [];
 							let prefix: ReturnType<typeof getCollaborationPrefix> | undefined;
@@ -347,9 +353,8 @@ export function registerPiCollaborationTools(options: {
 							const args = parseCollaborationArguments(name, input);
 							const current = controller.inspect(identity, args.target);
 							const delegation = validateDelegation({
-								version: 1,
 								task: args.task,
-								capabilities: args.capabilities,
+								tools: args.tools,
 								context: current.delegation?.context ?? { mode: "fork", turns: "all", prefix: "rebuild" },
 							});
 							const available = session
@@ -362,13 +367,17 @@ export function registerPiCollaborationTools(options: {
 											name,
 										),
 								);
-							const tools = args.capabilities.tools === "inherit" ? available : args.capabilities.tools;
-							if (tools.some((name) => !available.includes(name)))
+							// Capabilities are namespace-normalized inside validateDelegation already.
+							const tools =
+								delegation.capabilities.tools === "inherit" ? available : delegation.capabilities.tools;
+							const offending = tools.filter((name) => !available.includes(name));
+							if (offending.length > 0)
 								throw new CollaborationError(
 									"forbidden",
-									"Follow-up cannot expand delegated tools",
+									`Follow-up cannot expand delegated tools. Available: ${available.join(", ")}`,
 									"tools_unavailable",
-									tools.filter((name) => !available.includes(name)),
+									offending,
+									available,
 								);
 							result = {
 								message_id: await controller.followup(identity, args.target, args.task.objective, signal, {
