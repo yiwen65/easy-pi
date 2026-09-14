@@ -15,6 +15,7 @@ import {
 	COLLABORATION_LIMITS,
 	DELIVER_RESULT_TOOL_NAME,
 	DelegationResultSchema,
+	validateDelegation,
 } from "@easy-pi/subagent/collaboration-contract";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
@@ -25,7 +26,7 @@ import type { ExtensionAPI, InlineExtension } from "../src/core/extensions/types
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createPiChildSessionHost, preparePiCollaborationFork } from "../src/extensions/pi-child-session-host.ts";
-import { spawnArgs } from "./collaboration-fixture.ts";
+import { spawnArgs, taskContract } from "./collaboration-fixture.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -465,26 +466,20 @@ test("initial and cold followup requests carry the deliver_result contract witho
 		start_line: 1,
 		end_line: 1,
 	};
-	const { delegation } = spawnArgs("worker", "Extract the numeric result from the supplied evidence.", {
-		mode: "curated",
-		references: [reference],
+	const delegation = validateDelegation({
+		task: taskContract("Extract the numeric result from the supplied evidence."),
+		context: { mode: "curated", references: [reference] },
+		capabilities: { tools: "inherit" },
 	});
-	// Real gpt-5.6-luna/max output: valid JSON, but evidence elements violate string[].
+	// Removed result sections (artifacts/evidence/checks/risks) are rejected; the summary carries the citation.
 	const invalid = JSON.stringify({
 		summary: "CURATED_SYNTHETIC_B92A: 17",
 		outcome: "succeeded",
-		artifacts: [],
 		evidence: [{ path: reference.path, sha256: reference.sha256, observation: "8+9=17" }],
-		checks: [],
-		risks: [],
 	});
 	const valid = JSON.stringify({
-		summary: "CURATED_SYNTHETIC_B92A: 17",
+		summary: `CURATED_SYNTHETIC_B92A: 17 — evidence ${reference.path}:1 sha256=${reference.sha256}; 8+9=17`,
 		outcome: "succeeded",
-		artifacts: [],
-		evidence: [`${reference.path}:1 sha256=${reference.sha256}; 8+9=17`],
-		checks: [],
-		risks: [],
 	});
 	const requests: Context[] = [];
 	const make = () => {
@@ -542,7 +537,7 @@ test("initial and cold followup requests carry the deliver_result contract witho
 	expect(first.store.read().agents[0]).toMatchObject({
 		status: "completed",
 		result: invalid,
-		resultValidation: { contract: "invalid", acceptance: "not_reviewed" },
+		resultValidation: { contract: "invalid" },
 	});
 	expect(first.store.read().messages).toEqual(
 		expect.arrayContaining([
@@ -550,7 +545,7 @@ test("initial and cold followup requests carry the deliver_result contract witho
 				to: "/root",
 				kind: "result",
 				text: invalid,
-				resultValidation: { contract: "invalid", acceptance: "not_reviewed" },
+				resultValidation: { contract: "invalid" },
 			}),
 		]),
 	);
@@ -565,7 +560,7 @@ test("initial and cold followup requests carry the deliver_result contract witho
 	expect(f.faux.state.callCount).toBe(2);
 	expect(second.store.read().agents[0]).toMatchObject({
 		result: valid,
-		resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+		resultValidation: { contract: "valid", outcome: "succeeded" },
 	});
 	for (const context of requests) {
 		const message = context.messages.at(-1)!;
@@ -580,8 +575,8 @@ test("initial and cold followup requests carry the deliver_result contract witho
 		const deliver = context.tools?.find((tool) => tool.name === DELIVER_RESULT_TOOL_NAME);
 		expect(deliver, "the actual provider request must carry the deliver_result tool").toBeDefined();
 		expect(deliver!.parameters).toEqual(DelegationResultSchema);
-		expect(text).toContain("arrays of nonblank strings");
-		expect(text).toContain("not curated reference objects");
+		expect(text).toContain("only summary and outcome are required");
+		expect(text).toContain("residual risks in the summary text");
 		expect(text).toContain(`${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes`);
 		expect(context.systemPrompt).not.toContain("Final result JSON Schema:");
 	}
@@ -592,15 +587,16 @@ test("the deliver_result protocol tool overrides the final text, replaces earlie
 	const f = await fixture();
 	const caller = { rootSessionId: "deliver-tool", agentPath: "/root" };
 	const first = {
-		summary: "CURATED_SYNTHETIC_B92A: 17",
+		summary:
+			"CURATED_SYNTHETIC_B92A: 17 — evidence.txt:1 sha256=dd04b89cadf9af64537e008365c20ff80f5f87d6278a9c91fa6bbe796c85f429; 8+9=17",
 		outcome: "succeeded",
-		artifacts: [],
-		evidence: ["evidence.txt:1 sha256=dd04b89cadf9af64537e008365c20ff80f5f87d6278a9c91fa6bbe796c85f429; 8+9=17"],
-		checks: [],
-		risks: [],
 	};
 	const second = { ...first, summary: "CURATED_SYNTHETIC_B92A: 18" };
-	const { delegation } = spawnArgs("worker", "Compute the numeric result from the supplied evidence.");
+	const delegation = validateDelegation({
+		task: taskContract("Compute the numeric result from the supplied evidence."),
+		context: { mode: "isolated" },
+		capabilities: { tools: "inherit" },
+	});
 	const store = new CollaborationStore({
 		path: ":memory:",
 		cwd: f.cwd,
@@ -632,7 +628,7 @@ test("the deliver_result protocol tool overrides the final text, replaces earlie
 	expect(store.read().agents[0]).toMatchObject({
 		status: "completed",
 		result: JSON.stringify(second),
-		resultValidation: { contract: "valid", outcome: "succeeded", acceptance: "not_reviewed" },
+		resultValidation: { contract: "valid", outcome: "succeeded" },
 	});
 });
 

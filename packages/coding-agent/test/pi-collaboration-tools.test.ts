@@ -230,12 +230,8 @@ test("close_agent retires a settled child through the native tool layer and its 
 	let rootTurn = 0;
 	let childTurns = 0;
 	const delivered = {
-		summary: "CURATED_SYNTHETIC_CLOSE: 17",
+		summary: "CURATED_SYNTHETIC_CLOSE: 17 — evidence.txt:1; 8+9=17",
 		outcome: "succeeded",
-		artifacts: [],
-		evidence: ["evidence.txt:1; 8+9=17"],
-		checks: [],
-		risks: [],
 	};
 	f.faux.setResponses(
 		Array.from({ length: 20 }, () => (context: Context) => {
@@ -393,10 +389,12 @@ test("native user steering wakes wait without polling or cancelling a child", as
 	expect(f.faux.state.callCount).toBe(2);
 });
 
-test("tool model overrides fail explicitly, invalid roots fail safely, and no child request is made", async () => {
+test("settings-injected child model fails explicitly, invalid roots fail safely, and no child request is made", async () => {
 	const f = await fixture();
+	// Child model/effort come from user settings, not per-call arguments.
+	f.session.settingsManager.setSubagentModel("missing/model");
 	f.faux.setResponses([
-		tool("spawn_agent", { ...spawnArgs("bad", "task"), model: "missing/model" }),
+		tool("spawn_agent", spawnArgs("bad", "task")),
 		tool("followup_task", followupArgs("/root", "not allowed")),
 		tool("interrupt_agent", { target: "/root" }),
 		fauxAssistantMessage("rejected"),
@@ -412,7 +410,7 @@ test("tool model overrides fail explicitly, invalid roots fail safely, and no ch
 	expect(f.faux.state.callCount).toBe(4);
 });
 
-test("qualified model override uses the selected provider while unsupported effort is rejected", async () => {
+test("settings-injected model selects the provider while an unsupported effort is rejected", async () => {
 	const f = await fixture();
 	const alternate = fauxProvider({ provider: "alternate-faux", tokensPerSecond: 0 });
 	f.modelRuntime.registerNativeProvider(alternate.provider);
@@ -423,18 +421,25 @@ test("qualified model override uses the selected provider while unsupported effo
 			return fauxAssistantMessage("alternate child result");
 		},
 	]);
+	f.session.settingsManager.setSubagentModel(`alternate-faux/${alternate.getModel().id}`);
 	f.faux.setResponses([
-		tool("spawn_agent", {
-			...spawnArgs("alternate", "separate provider", { mode: "fork", turns: "all", prefix: "rebuild" }),
-			model: `alternate-faux/${alternate.getModel().id}`,
-		}),
-		tool("spawn_agent", { ...spawnArgs("unsupported", "task"), reasoning_effort: "max" }),
+		tool(
+			"spawn_agent",
+			spawnArgs("alternate", "separate provider", { mode: "fork", turns: "all", prefix: "rebuild" }),
+		),
 		fauxAssistantMessage("root done"),
 	]);
 	await f.session.prompt("inherited context marker");
 	await f.controller.settled();
 	expect(alternate.state.callCount).toBe(1);
-	expect(f.faux.state.callCount).toBe(3);
+	expect(f.faux.state.callCount).toBe(2);
+
+	// Phase two: an effort the selected child model does not support is rejected before admission.
+	f.session.settingsManager.setSubagentThinkingLevel("max");
+	f.faux.setResponses([tool("spawn_agent", spawnArgs("unsupported", "task")), fauxAssistantMessage("root done 2")]);
+	await f.session.prompt("phase two");
+	await f.controller.settled();
+	expect(f.faux.state.callCount).toBe(4);
 	expect(JSON.stringify(captured?.messages)).toContain("inherited context marker");
 	expect(captured?.tools?.map((item) => item.name)).toEqual(
 		expect.arrayContaining([
@@ -517,10 +522,6 @@ test("preserved fork uses the real neutral parent request prefix and appends the
 					JSON.stringify({
 						summary: "Completed assigned task",
 						outcome: "succeeded",
-						artifacts: [],
-						evidence: [],
-						checks: [],
-						risks: [],
 					}),
 				);
 			}
@@ -548,7 +549,7 @@ test("preserved fork uses the real neutral parent request prefix and appends the
 	expect(JSON.stringify(childContext!.messages.at(-1))).toContain("only child task");
 	expect(childContext!.systemPrompt).not.toContain("Collaboration identity:");
 	expect(f.controller.list(f.identity)[0]).toMatchObject({
-		resultValidation: { contract: "valid", acceptance: "not_reviewed" },
+		resultValidation: { contract: "valid" },
 		context: { prefix: "required" },
 	});
 	const record = f.controller.inspect(f.identity, "worker");
@@ -581,11 +582,7 @@ test("prefix diagnostics distinguish missing captures, changed rules, tools and 
 test("preserve rejects changed capability schemas before child admission, not by silently rebuilding", async () => {
 	const f = await fixture();
 	const args = spawnArgs("worker", "restricted task", { mode: "fork", turns: "all", prefix: "preserve" });
-	args.delegation.capabilities = { tools: "inherit" };
-	f.faux.setResponses([
-		tool("spawn_agent", { ...args, delegation: { ...args.delegation, capabilities: { tools: ["read"] } } }),
-		fauxAssistantMessage("rejected"),
-	]);
+	f.faux.setResponses([tool("spawn_agent", { ...args, tools: ["read"] }), fauxAssistantMessage("rejected")]);
 	await f.session.prompt("parent");
 	await f.controller.settled();
 	expect(f.store.read().agents).toEqual([]);
@@ -594,13 +591,76 @@ test("preserve rejects changed capability schemas before child admission, not by
 	expect(f.faux.state.callCount).toBe(2);
 });
 
+test("the minimal delegation form spawns with canonical defaults persisted", async () => {
+	const f = await fixture();
+	let rootStep = 0;
+	f.faux.setResponses(
+		Array.from({ length: 6 }, () => (context: Context) => {
+			if (currentCollaborationPath(context) === "/root/lite") return fauxAssistantMessage("child done");
+			if (rootStep++ === 0) return tool("spawn_agent", { task_name: "lite", task: { objective: "smallest probe" } });
+			return fauxAssistantMessage("parent done");
+		}),
+	);
+	await f.session.prompt("parent");
+	await f.controller.settled();
+	const record = f.store.read().agents.find((agent) => agent.path === "/root/lite");
+	expect(record).toMatchObject({
+		status: "completed",
+		delegation: {
+			version: 1,
+			task: {
+				relationship: "continue",
+				objective: "smallest probe",
+			},
+			// context derived from relationship=continue: fork the conversation (all turns, rebuilt prefix)
+			context: { mode: "fork", turns: "all", prefix: "rebuild" },
+			capabilities: { tools: "inherit" },
+		},
+	});
+});
+
+test("namespaced tool names normalize before the ceiling check; unknown names fail with the available list", async () => {
+	const f = await fixture();
+	let rootStep = 0;
+	const readerArgs = spawnArgs("reader", "read-only probe");
+	const writerArgs = spawnArgs("writer", "write probe");
+	f.faux.setResponses(
+		Array.from({ length: 8 }, () => (context: Context) => {
+			if (currentCollaborationPath(context) === "/root/reader") return fauxAssistantMessage("child done");
+			const step = rootStep++;
+			if (step === 0)
+				return tool("spawn_agent", {
+					...readerArgs,
+					tools: ["functions.read"],
+				});
+			if (step === 1) return fauxAssistantMessage("first spawn settled");
+			if (step === 2)
+				return tool("spawn_agent", {
+					...writerArgs,
+					tools: ["functions.laser_beam"],
+				});
+			return fauxAssistantMessage("rejected");
+		}),
+	);
+	await f.session.prompt("parent");
+	await f.controller.settled();
+	// functions.read normalized to the bare name: the child was admitted and ran
+	expect(f.store.read().agents[0]?.path).toBe("/root/reader");
+
+	await f.session.prompt("parent2");
+	await f.controller.settled();
+	// a genuinely unknown name is still refused, and the error now lists what is available
+	expect(f.store.read().agents.some((agent) => agent.path === "/root/writer")).toBe(false);
+	expect(JSON.stringify(f.session.messages)).toContain("Available:");
+});
+
 test("isolated verifier sees its assignment but no parent goals and cannot invoke excluded bash", async () => {
 	const f = await fixture();
 	let rootStep = 0;
 	let childStep = 0;
 	let childContext: Context | undefined;
 	const args = spawnArgs("reviewer", "independent verification");
-	args.delegation.task.relationship = "verify";
+	args.task.relationship = "verify";
 	f.faux.setResponses(
 		Array.from({ length: 8 }, () => (context: Context) => {
 			if (currentCollaborationPath(context) === "/root/reviewer") {
@@ -611,7 +671,7 @@ test("isolated verifier sees its assignment but no parent goals and cannot invok
 			if (rootStep++ === 0)
 				return tool("spawn_agent", {
 					...args,
-					delegation: { ...args.delegation, capabilities: { tools: ["read"] } },
+					tools: ["read"],
 				});
 			return fauxAssistantMessage("root finished");
 		}),
@@ -762,7 +822,7 @@ test("execution gate blocks a restricted tool even if a trusted host re-advertis
 				const args = spawnArgs("worker", "restricted");
 				return tool("spawn_agent", {
 					...args,
-					delegation: { ...args.delegation, capabilities: { tools: ["read"] } },
+					tools: ["read"],
 				});
 			}
 			return fauxAssistantMessage("root done");
@@ -787,7 +847,7 @@ test("curated spawn sends only pinned evidence and the current assignment, not p
 			{ path: "source.txt", sha256: createHash("sha256").update(text).digest("hex"), start_line: 2, end_line: 2 },
 		],
 	});
-	args.delegation.task.relationship = "verify";
+	args.task.relationship = "verify";
 	let root = 0;
 	let captured: Context | undefined;
 	f.faux.setResponses(
@@ -814,9 +874,7 @@ test("cold explicit followup retains the delegated ceiling and child history wit
 		Array.from({ length: 6 }, () => (context: Context) => {
 			if (currentCollaborationPath(context) === "/root/worker") return fauxAssistantMessage("RETAINED_CHILD_RESULT");
 			const args = spawnArgs("worker", "first task");
-			return root++ === 0
-				? tool("spawn_agent", { ...args, delegation: { ...args.delegation, capabilities: { tools: ["read"] } } })
-				: fauxAssistantMessage("root done");
+			return root++ === 0 ? tool("spawn_agent", { ...args, tools: ["read"] }) : fauxAssistantMessage("root done");
 		}),
 	);
 	await f.session.prompt("initial delegation");

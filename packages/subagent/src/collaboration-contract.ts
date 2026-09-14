@@ -96,7 +96,23 @@ const ERROR_REASONS = {
 	},
 	invalid_followup: {
 		code: "invalid_arguments",
-		hint: "Paste followup_task JSON with task, context=existing and capabilities.",
+		hint: "Paste followup_task JSON with target, task, and optional tools.",
+	},
+	invalid_delegation: {
+		code: "invalid_arguments",
+		hint: "Only delegation.task.objective is required; relationship defaults to continue; context derives from relationship (continue forks, explore/verify stay isolated, extract needs curated references); capabilities default to inherit.",
+	},
+	independent_needs_fresh_context: {
+		code: "invalid_arguments",
+		hint: "explore/verify relationships require isolated or curated context; to reuse this conversation use relationship=continue with context fork.",
+	},
+	preserve_needs_all_turns: {
+		code: "invalid_arguments",
+		hint: "Preserving the provider request prefix needs the complete history; omit turns (all is implied) or use prefix rebuild.",
+	},
+	curated_needs_references: {
+		code: "invalid_arguments",
+		hint: "Curated context requires references[] of cwd-local text files; use isolated or fork otherwise.",
 	},
 	tools_unavailable: {
 		code: "forbidden",
@@ -119,17 +135,21 @@ export class CollaborationError extends Error {
 	readonly reason?: CollaborationErrorReason;
 	/** Optional offending values (e.g. tool names) from trusted throw sites; re-filtered before formatting. */
 	readonly detail?: readonly string[];
+	/** Tool ids the receiver may actually use; formatted only when every entry is tool-name shaped. */
+	readonly availableTools?: readonly string[];
 	constructor(
 		code: CollaborationErrorCode,
 		message: string,
 		reason?: CollaborationErrorReason,
 		detail?: readonly string[],
+		availableTools?: readonly string[],
 	) {
 		super(message);
 		this.name = "CollaborationError";
 		this.code = code;
 		this.reason = reason;
 		this.detail = detail;
+		this.availableTools = availableTools;
 	}
 }
 
@@ -151,9 +171,15 @@ export function formatCollaborationError(error: unknown): string {
 		error instanceof CollaborationError && Array.isArray(error.detail)
 			? error.detail.filter((item) => typeof item === "string" && SAFE_DETAIL_PATTERN.test(item)).slice(0, 8)
 			: [];
+	const available =
+		error instanceof CollaborationError && Array.isArray(error.availableTools)
+			? error.availableTools
+					.filter((item) => typeof item === "string" && SAFE_DETAIL_PATTERN.test(item))
+					.slice(0, 32)
+			: [];
 	return `${code}${reason ? ` / ${reason}` : ""}. ${reason ? ERROR_REASONS[reason].hint : ERROR_HINTS[code]}${
 		details.length ? ` Offending values: ${details.join(", ")}.` : ""
-	}`;
+	}${available.length ? ` Available: ${available.join(", ")}.` : ""}`;
 }
 
 const TaskName = Type.String({
@@ -200,37 +226,38 @@ export const DelegationTaskSchema = Type.Object(
 				description:
 					"Independent checking; requires isolated or curated context, and follow-ups cannot reuse prior context.",
 			}),
-			Type.Literal("extract", { description: "Dataset extraction; name the dataset in material." }),
+			Type.Literal("extract", { description: "Dataset extraction; name the dataset in curated references." }),
 		]),
+		/** The complete self-contained assignment in free text: goal, scope, inputs, expected output, acceptance. */
 		objective: Nonblank,
-		scope: Nonblank,
-		material: Type.Array(Nonblank, {
-			description:
-				"Named inputs the child may rely on: paths, datasets, prior findings; extract must name its dataset here.",
-			maxItems: 16,
-		}),
-		deliverables: TextList,
-		acceptance: TextList,
+		scope: Type.Optional(Nonblank),
+		material: Type.Optional(Type.Array(Nonblank, { maxItems: 16 })),
+		deliverables: Type.Optional(TextList),
+		acceptance: Type.Optional(TextList),
 	},
 	{ additionalProperties: false },
 );
 export type DelegationTask = Static<typeof DelegationTaskSchema>;
 
-export const DelegationCapabilitiesSchema = Type.Object(
-	{
-		tools: Type.Union([
-			Type.Literal("inherit", { description: "Use exactly the caller's currently allowed tools." }),
-			Type.Array(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }), {
-				description:
-					"Allowlist of tool names. Every name must already be in the caller's active allowed set; delegation can only restrict, never add. Exclude bash and other write-capable tools for read-only tasks.",
-				maxItems: 128,
-				uniqueItems: true,
-			}),
-		]),
-	},
+export const DelegationCapabilitiesSchema = Type.Union(
+	[
+		Type.Literal("inherit", { description: "Use exactly the caller's currently allowed tools (default)." }),
+		Type.Array(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }), {
+			description:
+				"Allowlist of tool names. Every name must already be in the caller's active allowed set; delegation can only restrict, never add. Exclude bash and other write-capable tools for read-only tasks.",
+			maxItems: 128,
+			uniqueItems: true,
+		}),
+	],
+	{ description: "Tool authority; omit to inherit." },
+);
+export type DelegationCapabilitiesInput = Static<typeof DelegationCapabilitiesSchema>;
+/** Canonical stored shape keeps the wrapper for registry read compatibility. */
+export type DelegationCapabilities = { tools: "inherit" | string[] };
+const CanonicalCapabilitiesSchema = Type.Object(
+	{ tools: DelegationCapabilitiesSchema },
 	{ additionalProperties: false },
 );
-export type DelegationCapabilities = Static<typeof DelegationCapabilitiesSchema>;
 
 /** Curated input is read by the host and pinned to the full source file hash. */
 export const CuratedReferenceSchema = Type.Object(
@@ -288,53 +315,236 @@ export const DelegationContextSchema = Type.Union([
 	),
 ]);
 export type DelegationContext = Static<typeof DelegationContextSchema>;
+
+/* ——— Wire input layer: relaxed shapes that normalization expands to the canonical contract. ——— */
+
+export const DelegationTaskInputSchema = Type.Object(
+	{
+		relationship: Type.Optional(
+			Type.Union([
+				Type.Literal("continue", { description: "Continuation of the same thread of work (default)." }),
+				Type.Literal("explore", {
+					description:
+						"Independent investigation; requires isolated or curated context, and follow-ups cannot reuse prior context.",
+				}),
+				Type.Literal("verify", {
+					description:
+						"Independent checking; requires isolated or curated context, and follow-ups cannot reuse prior context.",
+				}),
+				Type.Literal("extract", { description: "Dataset extraction; provide the dataset via curated references." }),
+			]),
+		),
+		objective: Type.String({
+			minLength: 1,
+			maxLength: 2048,
+			pattern: "\\S",
+			description:
+				"The complete self-contained assignment in free text: goal, scope, inputs, expected output, and acceptance; the child sees only this.",
+		}),
+	},
+	{ additionalProperties: false },
+);
+export type DelegationTaskInput = Static<typeof DelegationTaskInputSchema>;
+
+const DelegationContextInputSchema = Type.Union([
+	Type.Union([Type.Literal("isolated"), Type.Literal("fork")], {
+		description:
+			'Shorthand: "isolated" = fresh context (default); "fork" = inherit this conversation (all turns, rebuilt prefix).',
+	}),
+	Type.Object(
+		{
+			mode: Type.Literal("fork"),
+			preservePrefix: Type.Optional(
+				Type.Boolean({
+					description:
+						"Reuse the caller's captured provider request prefix; implies turns=all and requires identical model, effort and ordered tools.",
+				}),
+			),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{ mode: Type.Literal("isolated") },
+		{ additionalProperties: false, description: "Fresh context: no parent conversation is carried." },
+	),
+	Type.Object(
+		{
+			mode: Type.Literal("fork"),
+			turns: Type.String({
+				description:
+					'"all" or the number of trailing complete turns to replay from the caller\'s effective history.',
+				pattern: "^(all|[1-9][0-9]{0,5})$",
+			}),
+			prefix: Type.Union([
+				Type.Literal("preserve", {
+					description:
+						"Reuse the caller's captured provider request prefix; requires turns=all plus identical model, effort and ordered tools, else the spawn fails.",
+				}),
+				Type.Literal("rebuild", {
+					description: "Replay the selected messages as a new context; model and tools may differ.",
+				}),
+			]),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			mode: Type.Literal("curated"),
+			references: Type.Array(CuratedReferenceSchema, {
+				description:
+					"cwd-local nonsymlink text files read by the host; each source and the combined set must fit 256KiB.",
+				minItems: 1,
+				maxItems: 16,
+			}),
+		},
+		{ additionalProperties: false },
+	),
+]);
+
+export const DelegationInputSchema = Type.Object(
+	{
+		version: Type.Optional(Type.Literal(1, { description: "Contract version; optional, only 1 exists." })),
+		task: DelegationTaskInputSchema,
+		context: Type.Optional(DelegationContextInputSchema),
+		tools: Type.Optional(DelegationCapabilitiesSchema),
+	},
+	{ additionalProperties: false },
+);
+export type DelegationInput = Static<typeof DelegationInputSchema>;
+
+/** Models sometimes emit OpenAI-style namespaced ids (functions.read); normalize to bare tool ids. */
+export function normalizeToolNames(tools: string[]): string[] {
+	return tools.map((name) => (name.startsWith("functions.") ? name.slice("functions.".length) : name));
+}
+
+function deriveDelegationContext(relationship: DelegationTask["relationship"]): DelegationContext {
+	// Context derives from the task type; an explicit context always wins over derivation.
+	if (relationship === "explore" || relationship === "verify") return { mode: "isolated" };
+	if (relationship === "extract")
+		throw new CollaborationError(
+			"invalid_arguments",
+			"Extract requires curated references naming the dataset",
+			"curated_needs_references",
+		);
+	return { mode: "fork", turns: "all", prefix: "rebuild" };
+}
+
+function normalizeDelegationContext(context: unknown, relationship: DelegationTask["relationship"]): DelegationContext {
+	if (context === undefined) return deriveDelegationContext(relationship);
+	if (context === "isolated") return { mode: "isolated" };
+	if (context === "fork") return { mode: "fork", turns: "all", prefix: "rebuild" };
+	if (context === "curated")
+		throw new CollaborationError(
+			"invalid_arguments",
+			"Curated shorthand requires references",
+			"curated_needs_references",
+		);
+	const object = context as { mode?: string; preservePrefix?: boolean };
+	if (object.mode === "fork" && "preservePrefix" in object && !("turns" in object))
+		return { mode: "fork", turns: "all", prefix: object.preservePrefix ? "preserve" : "rebuild" };
+	return context as DelegationContext;
+}
+
+/** Fill canonical defaults into a relaxed wire delegation; idempotent for complete contracts. */
+export function normalizeDelegation(input: unknown): Delegation {
+	const value = (input ?? {}) as {
+		task?: {
+			relationship?: DelegationTask["relationship"];
+			objective?: string;
+			scope?: string;
+			material?: string[];
+			deliverables?: string[];
+			acceptance?: string[];
+		};
+		context?: unknown;
+		tools?: "inherit" | string[] | DelegationCapabilities;
+	};
+	const task = value.task ?? {};
+	const relationship = task.relationship ?? "continue";
+	// Wire sends tools flat; legacy callers may wrap them as { tools }.
+	const rawTools = value.tools ?? (value as { capabilities?: { tools?: "inherit" | string[] } }).capabilities?.tools;
+	const normalizedTools =
+		rawTools === undefined || rawTools === "inherit" ? "inherit" : normalizeToolNames(rawTools as string[]);
+	return {
+		version: 1,
+		task: {
+			relationship,
+			objective: task.objective ?? "",
+			// Model-authored pass-through only; no filler defaults are injected.
+			...(task.scope !== undefined ? { scope: task.scope } : {}),
+			...(task.material !== undefined ? { material: task.material } : {}),
+			...(task.deliverables !== undefined ? { deliverables: task.deliverables } : {}),
+			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
+		},
+		context: normalizeDelegationContext(value.context, relationship),
+		capabilities: { tools: normalizedTools as "inherit" | string[] },
+	};
+}
+
 export const DelegationSchema = Type.Object(
 	{
 		version: Type.Literal(1, { description: "Contract version." }),
 		task: DelegationTaskSchema,
 		context: DelegationContextSchema,
-		capabilities: DelegationCapabilitiesSchema,
+		capabilities: CanonicalCapabilitiesSchema,
 	},
 	{ additionalProperties: false },
 );
 export type Delegation = Static<typeof DelegationSchema>;
 
 export function validateDelegation(value: unknown): Delegation {
-	if (!Value.Check(DelegationSchema, value))
-		throw new CollaborationError("invalid_arguments", "Invalid delegation contract");
+	// Wire input may use the relaxed short form; normalization fills canonical defaults first.
+	const normalized = normalizeDelegation(value);
+	if (!Value.Check(DelegationSchema, normalized))
+		throw new CollaborationError("invalid_arguments", "Invalid delegation contract", "invalid_delegation");
 	if (
-		Buffer.byteLength(JSON.stringify(value), "utf8") > COLLABORATION_LIMITS.maxMessageBytes ||
-		JSON.stringify(value).includes("\\u0000")
+		Buffer.byteLength(JSON.stringify(normalized), "utf8") > COLLABORATION_LIMITS.maxMessageBytes ||
+		JSON.stringify(normalized).includes("\\u0000")
 	)
 		throw new CollaborationError(
 			"invalid_arguments",
 			"Delegation exceeds the 8192-byte contract budget or contains NUL",
 		);
-	if ((value.task.relationship === "verify" || value.task.relationship === "explore") && value.context.mode === "fork")
-		throw new CollaborationError("invalid_arguments", "Independent work requires isolated or curated context");
-	if (value.context.mode === "fork" && value.context.prefix === "preserve" && value.context.turns !== "all")
+	if (
+		(normalized.task.relationship === "verify" || normalized.task.relationship === "explore") &&
+		normalized.context.mode === "fork"
+	)
+		throw new CollaborationError(
+			"invalid_arguments",
+			"Independent work requires isolated or curated context",
+			"independent_needs_fresh_context",
+		);
+	if (
+		normalized.context.mode === "fork" &&
+		normalized.context.prefix === "preserve" &&
+		normalized.context.turns !== "all"
+	)
 		throw new CollaborationError(
 			"invalid_arguments",
 			"Preserving a request prefix requires the complete effective history",
+			"preserve_needs_all_turns",
 		);
-	if (value.context.mode === "curated" && value.context.references.some((ref) => ref.end_line < ref.start_line))
+	if (
+		normalized.context.mode === "curated" &&
+		normalized.context.references.some((ref) => ref.end_line < ref.start_line)
+	)
 		throw new CollaborationError("invalid_arguments", "Invalid curated line range");
-	return structuredClone(value);
+	return structuredClone(normalized);
 }
 
 export const DelegationResultSchema = Type.Object(
 	{
-		summary: Nonblank,
-		outcome: Type.Union([
-			Type.Literal("succeeded"),
-			Type.Literal("partial"),
-			Type.Literal("blocked"),
-			Type.Literal("failed"),
-		]),
-		artifacts: Type.Array(Nonblank, { maxItems: 16 }),
-		evidence: Type.Array(Nonblank, { maxItems: 16 }),
-		checks: Type.Array(Nonblank, { maxItems: 16 }),
-		risks: Type.Array(Nonblank, { maxItems: 16 }),
+		summary: Type.String({
+			minLength: 1,
+			maxLength: 2048,
+			pattern: "\\S",
+			description:
+				"The complete result in free text: what was done, key outputs/artifacts, evidence with paths/lines/hashes, checks actually performed, and residual risks.",
+		}),
+		outcome: Type.Union(
+			[Type.Literal("succeeded"), Type.Literal("partial"), Type.Literal("blocked"), Type.Literal("failed")],
+			{ description: "Honest completion verdict." },
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -352,8 +562,8 @@ export function parseDelegationResult(value: unknown): DelegationResult {
 export const ResultValidationSchema = Type.Object(
 	{
 		contract: Type.Union([Type.Literal("valid"), Type.Literal("invalid"), Type.Literal("not_completed")]),
-		/** Format validation is not acceptance of the claims or shared edits. */
-		acceptance: Type.Literal("not_reviewed"),
+		/** Legacy field: previously always "not_reviewed"; no longer written, tolerated when reading old records. */
+		acceptance: Type.Optional(Type.Literal("not_reviewed")),
 		outcome: Type.Optional(
 			Type.Union([
 				Type.Literal("succeeded"),
@@ -372,7 +582,6 @@ const RESULT_FENCE_CLOSE = /\r?\n[ \t]*```[ \t]*$/;
 /**
  * Final answers are instructed to be bare JSON, but the common wrapper shapes are
  * tolerated before rejection: one markdown fence, or prose around one object.
- * Extraction can only widen acceptance; it never alters an already-valid result.
  */
 function extractResultJson(text: string): string {
 	const trimmed = text.trim();
@@ -386,17 +595,15 @@ function extractResultJson(text: string): string {
 }
 
 export function validateDelegationResult(text: string, status: CollaborationStatus): ResultValidation {
-	if (status !== "completed") return { contract: "not_completed", acceptance: "not_reviewed" };
-	if (Buffer.byteLength(text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
-		return { contract: "invalid", acceptance: "not_reviewed" };
+	if (status !== "completed") return { contract: "not_completed" };
+	if (Buffer.byteLength(text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes) return { contract: "invalid" };
 	try {
 		const value: unknown = JSON.parse(extractResultJson(text));
-		if (Value.Check(DelegationResultSchema, value))
-			return { contract: "valid", outcome: value.outcome, acceptance: "not_reviewed" };
+		if (Value.Check(DelegationResultSchema, value)) return { contract: "valid", outcome: value.outcome };
 	} catch {
 		/* Retain the original output; never retry inference to repair formatting. */
 	}
-	return { contract: "invalid", acceptance: "not_reviewed" };
+	return { contract: "invalid" };
 }
 
 /** Provider-neutral contract: model overrides are explicitly qualified as provider/model. */
@@ -404,17 +611,9 @@ export const CollaborationSchemas = {
 	spawn_agent: Type.Object(
 		{
 			task_name: TaskName,
-			delegation: DelegationSchema,
-			model: Type.Optional(
-				Type.String({
-					description:
-						'Model override as "provider/model" (e.g. "openai-codex/gpt-6-astra"); omit to inherit the subagent default or caller model. Unavailable models fail the spawn.',
-					minLength: 3,
-					maxLength: 256,
-					pattern: "^[^/\\s]+/[^\\s]+$",
-				}),
-			),
-			reasoning_effort: Type.Optional(Reasoning),
+			task: DelegationTaskInputSchema,
+			context: Type.Optional(DelegationContextInputSchema),
+			tools: Type.Optional(DelegationCapabilitiesSchema),
 		},
 		{ additionalProperties: false },
 	),
@@ -422,12 +621,8 @@ export const CollaborationSchemas = {
 	followup_task: Type.Object(
 		{
 			target: Target,
-			task: DelegationTaskSchema,
-			context: Type.Literal("existing", {
-				description:
-					'Must be "existing": follow-ups retain the child\'s history; independent explore/verify work requires a fresh spawn.',
-			}),
-			capabilities: DelegationCapabilitiesSchema,
+			task: DelegationTaskInputSchema,
+			tools: Type.Optional(DelegationCapabilitiesSchema),
 		},
 		{ additionalProperties: false },
 	),
@@ -466,14 +661,16 @@ export function parseCollaborationArguments<Name extends CollaborationToolName>(
 	}
 	const parsed = input as CollaborationArguments[Name];
 	if ("message" in parsed) validateCollaborationMessage(parsed.message);
-	if ("delegation" in parsed) validateDelegation(parsed.delegation);
-	if ("task" in parsed)
-		validateDelegation({
-			version: 1,
-			task: parsed.task,
-			context: { mode: "isolated" },
-			capabilities: parsed.capabilities,
-		});
+	if ("task" in parsed) {
+		const taskArgs = parsed as {
+			task: DelegationTaskInput;
+			context?: unknown;
+			tools?: "inherit" | string[];
+		};
+		if (name === "spawn_agent")
+			validateDelegation({ task: taskArgs.task, context: taskArgs.context, tools: taskArgs.tools });
+		else validateDelegation({ task: taskArgs.task, context: { mode: "isolated" }, tools: taskArgs.tools });
+	}
 	return structuredClone(parsed);
 }
 

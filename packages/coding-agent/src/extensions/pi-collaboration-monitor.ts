@@ -379,17 +379,23 @@ export class PiCollaborationMonitor {
 				throw new CollaborationError("invalid_arguments", "Expected a task contract object", "invalid_followup");
 			const args = parseCollaborationArguments("followup_task", { ...input, target: path });
 			const delegation = validateDelegation({
-				version: 1,
 				task: args.task,
-				capabilities: args.capabilities,
+				tools: args.tools,
 				context: record.delegation?.context ?? { mode: "fork", turns: "all", prefix: "rebuild" },
 			});
 			const available = this.root
 				.getActiveToolNames()
 				.filter((name) => this.controller.toolAllowed({ ...this.identity, agentPath: path }, name));
-			const tools = args.capabilities.tools === "inherit" ? available : args.capabilities.tools;
-			if (tools.some((name) => !available.includes(name)))
-				throw new CollaborationError("forbidden", "Follow-up cannot expand delegated tools", "tools_unavailable");
+			const tools = delegation.capabilities.tools === "inherit" ? available : delegation.capabilities.tools;
+			const offending = tools.filter((name) => !available.includes(name));
+			if (offending.length > 0)
+				throw new CollaborationError(
+					"forbidden",
+					"Follow-up cannot expand delegated tools",
+					"tools_unavailable",
+					offending,
+					available,
+				);
 			return `Task accepted: ${await this.controller.followup(this.identity, path, args.task.objective, signal, { delegation, tools })}`;
 		}
 		return `Interrupt finished; previous status: ${await this.controller.interrupt(this.identity, path)}`;
