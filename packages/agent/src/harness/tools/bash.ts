@@ -102,9 +102,9 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 	const maxForegroundTimeoutSeconds =
 		options?.promotion?.maxForegroundTimeoutSeconds ?? MAX_FOREGROUND_TIMEOUT_SECONDS;
 	const description =
-		`Execute a bash command and return stdout, stderr, and a structured exit status; nonzero exits, signals, timeouts, and cancellation are tool errors. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; full output is saved to a temp file. A nonexistent cwd fails the call and the error names the cause. cwd is not a sandbox.` +
+		`Execute a bash command and return stdout, stderr, and a structured exit status; nonzero exits, signals, and cancellation are tool errors. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; full output is saved to a temp file. A nonexistent cwd fails the call and the error names the cause. cwd is not a sandbox.` +
 		(options?.promotion
-			? ` A foreground command that runs longer than ${foregroundTimeoutSeconds}s (explicit timeout, max ${maxForegroundTimeoutSeconds}s) is not killed: it keeps running as a background task and the call returns its task ID.`
+			? ` Foreground commands run at most ${foregroundTimeoutSeconds}s (explicit timeout, max ${maxForegroundTimeoutSeconds}s): on timeout the command keeps running as a background task and the call returns its task ID.`
 			: " A timeout fails the call.") +
 		" Set run_in_background=true to return a task ID immediately; manage background tasks with task_list, task_output, task_stop, and wait_for.";
 	return {

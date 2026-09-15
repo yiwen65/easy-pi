@@ -21,6 +21,7 @@ import type {
 	ChildSessionIdentity,
 	ChildTurnResult,
 } from "@easy-pi/subagent/session-host";
+import webSearchExtension from "@easy-pi/web-search";
 import type { AgentSession } from "../core/agent-session.ts";
 import type { ExtensionAPI, InlineExtension } from "../core/extensions/types.ts";
 import type { ModelRuntime } from "../core/model-runtime.ts";
@@ -61,7 +62,7 @@ const DELIVER_RESULT_TOOL_DESCRIPTION =
 	"Deliver this child's final result to its creation parent. Call it exactly once when the task is done; a later call replaces the earlier one. Only summary (complete result text) and outcome (honest verdict) are required. The complete result must fit 8192 UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.";
 const DELEGATION_RESULT_INSTRUCTIONS = [
 	"Deliver the final result by calling the deliver_result tool exactly once: only summary and outcome are required - put key outputs, evidence (paths/line ranges/version hashes) and residual risks in the summary text. A later call replaces the delivered result.",
-	`The complete result must fit ${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks to fill an array.`,
+	`The complete result must fit ${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks.`,
 	"If deliver_result is unavailable, return one final JSON object matching the deliver_result schema as your final text, without fences, surrounding prose or extra fields. This final output is returned automatically; do not call any other handoff tool. Execution completion and valid JSON are not acceptance.",
 ].join("\n");
 
@@ -201,6 +202,8 @@ export function createPiChildSessionHost(options: {
 				noExtensions: options.noExtensions,
 				additionalExtensionPaths: options.additionalExtensionPaths,
 				extensionFactories: [
+					// Registration matches the root; getTools/toolAllowed still bound the active set.
+					{ name: "web-search", factory: webSearchExtension, hidden: true },
 					{
 						name: "easy-pi-child",
 						factory: createEasyPiHarness({

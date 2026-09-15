@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { CollaborationResults } from "@easy-pi/subagent/collaboration-contract";
 import { afterEach, expect, test, vi } from "vitest";

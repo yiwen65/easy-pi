@@ -23,7 +23,8 @@ export interface CompactionLLMRequest {
 
 export interface CompactionLLMResponse {
 	text: string;
-	stopReason: "stop" | "error" | "aborted";
+	/** "length" means the provider stopped at an output limit; the handoff is incomplete. */
+	stopReason: "stop" | "length" | "error" | "aborted";
 	errorMessage?: string;
 	usage?: { input: number; output: number };
 }

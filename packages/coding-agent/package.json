@@ -67,7 +67,8 @@
 		"undici": "8.9.0",
 		"yaml": "2.9.0",
 		"@easy-pi/permissions": "0.84.2",
-		"@easy-pi/subagent": "0.84.2"
+		"@easy-pi/subagent": "0.84.2",
+		"@easy-pi/web-search": "0.84.2"
 	},
 	"overrides": {
 		"protobufjs": "7.6.5",
@@ -111,6 +112,7 @@
 	"bundleDependencies": [
 		"@easy-pi/grok-tui",
 		"@easy-pi/permissions",
-		"@easy-pi/subagent"
+		"@easy-pi/subagent",
+		"@easy-pi/web-search"
 	]
 }

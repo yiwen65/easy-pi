@@ -41,6 +41,9 @@
 			"@easy-pi/subagent": [
 				"../subagent/src/index.ts"
 			],
+			"@easy-pi/web-search": [
+				"../pi-web-search/src/index.ts"
+			],
 			"@easy-pi/subagent/*": [
 				"../subagent/src/*.ts"
 			],
@@ -53,7 +56,8 @@
 	"include": [
 		"src/**/*.ts",
 		"../permissions/src/**/*.ts",
-		"../subagent/src/index.ts"
+		"../subagent/src/index.ts",
+		"../pi-web-search/src/index.ts"
 	],
 	"exclude": [
 		"node_modules",

@@ -64,7 +64,9 @@ describe("issue #6768 Copilot compaction base URL", () => {
 				reason: "stop",
 				message: {
 					...fauxAssistantMessage(
-						wantsJson ? JSON.stringify({ facts: [], decisions: [], nextActions: [] }) : "summary",
+						wantsJson
+							? JSON.stringify({ facts: [], decisions: [], nextActions: [] })
+							: "compacted session summary",
 					),
 					api: requestModel.api,
 					provider: requestModel.provider,

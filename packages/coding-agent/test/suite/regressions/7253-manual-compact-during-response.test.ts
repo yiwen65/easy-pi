@@ -34,8 +34,11 @@ describe("issue #7253: manual compaction during an active response", () => {
 		});
 
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, reserveTokens: 999, keepRecentTokens: 2 } },
+			// reserveTokens keeps the auto-compaction threshold at ~1 token so the provider-boundary
+			// attempt fires immediately, while the window stays large enough to hold the local
+			// compaction request (system + tools + history + ~1.3k-token trigger).
+			models: [{ id: "faux-1", contextWindow: 20_000, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 19_999, keepRecentTokens: 2 } },
 			tools: [createNoopTool()],
 			extensionFactories: [
 				(pi) => {

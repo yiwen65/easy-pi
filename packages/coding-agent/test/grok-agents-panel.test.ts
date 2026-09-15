@@ -509,7 +509,7 @@ test("operator followup diagnostics retain the draft and show a corrective hint 
 	f.key("malformed-draft");
 	f.key("\r");
 	await vi.waitFor(() => expect(f.text()).toContain("invalid_followup"));
-	expect(f.text()).toContain("context=existing");
+	expect(f.text()).toContain("JSON: {task, tools?}");
 	expect(f.text()).toContain("malformed-draft");
 	expect(f.faux.state.callCount).toBe(calls);
 	for (const width of [1, 40, 80, 100])

@@ -1,0 +1,29 @@
+{
+	"name": "@easy-pi/web-search",
+	"version": "0.84.2",
+	"private": true,
+	"type": "module",
+	"description": "Built-in Tavily search and anonymous-browser webpage reading for easy-pi",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": ["dist"],
+	"scripts": {
+		"test": "node test/run.mjs"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"typebox": "1.3.7"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.84.2"
+	}
+}

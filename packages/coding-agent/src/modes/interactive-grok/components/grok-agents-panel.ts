@@ -370,7 +370,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 						? `Interrupt ${target}? Its current turn stops; history is kept. ${hint("tui.select.confirm")} confirm · ${hint("tui.select.cancel")} cancel`
 						: this.composing === "send"
 							? `Message → ${target} (won't start an idle agent)`
-							: `New task → ${target} (starts it if idle; inherits its context) — task JSON (task, context=existing, capabilities)`,
+							: `New task → ${target} (starts if idle, keeps context) — JSON: {task, tools?}`,
 				),
 			);
 			if (this.composing !== "interrupt") lines.push(...this.input.render(contentWidth));

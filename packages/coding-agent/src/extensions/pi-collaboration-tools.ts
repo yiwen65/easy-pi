@@ -28,17 +28,17 @@ import {
 const MESSAGE_TYPE = "epi-collaboration-message";
 const descriptions: Record<CollaborationToolName, string> = {
 	spawn_agent:
-		"Start a named child agent in the shared cwd. Minimal form: task needs only objective (relationship defaults to continue; context derives from it - continue forks this conversation, explore/verify stay isolated, extract requires curated references naming the dataset; capabilities default to inherit). The full version-1 contract remains accepted (task <= 8192 UTF-8 bytes total). Context note: fork shows the child the caller's compressed effective history, which may carry sensitive text. Delegate minimum sufficient authority - exclude bash and other write-capable tools for read-only tasks. All agents share cwd; coordinate edits. Child model and effort come from the user's subagent settings, falling back to your own; they cannot be set per call. Children cannot delegate further - split multi-part work into sibling tasks. Creation is not completion, acceptance, or a cache hit; field-level rules are enforced by the parameter schema.",
+		"Start a named child agent in the shared cwd. task needs only a free-text objective: the complete self-contained assignment (goal, scope, inputs, expected output, acceptance) — the child sees only it. relationship (default continue) routes context: continue forks this conversation (compressed history, may carry sensitive text), explore/verify run isolated, extract requires curated references naming the dataset; an explicit context always wins. tools default to inherit and can only narrow. Child model and effort come from the user's subagent settings, else yours; never per call. All agents share cwd; coordinate edits. Children cannot delegate further — split multi-part work into sibling tasks. Creation is not completion or acceptance. Contract <= 8192 UTF-8 bytes.",
 	send_message:
-		"Persist a message to an agent in this root team (target: /root/<name>). Does not start or resume an idle agent; accepted is not consumed. Grants no permissions.",
+		"Persist a message to an agent in this root team (target: /root/<name>). Does not start an idle agent; accepted is not consumed. Grants no permissions.",
 	followup_task:
-		"Start an idle child's next task; task needs only objective (tools default to inherit like spawn_agent). Retains the child's history - cannot provide fresh independent judgment. tools can only narrow. Running children reject busy. Results return to the creation parent, not necessarily this sender. No rollback or automatic acceptance.",
+		"Start an idle child's next task: task needs only objective; tools default to inherit and can only narrow. Retains the child's history — never fresh independent judgment. Running children reject busy. Results return to the creation parent, not necessarily this sender. No rollback or automatic acceptance.",
 	wait_agent:
-		"Wait for this agent's mailbox or user input (not a list of task IDs). Timeout does not cancel children. Mailbox contents are injected at the next model request boundary.",
+		"Wait for this agent's mailbox or user input. Timeout does not cancel children. Mailbox contents are injected at the next model request boundary.",
 	interrupt_agent:
-		"Abort a child's current execution, retaining history and shared edits. Cannot interrupt root. Returns previous status.",
+		"Abort a child's current execution; history and shared edits are retained. Cannot interrupt root. Returns previous status.",
 	close_agent:
-		"Retire a settled child agent (interrupt it first if pending or running): frees its team slot and native session, keeps its record, session file, and last result. Closed names are never reusable and reject messages/follow-ups. Cannot close root. Idempotent; returns previous status.",
+		"Retire a settled child (interrupt it first if pending or running): frees its team slot and session, keeps its record, history file, and last result. Closed names are never reusable and reject messages/follow-ups. Cannot close root. Idempotent; returns previous status.",
 	list_agents:
 		"List this root team's child agents with latest turn status and loaded state, optionally restricted to a path subtree. Completed does not mean delivered.",
 };

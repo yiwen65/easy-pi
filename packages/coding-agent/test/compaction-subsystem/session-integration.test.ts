@@ -5,8 +5,16 @@ import type { CompleteFn } from "../../src/core/compaction/subsystem/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
+/** A handoff that satisfies the quality gate in validateCompactionSummary(). */
+const compliantHandoff = [
+	"## Conversation timeline",
+	"User asked to migrate the checkpoint store; the assistant read large.log and confirmed the v2 layout.",
+	"",
+	"## Current continuation point",
+	"Primary objective: finish the checkpoint migration. Next concrete action: run the focused tests.",
+].join("\n");
 const complete: CompleteFn = async () => ({
-	text: "Goal: finish the checkpoint migration.\nNext: run the focused tests.",
+	text: compliantHandoff,
 	stopReason: "stop",
 });
 

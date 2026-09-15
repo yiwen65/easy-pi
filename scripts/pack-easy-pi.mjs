@@ -23,6 +23,7 @@ const internal = [
 	["packages/telemetry", "@earendil-works/pi-telemetry"],
 	["packages/permissions", "@easy-pi/permissions"],
 	["packages/subagent", "@easy-pi/subagent"],
+	["packages/pi-web-search", "@easy-pi/web-search"],
 ];
 
 function readJson(path) { return JSON.parse(readFileSync(path, "utf8")); }

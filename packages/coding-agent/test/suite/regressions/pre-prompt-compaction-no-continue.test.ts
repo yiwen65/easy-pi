@@ -25,7 +25,10 @@ describe("pre-prompt compaction regression", () => {
 
 	it("compacts length-stop overflow before a new prompt without continuing from an assistant message", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 100, maxTokens: 100 }],
+			// The window must also hold the local compaction request (system + tools + history +
+			// ~1.3k-token trigger); the overflow is produced by the assistant usage below, not by a
+			// window too small to compact into.
+			models: [{ id: "faux-1", contextWindow: 20_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			extensionFactories: [
 				(pi) => {
@@ -49,7 +52,7 @@ describe("pre-prompt compaction regression", () => {
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: createUsage(100),
+			usage: createUsage(20_000),
 		};
 		harness.sessionManager.appendMessage(lengthStopAssistant);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;

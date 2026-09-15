@@ -138,4 +138,42 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		expect(res.stopReason).toBe("error");
 		expect(res.errorMessage).toBe("rate limit");
 	});
+
+	it("maps a silent context overflow to a closed failure instead of a completed handoff", async () => {
+		const overflowed = assistantOk("#");
+		completeSimpleMock.mockResolvedValue({
+			...overflowed,
+			usage: { ...overflowed.usage, input: 763_998, cacheRead: 0, totalTokens: 764_003 },
+		});
+		const complete = createPiAiCompleteFn({ model: createModel() });
+		const res = await complete({
+			systemPrompt: "p",
+			messages: [{ role: "user", content: "d", timestamp: 1 }],
+			promptVersion: "1.0.0",
+		});
+		expect(res.stopReason).toBe("error");
+		expect(res.text).toBe("");
+		expect(res.errorMessage).toContain("context overflow");
+		expect(res.errorMessage).toContain("763998");
+		expect(res.errorMessage).toContain("200000");
+	});
+
+	it("keeps a length stop visible instead of reporting a complete handoff", async () => {
+		const truncated = assistantOk("partial handoff");
+		completeSimpleMock.mockResolvedValue({
+			...truncated,
+			stopReason: "length",
+			usage: { ...truncated.usage, output: 0 },
+		});
+		const complete = createPiAiCompleteFn({ model: createModel() });
+		const res = await complete({
+			systemPrompt: "p",
+			messages: [{ role: "user", content: "d", timestamp: 1 }],
+			promptVersion: "1.0.0",
+		});
+		expect(res.stopReason).toBe("length");
+		expect(res.text).toBe("partial handoff");
+		expect(res.errorMessage).toContain("output limit");
+		expect(res.usage).toEqual({ input: 10, output: 0 });
+	});
 });

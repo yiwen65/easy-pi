@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import { Container, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Container, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { ToolExecutionComponent } from "./tool-execution.ts";
 

@@ -200,16 +200,6 @@ const Message = Type.String({
 	minLength: 1,
 	maxLength: COLLABORATION_LIMITS.maxMessageBytes,
 });
-const Reasoning = Type.Union([
-	Type.Literal("off"),
-	Type.Literal("minimal"),
-	Type.Literal("low"),
-	Type.Literal("medium"),
-	Type.Literal("high"),
-	Type.Literal("xhigh"),
-	Type.Literal("max"),
-]);
-
 const Nonblank = Type.String({ minLength: 1, maxLength: 2048, pattern: "\\S" });
 const TextList = Type.Array(Nonblank, { minItems: 1, maxItems: 16 });
 
@@ -244,7 +234,7 @@ export const DelegationCapabilitiesSchema = Type.Union(
 		Type.Literal("inherit", { description: "Use exactly the caller's currently allowed tools (default)." }),
 		Type.Array(Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.-]+$" }), {
 			description:
-				"Allowlist of tool names. Every name must already be in the caller's active allowed set; delegation can only restrict, never add. Exclude bash and other write-capable tools for read-only tasks.",
+				"Allowlist of tool names. Every name must already be in the caller's active allowed set; delegation can only restrict, never add.",
 			maxItems: 128,
 			uniqueItems: true,
 		}),

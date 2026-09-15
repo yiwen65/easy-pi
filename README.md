@@ -43,6 +43,11 @@ The built-in tools cover the ordinary coding path: read files, search a tree, ed
 content, write new files, and run shell commands. Interactive and print modes use
 the same session runtime.
 
+Web tools are built in: `web_search` uses Tavily Basic (`TAVILY_API_KEY` required),
+and `web_fetch` reads public pages directly in a fresh anonymous Chrome/Chromium
+browser, without Tavily or personal login state. See
+[`packages/pi-web-search`](packages/pi-web-search) for setup and limits.
+
 ### Native delegation
 
 Subagents are part of the runtime rather than an afterthought. Work can be delegated
@@ -120,6 +125,7 @@ The release workflow is tag-gated and publishes only `easy-pi` with a matching
 | [`packages/ai`](packages/ai) | Multi-provider model API and Codex transport |
 | [`packages/agent`](packages/agent) | Agent runtime, state, and streaming |
 | [`packages/subagent`](packages/subagent) | Native delegation and collaboration runtime |
+| [`packages/pi-web-search`](packages/pi-web-search) | Built-in public web search and anonymous-browser reading |
 | [`packages/tui`](packages/tui) | Terminal UI primitives |
 | [`scripts/pack-easy-pi.mjs`](scripts/pack-easy-pi.mjs) | Standalone npm package staging |
 
