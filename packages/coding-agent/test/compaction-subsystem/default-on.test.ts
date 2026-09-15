@@ -13,6 +13,14 @@ afterEach(() => {
 	while (harnesses.length > 0) harnesses.pop()!.cleanup();
 });
 
+/** Stub handoff that satisfies the compaction summary quality gate. */
+const subsystemHandoff = [
+	"## Conversation timeline",
+	"Subsystem compacted context for the auto-compaction path.",
+	"## Current continuation point",
+	"Next concrete action: answer the pending user request.",
+].join("\n");
+
 describe("default-on compaction", () => {
 	it("rejects removed or misspelled explicit modes instead of enabling the default pipeline", () => {
 		expect(getHfCompactionModeFromEnv({})).toBeUndefined();
@@ -24,12 +32,15 @@ describe("default-on compaction", () => {
 
 	it("no configuration: auto compaction persists a replacement checkpoint", async () => {
 		const h = await createHarness({
-			contextWindow: 3000,
+			// The window must leave room for the fixed costs (system + tools + local trigger + reserve),
+			// otherwise local compaction cannot fit the history and now fails closed instead of sending
+			// a request that a real provider would reject or silently truncate.
+			contextWindow: 20_000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			responses: [
 				{ text: `first answer ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
-				{ text: `second answer ${"padding ".repeat(150)}`, usage: { totalTokens: 2900 } },
-				{ text: "Subsystem compacted context." }, // single local compaction-item call
+				{ text: `second answer ${"padding ".repeat(150)}`, usage: { totalTokens: 19_000 } },
+				{ text: subsystemHandoff }, // single local compaction-item call
 				{ text: "post-compaction answer", usage: { totalTokens: 100 } },
 			],
 		});
@@ -117,7 +128,7 @@ describe("default-on compaction", () => {
 
 	it("extension-provided custom summary is ignored (deprecated): result comes from the subsystem", async () => {
 		const h = await createHarnessWithExtensions({
-			contextWindow: 3000,
+			contextWindow: 20_000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			extensionFactories: [
 				{
@@ -131,8 +142,8 @@ describe("default-on compaction", () => {
 			],
 			responses: [
 				{ text: `one ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
-				{ text: `two ${"padding ".repeat(150)}`, usage: { totalTokens: 2900 } },
-				{ text: "Subsystem narrative." },
+				{ text: `two ${"padding ".repeat(150)}`, usage: { totalTokens: 19_000 } },
+				{ text: subsystemHandoff },
 				{ text: "post-compaction answer", usage: { totalTokens: 100 } },
 			],
 		});
@@ -153,13 +164,13 @@ describe("default-on compaction", () => {
 
 	it("overflow recovery: subsystem compaction then retried turn completes", async () => {
 		const h = await createHarness({
-			contextWindow: 3000,
+			contextWindow: 20_000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			responses: [
 				{ text: `first ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
 				// Recoverable length stop on the second turn: output truncated → overflow recovery path.
 				{ text: `truncated ${"padding ".repeat(100)}`, stopReason: "length", usage: { totalTokens: 990 } },
-				{ text: "Narrative after overflow." },
+				{ text: subsystemHandoff },
 				{ text: "recovered final answer", usage: { totalTokens: 120 } },
 			],
 		});

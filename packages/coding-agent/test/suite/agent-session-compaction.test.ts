@@ -428,7 +428,9 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts and resumes after a length stop below the desired output limit", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			// The window has to hold the local compaction request itself (system + tools + history +
+			// ~1.3k-token trigger); a window that cannot fit it makes compaction physically impossible.
+			models: [{ id: "faux-1", contextWindow: 20_000, maxTokens: 100 }],
 			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
 			hfCompaction: { mode: "full_pipeline" },
 		});
@@ -1000,14 +1002,16 @@ describe("AgentSession compaction characterization", () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			models: [{ id: "faux-1", contextWindow: 1, maxTokens: 100 }],
-			hfCompaction: { mode: "full_pipeline" },
+			hfCompaction: {
+				mode: "full_pipeline",
+				// Stubbed compactor: this test characterizes deferral timing. A one-token window cannot
+				// hold a real local compaction request (the trigger prompt alone is ~1.3k tokens), so the
+				// provider adapter path is characterized in compaction-summary-reasoning.test.ts instead.
+				complete: async () => ({ text: "overflow narrative", stopReason: "stop" }),
+			},
 		});
 		harnesses.push(harness);
-		harness.setResponses([
-			fauxAssistantMessage("completed answer"),
-			fauxAssistantMessage("overflow narrative"),
-			fauxAssistantMessage("continued answer"),
-		]);
+		harness.setResponses([fauxAssistantMessage("completed answer"), fauxAssistantMessage("continued answer")]);
 
 		await expect(harness.session.prompt("hello")).resolves.toBeUndefined();
 		expect(harness.eventsOfType("compaction_end")).toHaveLength(0);
@@ -1019,8 +1023,8 @@ describe("AgentSession compaction characterization", () => {
 			aborted: false,
 			willRetry: false,
 		});
-		// Two agent turns + one local compaction-item call.
-		expect(harness.faux.state.callCount).toBe(3);
+		// Two agent turns; the stubbed local compaction-item call never reaches the provider.
+		expect(harness.faux.state.callCount).toBe(2);
 	});
 
 	it("ignores stale pre-compaction assistant usage on pre-prompt checks", async () => {

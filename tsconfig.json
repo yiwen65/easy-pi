@@ -8,6 +8,7 @@
 			"@easy-pi/permissions": ["./packages/permissions/src/index.ts"],
 			"@easy-pi/permissions/journal": ["./packages/permissions/src/external-mutation-journal.ts"],
 			"@easy-pi/subagent": ["./packages/subagent/src/index.ts"],
+			"@easy-pi/web-search": ["./packages/pi-web-search/src/index.ts"],
 			"@easy-pi/subagent/*": ["./packages/subagent/src/*.ts"],
 			"*": ["./*"],
 			"@earendil-works/pi-telemetry": ["./packages/telemetry/src/index.ts"],

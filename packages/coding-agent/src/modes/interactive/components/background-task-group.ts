@@ -5,7 +5,7 @@ import type {
 	BackgroundTaskStatus,
 } from "@earendil-works/pi-agent-core/node";
 import { isTerminalTaskStatus } from "@earendil-works/pi-agent-core/node";
-import { Container, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Container, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 
 const safe = (text: string) =>
@@ -97,7 +97,7 @@ export class BackgroundTaskGroupComponent extends Container {
 		}
 	}
 
-	private collapsedLine(width: number, now: number): string {
+	private collapsedLine(width: number): string {
 		const active = this.manager.list();
 		const terminalCount = this.tasks().length - active.length;
 		const marqueeSource = active[active.length - 1];
@@ -178,7 +178,7 @@ export class BackgroundTaskGroupComponent extends Container {
 
 	override render(width: number): string[] {
 		const now = Date.now();
-		const lines = [this.collapsedLine(width, now)];
+		const lines = [this.collapsedLine(width)];
 		if (!this.expanded) return lines;
 		for (const record of this.tasks()) {
 			lines.push(this.taskLine(record, width, now));

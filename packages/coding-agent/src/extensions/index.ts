@@ -1,3 +1,4 @@
+import webSearchExtension from "@easy-pi/web-search";
 import type { InlineExtension } from "../core/extensions/types.ts";
 import { createEasyPiHarness } from "./easy-pi.ts";
 import llamaExtension from "./llama/index.ts";
@@ -8,6 +9,7 @@ export function createBuiltInExtensions(agentDir: string, options?: { collaborat
 	return [
 		{ name: "llama.cpp", factory: llamaExtension, hidden: true },
 		{ name: "background-tasks", factory: registerPiBackgroundTasks, hidden: true },
+		{ name: "web-search", factory: webSearchExtension, hidden: true },
 		{
 			name: "easy-pi",
 			factory: createEasyPiHarness({ agentDir, collaboration: options?.collaboration }),

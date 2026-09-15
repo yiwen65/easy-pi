@@ -1,5 +1,11 @@
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import { contentText, type RetryCallbacks, type RetryPolicy } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	isContextOverflow,
+	isRecoverableLength,
+	type RetryCallbacks,
+	type RetryPolicy,
+} from "@earendil-works/pi-ai";
 import type { Model, Tool } from "@earendil-works/pi-ai/compat";
 import { createCompactionSummaryMessage } from "../../messages.ts";
 import {
@@ -10,7 +16,11 @@ import {
 } from "../../session-manager.ts";
 import { completeSummarization, estimateTokens } from "../compaction.ts";
 import type { ProviderContextObservation } from "./context-identity.ts";
-import { estimateLocalCompactionTriggerTokens, generateCompactionItem } from "./narrative.ts";
+import {
+	estimateLocalCompactionTriggerTokens,
+	generateCompactionItem,
+	validateCompactionSummary,
+} from "./narrative.ts";
 import { AuditTrail } from "./observability.ts";
 import { evaluateTriggers, type TriggerDecision } from "./trigger.ts";
 import type { CompleteFn, TokenStats } from "./types.ts";
@@ -395,6 +405,27 @@ export class HfCompactionHost {
 					tokensAfter: after.total,
 				};
 			}
+			// Guard the artifact that actually replaces the branch: a handoff that is trivially small
+			// relative to the history it stands in for means the summarizing model never saw that history.
+			const replacedTokens = before.compactionItem + before.recentUsers + before.postCheckpointHistory;
+			const summaryIssue = validateCompactionSummary(summary, replacedTokens);
+			if (summaryIssue) {
+				this.audit.record("checkpoint_rejected", this.sessionId, {
+					reason: summaryIssue,
+					tokensBefore: before.total,
+					tokensAfter: after.total,
+					summaryChars: summary.length,
+					usageInput: modelUsage?.input,
+					usageOutput: modelUsage?.output,
+				});
+				return {
+					activated: false,
+					summaryText: summaryIssue,
+					result: { status: "rejected", reason: summaryIssue },
+					tokensBefore: before.total,
+					tokensAfter: after.total,
+				};
+			}
 			const checkpoint: CheckpointCandidate = {
 				replacementHistory,
 				tokensBefore: before.total,
@@ -458,14 +489,42 @@ export function createPiAiCompleteFn(options: {
 			options.retry,
 			options.callbacks,
 		);
+		const usage = { input: response.usage.input, output: response.usage.output };
 		if (response.stopReason === "error") {
-			return { text: "", stopReason: "error", errorMessage: response.errorMessage ?? "unknown" };
+			return { text: "", stopReason: "error", errorMessage: response.errorMessage ?? "unknown", usage };
 		}
-		if (response.stopReason === "aborted") return { text: "", stopReason: "aborted" };
-		return {
-			text: contentText(response.content),
-			stopReason: "stop",
-			usage: { input: response.usage.input, output: response.usage.output },
-		};
+		if (response.stopReason === "aborted") return { text: "", stopReason: "aborted", usage };
+		const text = contentText(response.content);
+		// A gateway can accept an oversized request and answer anyway, either by truncating the input or
+		// by reporting usage above its own window. Passing that off as "stop" lets a degenerate handoff
+		// replace the whole branch, so overflow and length stops stay visible to the caller.
+		if (isContextOverflow(response, options.model.contextWindow)) {
+			const inputTokens = response.usage.input + response.usage.cacheRead;
+			return {
+				text: "",
+				stopReason: "error",
+				errorMessage: `context overflow while summarizing (${inputTokens} input tokens reported against a ${options.model.contextWindow} token window)`,
+				usage,
+			};
+		}
+		if (response.stopReason === "length") {
+			return {
+				text,
+				stopReason: "length",
+				errorMessage: isRecoverableLength(response, options.model.maxTokens)
+					? `summarization was truncated below the ${options.model.maxTokens} token output limit after ${usage.output} output tokens`
+					: `summarization reached the ${options.model.maxTokens} token output limit after ${usage.output} output tokens`,
+				usage,
+			};
+		}
+		if (response.stopReason !== "stop") {
+			return {
+				text: "",
+				stopReason: "error",
+				errorMessage: `summarization stopped with unsupported reason "${response.stopReason}"`,
+				usage,
+			};
+		}
+		return { text, stopReason: "stop", usage };
 	};
 }

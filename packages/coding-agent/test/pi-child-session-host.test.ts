@@ -26,7 +26,7 @@ import type { ExtensionAPI, InlineExtension } from "../src/core/extensions/types
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createPiChildSessionHost, preparePiCollaborationFork } from "../src/extensions/pi-child-session-host.ts";
-import { spawnArgs, taskContract } from "./collaboration-fixture.ts";
+import { taskContract } from "./collaboration-fixture.ts";
 
 function deferred() {
 	let resolve!: () => void;

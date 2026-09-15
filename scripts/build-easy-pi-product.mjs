@@ -25,19 +25,19 @@ try {
 			throw new Error(`Unexpected Subagent product artifact: ${file}`);
 		}
 	}
-	for (const name of ["permissions", "subagent", "coding-agent"]) {
+	for (const name of ["permissions", "subagent", "pi-web-search", "coding-agent"]) {
 		const destination = join(root, "packages", name, "dist");
 		rmSync(destination, { recursive: true, force: true });
 		cpSync(join(output, name, "src"), destination, { recursive: true });
 	}
 	// npm pack omits hoisted workspace symlinks, even for bundleDependencies.
 	// Materialize only these private, compiled packages under the product.
-	for (const name of ["permissions", "subagent"]) {
+	for (const [directory, name] of [["permissions", "permissions"], ["subagent", "subagent"], ["pi-web-search", "web-search"]]) {
 		const destination = join(root, "packages/coding-agent/node_modules/@easy-pi", name);
 		rmSync(destination, { recursive: true, force: true });
 		mkdirSync(destination, { recursive: true });
-		cpSync(join(root, "packages", name, "package.json"), join(destination, "package.json"));
-		cpSync(join(root, "packages", name, "dist"), join(destination, "dist"), { recursive: true });
+		cpSync(join(root, "packages", directory, "package.json"), join(destination, "package.json"));
+		cpSync(join(root, "packages", directory, "dist"), join(destination, "dist"), { recursive: true });
 	}
 } finally {
 	rmSync(output, { recursive: true, force: true });

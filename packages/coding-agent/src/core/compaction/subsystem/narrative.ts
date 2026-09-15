@@ -54,6 +54,68 @@ Output only a concise, self-contained Markdown handoff. Use a chronological "Con
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE =
 	"Output exceeded the available model context and was truncated before local compaction";
 
+/** Hard floor: below this a handoff cannot name a single goal, whatever the history looks like. */
+export const MIN_COMPACTION_SUMMARY_CHARS = 8;
+/** Sections LOCAL_COMPACTION_TRIGGER requires of every handoff. */
+export const REQUIRED_COMPACTION_SECTIONS = ["Conversation timeline", "Current continuation point"] as const;
+/** Structure and proportionality are only demanded once the history is large enough to matter. */
+export const SUMMARY_STRUCTURE_GUARD_MIN_INPUT_TOKENS = 5_000;
+/** A handoff must retain at least this fraction of the tokens it replaces. */
+export const MIN_SUMMARY_TO_HISTORY_RATIO = 0.002;
+/** A handoff that ignores the required structure must at least be substantial. */
+export const MIN_UNSTRUCTURED_COMPACTION_SUMMARY_CHARS = 1_000;
+
+/**
+ * Reject a degenerate handoff before it is allowed to replace durable history.
+ *
+ * A provider that silently truncates an oversized request can answer a compaction prompt with a
+ * single character and stopReason "stop". Accepting that replaces the whole branch with junk and
+ * the original history is unrecoverable from the live context. The guards scale with the history
+ * being replaced: a terse handoff for a short conversation loses little, but the same answer for a
+ * large branch means the model never saw that branch. Returns the rejection reason, or undefined
+ * when the summary is acceptable.
+ */
+export function validateCompactionSummary(text: string, replacedTokens?: number): string | undefined {
+	const trimmed = text.trim();
+	if (trimmed.length < MIN_COMPACTION_SUMMARY_CHARS) {
+		return `compaction summary is degenerate (${trimmed.length} chars < ${MIN_COMPACTION_SUMMARY_CHARS} minimum); history preserved`;
+	}
+	if (replacedTokens === undefined || replacedTokens < SUMMARY_STRUCTURE_GUARD_MIN_INPUT_TOKENS) {
+		return undefined;
+	}
+	const summaryTokens = Math.ceil(trimmed.length / 4);
+	const requiredTokens = Math.ceil(replacedTokens * MIN_SUMMARY_TO_HISTORY_RATIO);
+	if (summaryTokens < requiredTokens) {
+		return `compaction summary is implausibly small for the history it replaces (~${summaryTokens} tokens < ${requiredTokens} required for ${replacedTokens} tokens of history); history preserved`;
+	}
+	const haystack = trimmed.toLowerCase();
+	const missing = REQUIRED_COMPACTION_SECTIONS.filter((section) => !haystack.includes(section.toLowerCase()));
+	if (
+		missing.length === REQUIRED_COMPACTION_SECTIONS.length &&
+		trimmed.length < MIN_UNSTRUCTURED_COMPACTION_SUMMARY_CHARS
+	) {
+		return `compaction summary lacks every required section (${REQUIRED_COMPACTION_SECTIONS.join(", ")}) and is too short to be a credible handoff (${trimmed.length} chars); history preserved`;
+	}
+	return undefined;
+}
+
+/** Raised when rewriting tool results cannot bring the history inside the local compaction budget. */
+export class LocalCompactionBudgetError extends Error {
+	readonly estimatedTokens: number;
+	readonly messageTokenBudget: number;
+	readonly replacedToolResults: number;
+
+	constructor(estimatedTokens: number, messageTokenBudget: number, replacedToolResults: number) {
+		super(
+			`local compaction cannot fit the model context: history is still ~${estimatedTokens} tokens after replacing ${replacedToolResults} tool result(s), budget is ~${messageTokenBudget} tokens`,
+		);
+		this.name = "LocalCompactionBudgetError";
+		this.estimatedTokens = estimatedTokens;
+		this.messageTokenBudget = messageTokenBudget;
+		this.replacedToolResults = replacedToolResults;
+	}
+}
+
 function buildLocalCompactionTrigger(customInstructions?: string): string {
 	return customInstructions?.trim()
 		? `${LOCAL_COMPACTION_TRIGGER}\n\nAdditional user instructions for this compaction:\n${customInstructions.trim()}`
@@ -74,6 +136,7 @@ export function trimToolResultsForLocalCompaction(
 	if (estimatedTokens <= messageTokenBudget) return [...messages];
 
 	const prepared = [...messages];
+	let replacedToolResults = 0;
 	for (let index = prepared.length - 1; index >= 0 && estimatedTokens > messageTokenBudget; index--) {
 		const message = prepared[index];
 		if (message.role !== "toolResult") continue;
@@ -83,6 +146,15 @@ export function trimToolResultsForLocalCompaction(
 		};
 		prepared[index] = replacement;
 		estimatedTokens = estimatedTokens - estimateTokens(message) + estimateTokens(replacement);
+		replacedToolResults++;
+	}
+	// Fail closed when a real budget exists but rewriting tool results could not meet it: the request
+	// would go out over the window, and a provider that truncates oversized input then answers with a
+	// degenerate summary that replaces the branch. A zero budget means the fixed costs (system prompt,
+	// tools, trigger, output reserve) already exceed the window, so no request could ever fit; there
+	// compaction is the session's last resort and is attempted anyway, judged by the summary gates.
+	if (messageTokenBudget > 0 && estimatedTokens > messageTokenBudget) {
+		throw new LocalCompactionBudgetError(estimatedTokens, messageTokenBudget, replacedToolResults);
 	}
 	return prepared;
 }
@@ -97,6 +169,8 @@ export async function generateCompactionItem(options: {
 	messageTokenBudget?: number;
 }): Promise<CompactionItemResult> {
 	const instructions = buildLocalCompactionTrigger(options.customInstructions);
+	// Estimated over the untrimmed history: that is what the handoff has to stand in for.
+	const replacedTokens = options.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 	try {
 		const response = await options.complete({
 			systemPrompt: options.systemPrompt,
@@ -116,7 +190,12 @@ export async function generateCompactionItem(options: {
 				modelUsage: response.usage,
 			};
 		}
-		return { text: response.text.trim(), rejected: false, modelUsage: response.usage };
+		const text = response.text.trim();
+		const qualityIssue = validateCompactionSummary(text, replacedTokens);
+		if (qualityIssue) {
+			return { text: "", rejected: true, reason: qualityIssue, modelUsage: response.usage };
+		}
+		return { text, rejected: false, modelUsage: response.usage };
 	} catch (error) {
 		return {
 			text: "",

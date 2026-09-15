@@ -1,4 +1,4 @@
-export type AuditEventType = "checkpoint_validated" | "provider_context";
+export type AuditEventType = "checkpoint_validated" | "checkpoint_rejected" | "provider_context";
 
 export interface AuditEvent {
 	type: AuditEventType;

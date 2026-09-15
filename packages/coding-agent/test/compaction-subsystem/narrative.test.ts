@@ -17,12 +17,21 @@ const messages = [
 	},
 ];
 
+/** A handoff that satisfies validateCompactionSummary(): structured, and long enough to be credible. */
+const compliantHandoff = [
+	"## Conversation timeline",
+	"User asked to migrate auth to /src/auth/v2; the assistant read the handler and confirmed the v2 layout.",
+	"",
+	"## Current continuation point",
+	"Primary objective: finish the auth migration. Next concrete action: wire the v2 handler and re-run tests.",
+].join("\n");
+
 describe("local Remote V2-style compaction item", () => {
 	it("appends a local compaction trigger to the canonical provider prefix", async () => {
 		let capturedRequest: CompactionLLMRequest | undefined;
 		const complete: CompleteFn = async (request) => {
 			capturedRequest = request;
-			return { text: "Goal: migrate auth.\nNext: wire the v2 handler.", stopReason: "stop" };
+			return { text: compliantHandoff, stopReason: "stop" };
 		};
 		const tools: Tool[] = [{ name: "read", description: "Read a file", parameters: Type.Object({}) }];
 
@@ -86,19 +95,54 @@ describe("local Remote V2-style compaction item", () => {
 		expect(JSON.stringify(capturedRequest?.messages[1])).toContain("x".repeat(10_000));
 	});
 
-	it("rewrites only tool results when an overflow leaves no room for the local compact request", async () => {
+	it("rewrites only tool results when the trimmed history fits the local compact budget", async () => {
 		let capturedRequest: CompactionLLMRequest | undefined;
 		await generateCompactionItem({
 			messages,
 			systemPrompt: "CURRENT SYSTEM",
-			messageTokenBudget: 20,
+			messageTokenBudget: 200,
 			complete: async (request) => {
 				capturedRequest = request;
-				return { text: "Compacted state", stopReason: "stop" };
+				return { text: compliantHandoff, stopReason: "stop" };
 			},
 		});
 		expect(JSON.stringify(capturedRequest?.messages[1])).toContain("truncated before local compaction");
 		expect(JSON.stringify(messages[1])).toContain("x".repeat(10_000));
+	});
+
+	it("fails closed instead of sending a history that cannot fit the local compact budget", async () => {
+		let completeCalled = false;
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			messageTokenBudget: 20,
+			complete: async () => {
+				completeCalled = true;
+				return { text: compliantHandoff, stopReason: "stop" };
+			},
+		});
+		expect(completeCalled).toBe(false);
+		expect(result.rejected).toBe(true);
+		expect(result.text).toBe("");
+		expect(result.reason).toContain("cannot fit the model context");
+		expect(JSON.stringify(messages[1])).toContain("x".repeat(10_000));
+	});
+
+	it("still attempts the request when the fixed costs alone exhaust the budget", async () => {
+		let capturedRequest: CompactionLLMRequest | undefined;
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			messageTokenBudget: 0,
+			complete: async (request) => {
+				capturedRequest = request;
+				return { text: compliantHandoff, stopReason: "stop" };
+			},
+		});
+		expect(result.rejected).toBe(false);
+		// Tool results are still rewritten; the request simply cannot be made to fit, so the summary
+		// gates decide whether the answer may replace the branch.
+		expect(JSON.stringify(capturedRequest?.messages[1])).toContain("truncated before local compaction");
 	});
 
 	it("rejects an empty or failed compactor response without publishing fallback state", async () => {
@@ -108,5 +152,62 @@ describe("local Remote V2-style compaction item", () => {
 			complete: async () => ({ text: "", stopReason: "error", errorMessage: "provider failed" }),
 		});
 		expect(result).toMatchObject({ rejected: true, reason: "provider failed" });
+	});
+
+	it("rejects a degenerate one-character handoff that a truncated provider returned as stop", async () => {
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async () => ({ text: "#", stopReason: "stop", usage: { input: 763_998, output: 1 } }),
+		});
+		expect(result.rejected).toBe(true);
+		expect(result.text).toBe("");
+		expect(result.reason).toContain("degenerate");
+		expect(result.modelUsage).toEqual({ input: 763_998, output: 1 });
+	});
+
+	it("rejects a short unstructured handoff once the history is large enough to matter", async () => {
+		const largeHistory = [{ role: "user" as const, content: "x".repeat(100_000), timestamp: 1 }];
+		const result = await generateCompactionItem({
+			messages: largeHistory,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async () => ({ text: "plausible but unstructured handoff. ".repeat(8), stopReason: "stop" }),
+		});
+		expect(result.rejected).toBe(true);
+		expect(result.reason).toContain("required section");
+	});
+
+	it("accepts a terse handoff when the history it replaces is small", async () => {
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async () => ({ text: "Preserve the post-tool task state.", stopReason: "stop" }),
+		});
+		expect(result.rejected).toBe(false);
+	});
+
+	it("accepts a long handoff that omits the prescribed sections", async () => {
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async () => ({ text: "unstructured but substantive handoff. ".repeat(40), stopReason: "stop" }),
+		});
+		expect(result.rejected).toBe(false);
+	});
+
+	it("rejects a structured handoff that is implausibly small for the history it replaces", async () => {
+		const largeHistory = [{ role: "user" as const, content: "x".repeat(200_000), timestamp: 1 }];
+		const result = await generateCompactionItem({
+			messages: largeHistory,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async () => ({
+				// ~198 chars: above the absolute floor and structured, yet far below the ~400 chars
+				// (0.2% of the 50k-token history) that a credible handoff would need.
+				text: `## Conversation timeline\n${"one episode. ".repeat(10)}\n## Current continuation point\nnext action.`,
+				stopReason: "stop",
+			}),
+		});
+		expect(result.rejected).toBe(true);
+		expect(result.reason).toContain("implausibly small");
 	});
 });
