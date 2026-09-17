@@ -15,6 +15,7 @@ import type {
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "@earendil-works/pi-agent-core";
+import type { BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import type {
 	Api,
 	AssistantMessageEvent,
@@ -1052,6 +1053,7 @@ export type ExtensionEvent =
 	| ProjectTrustEvent
 	| ResourcesDiscoverEvent
 	| SessionEvent
+	| BackgroundTaskEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
@@ -1074,6 +1076,32 @@ export type ExtensionEvent =
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent;
+
+/**
+ * Background bash task lifecycle, forwarded from the shared task manager. Display-only consumers
+ * (status bar, /tasks panel) and automations can react without reaching into the session.
+ */
+export interface BackgroundTaskStartedEvent {
+	type: "background_task_started";
+	task: BackgroundTaskRecord;
+}
+
+export interface BackgroundTaskCompletedEvent {
+	type: "background_task_completed";
+	task: BackgroundTaskRecord;
+}
+
+export interface BackgroundTaskStalledEvent {
+	type: "background_task_stalled";
+	task: BackgroundTaskRecord;
+	/** Milliseconds without output when the notice fired; the task is still running. */
+	silentMs: number;
+}
+
+export type BackgroundTaskEvent =
+	| BackgroundTaskStartedEvent
+	| BackgroundTaskCompletedEvent
+	| BackgroundTaskStalledEvent;
 
 // ============================================================================
 // Event Results
@@ -1260,6 +1288,9 @@ export interface ExtensionAPI {
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+	on(event: "background_task_started", handler: ExtensionHandler<BackgroundTaskStartedEvent>): void;
+	on(event: "background_task_completed", handler: ExtensionHandler<BackgroundTaskCompletedEvent>): void;
+	on(event: "background_task_stalled", handler: ExtensionHandler<BackgroundTaskStalledEvent>): void;
 
 	// =========================================================================
 	// Tool Registration

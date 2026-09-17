@@ -53,7 +53,7 @@ export const bashToolSystemPromptContribution = {
 	snippet: "Execute bash commands (ls, rg, find, etc.)",
 	guidelines: [
 		"You can inspect PI_* environment variables for current model and session details.",
-		"For long-running commands (builds, servers, watch mode, long test suites), prefer run_in_background=true over raising the timeout; follow up with wait_for or task_output instead of polling.",
+		"For long-running commands (builds, servers, watch mode, long test suites), prefer run_in_background=true over raising the timeout; follow up with wait_for or task_output instead of polling. Background tasks have no runtime cap: they run until they finish or are stopped, and a task that produces no output for a long time only triggers a stall notice (task_output to inspect, task_stop to stop it).",
 	],
 } as const;
 

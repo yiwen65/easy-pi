@@ -3,9 +3,14 @@ export {
 	type BackgroundTaskManagerOptions,
 	type BackgroundTaskOutput,
 	type BackgroundTaskRecord,
+	type BackgroundTaskStallInfo,
 	type BackgroundTaskStatus,
 	DEFAULT_BACKGROUND_TIMEOUT_MS,
+	DEFAULT_MAX_LOG_BYTES,
+	DEFAULT_MAX_TASKS,
+	DEFAULT_STALL_TIMEOUT_MS,
 	DEFAULT_STOP_GRACE_MS,
+	isBackgroundTaskStalled,
 	isTerminalTaskStatus,
 } from "./harness/env/background-task-manager.ts";
 export {

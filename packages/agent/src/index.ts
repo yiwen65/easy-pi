@@ -138,6 +138,7 @@ export {
 	type TextRangeReadResult,
 	toError,
 } from "./harness/types.ts";
+export * from "./harness/utils/duration.ts";
 export * from "./harness/utils/shell-output.ts";
 export * from "./harness/utils/truncate.ts";
 // Proxy utilities

@@ -164,6 +164,7 @@ export type ExecutionErrorCode =
 	| "shell_unavailable"
 	| "spawn_error"
 	| "callback_error"
+	| "limit_reached"
 	| "not_found"
 	| "unknown";
 

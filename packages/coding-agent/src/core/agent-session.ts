@@ -25,7 +25,7 @@ import type {
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { ok } from "@earendil-works/pi-agent-core";
-import { BackgroundTaskManager } from "@earendil-works/pi-agent-core/node";
+import { BackgroundTaskManager, type BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { contentText } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
@@ -55,7 +55,7 @@ import { getShellConfig, getShellEnv } from "../utils/shell.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import { BackgroundTaskNotifications } from "./background-task-notifications.ts";
+import { type BackgroundTaskInlinePolicy, BackgroundTaskNotifications } from "./background-task-notifications.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionResult,
@@ -192,7 +192,10 @@ export type AgentSessionEvent =
 	  }
 	| { type: "summarization_retry_finished" }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "bash_execution_update"; id?: string; delta: string };
+	| { type: "bash_execution_update"; id?: string; delta: string }
+	| { type: "background_task_started"; task: BackgroundTaskRecord }
+	| { type: "background_task_completed"; task: BackgroundTaskRecord }
+	| { type: "background_task_stalled"; task: BackgroundTaskRecord; silentMs: number };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -421,6 +424,7 @@ export class AgentSession {
 	private _backgroundTaskManager?: BackgroundTaskManager;
 	private readonly _backgroundBashPromotion: boolean;
 	private readonly _backgroundTaskNotifications = new BackgroundTaskNotifications();
+	private _backgroundTaskUnsubscribes: Array<() => void> = [];
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -683,12 +687,50 @@ export class AgentSession {
 	private _installBackgroundTaskNotificationTransform(): void {
 		const previous = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
-			const added = await this._backgroundTaskNotifications.drain((message) =>
-				this.sendCustomMessage(message, { triggerTurn: false }),
-			);
-			const projected = added.length > 0 ? [...messages, ...added] : messages;
+			const delivery = this.settingsManager.getBackgroundBashCompletionDelivery();
+			const added = await this._backgroundTaskNotifications.drain(async (message) => {
+				if (delivery === "nextRequest") {
+					// Default: persist and append once to the in-flight request.
+					await this.sendCustomMessage(message, { triggerTurn: false });
+					return;
+				}
+				if (delivery === "followUp" && !this.isStreaming) {
+					// No active turn to queue behind: persist and let the next request pick it up.
+					await this.sendCustomMessage(message, { triggerTurn: false });
+					return;
+				}
+				// followUp/wake with a live run: queue behind the current turn instead of interrupting it.
+				await this.sendCustomMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+			});
+			const projected = delivery === "nextRequest" && added.length > 0 ? [...messages, ...added] : messages;
 			return previous ? previous(projected, signal) : projected;
 		};
+	}
+
+	/** Live inline policy for completion notices, read per drain so settings changes apply. */
+	private _backgroundTaskInlinePolicy(): BackgroundTaskInlinePolicy {
+		return {
+			mode: this.settingsManager.getBackgroundBashCompletionInlineOutput(),
+			bytes: this.settingsManager.getBackgroundBashCompletionInlineBytes(),
+		};
+	}
+
+	/**
+	 * "wake" delivery: a task that finishes while the session is idle starts a turn so the model can
+	 * act on the result without waiting for the next user message. No-op for other delivery modes.
+	 */
+	private _wakeForBackgroundTaskCompletion(): void {
+		if (this.settingsManager.getBackgroundBashCompletionDelivery() !== "wake") return;
+		if (!this.isIdle) return;
+		this._backgroundTaskNotifications
+			.drain((message) => this.sendCustomMessage(message, { triggerTurn: true }))
+			.catch((error: unknown) => {
+				this._extensionErrorListener?.({
+					extensionPath: "<background-tasks>",
+					event: "background_task_completed",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1136,6 +1178,7 @@ export class AgentSession {
 				);
 				this._disconnectFromAgent();
 				this._eventListeners = [];
+				for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
 				this._backgroundTaskNotifications.dispose();
 			}
 
@@ -2983,13 +3026,48 @@ export class AgentSession {
 	}
 
 	private _getOrCreateBackgroundTaskManager(): BackgroundTaskManager {
-		this._backgroundTaskManager ??= new BackgroundTaskManager({
-			shell: async () => ok(getShellConfig(this.settingsManager.getShellPath())),
-			resolveEnv: (env, inheritEnv) => (inheritEnv ? { ...getShellEnv(), ...env } : env),
-			defaultTimeoutMs: this.settingsManager.getBackgroundBashTaskTimeoutSeconds() * 1000,
-		});
-		this._backgroundTaskNotifications.bind(this._backgroundTaskManager);
+		if (!this._backgroundTaskManager) {
+			const manager = new BackgroundTaskManager({
+				shell: async () => ok(getShellConfig(this.settingsManager.getShellPath())),
+				resolveEnv: (env, inheritEnv) => (inheritEnv ? { ...getShellEnv(), ...env } : env),
+				defaultTimeoutMs: this.settingsManager.getBackgroundBashTaskTimeoutSeconds() * 1000,
+				stallTimeoutMs: this.settingsManager.getBackgroundBashStallTimeoutSeconds() * 1000,
+				maxTasks: this.settingsManager.getBackgroundBashMaxTasks(),
+				maxLogBytes: this.settingsManager.getBackgroundBashMaxLogBytes(),
+			});
+			this._backgroundTaskManager = manager;
+			// Queue notifications before registering the session's own listeners: the "wake" hook runs on
+			// the same terminal event and must drain the notification that event just produced.
+			this._backgroundTaskNotifications.bind(manager, { inlinePolicy: () => this._backgroundTaskInlinePolicy() });
+			this._backgroundTaskUnsubscribes = [
+				manager.onStart((task) => this._emitBackgroundTaskEvent({ type: "background_task_started", task })),
+				manager.onTerminal((task) => {
+					this._emitBackgroundTaskEvent({ type: "background_task_completed", task });
+					this._wakeForBackgroundTaskCompletion();
+				}),
+				manager.onStall((task, info) =>
+					this._emitBackgroundTaskEvent({ type: "background_task_stalled", task, silentMs: info.silentMs }),
+				),
+			];
+		} else {
+			// Rebinding keeps the notification queue attached to the surviving manager.
+			this._backgroundTaskNotifications.bind(this._backgroundTaskManager, {
+				inlinePolicy: () => this._backgroundTaskInlinePolicy(),
+			});
+		}
 		return this._backgroundTaskManager;
+	}
+
+	/** Session listeners and extensions both see task start/complete/stall. */
+	private _emitBackgroundTaskEvent(
+		event:
+			| { type: "background_task_started"; task: BackgroundTaskRecord }
+			| { type: "background_task_completed"; task: BackgroundTaskRecord }
+			| { type: "background_task_stalled"; task: BackgroundTaskRecord; silentMs: number },
+	): void {
+		this._emit(event);
+		// Handler errors are collected by the runner; nothing here can change task results.
+		void this._extensionRunner.emit(event);
 	}
 
 	/** Shared background bash task manager, present once the built-in bash tool has been built. */

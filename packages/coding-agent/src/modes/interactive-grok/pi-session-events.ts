@@ -129,7 +129,14 @@ export type PiSessionUiEvent =
 			kind: "thinking-level";
 			level: Extract<AgentSessionEvent, { type: "thinking_level_changed" }>["level"];
 	  }
-	| { sequence: number; kind: "bash-output"; id: string | undefined; delta: string };
+	| { sequence: number; kind: "bash-output"; id: string | undefined; delta: string }
+	| {
+			sequence: number;
+			kind: "background-task";
+			phase: "started" | "completed" | "stalled";
+			task: Extract<AgentSessionEvent, { type: "background_task_started" }>["task"];
+			silentMs?: number;
+	  };
 
 function unreachableEvent(event: never): never {
 	throw new Error(`Unhandled AgentSessionEvent: ${JSON.stringify(event)}`);
@@ -266,6 +273,12 @@ export function mapAgentSessionEvent(event: AgentSessionEvent, sequence: number)
 			return { sequence, kind: "thinking-level", level: event.level };
 		case "bash_execution_update":
 			return { sequence, kind: "bash-output", id: event.id, delta: event.delta };
+		case "background_task_started":
+			return { sequence, kind: "background-task", phase: "started", task: event.task };
+		case "background_task_completed":
+			return { sequence, kind: "background-task", phase: "completed", task: event.task };
+		case "background_task_stalled":
+			return { sequence, kind: "background-task", phase: "stalled", task: event.task, silentMs: event.silentMs };
 		default:
 			return unreachableEvent(event);
 	}

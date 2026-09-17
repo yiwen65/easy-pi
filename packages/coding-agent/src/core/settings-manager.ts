@@ -111,7 +111,13 @@ export interface Settings {
 	quietStartup?: boolean;
 	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
-	backgroundBashTaskTimeoutSeconds?: number; // Background bash task runtime bound in seconds; default: 600; 0 = no timeout
+	backgroundBashTaskTimeoutSeconds?: number; // Background bash runtime cap in seconds; default: 0 = no cap (0 also disables an explicit cap)
+	backgroundBashStallTimeoutSeconds?: number; // No-output stall window in seconds; default: 1800 (30 minutes); 0 = no stall notices
+	backgroundBashCompletionDelivery?: "nextRequest" | "followUp" | "wake"; // How task completion reaches the model; default: nextRequest (inject at the next request boundary)
+	backgroundBashCompletionInlineOutput?: "failures" | "never" | "tail-lines" | "always"; // Output inlined in completion notices; default: failures
+	backgroundBashCompletionInlineBytes?: number; // Byte budget for inlined output; default: 4096 (max 32768)
+	backgroundBashMaxTasks?: number; // Concurrent background task cap; default: 8; 0 = no cap
+	backgroundBashMaxLogBytes?: number; // Per-task output log budget in bytes; default: 67108864 (64MB); 0 = unlimited
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
@@ -955,10 +961,65 @@ export class SettingsManager {
 		return this.settings.shellCommandPrefix;
 	}
 
-	/** Background bash task runtime bound in seconds. Default: 600 (10 minutes); 0 disables the timeout. */
+	/**
+	 * Background bash runtime cap in seconds. Default: 0 = no cap, so long tasks keep running until they
+	 * exit or are stopped; a stall only produces a notice. Set a positive value to opt into a hard cap.
+	 */
 	getBackgroundBashTaskTimeoutSeconds(): number {
 		const value = this.settings.backgroundBashTaskTimeoutSeconds;
-		if (value === undefined || !Number.isFinite(value) || value < 0) return 600;
+		if (value === undefined || !Number.isFinite(value) || value < 0) return 0;
+		return value;
+	}
+
+	/**
+	 * How a finished background task reaches the model:
+	 * - `nextRequest` (default): inject once at the next provider request boundary.
+	 * - `followUp`: queue it behind the current turn instead of injecting into the in-flight request.
+	 * - `wake`: like followUp while running, and start a turn when the session is idle.
+	 */
+	getBackgroundBashCompletionDelivery(): "nextRequest" | "followUp" | "wake" {
+		const value = this.settings.backgroundBashCompletionDelivery;
+		return value === "followUp" || value === "wake" ? value : "nextRequest";
+	}
+
+	/**
+	 * Output inlined into a completion notice: `failures` (default) inlines the last bytes of tasks
+	 * that need attention, `always` does it for successes too, `tail-lines` keeps only the last few
+	 * lines, and `never` leaves the notice as a pure result plus a pointer.
+	 */
+	getBackgroundBashCompletionInlineOutput(): "failures" | "never" | "tail-lines" | "always" {
+		const value = this.settings.backgroundBashCompletionInlineOutput;
+		return value === "never" || value === "tail-lines" || value === "always" ? value : "failures";
+	}
+
+	/** Byte budget for inlined notice output. Default: 4096; clamped to 256..32768. */
+	getBackgroundBashCompletionInlineBytes(): number {
+		const value = this.settings.backgroundBashCompletionInlineBytes;
+		if (value === undefined || !Number.isFinite(value) || value <= 0) return 4 * 1024;
+		return Math.min(32 * 1024, Math.max(256, Math.floor(value)));
+	}
+
+	/** Concurrent background task cap. Default: 8; 0 disables the cap. */
+	getBackgroundBashMaxTasks(): number {
+		const value = this.settings.backgroundBashMaxTasks;
+		if (value === undefined || !Number.isFinite(value) || value < 0) return 8;
+		return Math.floor(value);
+	}
+
+	/** Per-task output log budget in bytes. Default: 64MB; 0 disables the budget. */
+	getBackgroundBashMaxLogBytes(): number {
+		const value = this.settings.backgroundBashMaxLogBytes;
+		if (value === undefined || !Number.isFinite(value) || value < 0) return 64 * 1024 * 1024;
+		return Math.floor(value);
+	}
+
+	/**
+	 * Stall window in seconds: a running background task with no output for this long emits a notice
+	 * (model + UI) without being stopped. Default: 1800 (30 minutes); 0 disables stall notices.
+	 */
+	getBackgroundBashStallTimeoutSeconds(): number {
+		const value = this.settings.backgroundBashStallTimeoutSeconds;
+		if (value === undefined || !Number.isFinite(value) || value < 0) return 1800;
 		return value;
 	}
 

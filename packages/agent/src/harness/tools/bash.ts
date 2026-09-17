@@ -172,7 +172,11 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				});
 				if (!started.ok) {
 					throw new ExecutionToolError(
-						started.error.code === "not_found" ? "NOT_FOUND" : "SPAWN_ERROR",
+						started.error.code === "not_found"
+							? "NOT_FOUND"
+							: started.error.code === "limit_reached"
+								? "LIMIT_REACHED"
+								: "SPAWN_ERROR",
 						started.error.message,
 					);
 				}

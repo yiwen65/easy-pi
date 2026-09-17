@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
-import { BackgroundTaskManager, isTerminalTaskStatus } from "../../src/harness/env/background-task-manager.ts";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import {
+	BackgroundTaskManager,
+	DEFAULT_BACKGROUND_TIMEOUT_MS,
+	isTerminalTaskStatus,
+} from "../../src/harness/env/background-task-manager.ts";
 import {
 	type NodeProcessExecutionOptions,
 	NodeProcessExecutor,
@@ -105,6 +110,55 @@ describe("BackgroundTaskManager", () => {
 		await manager.cleanup();
 	});
 
+	it("keeps only the preview tail once a task settles", async () => {
+		const { manager } = createManager();
+		const task = getOrThrow(
+			await manager.start("process.stdout.write('x'.repeat(64 * 1024));", {
+				cwd: createTempDir(),
+				env: { ...process.env },
+			}),
+		);
+		const settled = await waitTerminal(manager, task.id);
+		expect(settled.status).toBe("succeeded");
+
+		// 64KB of output: the live buffer keeps up to 128KB, the settled record only the 32KB preview.
+		const preview = getOrThrow(manager.readOutput(task.id, 128 * 1024));
+		expect(preview.truncated).toBe(true);
+		expect(Buffer.byteLength(preview.output)).toBeLessThanOrEqual(32 * 1024);
+
+		// the log file still holds everything
+		expect(settled.outputPath).toBeTruthy();
+		const deadline = Date.now() + 5_000;
+		let log = "";
+		while (Date.now() < deadline) {
+			log = await readFile(settled.outputPath, "utf8");
+			if (log.length >= 64 * 1024) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		expect(log.length).toBe(64 * 1024);
+		await manager.cleanup();
+	});
+
+	it("reports an unwritable log on the record instead of failing the task", async () => {
+		const manager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: join(createTempDir(), "missing"),
+			stopGraceMs: 100,
+		});
+		const task = getOrThrow(
+			await manager.start("process.stdout.write('logless-output');", {
+				cwd: createTempDir(),
+				env: { ...process.env },
+			}),
+		);
+		const settled = await waitTerminal(manager, task.id);
+		expect(settled.status).toBe("succeeded");
+		// The log stream's ENOENT surfaces on the record instead of being swallowed.
+		await vi.waitFor(() => expect(manager.get(task.id)?.logError).toBeDefined());
+		expect(getOrThrow(manager.readOutput(task.id)).output).toContain("logless-output");
+		await manager.cleanup();
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"stops a task two-phase: SIGTERM then SIGKILL after the grace period",
 		async () => {
@@ -134,6 +188,61 @@ describe("BackgroundTaskManager", () => {
 			await manager.cleanup();
 		},
 	);
+
+	it("refuses to start beyond the concurrency cap and frees a slot when a task ends", async () => {
+		const manager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: createTempDir(),
+			stopGraceMs: 100,
+			maxTasks: 2,
+		});
+		const cwd = createTempDir();
+		const first = getOrThrow(await manager.start("sleep 5", { cwd, env: { ...process.env } }));
+		getOrThrow(await manager.start("sleep 5", { cwd, env: { ...process.env } }));
+
+		const rejected = await manager.start("echo nope", { cwd, env: { ...process.env } });
+		expect(rejected.ok).toBe(false);
+		if (!rejected.ok) {
+			expect(rejected.error.code).toBe("limit_reached");
+			expect(rejected.error.message).toContain("task_stop");
+		}
+
+		// ending a task frees the slot
+		getOrThrow(await manager.stop(first.id));
+		await waitTerminal(manager, first.id);
+		const started = await manager.start("echo allowed-now", { cwd, env: { ...process.env } });
+		expect(started.ok).toBe(true);
+		await manager.cleanup();
+	});
+
+	it("stops writing a log at its byte budget while the tail and byte count stay accurate", async () => {
+		const budget = 16 * 1024;
+		const manager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: createTempDir(),
+			stopGraceMs: 100,
+			maxLogBytes: budget,
+		});
+		const task = getOrThrow(
+			await manager.start("process.stdout.write('x'.repeat(64 * 1024)); process.stdout.write('TAIL-END');", {
+				cwd: createTempDir(),
+				env: { ...process.env },
+			}),
+		);
+		const settled = await waitTerminal(manager, task.id);
+		expect(settled.status).toBe("succeeded");
+		expect(settled.logTruncated).toBe(true);
+		// everything the process produced is still counted, and the newest output is in the tail
+		const preview = getOrThrow(manager.readOutput(task.id));
+		expect(preview.output).toContain("TAIL-END");
+		expect(preview.totalBytes).toBeGreaterThan(64 * 1024 - 1);
+
+		// the log file stops near the budget and carries the truncation marker
+		const log = await readFile(settled.outputPath, "utf8");
+		expect(log.length).toBeLessThanOrEqual(budget + 200);
+		expect(log).toContain("byte budget");
+		await manager.cleanup();
+	});
 
 	it("bounds background runtime with the default timeout and reports timed_out", async () => {
 		const { manager } = createManager({ defaultTimeoutMs: 100, stopGraceMs: 50 });
@@ -238,6 +347,62 @@ describe("NodeProcessExecutor promotion", () => {
 		};
 	}
 
+	it("ships no default runtime cap (long tasks are not killed by wall clock)", () => {
+		expect(DEFAULT_BACKGROUND_TIMEOUT_MS).toBe(0);
+	});
+
+	it("notices a silent task without stopping it", async () => {
+		const manager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: createTempDir(),
+			stopGraceMs: 100,
+			stallTimeoutMs: 60,
+			stallSweepIntervalMs: 20,
+		});
+		const notices: Array<{ id: string; silentMs: number }> = [];
+		manager.onStall((task, info) => notices.push({ id: task.id, silentMs: info.silentMs }));
+		const task = getOrThrow(
+			await manager.start("setTimeout(() => {}, 5_000);", { cwd: createTempDir(), env: { ...process.env } }),
+		);
+
+		await vi.waitFor(() => expect(notices.length).toBeGreaterThan(0));
+		expect(notices[0]?.id).toBe(task.id);
+		expect(notices[0]?.silentMs).toBeGreaterThanOrEqual(60);
+		// the notice is informational: the task is still running
+		expect(manager.get(task.id)?.status).toBe("running");
+
+		// still silent => another window elapses and reminds again, again without stopping it
+		await vi.waitFor(() => expect(notices.length).toBeGreaterThan(1));
+		expect(manager.get(task.id)?.status).toBe("running");
+		await manager.cleanup();
+	});
+
+	it("keeps a task that is producing output out of the stall window", async () => {
+		const manager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: createTempDir(),
+			stopGraceMs: 100,
+			stallTimeoutMs: 150,
+			stallSweepIntervalMs: 20,
+		});
+		let noticed = 0;
+		manager.onStall(() => noticed++);
+		getOrThrow(
+			await manager.start(
+				"let i = 0; const t = setInterval(() => { process.stdout.write('tick'); if (++i >= 12) clearInterval(t); }, 25); setTimeout(() => {}, 5_000);",
+				{ cwd: createTempDir(), env: { ...process.env } },
+			),
+		);
+
+		// ~300ms of steady output: the window keeps resetting, so no notice is due
+		await new Promise((resolve) => setTimeout(resolve, 280));
+		expect(noticed).toBe(0);
+
+		// once output stops, the window does elapse
+		await vi.waitFor(() => expect(noticed).toBeGreaterThan(0), { timeout: 3_000 });
+		await manager.cleanup();
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"promotes a timed-out process to a background task instead of killing it",
 		async () => {
@@ -273,6 +438,36 @@ describe("NodeProcessExecutor promotion", () => {
 			// the process kept running after promotion and its later output reached the task log
 			const log = await readFile(settled.outputPath, "utf8");
 			expect(log).toContain("tick5");
+			await manager.cleanup();
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"keeps the command's real start time when a foreground timeout is promoted",
+		async () => {
+			const { manager } = createManager({ stopGraceMs: 100 });
+			const executor = new NodeProcessExecutor();
+			const command = "setTimeout(() => process.exit(0), 2000);";
+			const cwd = createTempDir();
+			const before = Date.now();
+
+			const result = getOrThrow(
+				await executor.execute(
+					command,
+					nodeExecutionOptions(cwd, {
+						timeoutMs: 1000,
+						promoteOnTimeout: { adopt: (handle) => manager.adopt(handle, { command, cwd }) },
+					}),
+				),
+			);
+			expect(result.promotedTaskId).toBeDefined();
+			const settled = await waitTerminal(manager, result.promotedTaskId!);
+
+			// The task started with the foreground command, not at the promotion point ~1s later,
+			// so its runtime covers the whole command rather than the promoted phase only.
+			expect(settled.promoted).toBe(true);
+			expect(settled.startedAt - before).toBeLessThan(500);
+			expect((settled.endedAt ?? 0) - settled.startedAt).toBeGreaterThan(1700);
 			await manager.cleanup();
 		},
 	);
