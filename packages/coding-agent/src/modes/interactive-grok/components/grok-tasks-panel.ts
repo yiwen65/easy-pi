@@ -1,10 +1,5 @@
-import { stripVTControlCharacters } from "node:util";
-import {
-	type BackgroundTaskManager,
-	type BackgroundTaskRecord,
-	type BackgroundTaskStatus,
-	isTerminalTaskStatus,
-} from "@earendil-works/pi-agent-core/node";
+import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
+import { isTerminalTaskStatus } from "@earendil-works/pi-agent-core/node";
 import {
 	type Component,
 	type Focusable,
@@ -13,13 +8,15 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import {
+	backgroundTaskStallHint,
+	oneLineBackgroundTaskText as oneLine,
+	BACKGROUND_TASK_STATUS_PRESENTATION as STATUS_PRESENTATION,
+	safeBackgroundTaskText as safe,
+	sortBackgroundTasks,
+	backgroundTaskDuration as timeText,
+} from "../../interactive/components/background-task-view.ts";
 import type { Theme } from "../../interactive/theme/theme.ts";
-
-const safe = (text: string) =>
-	stripVTControlCharacters(text)
-		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
-		.replace(/\t/g, "    ");
-const oneLine = (text: string) => safe(text).replace(/\s+/g, " ");
 
 /** Output tail preview size for the detail view; the per-task log file always holds the full output. */
 const OUTPUT_PREVIEW_BYTES = 16 * 1024;
@@ -27,32 +24,6 @@ const OUTPUT_PREVIEW_BYTES = 16 * 1024;
 const ACTIVE_TICK_MS = 1_000;
 /** Below this width the panel switches to a compact single-line layout. */
 const COMPACT_WIDTH = 60;
-
-const STATUS_PRESENTATION: Record<
-	BackgroundTaskStatus,
-	{ icon: string; word: string; color: "success" | "warning" | "error" | "muted" | "dim" }
-> = {
-	running: { icon: "●", word: "Running", color: "success" },
-	stopping: { icon: "◌", word: "Stopping", color: "warning" },
-	succeeded: { icon: "✓", word: "Done", color: "dim" },
-	failed: { icon: "✗", word: "Failed", color: "error" },
-	timed_out: { icon: "⏱", word: "Timed out", color: "error" },
-	stopped: { icon: "■", word: "Stopped", color: "muted" },
-};
-
-function durationText(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
-	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
-}
-
-/** Active tasks show running elapsed time; finished tasks show how long ago they ended. */
-function timeText(record: BackgroundTaskRecord, now: number): string {
-	if (isTerminalTaskStatus(record.status)) return `${durationText(now - (record.endedAt ?? now))} ago`;
-	return durationText(now - record.startedAt);
-}
 
 function statusText(record: BackgroundTaskRecord): string {
 	const presentation = STATUS_PRESENTATION[record.status];
@@ -139,12 +110,7 @@ export class GrokTasksPanel implements Component, Focusable {
 
 	/** Active tasks first (oldest running at top), then finished tasks, newest first. */
 	private tasks(): BackgroundTaskRecord[] {
-		const all = this.manager.list({ activeOnly: false });
-		const active = all.filter((record) => !isTerminalTaskStatus(record.status));
-		const finished = all.filter((record) => isTerminalTaskStatus(record.status));
-		active.sort((a, b) => a.startedAt - b.startedAt);
-		finished.sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
-		return [...active, ...finished];
+		return sortBackgroundTasks(this.manager.list({ activeOnly: false }));
 	}
 
 	handleInput(data: string): void {
@@ -228,9 +194,11 @@ export class GrokTasksPanel implements Component, Focusable {
 			const selectedRow = index === this.selected;
 			const marker = selectedRow ? "›" : " ";
 			const command = oneLine(record.command);
+			const stall = backgroundTaskStallHint(record, now, this.manager.stallTimeoutMs);
+			const status = `${statusText(record)}${stall ? " ⏸" : ""}`;
 			const text = compact
-				? `${marker} ${presentation.icon} ${record.id} ${statusText(record)} ${timeText(record, now)} ${command}`
-				: `${marker} ${presentation.icon} ${pad(record.id, idWidth)} ${pad(statusText(record), 15)} ${pad(timeText(record, now), 10)}${record.promoted ? pad("↪ promoted", 12) : pad("", 12)}${command}`;
+				? `${marker} ${presentation.icon} ${record.id} ${status} ${timeText(record, now)} ${command}`
+				: `${marker} ${presentation.icon} ${pad(record.id, idWidth)} ${pad(status, 15)} ${pad(timeText(record, now), 10)}${record.promoted ? pad("↪ promoted", 12) : pad("", 12)}${command}`;
 			lines.push(th.fg(selectedRow ? "accent" : presentation.color, text));
 		}
 		return lines;
@@ -259,10 +227,11 @@ export class GrokTasksPanel implements Component, Focusable {
 			} else {
 				const presentation = STATUS_PRESENTATION[record.status];
 				const pid = record.pid !== undefined ? ` · pid ${record.pid}` : "";
+				const stall = backgroundTaskStallHint(record, now, this.manager.stallTimeoutMs);
 				lines.push(
 					th.fg(
 						presentation.color,
-						`${presentation.icon} ${record.id} · ${statusText(record)} · ${timeText(record, now)}${pid}`,
+						`${presentation.icon} ${record.id} · ${statusText(record)} · ${timeText(record, now)}${stall ? ` · ${stall}` : ""}${pid}`,
 					),
 				);
 				lines.push(th.fg("text", oneLine(`$ ${record.command}`)));

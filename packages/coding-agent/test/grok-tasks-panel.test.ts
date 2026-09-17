@@ -195,8 +195,9 @@ test("/tasks opens a read-only panel with live list, detail watch and clean clos
 	expect(list).toContain("Running");
 	// Active tasks sort above finished ones even though the quick task started later.
 	expect(list.indexOf(runningId)).toBeLessThan(list.indexOf(quickId));
-	// Finished rows show how long ago they ended, not their runtime.
-	expect(list).toContain("ago");
+	// Finished rows show the task's runtime (start -> end), not how long ago it ended.
+	expect(list).not.toContain("ago");
+	expect(list).toMatch(new RegExp(`${quickId}\\s+Done\\s+\\d+s`));
 
 	// Detail view: watch the running task; panel keys never change manager state.
 	f.key("\r");

@@ -14,7 +14,13 @@ export interface BackgroundTaskRecord {
 	signal?: string | null;
 	outputPath: string;
 	promoted: boolean;
+	/** Wall-clock time of the last stdout/stderr chunk (or the start time when the task never printed). */
+	lastOutputAt: number;
 	error?: string;
+	/** Set when the output log file could not be written; the in-memory tail preview stays available. */
+	logError?: string;
+	/** Set when the output log reached the byte budget; the file stops growing at that point. */
+	logTruncated?: boolean;
 }
 
 export interface BackgroundTaskOutput {
@@ -51,4 +57,13 @@ export interface BackgroundTaskManagerLike {
 
 export function isTerminalTaskStatus(status: BackgroundTaskStatus): boolean {
 	return status !== "running" && status !== "stopping";
+}
+
+/**
+ * True when a running task has produced no output for at least the stall window. A stall is a
+ * notice, never a termination: the task keeps running until it exits or is stopped.
+ */
+export function isBackgroundTaskStalled(record: BackgroundTaskRecord, now: number, stallTimeoutMs: number): boolean {
+	if (stallTimeoutMs <= 0 || isTerminalTaskStatus(record.status)) return false;
+	return now - (record.lastOutputAt ?? record.startedAt) >= stallTimeoutMs;
 }

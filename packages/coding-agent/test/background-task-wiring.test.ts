@@ -136,7 +136,7 @@ describe("background task wiring (coding-agent)", () => {
 	});
 });
 
-describe("backgroundBashTaskTimeoutSeconds setting", () => {
+describe("background bash runtime and stall settings", () => {
 	let dir: string;
 	beforeEach(() => {
 		dir = mkdtempSync(join(tmpdir(), "pi-bg-settings-"));
@@ -145,13 +145,75 @@ describe("backgroundBashTaskTimeoutSeconds setting", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("defaults to 600 and honors explicit values including 0", () => {
-		expect(SettingsManager.create(dir, dir).getBackgroundBashTaskTimeoutSeconds()).toBe(600);
+	it("ships no runtime cap by default and honors explicit caps including 0", () => {
+		// Long tasks keep running until they finish or are stopped; a cap is opt-in.
+		expect(SettingsManager.create(dir, dir).getBackgroundBashTaskTimeoutSeconds()).toBe(0);
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashTaskTimeoutSeconds: 0 }));
 		expect(SettingsManager.create(dir, dir).getBackgroundBashTaskTimeoutSeconds()).toBe(0);
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashTaskTimeoutSeconds: 42 }));
 		expect(SettingsManager.create(dir, dir).getBackgroundBashTaskTimeoutSeconds()).toBe(42);
 		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashTaskTimeoutSeconds: -1 }));
-		expect(SettingsManager.create(dir, dir).getBackgroundBashTaskTimeoutSeconds()).toBe(600);
+		expect(SettingsManager.create(dir, dir).getBackgroundBashTaskTimeoutSeconds()).toBe(0);
+	});
+
+	it("defaults the stall window to 30 minutes and honors explicit values including 0", () => {
+		expect(SettingsManager.create(dir, dir).getBackgroundBashStallTimeoutSeconds()).toBe(1800);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashStallTimeoutSeconds: 0 }));
+		expect(SettingsManager.create(dir, dir).getBackgroundBashStallTimeoutSeconds()).toBe(0);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashStallTimeoutSeconds: 900 }));
+		expect(SettingsManager.create(dir, dir).getBackgroundBashStallTimeoutSeconds()).toBe(900);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashStallTimeoutSeconds: -5 }));
+		expect(SettingsManager.create(dir, dir).getBackgroundBashStallTimeoutSeconds()).toBe(1800);
+	});
+
+	it("defaults delivery, concurrency, log budget, and inline output, and honors explicit values", () => {
+		const settings = () => SettingsManager.create(dir, dir);
+		expect(settings().getBackgroundBashCompletionDelivery()).toBe("nextRequest");
+		expect(settings().getBackgroundBashMaxTasks()).toBe(8);
+		expect(settings().getBackgroundBashMaxLogBytes()).toBe(64 * 1024 * 1024);
+		expect(settings().getBackgroundBashCompletionInlineOutput()).toBe("failures");
+		expect(settings().getBackgroundBashCompletionInlineBytes()).toBe(4 * 1024);
+
+		writeFileSync(
+			join(dir, "settings.json"),
+			JSON.stringify({
+				backgroundBashCompletionDelivery: "wake",
+				backgroundBashMaxTasks: 0,
+				backgroundBashMaxLogBytes: 1024,
+				backgroundBashCompletionInlineOutput: "always",
+				backgroundBashCompletionInlineBytes: 8192,
+			}),
+		);
+		expect(settings().getBackgroundBashCompletionDelivery()).toBe("wake");
+		expect(settings().getBackgroundBashMaxTasks()).toBe(0);
+		expect(settings().getBackgroundBashMaxLogBytes()).toBe(1024);
+		expect(settings().getBackgroundBashCompletionInlineOutput()).toBe("always");
+		expect(settings().getBackgroundBashCompletionInlineBytes()).toBe(8192);
+
+		writeFileSync(
+			join(dir, "settings.json"),
+			JSON.stringify({
+				backgroundBashCompletionDelivery: "nonsense",
+				backgroundBashMaxTasks: -3,
+				backgroundBashMaxLogBytes: -1,
+				backgroundBashCompletionInlineOutput: "nonsense",
+				backgroundBashCompletionInlineBytes: -5,
+			}),
+		);
+		expect(settings().getBackgroundBashCompletionDelivery()).toBe("nextRequest");
+		expect(settings().getBackgroundBashMaxTasks()).toBe(8);
+		expect(settings().getBackgroundBashMaxLogBytes()).toBe(64 * 1024 * 1024);
+		expect(settings().getBackgroundBashCompletionInlineOutput()).toBe("failures");
+		expect(settings().getBackgroundBashCompletionInlineBytes()).toBe(4 * 1024);
+
+		// the inline byte budget is clamped to a usable range
+		writeFileSync(
+			join(dir, "settings.json"),
+			JSON.stringify({ backgroundBashCompletionInlineOutput: "never", backgroundBashCompletionInlineBytes: 1 }),
+		);
+		expect(settings().getBackgroundBashCompletionInlineOutput()).toBe("never");
+		expect(settings().getBackgroundBashCompletionInlineBytes()).toBe(256);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ backgroundBashCompletionInlineBytes: 999_999 }));
+		expect(settings().getBackgroundBashCompletionInlineBytes()).toBe(32 * 1024);
 	});
 });

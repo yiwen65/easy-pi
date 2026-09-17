@@ -6,6 +6,7 @@ export type ExecutionToolErrorCode =
 	| "OUTSIDE_WORKSPACE"
 	| "SYMLINK_ESCAPE"
 	| "UNSUPPORTED"
+	| "LIMIT_REACHED"
 	| "SPAWN_ERROR"
 	| "ABORTED";
 

@@ -5,6 +5,7 @@ import {
 	isTerminalTaskStatus,
 } from "../env/background-task-types.ts";
 import type { AgentHarnessTool } from "../types.ts";
+import { formatTaskDuration } from "../utils/duration.ts";
 import { formatSize } from "../utils/truncate.ts";
 import { ExecutionToolError } from "./execution-tool-error.ts";
 import type { ExecutionToolContext } from "./tool-context.ts";
@@ -69,12 +70,18 @@ function requireManager(context: ExecutionToolContext): BackgroundTaskManagerLik
 	return manager;
 }
 
-function formatElapsed(record: BackgroundTaskRecord, now: number): string {
-	const end = record.endedAt ?? now;
-	const seconds = Math.max(0, Math.round((end - record.startedAt) / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	return `${minutes}m${seconds % 60}s`;
+/** Live elapsed while running; the fixed runtime (start -> end) once terminal. */
+function taskDuration(record: BackgroundTaskRecord, now: number): string {
+	return formatTaskDuration((record.endedAt ?? now) - record.startedAt);
+}
+
+/**
+ * Log path line for model-facing text: an unwritable log is reported instead of being promised.
+ */
+function logLine(record: BackgroundTaskRecord): string {
+	return record.logError
+		? `Output log unavailable (${record.logError}); the tail preview below is in-memory.`
+		: `Output log: ${record.outputPath}`;
 }
 
 function formatTaskLine(record: BackgroundTaskRecord, now: number): string {
@@ -86,7 +93,11 @@ function formatTaskLine(record: BackgroundTaskRecord, now: number): string {
 			: record.signal
 				? ` signal=${record.signal}`
 				: "";
-	return `${record.id}  ${record.status}${suffix}  ${formatElapsed(record, now)}  ${commandPreview}`;
+	// Running tasks also report how long they have been silent, so a stalled task is visible here.
+	const silent = isTerminalTaskStatus(record.status)
+		? ""
+		: `  silent=${formatTaskDuration(now - (record.lastOutputAt ?? record.startedAt))}`;
+	return `${record.id}  ${record.status}${suffix}  ${taskDuration(record, now)}${silent}  ${commandPreview}`;
 }
 
 function notFound(taskId: string): ExecutionToolError {
@@ -103,7 +114,7 @@ export function createTaskListTool<TContext extends ExecutionToolContext = Execu
 		name: "task_list",
 		label: "task_list",
 		description:
-			"List background bash tasks started with run_in_background or promoted from a timed-out foreground command. By default only active tasks are shown; pass active_only=false to include finished ones.",
+			"List background bash tasks started with run_in_background or promoted from a timed-out foreground command. By default only active tasks are shown; pass active_only=false to include finished ones. Active rows include `silent=` (time since the task last produced output).",
 		parameters: taskListSchema,
 		replay: "safe",
 		async execute(_toolCallId, { active_only }, _signal, _onUpdate, context) {
@@ -142,9 +153,23 @@ export function createTaskOutputTool<TContext extends ExecutionToolContext = Exe
 			const task = manager.get(task_id);
 			if (!task) throw notFound(task_id);
 			const { output, outputPath, totalBytes, truncated } = result.value;
-			const header = `Task ${task.id} (${task.status})\n`;
+			const warnings = [
+				task.logError
+					? `[Warning: output log write failed (${task.logError}); this preview is the in-memory tail only.]`
+					: undefined,
+				task.logTruncated
+					? "[Warning: the output log reached its byte budget and stopped growing; the tail preview and totalBytes are still accurate.]"
+					: undefined,
+			]
+				.filter(Boolean)
+				.join("\n");
+			const header = `Task ${task.id} (${task.status})\n${warnings ? `${warnings}\n` : ""}`;
 			const footer = truncated
-				? `\n\n[Showing last ${formatSize(output.length)} of ${formatSize(totalBytes)}. Full output: ${outputPath} — use the read tool for paging.]`
+				? `\n\n[Showing last ${formatSize(output.length)} of ${formatSize(totalBytes)}.${
+						task.logError
+							? " The log file is incomplete."
+							: ` Full output: ${outputPath} — use the read tool for paging.`
+					}]`
 				: "";
 			return {
 				content: [{ type: "text", text: `${header}${output || "(no output yet)"}${footer}` }],
@@ -208,10 +233,12 @@ export function createWaitForTool<TContext extends ExecutionToolContext = Execut
 						: task.signal
 							? `signal ${task.signal}`
 							: "no exit status";
-				text = `Task ${task.id} finished: ${task.status} (${outcome}) after ${formatElapsed(task, Date.now())}.\nOutput log: ${task.outputPath}`;
+				text = `Task ${task.id} finished: ${task.status} (${outcome}) after ${taskDuration(task, Date.now())}.\n${logLine(task)}`;
 				const tail = manager.readOutput(task_id, WAIT_RESULT_TAIL_BYTES);
 				if (tail.ok && tail.value.output) {
-					text += `\n\nLast output:\n${tail.value.output}${tail.value.truncated ? `\n[...] Full output: ${tail.value.outputPath}` : ""}`;
+					text += `\n\nLast output:\n${tail.value.output}${
+						tail.value.truncated && !task.logError ? `\n[...] Full output: ${tail.value.outputPath}` : ""
+					}`;
 				}
 			}
 			return { content: [{ type: "text", text }], details: { task, timedOut } };

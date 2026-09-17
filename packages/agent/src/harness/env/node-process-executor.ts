@@ -27,6 +27,8 @@ export interface NodeProcessExecutionOptions {
 export interface NodePromotedProcess {
 	pid: number | undefined;
 	child: ChildProcess;
+	/** Wall-clock time when the command actually started, so promotion keeps the real task duration. */
+	startedAt: number;
 	/** Remove every executor listener without destroying streams; after detach the executor no longer observes the child. */
 	detach: () => void;
 }
@@ -255,6 +257,7 @@ export class NodeProcessExecutor {
 		let promotedTaskId: string | undefined;
 		let callbackError: ExecutionError | undefined;
 		let trackedPid: number | undefined;
+		const spawnedAt = Date.now();
 
 		const terminate = (): void => {
 			if (child?.pid) killNodeProcessTree(child.pid);
@@ -316,7 +319,12 @@ export class NodeProcessExecutor {
 				timedOut = true;
 				if (options.promoteOnTimeout && !observer.settled() && promotedTaskId === undefined) {
 					try {
-						promotedTaskId = options.promoteOnTimeout.adopt({ pid: trackedPid, child, detach: detachFromChild });
+						promotedTaskId = options.promoteOnTimeout.adopt({
+							pid: trackedPid,
+							child,
+							detach: detachFromChild,
+							startedAt: spawnedAt,
+						});
 						// Ownership transferred: the executor no longer tracks, aborts, or observes this process.
 						if (options.abortSignal) options.abortSignal.removeEventListener("abort", onAbort);
 						releaseProcess();

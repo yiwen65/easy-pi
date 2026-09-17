@@ -164,6 +164,24 @@ describe("task management tools", () => {
 		await env.cleanup();
 	});
 
+	it("marks running tasks with their silent time", async () => {
+		const env = createEnv();
+		const taskList = createTaskListTool();
+		const quickId = await startTask(env, "echo quiet");
+		const slowId = await startTask(env, "sleep 5");
+		await waitTaskTerminal(env, quickId);
+
+		const all = await taskList.execute("t1", { active_only: false }, undefined, undefined, contextFor(env));
+		const lines = textOf(all).split("\n");
+		// only running tasks report silence; finished rows keep their duration only
+		expect(lines.find((line) => line.includes(slowId))).toContain("silent=");
+		expect(lines.find((line) => line.includes(quickId))).not.toContain("silent=");
+
+		await env.backgroundTasks?.stop(slowId);
+		await waitTaskTerminal(env, slowId);
+		await env.cleanup();
+	});
+
 	it("task_output returns a bounded preview plus the log path", async () => {
 		const env = createEnv();
 		const taskOutput = createTaskOutputTool();

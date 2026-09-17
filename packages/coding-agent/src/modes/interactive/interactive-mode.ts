@@ -66,6 +66,10 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import {
+	BACKGROUND_TASK_NOTIFICATION_TYPE,
+	BACKGROUND_TASK_STALL_NOTIFICATION_TYPE,
+} from "../../core/background-task-notifications.ts";
+import {
 	CACHE_TTL_MS,
 	type CacheMiss,
 	collectCacheMisses,
@@ -595,6 +599,7 @@ export class InteractiveMode {
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private subagentRouter!: SubagentTranscriptRouter;
 	private backgroundTaskGroup: BackgroundTaskGroupComponent | undefined;
+	private backgroundTaskUnsubscribe: (() => void) | undefined;
 	private grokTurnStartedAt: number | undefined = undefined;
 	private currentTurnThinkingGroup: GrokThinkingTurnGroupComponent | undefined = undefined;
 	private currentTurnToolGroup: GrokToolTurnGroupComponent | undefined = undefined;
@@ -2180,6 +2185,7 @@ export class InteractiveMode {
 		if (!options.renderBeforeBind) {
 			this.subscribeToAgent();
 		}
+		this.subscribeToBackgroundTasks();
 
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
@@ -3360,6 +3366,32 @@ export class InteractiveMode {
 		};
 	}
 
+	/**
+	 * Task starts that do not come from a bash tool result (extensions/SDK callers) still surface in
+	 * the transcript. The block is a peer of the turn tool group: always the latest transcript line.
+	 */
+	private subscribeToBackgroundTasks(): void {
+		this.backgroundTaskUnsubscribe?.();
+		this.backgroundTaskUnsubscribe = this.session.backgroundTasks?.onStart(() => this.ensureBackgroundTaskGroup());
+	}
+
+	private ensureBackgroundTaskGroup(): void {
+		const manager = this.session.backgroundTasks;
+		if (!manager) return;
+		if (this.backgroundTaskGroup && this.backgroundTaskGroup.manager !== manager) {
+			this.chatContainer.removeChild(this.backgroundTaskGroup);
+			this.backgroundTaskGroup.dispose();
+			this.backgroundTaskGroup = undefined;
+		}
+		if (!this.backgroundTaskGroup) {
+			this.backgroundTaskGroup = new BackgroundTaskGroupComponent(manager, () => this.ui.requestRender());
+			this.backgroundTaskGroup.setExpanded(this.toolOutputExpanded);
+		}
+		this.chatContainer.removeChild(this.backgroundTaskGroup);
+		this.chatContainer.addChild(this.backgroundTaskGroup);
+		this.ui.requestRender();
+	}
+
 	private subscribeToAgent(): void {
 		if (this.sessionPort) {
 			this.unsubscribe = this.sessionPort.subscribe((_uiEvent, sourceEvent) => {
@@ -3578,16 +3610,7 @@ export class InteractiveMode {
 				const taskId = (event.result as { details?: { backgroundTaskId?: string } } | undefined)?.details
 					?.backgroundTaskId;
 				if (taskId && this.session.backgroundTasks) {
-					if (!this.backgroundTaskGroup) {
-						this.backgroundTaskGroup = new BackgroundTaskGroupComponent(this.session.backgroundTasks, () =>
-							this.ui.requestRender(),
-						);
-						this.backgroundTaskGroup.setExpanded(this.toolOutputExpanded);
-					}
-					// Peer of the turn tool group: always the latest transcript line, never nested in tools.
-					this.chatContainer.removeChild(this.backgroundTaskGroup);
-					this.chatContainer.addChild(this.backgroundTaskGroup);
-					this.ui.requestRender();
+					this.ensureBackgroundTaskGroup();
 				}
 				break;
 			}
@@ -3872,9 +3895,14 @@ export class InteractiveMode {
 				}
 				this.flushPendingSkillMentions();
 				if (message.display) {
-					// Background task terminal notifications feed the model context only; humans track
+					// Background task terminal and stall notifications feed the model context only; humans track
 					// tasks via the folding transcript group and /tasks panel instead of raw messages.
-					if (message.customType === "pi-background-task") break;
+					if (
+						message.customType === BACKGROUND_TASK_NOTIFICATION_TYPE ||
+						message.customType === BACKGROUND_TASK_STALL_NOTIFICATION_TYPE
+					) {
+						break;
+					}
 					this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
 					if (this.subagentRouter.handleMailboxMessage(message)) break;
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
@@ -7031,6 +7059,10 @@ export class InteractiveMode {
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
+		}
+		if (this.backgroundTaskUnsubscribe) {
+			this.backgroundTaskUnsubscribe();
+			this.backgroundTaskUnsubscribe = undefined;
 		}
 		this.sessionPort?.dispose();
 		if (this.isInitialized) {

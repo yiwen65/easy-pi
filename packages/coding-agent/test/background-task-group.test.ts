@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { ok } from "@earendil-works/pi-agent-core";
 import { BackgroundTaskManager } from "@earendil-works/pi-agent-core/node";
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
@@ -26,7 +27,8 @@ function fakeMode() {
 		outputPad: 1,
 		getMarkdownThemeWithSettings: () => ({}),
 	};
-	for (const name of ["addMessageToChat"]) mode[name] = proto[name];
+	for (const name of ["addMessageToChat", "subscribeToBackgroundTasks", "ensureBackgroundTaskGroup"])
+		mode[name] = proto[name];
 	return mode;
 }
 
@@ -89,6 +91,69 @@ describe("BackgroundTaskGroupComponent", () => {
 		group.dispose();
 	});
 
+	it("keeps a finished task's runtime duration (start -> end) instead of counting up", async () => {
+		const group = new BackgroundTaskGroupComponent(manager, () => {});
+		const task = await manager.start("setTimeout(() => process.stdout.write('late'), 1000)", {
+			cwd: dir,
+			env: { ...process.env },
+		});
+		if (!task.ok) throw new Error("start failed");
+		await manager.wait(task.value.id, 10_000);
+		expect(manager.get(task.value.id)?.endedAt).toBeDefined();
+
+		group.setExpanded(true);
+		// Only the task row carries the time; the header marquee animates independently.
+		const taskRow = (): string =>
+			stripVTControlCharacters(group.render(200).join("\n"))
+				.split("\n")
+				.find((line) => line.includes(task.value.id)) ?? "";
+		const first = taskRow();
+		expect(first).not.toContain("ago");
+		expect(first).toMatch(/\b\d+s\b/);
+
+		// The old '<time since end> ago' rendering grew every second for the same finished task.
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+		expect(taskRow()).toBe(first);
+		group.dispose();
+	});
+
+	it("badges a silent running task as stalled without touching its state", async () => {
+		const stallManager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: dir,
+			stopGraceMs: 100,
+			stallTimeoutMs: 50,
+		});
+		const group = new BackgroundTaskGroupComponent(stallManager, () => {});
+		const task = await stallManager.start("setTimeout(() => {}, 5_000);", {
+			cwd: dir,
+			env: { ...process.env },
+		});
+		if (!task.ok) throw new Error("start failed");
+
+		group.setExpanded(true);
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		const rendered = stripVTControlCharacters(group.render(200).join("\n"));
+		expect(rendered).toContain("⏸ no output");
+		// the badge reports silence; the task is still running
+		expect(stallManager.get(task.value.id)?.status).toBe("running");
+
+		// a task that keeps producing output stays unbadged
+		const chatty = await stallManager.start("setInterval(() => process.stdout.write('tick'), 20);", {
+			cwd: dir,
+			env: { ...process.env },
+		});
+		if (!chatty.ok) throw new Error("start failed");
+		const row = stripVTControlCharacters(group.render(200).join("\n"))
+			.split("\n")
+			.find((line) => line.includes(chatty.value.id));
+		expect(row).toBeDefined();
+		expect(row).not.toContain("⏸");
+
+		await stallManager.cleanup();
+		group.dispose();
+	});
+
 	it("supports ctrl+o global expansion and stays within width", async () => {
 		const group = new BackgroundTaskGroupComponent(manager, () => {});
 		await manager.start("process.stdout.write('x')", { cwd: dir, env: { ...process.env } });
@@ -118,6 +183,61 @@ describe("BackgroundTaskGroupComponent", () => {
 		expect(toolGroup.children).not.toContain(group);
 		expect(container.children).toContain(toolGroup);
 		group.dispose();
+	});
+});
+
+describe("background task transcript mounting", () => {
+	let dir: string;
+	let manager: BackgroundTaskManager;
+	beforeEach(() => {
+		initTheme("dark");
+		dir = mkdtempSync(join(tmpdir(), "pi-bg-mount-"));
+		manager = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: dir,
+			stopGraceMs: 100,
+		});
+	});
+	afterEach(async () => {
+		await manager.cleanup();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("mounts the folding block for task starts outside the bash tool path", async () => {
+		const mode = fakeMode();
+		mode.session = { backgroundTasks: manager, extensionRunner: { getMessageRenderer: () => undefined } };
+		mode.backgroundTaskUnsubscribe = undefined;
+		proto.subscribeToBackgroundTasks.call(mode);
+
+		const first = await manager.start("echo mounted", { cwd: dir, env: { ...process.env } });
+		if (!first.ok) throw new Error("start failed");
+		expect(mode.chatContainer.children).toHaveLength(1);
+		const group = mode.chatContainer.children[0] as BackgroundTaskGroupComponent;
+		expect(group).toBeInstanceOf(BackgroundTaskGroupComponent);
+		expect(group.manager).toBe(manager);
+		expect(group.render(100).join("\n")).toContain("background tasks");
+
+		// later starts reuse the mounted block instead of stacking another one
+		await manager.start("echo mounted-2", { cwd: dir, env: { ...process.env } });
+		expect(mode.chatContainer.children).toHaveLength(1);
+		expect(mode.chatContainer.children[0]).toBe(group);
+
+		// a session swap (new manager) replaces the block instead of keeping the stale one
+		const other = new BackgroundTaskManager({
+			shell: async () => ok({ ...SHELL }),
+			logDir: dir,
+			stopGraceMs: 100,
+		});
+		mode.session = { backgroundTasks: other, extensionRunner: { getMessageRenderer: () => undefined } };
+		proto.subscribeToBackgroundTasks.call(mode);
+		const second = await other.start("echo other", { cwd: dir, env: { ...process.env } });
+		if (!second.ok) throw new Error("start failed");
+		expect(mode.chatContainer.children).toHaveLength(1);
+		const swapped = mode.chatContainer.children[0] as BackgroundTaskGroupComponent;
+		expect(swapped).not.toBe(group);
+		expect(swapped.manager).toBe(other);
+		await other.cleanup();
+		swapped.dispose();
 	});
 });
 

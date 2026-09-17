@@ -5,9 +5,18 @@
 ### Added
 
 - Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
+- Added `backgroundBashCompletionInlineOutput` (`failures` default, `always`, `tail-lines`, `never`) and `backgroundBashCompletionInlineBytes` (default 4096, clamped 256..32768) so completion notices can carry as much or as little output as you want; every notice now also states how to inspect output (`task_output(<id>)`).
+- Added `background_task_started` / `background_task_completed` / `background_task_stalled` extension events plus the matching session events (`session.subscribe(...)`) for background bash tasks.
+- Added `backgroundBashCompletionDelivery` (`nextRequest` default, `followUp`, `wake`) to choose how a finished background task reaches the model; `wake` starts a turn when the session is idle.
+- Added background task stall notices: a running task with no output for `backgroundBashStallTimeoutSeconds` (default 30 minutes, `0` disables) reports to the model and the UI without being stopped; `task_list` rows show `silent=` and the TUI marks stalled tasks with `⏸`.
+- Added inlined output (last ≤4KB) to single-task failure, timeout, and stall notices so the model can diagnose without a second tool call.
+- Added resource bounds for background tasks: `backgroundBashMaxTasks` (default 8 concurrent, `0` = no cap) and `backgroundBashMaxLogBytes` (default 64MB per task log, `0` = unlimited; a capped log ends with a truncation marker and `task_output` warns).
 
 ### Fixed
 
+- Background bash tasks are no longer capped by wall clock by default: long tasks keep running until they finish or are stopped, `backgroundBashTaskTimeoutSeconds` is now an opt-in hard cap (`0`/unset = no cap), and an explicit `timeout` still caps only that task.
+- Fixed background bash task timing: a foreground command promoted to a background task now keeps its real start time instead of counting from the promotion point, and finished tasks show their runtime (start to end) instead of a growing "ago" value.
+- Coalesced background task completion notices that land in the same request boundary into one message, and reported an unwritable task output log instead of pointing at a missing file.
 - Fixed large tool results crossing the auto-compaction threshold being sent to the provider before compaction, and applied steering queued during that compaction to the immediately resumed request ([#6879](https://github.com/earendil-works/pi/issues/6879)).
 - Fixed the subagent example repeatedly prompting before running project-local agents in trusted repositories ([#8261](https://github.com/earendil-works/pi/issues/8261)).
 - Added `session_compact_failed` extension events so compaction failures and aborts expose their reason, retry state, source, and error message to handlers ([#8175](https://github.com/earendil-works/pi/issues/8175)).

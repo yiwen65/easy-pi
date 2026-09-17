@@ -291,8 +291,14 @@ export interface NodeExecutionEnvOptions {
 	shellEnv?: NodeJS.ProcessEnv;
 	onProcessStart?: (pid: number) => void;
 	onProcessEnd?: (pid: number) => void;
-	/** Background task runtime bound in milliseconds. Defaults to 600s; 0 disables the timeout. */
+	/** Background task runtime bound in milliseconds. Defaults to 0 (no cap); 0 disables the timeout. */
 	backgroundTaskTimeoutMs?: number;
+	/** Stall window in milliseconds; a silent running task emits an onStall notice. Defaults to 30 minutes. */
+	backgroundTaskStallTimeoutMs?: number;
+	/** Concurrency cap for background tasks. Defaults to 8; 0 disables the cap. */
+	backgroundTaskMaxTasks?: number;
+	/** Per-task output log budget in bytes. Defaults to 64MB; 0 disables the budget. */
+	backgroundTaskMaxLogBytes?: number;
 	/** Directory for background task output logs. Defaults to the OS temp directory. */
 	backgroundTaskLogDir?: string;
 	/** Shared background task manager instance. Default: a new manager owned by this environment. */
@@ -323,6 +329,9 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				},
 				resolveEnv: (env, inheritEnv) => getShellEnv(this.shellEnv, env, inheritEnv),
 				defaultTimeoutMs: options.backgroundTaskTimeoutMs,
+				stallTimeoutMs: options.backgroundTaskStallTimeoutMs,
+				maxTasks: options.backgroundTaskMaxTasks,
+				maxLogBytes: options.backgroundTaskMaxLogBytes,
 				logDir: options.backgroundTaskLogDir,
 			});
 	}

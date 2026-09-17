@@ -856,6 +856,26 @@ pi.on("tool_result", async (event, ctx) => {
 });
 ```
 
+### Background Task Events
+
+#### background_task_started / background_task_completed / background_task_stalled
+
+Fired for managed background bash tasks (`bash(run_in_background=true)` or a foreground command promoted after its timeout). Payloads carry the task record (`id`, `command`, `status`, `exitCode`, `signal`, `outputPath`, `promoted`, timings) and `silentMs` for stalls. A stall is informational: the task keeps running until it exits or is stopped, so handlers can nudge the user or start their own follow-up work instead of assuming failure.
+
+```typescript
+pi.on("background_task_completed", (event) => {
+  if (event.task.status === "failed") {
+    // event.task.outputPath holds the full log; the model already got a notice.
+  }
+});
+
+pi.on("background_task_stalled", (event) => {
+  // event.silentMs - how long the task has been silent; it is still running.
+});
+```
+
+How completions reach the model is a session setting (`backgroundBashCompletionDelivery`: `nextRequest` default, `followUp`, `wake`); the events fire regardless of that choice.
+
 ### User Bash Events
 
 #### user_bash

@@ -5,13 +5,15 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { ok } from "@earendil-works/pi-agent-core";
 import { BackgroundTaskManager, type BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
 	BACKGROUND_TASK_NOTIFICATION_TYPE,
+	BACKGROUND_TASK_STALL_NOTIFICATION_TYPE,
 	BackgroundTaskNotifications,
 	formatBackgroundTaskNotification,
+	formatBackgroundTaskStallNotification,
 } from "../src/core/background-task-notifications.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -67,6 +69,182 @@ describe("BackgroundTaskNotifications", () => {
 		// one-shot: a later request boundary has nothing to inject
 		expect(await notifications.drain(async () => {})).toHaveLength(0);
 		expect(notifications.pendingCount).toBe(0);
+	});
+
+	it("coalesces every task that finished inside one boundary into a single message", async () => {
+		const notifications = new BackgroundTaskNotifications();
+		notifications.bind(manager);
+		const started = await Promise.all([
+			manager.start("echo batch-1", { cwd: dir, env: { ...process.env } }),
+			manager.start("exit 3", { cwd: dir, env: { ...process.env } }),
+			manager.start("echo batch-3", { cwd: dir, env: { ...process.env } }),
+		]);
+		const ids = started.map((result) => {
+			if (!result.ok) throw new Error("start failed");
+			return result.value.id;
+		});
+		for (const id of ids) await settle(manager, id);
+		expect(notifications.pendingCount).toBe(3);
+
+		const sent: string[] = [];
+		const added = await notifications.drain(async (message) => {
+			sent.push(message.content);
+		});
+		expect(sent).toHaveLength(1);
+		expect(added).toHaveLength(1);
+		expect(sent[0]).toContain("Background tasks finished: 3");
+		for (const id of ids) expect(sent[0]).toContain(id);
+		expect(sent[0]).toContain("task_output(task_id)");
+		// tasks finish in nondeterministic order, so compare the id set rather than the array order
+		const detailTasks = (added[0] as { details?: { tasks?: Array<{ id: string }> } }).details?.tasks ?? [];
+		expect(detailTasks.map((task) => task.id).sort()).toEqual([...ids].sort());
+		expect(notifications.pendingCount).toBe(0);
+	});
+
+	it("reports an unavailable log instead of a log path", () => {
+		const record: BackgroundTaskRecord = {
+			id: "task-9",
+			command: "echo nope",
+			cwd: dir,
+			status: "succeeded",
+			startedAt: 1_000,
+			endedAt: 3_400,
+			lastOutputAt: 2_000,
+			exitCode: 0,
+			signal: null,
+			outputPath: "/tmp/pi-batch-missing.log",
+			promoted: false,
+			logError: "ENOENT: no such file or directory",
+		};
+		const text = formatBackgroundTaskNotification(record);
+		expect(text).toContain("finished: succeeded (exit code 0) after 2s.");
+		expect(text).toContain("Output log unavailable (ENOENT: no such file or directory)");
+		expect(text).not.toContain("/tmp/pi-batch-missing.log");
+	});
+
+	it("inlines the last output for a single failed task and keeps a success as a pointer", async () => {
+		const notifications = new BackgroundTaskNotifications();
+		notifications.bind(manager);
+
+		const failed = await manager.start("echo boom-marker >&2; exit 3", { cwd: dir, env: { ...process.env } });
+		if (!failed.ok) throw new Error("start failed");
+		const failedTask = await settle(manager, failed.value.id);
+		expect(failedTask.status).toBe("failed");
+		let sent: string[] = [];
+		await notifications.drain(async (message) => {
+			sent.push(message.content);
+		});
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain("Last output:");
+		expect(sent[0]).toContain("boom-marker");
+
+		// a successful task stays a result plus a pointer: no output inlined, log path only
+		const ok = await manager.start("echo fine-here", { cwd: dir, env: { ...process.env } });
+		if (!ok.ok) throw new Error("start failed");
+		await settle(manager, ok.value.id);
+		sent = [];
+		await notifications.drain(async (message) => {
+			sent.push(message.content);
+		});
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).not.toContain("Last output:");
+		expect(sent[0]).toContain("Output log: ");
+		// every notice tells the model how to look closer, so it never has to guess
+		expect(sent[0]).toContain("Use task_output(");
+	});
+
+	it("honors the configured inline policy", async () => {
+		const run = async (mode: "failures" | "never" | "tail-lines" | "always", command: string) => {
+			const notifications = new BackgroundTaskNotifications();
+			notifications.bind(manager, { inlinePolicy: () => ({ mode, bytes: 4 * 1024 }) });
+			const started = await manager.start(command, { cwd: dir, env: { ...process.env } });
+			if (!started.ok) throw new Error("start failed");
+			await settle(manager, started.value.id);
+			const sent: string[] = [];
+			await notifications.drain(async (message) => {
+				sent.push(message.content);
+			});
+			return sent[0] ?? "";
+		};
+
+		// never: even a failure stays a pure result
+		const neverFailure = await run("never", "echo hidden-marker >&2; exit 9");
+		expect(neverFailure).toContain("failed (exit code 9)");
+		expect(neverFailure).not.toContain("Last output:");
+
+		// always: a success carries its output too
+		const alwaysSuccess = await run("always", "echo success-marker");
+		expect(alwaysSuccess).toContain("Last output:");
+		expect(alwaysSuccess).toContain("success-marker");
+
+		// tail-lines: only the last few lines, not the whole output
+		const tailLines = await run("tail-lines", "echo line-1; echo line-2; echo line-3; echo line-4; exit 1");
+		expect(tailLines).toContain("Last output:");
+		const [, tailSection = ""] = tailLines.split("Last output:");
+		expect(tailSection).toContain("line-4");
+		expect(tailSection).not.toContain("line-1");
+	});
+
+	it("formats a batch of stall notices compactly", () => {
+		const now = Date.now();
+		const base: BackgroundTaskRecord = {
+			id: "task-1",
+			command: "cargo build",
+			cwd: dir,
+			status: "running",
+			startedAt: now - 3_600_000,
+			lastOutputAt: now - 1_800_000,
+			outputPath: "/tmp/pi-stall.log",
+			promoted: false,
+		};
+		const text = formatBackgroundTaskStallNotification([
+			{ task: base, silentMs: 1_800_000 },
+			{ task: { ...base, id: "task-2", command: "npm install" }, silentMs: 3_600_000 },
+		]);
+		expect(text).toContain("Background tasks with no output for their stall window: 2");
+		expect(text).toContain("task-1 silent 30m0s");
+		expect(text).toContain("task-2 silent 1h0m");
+		expect(text).toContain("They keep running");
+	});
+
+	it("queues one stall notice per silent task and drains it as its own message", async () => {
+		const notifications = new BackgroundTaskNotifications();
+		const stallManager = new BackgroundTaskManager({
+			shell: async () => ok(getShellConfig()),
+			resolveEnv: (env) => env,
+			stopGraceMs: 100,
+			logDir: dir,
+			stallTimeoutMs: 50,
+			stallSweepIntervalMs: 20,
+		});
+		notifications.bind(stallManager);
+		let notices = 0;
+		stallManager.onStall(() => notices++);
+		const started = await stallManager.start("sleep 5", {
+			cwd: dir,
+			env: { ...process.env },
+		});
+		if (!started.ok) throw new Error("start failed");
+
+		// Several stall windows elapse for the same task, but only one notice stays queued.
+		await vi.waitFor(() => expect(notices).toBeGreaterThan(1), { timeout: 5_000 });
+		expect(notifications.pendingStallCount).toBe(1);
+
+		const sent: Array<{ type: string; content: string }> = [];
+		const added = await notifications.drain(async (message) => {
+			sent.push({ type: message.customType, content: message.content });
+		});
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.type).toBe(BACKGROUND_TASK_STALL_NOTIFICATION_TYPE);
+		expect(sent[0]?.content).toContain(`Background task ${started.value.id} has produced no output for`);
+		expect(sent[0]?.content).toContain("It may be stuck, but it keeps running.");
+		expect(sent[0]?.content).toContain(`task_output(${started.value.id})`);
+		expect(added[0]).toMatchObject({ customType: BACKGROUND_TASK_STALL_NOTIFICATION_TYPE });
+		expect(notifications.pendingStallCount).toBe(0);
+
+		// a stall notice never stops the task
+		expect(stallManager.get(started.value.id)?.status).toBe("running");
+		await stallManager.cleanup();
 	});
 
 	it("suppresses notifications for tasks consumed via wait_for", async () => {
