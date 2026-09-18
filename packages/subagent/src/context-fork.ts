@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { COLLABORATION_LIMITS, CollaborationError, type ForkSelection } from "./collaboration-contract.ts";
+import { CollaborationError, type ForkSelection } from "./collaboration-contract.ts";
 
 /** Input must be the host's effective branch context, never raw JSONL or all stored branches. */
 export function prepareCollaborationFork(
@@ -62,7 +62,5 @@ export function prepareCollaborationFork(
 		);
 		if (paired && results.length === calls.length) output.push(message, ...results);
 	}
-	if (Buffer.byteLength(JSON.stringify(output), "utf8") > COLLABORATION_LIMITS.maxForkBytes)
-		throw new CollaborationError("limit_reached", "Effective fork context exceeds 256 KiB");
 	return structuredClone(output);
 }

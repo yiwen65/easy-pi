@@ -37,10 +37,15 @@ describe("explicit delegation contract", () => {
 			validateDelegation(delegation({ context: { mode: "fork", turns: "2", prefix: "rebuild" } })).context.mode,
 		).toBe("fork");
 	});
-	test("bounds UTF-8 contract bytes, NUL, capability names and evidence ranges", () => {
+	test("accepts a 40,000-character objective and rejects larger or unsafe contracts", () => {
 		const input = delegation();
-		input.task.material = ["界".repeat(2000), "界".repeat(2000)];
-		expect(() => validateDelegation(input)).toThrow(/budget/);
+		input.task.objective = "界".repeat(40_000);
+		expect(validateDelegation(input).task.objective).toHaveLength(40_000);
+		input.task.objective += "界";
+		expect(() => validateDelegation(input)).toThrow(/Invalid delegation/);
+		input.task.objective = "valid";
+		input.task.material = ["界".repeat(2048), "界".repeat(2048)];
+		expect(() => validateDelegation(input)).not.toThrow();
 		input.task.material = ["a\0b"];
 		expect(() => validateDelegation(input)).toThrow(/NUL/);
 		expect(() => validateDelegation(delegation({ capabilities: { tools: ["bash", "bash"] } }))).toThrow();

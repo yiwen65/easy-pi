@@ -41,7 +41,7 @@ const MessageSchema = Type.Object(
 		status: Type.Optional(
 			Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("interrupted")]),
 		),
-		text: Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes }),
+		text: Type.String({ maxLength: COLLABORATION_LIMITS.maxTaskCharacters }),
 		delegation: Type.Optional(DelegationSchema),
 		parent: Type.Optional(Type.String()),
 		contextUse: Type.Optional(Type.Union([Type.Literal("initial"), Type.Literal("existing")])),
@@ -69,7 +69,7 @@ const AgentSchema = Type.Object(
 		sessionFile: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9._-]+\\.jsonl$" })),
 		result: Type.Optional(Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes })),
 		delegation: Type.Optional(DelegationSchema),
-		contextBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: COLLABORATION_LIMITS.maxForkBytes })),
+		contextBytes: Type.Optional(Type.Integer({ minimum: 0 })),
 		usage: Type.Optional(
 			Type.Object(
 				{
@@ -146,7 +146,9 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 			message.rootSessionId !== value.rootSessionId ||
 			messageIds.has(message.id) ||
 			![message.from, message.to].every((path) => path === "/root" || paths.has(path)) ||
-			Buffer.byteLength(message.text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes
+			(message.kind === "task"
+				? [...message.text].length > COLLABORATION_LIMITS.maxTaskCharacters
+				: Buffer.byteLength(message.text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
 		)
 			throw new CollaborationError("storage_error", "Invalid mailbox message");
 		if (message.delegation) validateDelegation(message.delegation);

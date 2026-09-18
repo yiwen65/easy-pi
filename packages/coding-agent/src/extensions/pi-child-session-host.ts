@@ -11,7 +11,7 @@ import {
 	type ForkSelection,
 	parseDelegationResult,
 	validateAgentPath,
-	validateCollaborationMessage,
+	validateCollaborationTask,
 } from "@easy-pi/subagent/collaboration-contract";
 import { prepareCollaborationFork } from "@easy-pi/subagent/context-fork";
 import type {
@@ -347,7 +347,7 @@ export function createPiChildSessionHost(options: {
 				context: (): AgentMessage[] => structuredClone(manager.buildSessionContext().messages),
 				forkContext: (selection) => preparePiCollaborationFork(manager, selection),
 				run(text, task) {
-					validateCollaborationMessage(text);
+					validateCollaborationTask(text);
 					if (
 						task &&
 						(task.rootSessionId !== identity.rootSessionId ||

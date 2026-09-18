@@ -82,6 +82,25 @@ test("reserves duplicate names and execution slots atomically across concurrent 
 	expect(f.disposed).toHaveLength(3);
 });
 
+test("task receipts accept 40,000-character objectives while ordinary messages remain bounded", async () => {
+	const f = fixture();
+	const objective = "界".repeat(COLLABORATION_LIMITS.maxTaskCharacters);
+	const contract = delegation();
+	contract.task.objective = objective;
+	await f.controller.spawn(caller, "large", objective, model, [], undefined, {
+		delegation: contract,
+		tools: [],
+	});
+	expect(f.store.read().agents[0].taskMessage?.text).toBe(objective);
+	expect(() => f.controller.send(caller, "/root", objective)).toThrow(/8192/);
+	f.finishes.get("/root/large")?.({ status: "completed", text: "done" });
+	await f.controller.settled();
+	const next = delegation();
+	next.task.objective = objective;
+	await f.controller.followup(caller, "large", objective, undefined, { delegation: next, tools: [] });
+	expect(f.store.read().agents[0].taskMessage?.text).toBe(objective);
+});
+
 test("a completed turn can accept explicit followup; opening a controller never reruns work", async () => {
 	const f = fixture(true);
 	await f.controller.spawn(caller, "a", "first", model);

@@ -44,8 +44,9 @@ test("N counts complete user turns, not messages or an in-flight final turn", ()
 	expect(prepareCollaborationFork(source, { mode: "none" })).toEqual([]);
 });
 
-test("fork rejects oversized context and ambiguous IDs rather than truncating history", () => {
-	expect(() => prepareCollaborationFork([user("x".repeat(256 * 1024))])).toThrow(/256 KiB/);
+test("fork preserves large effective context but still rejects ambiguous IDs", () => {
+	const large = user("x".repeat(300 * 1024));
+	expect(prepareCollaborationFork([large])).toEqual([large]);
 	expect(() =>
 		prepareCollaborationFork([fauxAssistantMessage([call, call], { stopReason: "toolUse" }), result]),
 	).toThrow(/Ambiguous/);
