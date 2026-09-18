@@ -583,7 +583,7 @@ test("initial and cold followup requests carry the deliver_result contract witho
 	expect(JSON.stringify(requests[1].messages)).toContain("This follow-up retains your existing child history");
 });
 
-test("the deliver_result protocol tool overrides the final text, replaces earlier deliveries, and works despite an empty delegated tool list", async () => {
+test("a valid deliver_result ends the child turn without another provider request", async () => {
 	const f = await fixture();
 	const caller = { rootSessionId: "deliver-tool", agentPath: "/root" };
 	const first = {
@@ -591,7 +591,6 @@ test("the deliver_result protocol tool overrides the final text, replaces earlie
 			"CURATED_SYNTHETIC_B92A: 17 — evidence.txt:1 sha256=dd04b89cadf9af64537e008365c20ff80f5f87d6278a9c91fa6bbe796c85f429; 8+9=17",
 		outcome: "succeeded",
 	};
-	const second = { ...first, summary: "CURATED_SYNTHETIC_B92A: 18" };
 	const delegation = validateDelegation({
 		task: taskContract("Compute the numeric result from the supplied evidence."),
 		context: { mode: "isolated" },
@@ -611,8 +610,6 @@ test("the deliver_result protocol tool overrides the final text, replaces earlie
 	cleanups.push(() => controller.shutdown());
 	f.faux.setResponses([
 		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, first), { stopReason: "toolUse" }),
-		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, second), { stopReason: "toolUse" }),
-		fauxAssistantMessage("This narrative is not the contracted result."),
 	]);
 	await controller.spawn(
 		caller,
@@ -624,12 +621,80 @@ test("the deliver_result protocol tool overrides the final text, replaces earlie
 		{ delegation, tools: [] },
 	);
 	await controller.settled();
-	expect(f.faux.state.callCount).toBe(3);
+	expect(f.faux.state.callCount).toBe(1);
 	expect(store.read().agents[0]).toMatchObject({
 		status: "completed",
-		result: JSON.stringify(second),
+		result: JSON.stringify(first),
 		resultValidation: { contract: "valid", outcome: "succeeded" },
 	});
+});
+
+test("an invalid deliver_result can be corrected on the next provider turn", async () => {
+	const f = await fixture();
+	const caller = { rootSessionId: "deliver-retry", agentPath: "/root" };
+	const delegation = validateDelegation({
+		task: taskContract("Deliver one valid result."),
+		context: { mode: "isolated" },
+		capabilities: { tools: "inherit" },
+	});
+	const store = new CollaborationStore({ path: ":memory:", cwd: f.cwd, rootSessionId: caller.rootSessionId });
+	const controller = new CollaborationController({
+		store,
+		host: f.host,
+		agentDir: join(f.root, "agent"),
+		getPermissions: full,
+	});
+	cleanups.push(() => controller.shutdown());
+	const valid = { summary: "corrected", outcome: "succeeded" as const };
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, { summary: "missing outcome" }), {
+			stopReason: "toolUse",
+		}),
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, valid), { stopReason: "toolUse" }),
+	]);
+	await controller.spawn(
+		caller,
+		"worker",
+		delegation.task.objective,
+		{ provider: f.faux.provider.id, id: f.faux.getModel().id, thinkingLevel: "off" },
+		[],
+		undefined,
+		{ delegation, tools: [] },
+	);
+	await controller.settled();
+	expect(f.faux.state.callCount).toBe(2);
+	expect(store.read().agents[0]).toMatchObject({
+		status: "completed",
+		result: JSON.stringify(valid),
+		resultValidation: { contract: "valid", outcome: "succeeded" },
+	});
+});
+
+test("a delivery batch finishes its other tools and keeps the last delivered result", async () => {
+	const f = await fixture();
+	const child = await f.create("multi-delivery", full);
+	const first = { summary: "first", outcome: "partial" as const };
+	const second = { summary: "second", outcome: "succeeded" as const };
+	f.faux.setResponses([
+		fauxAssistantMessage(
+			[
+				fauxToolCall(DELIVER_RESULT_TOOL_NAME, first),
+				fauxToolCall("probe_identity", {}),
+				fauxToolCall(DELIVER_RESULT_TOOL_NAME, second),
+			],
+			{ stopReason: "toolUse" },
+		),
+	]);
+	expect(await child.session.run("deliver twice")).toMatchObject({
+		status: "completed",
+		text: JSON.stringify(second),
+	});
+	expect(f.faux.state.callCount).toBe(1);
+	expect(child.session.context()).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({ role: "toolResult", toolName: "probe_identity", isError: false }),
+		]),
+	);
 });
 
 test("a failed extension startup rejects the host instead of silently continuing without its hooks", async () => {

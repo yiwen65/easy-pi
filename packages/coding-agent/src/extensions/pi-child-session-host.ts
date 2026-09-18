@@ -59,9 +59,9 @@ function readCacheAffinity(value: unknown): ChildRequestPrefix["cacheAffinity"] 
 
 // Keep the model-visible contract in sync with validation, appended to each task (not the shared prefix).
 const DELIVER_RESULT_TOOL_DESCRIPTION =
-	"Deliver this child's final result to its creation parent. Call it exactly once when the task is done; a later call replaces the earlier one. Only summary (complete result text) and outcome (honest verdict) are required. The complete result must fit 8192 UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.";
+	"Deliver this child's final result to its creation parent. Call it exactly once when the task is done; successful delivery ends the child turn after the current tool batch. If multiple deliveries occur in one batch, the later one replaces the earlier one. Only summary (complete result text) and outcome (honest verdict) are required. The complete result must fit 8192 UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.";
 const DELEGATION_RESULT_INSTRUCTIONS = [
-	"Deliver the final result by calling the deliver_result tool exactly once: only summary and outcome are required - put key outputs, evidence (paths/line ranges/version hashes) and residual risks in the summary text. A later call replaces the delivered result.",
+	"Deliver the final result by calling the deliver_result tool exactly once: only summary and outcome are required - put key outputs, evidence (paths/line ranges/version hashes) and residual risks in the summary text. Successful delivery ends this turn after the current tool batch; if one batch contains multiple deliveries, the last one wins.",
 	`The complete result must fit ${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks.`,
 	"If deliver_result is unavailable, return one final JSON object matching the deliver_result schema as your final text, without fences, surrounding prose or extra fields. This final output is returned automatically; do not call any other handoff tool. Execution completion and valid JSON are not acceptance.",
 ].join("\n");
@@ -273,6 +273,9 @@ export function createPiChildSessionHost(options: {
 					: undefined,
 			});
 			boundSession = session;
+			const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
+			session.agent.shouldStopAfterTurn = async (context, signal) =>
+				delivered !== undefined || (await previousShouldStopAfterTurn?.(context, signal)) === true;
 			if (cacheAffinity && model.api === "openai-codex-responses") {
 				session.agent.cacheAffinityId = cacheAffinity.id;
 				session.agent.promptCacheKey = cacheAffinity.key;
