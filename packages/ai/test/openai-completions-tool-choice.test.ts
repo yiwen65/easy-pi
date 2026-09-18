@@ -295,17 +295,23 @@ describe("openai-completions tool_choice", () => {
 		expect(getModel("zai", "glm-5.2")?.compat?.zaiToolStream).toBe(true);
 	});
 
-	it("stores z.ai GLM-5.2 effort metadata", () => {
+	it("stores model-specific z.ai effort metadata", () => {
+		const model = getModel("zai", "glm-5.2")!;
+		expect(model.compat?.supportsReasoningEffort).toBe(true);
+		expect(model.thinkingLevelMap).toEqual({
+			minimal: null,
+			low: "high",
+			medium: "high",
+			high: "high",
+			max: "max",
+		});
+
+		// The CN catalog no longer lists 5.2. The generator's 5.2-only
+		// effort override must not be inferred for newer model IDs.
 		for (const provider of ["zai", "zai-coding-cn"] as const) {
-			const model = getModel(provider, "glm-5.2")!;
-			expect(model.compat?.supportsReasoningEffort).toBe(true);
-			expect(model.thinkingLevelMap).toEqual({
-				minimal: null,
-				low: "high",
-				medium: "high",
-				high: "high",
-				max: "max",
-			});
+			const current = getModel(provider, "glm-5.3")!;
+			expect(current.compat?.supportsReasoningEffort).toBe(false);
+			expect(current.thinkingLevelMap).toBeUndefined();
 		}
 	});
 
