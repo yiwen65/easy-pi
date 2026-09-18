@@ -8,8 +8,10 @@ export const COLLABORATION_LIMITS = Object.freeze({
 	maxAgents: 32, // Includes the root and unloaded agents until explicit cleanup.
 	maxDepth: 4,
 	maxMessageBytes: 8 * 1024,
+	maxTaskCharacters: 40_000,
+	maxDelegationBytes: 256 * 1024,
 	maxPendingMessages: 64,
-	maxForkBytes: 256 * 1024,
+	maxCuratedBytes: 256 * 1024,
 	minWaitMs: 10_000,
 	defaultWaitMs: 30_000,
 	maxWaitMs: 3_600_000,
@@ -29,7 +31,7 @@ const ERROR_HINTS: Record<CollaborationErrorCode, string> = {
 	invalid_arguments: "Supply the complete explicit contract and valid field values.",
 	unknown_agent: "Use list_agents to select an existing child in this team.",
 	forbidden: "Check the active tool ceiling and live root permissions; agent messages cannot grant authority.",
-	limit_reached: "Inspect agent slots, mailbox capacity and context size before another admission.",
+	limit_reached: "Inspect agent slots, execution capacity and mailbox capacity before another admission.",
 	busy: "Inspect current status; use an idle child or wait for the admitted operation to settle.",
 	interrupted: "No automatic retry. Inspect retained state before explicitly continuing.",
 	storage_error: "Inspect retained team and child history; do not blindly replay the operation.",
@@ -46,7 +48,7 @@ const ERROR_REASONS = {
 	},
 	prefix_unavailable: {
 		code: "context_unavailable",
-		hint: "No bounded request capture is available. Choose explicit rebuild or isolated context.",
+		hint: "No parent request capture is available. Choose explicit rebuild or isolated context.",
 	},
 	prefix_branch_changed: {
 		code: "context_unavailable",
@@ -201,6 +203,11 @@ const Message = Type.String({
 	maxLength: COLLABORATION_LIMITS.maxMessageBytes,
 });
 const Nonblank = Type.String({ minLength: 1, maxLength: 2048, pattern: "\\S" });
+const TaskObjective = Type.String({
+	minLength: 1,
+	maxLength: COLLABORATION_LIMITS.maxTaskCharacters,
+	pattern: "\\S",
+});
 const TextList = Type.Array(Nonblank, { minItems: 1, maxItems: 16 });
 
 /** Task data is not authority. Capability restrictions are intersected by the host. */
@@ -219,7 +226,7 @@ export const DelegationTaskSchema = Type.Object(
 			Type.Literal("extract", { description: "Dataset extraction; name the dataset in curated references." }),
 		]),
 		/** The complete self-contained assignment in free text: goal, scope, inputs, expected output, acceptance. */
-		objective: Nonblank,
+		objective: TaskObjective,
 		scope: Type.Optional(Nonblank),
 		material: Type.Optional(Type.Array(Nonblank, { maxItems: 16 })),
 		deliverables: Type.Optional(TextList),
@@ -326,7 +333,7 @@ export const DelegationTaskInputSchema = Type.Object(
 		),
 		objective: Type.String({
 			minLength: 1,
-			maxLength: 2048,
+			maxLength: COLLABORATION_LIMITS.maxTaskCharacters,
 			pattern: "\\S",
 			description:
 				"The complete self-contained assignment in free text: goal, scope, inputs, expected output, and acceptance; the child sees only this.",
@@ -487,14 +494,10 @@ export function validateDelegation(value: unknown): Delegation {
 	const normalized = normalizeDelegation(value);
 	if (!Value.Check(DelegationSchema, normalized))
 		throw new CollaborationError("invalid_arguments", "Invalid delegation contract", "invalid_delegation");
-	if (
-		Buffer.byteLength(JSON.stringify(normalized), "utf8") > COLLABORATION_LIMITS.maxMessageBytes ||
-		JSON.stringify(normalized).includes("\\u0000")
-	)
-		throw new CollaborationError(
-			"invalid_arguments",
-			"Delegation exceeds the 8192-byte contract budget or contains NUL",
-		);
+	const encoded = JSON.stringify(normalized);
+	if (encoded.includes("\\u0000")) throw new CollaborationError("invalid_arguments", "Delegation contains NUL");
+	if (Buffer.byteLength(encoded, "utf8") > COLLABORATION_LIMITS.maxDelegationBytes)
+		throw new CollaborationError("invalid_arguments", "Delegation exceeds the 256 KiB contract budget");
 	if (
 		(normalized.task.relationship === "verify" || normalized.task.relationship === "explore") &&
 		normalized.context.mode === "fork"
@@ -671,6 +674,15 @@ export function validateCollaborationMessage(message: string): void {
 		Buffer.byteLength(message, "utf8") > COLLABORATION_LIMITS.maxMessageBytes
 	) {
 		throw new CollaborationError("invalid_arguments", "Message must be nonblank text of at most 8192 UTF-8 bytes");
+	}
+}
+
+export function validateCollaborationTask(message: string): void {
+	if (!message.trim() || message.includes("\0") || [...message].length > COLLABORATION_LIMITS.maxTaskCharacters) {
+		throw new CollaborationError(
+			"invalid_arguments",
+			`Task objective must be nonblank text of at most ${COLLABORATION_LIMITS.maxTaskCharacters} characters`,
+		);
 	}
 }
 

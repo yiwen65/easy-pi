@@ -64,6 +64,24 @@ describe("collaboration contract", () => {
 		expect(formatCollaborationError(known)).toContain("storage_error");
 	});
 
+	test("accepts objective text through 40,000 characters and rejects 40,001", () => {
+		const atLimit = "界".repeat(COLLABORATION_LIMITS.maxTaskCharacters);
+		expect(
+			parseCollaborationArguments("spawn_agent", {
+				task_name: "large",
+				task: { objective: atLimit },
+				context: "isolated",
+			}).task.objective,
+		).toBe(atLimit);
+		expect(() =>
+			parseCollaborationArguments("spawn_agent", {
+				task_name: "too-large",
+				task: { objective: `${atLimit}x` },
+				context: "isolated",
+			}),
+		).toThrow(CollaborationError);
+	});
+
 	test("child model and effort are not settable per call anymore", () => {
 		expect(() =>
 			parseCollaborationArguments("spawn_agent", {

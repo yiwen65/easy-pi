@@ -560,6 +560,19 @@ test("preserved fork uses the real neutral parent request prefix and appends the
 	).toBe(true);
 });
 
+test("preserved prefix capture has no collaboration byte cap", async () => {
+	const f = await fixture();
+	const context: Context = {
+		systemPrompt: f.session.systemPrompt,
+		messages: [{ role: "user", content: "x".repeat(300 * 1024), timestamp: 1 }],
+		tools: f.session.agent.state.tools,
+	};
+	f.session.agent.onProviderContext?.(f.faux.getModel(), context);
+	const captured = getCollaborationPrefix(f.session);
+	expect(Buffer.byteLength(JSON.stringify(captured.context), "utf8")).toBeGreaterThan(256 * 1024);
+	expect(captured.context.messages).toEqual(context.messages);
+});
+
 test("prefix diagnostics distinguish missing captures, changed rules, tools and payload hooks", async () => {
 	const f = await fixture();
 	expect(() => getCollaborationPrefix(f.session)).toThrow(expect.objectContaining({ reason: "prefix_unavailable" }));

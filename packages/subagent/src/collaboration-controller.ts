@@ -13,6 +13,7 @@ import {
 	type Delegation,
 	resolveAgentPath,
 	validateCollaborationMessage,
+	validateCollaborationTask,
 	validateDelegation,
 	validateDelegationResult,
 } from "./collaboration-contract.ts";
@@ -216,7 +217,7 @@ export class CollaborationController {
 		signal?: AbortSignal,
 		admission?: { delegation: Delegation; tools: string[]; prefix?: ChildRequestPrefix },
 	): Promise<string> {
-		validateCollaborationMessage(message);
+		validateCollaborationTask(message);
 		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
 		const context = fork ? prepareCollaborationFork(fork) : undefined;
 		return this.serialize(() => {
@@ -284,7 +285,7 @@ export class CollaborationController {
 		signal?: AbortSignal,
 		admission?: { delegation: Delegation; tools: string[] },
 	): Promise<string> {
-		validateCollaborationMessage(message);
+		validateCollaborationTask(message);
 		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
 		return this.serialize(() => {
 			this.assertReady();
