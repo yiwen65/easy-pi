@@ -1,0 +1,3733 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver/Cargo.toml b/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
+--- a/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
++++ b/libs/cua-driver/rust/crates/cua-driver/Cargo.toml
+@@ -17,7 +17,7 @@
+ tracing = { workspace = true }
+ tracing-subscriber = { workspace = true }
+ cua-driver-core = { path = "../cua-driver-core" }
+-cua-driver-sdk = { path = "../cua-driver-sdk" }
++cua-driver-sdk = { path = "../cua-driver-sdk", features = ["legacy-remote-receiver", "legacy-recording", "legacy-history"] }
+ cursor-overlay = { path = "../cursor-overlay" }
+ pip-preview = { path = "../pip-preview" }
+ async-trait = "0.1"
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml b/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml
+--- a/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml
++++ b/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml
+@@ -5,7 +5,11 @@
+ publish = false
+ 
+ [features]
+-default = ["yaml", "rego"]
++default = ["yaml", "rego", "recording", "history", "mcp-server", "daemon-client"]
++mcp-server = []
++daemon-client = []
++recording = []
++history = ["dep:chacha20poly1305", "dep:hkdf", "dep:zeroize", "dep:coset", "dep:ciborium", "dep:getrandom", "dep:hmac"]
+ yaml = ["dep:regex"]
+ rego = ["dep:regorus"]
+ 
+@@ -39,15 +43,15 @@
+ base64 = { workspace = true }
+ sha2 = "0.10"
+ url = "2.5"
+-chacha20poly1305 = { workspace = true }
+-hkdf = { workspace = true }
+-zeroize = { workspace = true }
+-coset = { workspace = true }
+-ciborium = { workspace = true }
++chacha20poly1305 = { workspace = true, optional = true }
++hkdf = { workspace = true, optional = true }
++zeroize = { workspace = true, optional = true }
++coset = { workspace = true, optional = true }
++ciborium = { workspace = true, optional = true }
+ time = { workspace = true }
+-getrandom = { workspace = true }
++getrandom = { workspace = true, optional = true }
+ fs2 = { workspace = true }
+-hmac = { workspace = true }
++hmac = { workspace = true, optional = true }
+ # Validate the raw wire payload; serde permits some shapes the schema rejects.
+ jsonschema = { version = "0.46", default-features = false }
+ 
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs
+@@ -109,200 +109,17 @@
+     }
+ }
+ 
+-/// Perform the daemon identity/version handshake used by embedded startup and
+-/// imported SDK diagnostics. Unlike a connect-only probe, this proves the
+-/// endpoint speaks the expected Cua wire protocol.
+-pub fn request_daemon_metadata(socket_path: &str) -> anyhow::Result<DaemonMetadata> {
+-    let response = send_request(
+-        socket_path,
+-        &DaemonRequest {
+-            method: "metadata".into(),
+-            name: None,
+-            args: None,
+-            session_id: None,
+-            observation_origin: None,
+-            client_kind: None,
+-        },
+-    )?;
+-    if !response.ok {
+-        anyhow::bail!(
+-            "daemon metadata request failed: {}",
+-            response.error.unwrap_or_else(|| "unknown error".into())
+-        );
+-    }
+-    serde_json::from_value(
+-        response
+-            .result
+-            .ok_or_else(|| anyhow::anyhow!("daemon metadata response omitted result"))?,
+-    )
+-    .map_err(Into::into)
+-}
+-
+-/// Return the platform socket or pipe path for an installed-product namespace.
+-/// The executable chooses its release/local namespace; imported SDKs use the
+-/// release namespace unless the caller supplies an explicit path.
+-pub fn socket_path_for_namespace(namespace: &str) -> String {
+-    #[cfg(target_os = "macos")]
+-    {
+-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+-        format!("{home}/Library/Caches/{namespace}/{namespace}.sock")
+-    }
+-    #[cfg(target_os = "linux")]
+-    {
+-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+-        format!("{home}/.cache/{namespace}/{namespace}.sock")
+-    }
+-    #[cfg(target_os = "windows")]
+-    {
+-        format!(r"\\.\pipe\{namespace}")
+-    }
+-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+-    {
+-        format!("/tmp/{namespace}.sock")
+-    }
+-}
+-
+-/// Probe whether a daemon is listening on `socket_path`.
+-///
+-/// On Windows this uses `WaitNamedPipeW` without consuming a pipe instance.
+-/// Unix probes with the protocol's read-only `list` request.
+-pub fn is_daemon_listening(socket_path: &str) -> bool {
+-    #[cfg(target_os = "windows")]
+-    {
+-        use std::os::windows::ffi::OsStrExt;
+-
+-        #[link(name = "kernel32")]
+-        extern "system" {
+-            fn WaitNamedPipeW(lp_named_pipe_name: *const u16, timeout_ms: u32) -> i32;
+-        }
+-
+-        let wide: Vec<u16> = std::ffi::OsStr::new(socket_path)
+-            .encode_wide()
+-            .chain(std::iter::once(0))
+-            .collect();
+-        // NMPWAIT_NOWAIT == 1.
+-        unsafe { WaitNamedPipeW(wide.as_ptr(), 1) != 0 }
+-    }
+-    #[cfg(not(target_os = "windows"))]
+-    {
+-        let request = DaemonRequest {
+-            method: "list".into(),
+-            name: None,
+-            args: None,
+-            session_id: None,
+-            observation_origin: None,
+-            client_kind: None,
+-        };
+-        send_request(socket_path, &request)
+-            .ok()
+-            .is_some_and(|response| response.ok)
+-    }
+-}
+-
+-/// Send one newline-delimited request and read one response.
+-///
+-/// Unix reads and writes retry transient timeouts until a 120-second overall
+-/// deadline so slow accessibility walks and large screenshots are supported.
+-#[cfg(unix)]
+-pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Result<DaemonResponse> {
+-    use std::io::Read;
+-    use std::os::unix::net::UnixStream;
+-    use std::time::{Duration, Instant};
+-
+-    let mut stream = UnixStream::connect(socket_path)
+-        .map_err(|error| anyhow::anyhow!("connect to {socket_path}: {error}"))?;
+-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+-
+-    let mut writer = stream.try_clone()?;
+-    let line = serde_json::to_string(request)? + "\n";
+-    let write_deadline = Instant::now() + Duration::from_secs(120);
+-    crate::socket_io::write_all_with_retry(&mut writer, line.as_bytes(), write_deadline)?;
+-
+-    let overall_deadline = Instant::now() + Duration::from_secs(120);
+-    let mut buffer = Vec::with_capacity(64 * 1024);
+-    let mut chunk = [0_u8; 64 * 1024];
+-    let response_line = loop {
+-        if let Some(newline) = buffer.iter().position(|&byte| byte == b'\n') {
+-            break String::from_utf8_lossy(&buffer[..newline]).into_owned();
+-        }
+-        match stream.read(&mut chunk) {
+-            Ok(0) if buffer.is_empty() => {
+-                anyhow::bail!("daemon closed connection without response");
+-            }
+-            Ok(0) => break String::from_utf8_lossy(&buffer).into_owned(),
+-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+-            Err(error)
+-                if matches!(
+-                    error.kind(),
+-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+-                ) =>
+-            {
+-                if Instant::now() >= overall_deadline {
+-                    anyhow::bail!(
+-                        "timed out after 120s waiting for daemon response (received {} bytes so far)",
+-                        buffer.len()
+-                    );
+-                }
+-            }
+-            Err(error) => return Err(error.into()),
+-        }
+-    };
+-
+-    Ok(serde_json::from_str(&response_line)?)
+-}
+-
+-#[cfg(not(unix))]
+-pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Result<DaemonResponse> {
+-    #[cfg(target_os = "windows")]
+-    {
+-        use std::io::{BufRead, BufReader, Write};
+-        use std::time::Duration;
+-
+-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+-        let pipe = loop {
+-            match std::fs::OpenOptions::new()
+-                .read(true)
+-                .write(true)
+-                .open(socket_path)
+-            {
+-                Ok(pipe) => break pipe,
+-                Err(_) if std::time::Instant::now() < deadline => {
+-                    std::thread::sleep(Duration::from_millis(50));
+-                }
+-                Err(error) => anyhow::bail!("connect to named pipe {socket_path}: {error}"),
+-            }
+-        };
+-
+-        let mut writer = pipe.try_clone()?;
+-        writer.write_all((serde_json::to_string(request)? + "\n").as_bytes())?;
+-        writer.flush()?;
+-
+-        let response_line = BufReader::new(pipe)
+-            .lines()
+-            .next()
+-            .ok_or_else(|| anyhow::anyhow!("daemon closed connection without response"))??;
+-        Ok(serde_json::from_str(&response_line)?)
+-    }
+-    #[cfg(not(target_os = "windows"))]
+-    {
+-        anyhow::bail!("daemon client not supported on this platform (socket path: {socket_path})");
+-    }
+-}
++#[cfg(feature = "daemon-client")]
++pub use crate::daemon_transport::{
++    is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
++};
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        current_daemon_metadata, socket_path_for_namespace, DaemonClientKind, DaemonRequest,
+-        DaemonResponse, ToolObservationOrigin,
++        current_daemon_metadata, DaemonClientKind, DaemonRequest, DaemonResponse,
++        ToolObservationOrigin,
+     };
+-
+-    #[test]
+-    fn socket_path_keeps_the_selected_namespace() {
+-        let path = socket_path_for_namespace("cua-driver-test");
+-        assert!(path.contains("cua-driver-test"));
+-    }
+ 
+     #[test]
+     fn legacy_request_without_additive_fields_deserializes() {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/daemon_transport.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/daemon_transport.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/daemon_transport.rs
+@@ -0,0 +1,195 @@
++//! Optional synchronous daemon socket/pipe client.
++
++use crate::daemon::{DaemonMetadata, DaemonRequest, DaemonResponse};
++
++/// Perform the daemon identity/version handshake used by embedded startup and
++/// imported SDK diagnostics. Unlike a connect-only probe, this proves the
++/// endpoint speaks the expected Cua wire protocol.
++pub fn request_daemon_metadata(socket_path: &str) -> anyhow::Result<DaemonMetadata> {
++    let response = send_request(
++        socket_path,
++        &DaemonRequest {
++            method: "metadata".into(),
++            name: None,
++            args: None,
++            session_id: None,
++            observation_origin: None,
++            client_kind: None,
++        },
++    )?;
++    if !response.ok {
++        anyhow::bail!(
++            "daemon metadata request failed: {}",
++            response.error.unwrap_or_else(|| "unknown error".into())
++        );
++    }
++    serde_json::from_value(
++        response
++            .result
++            .ok_or_else(|| anyhow::anyhow!("daemon metadata response omitted result"))?,
++    )
++    .map_err(Into::into)
++}
++
++/// Return the platform socket or pipe path for an installed-product namespace.
++/// The executable chooses its release/local namespace; imported SDKs use the
++/// release namespace unless the caller supplies an explicit path.
++pub fn socket_path_for_namespace(namespace: &str) -> String {
++    #[cfg(target_os = "macos")]
++    {
++        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
++        format!("{home}/Library/Caches/{namespace}/{namespace}.sock")
++    }
++    #[cfg(target_os = "linux")]
++    {
++        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
++        format!("{home}/.cache/{namespace}/{namespace}.sock")
++    }
++    #[cfg(target_os = "windows")]
++    {
++        format!(r"\\.\pipe\{namespace}")
++    }
++    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
++    {
++        format!("/tmp/{namespace}.sock")
++    }
++}
++
++/// Probe whether a daemon is listening on `socket_path`.
++///
++/// On Windows this uses `WaitNamedPipeW` without consuming a pipe instance.
++/// Unix probes with the protocol's read-only `list` request.
++pub fn is_daemon_listening(socket_path: &str) -> bool {
++    #[cfg(target_os = "windows")]
++    {
++        use std::os::windows::ffi::OsStrExt;
++
++        #[link(name = "kernel32")]
++        extern "system" {
++            fn WaitNamedPipeW(lp_named_pipe_name: *const u16, timeout_ms: u32) -> i32;
++        }
++
++        let wide: Vec<u16> = std::ffi::OsStr::new(socket_path)
++            .encode_wide()
++            .chain(std::iter::once(0))
++            .collect();
++        // NMPWAIT_NOWAIT == 1.
++        unsafe { WaitNamedPipeW(wide.as_ptr(), 1) != 0 }
++    }
++    #[cfg(not(target_os = "windows"))]
++    {
++        let request = DaemonRequest {
++            method: "list".into(),
++            name: None,
++            args: None,
++            session_id: None,
++            observation_origin: None,
++            client_kind: None,
++        };
++        send_request(socket_path, &request)
++            .ok()
++            .is_some_and(|response| response.ok)
++    }
++}
++
++/// Send one newline-delimited request and read one response.
++///
++/// Unix reads and writes retry transient timeouts until a 120-second overall
++/// deadline so slow accessibility walks and large screenshots are supported.
++#[cfg(unix)]
++pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Result<DaemonResponse> {
++    use std::io::Read;
++    use std::os::unix::net::UnixStream;
++    use std::time::{Duration, Instant};
++
++    let mut stream = UnixStream::connect(socket_path)
++        .map_err(|error| anyhow::anyhow!("connect to {socket_path}: {error}"))?;
++    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
++    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
++
++    let mut writer = stream.try_clone()?;
++    let line = serde_json::to_string(request)? + "\n";
++    let write_deadline = Instant::now() + Duration::from_secs(120);
++    crate::socket_io::write_all_with_retry(&mut writer, line.as_bytes(), write_deadline)?;
++
++    let overall_deadline = Instant::now() + Duration::from_secs(120);
++    let mut buffer = Vec::with_capacity(64 * 1024);
++    let mut chunk = [0_u8; 64 * 1024];
++    let response_line = loop {
++        if let Some(newline) = buffer.iter().position(|&byte| byte == b'\n') {
++            break String::from_utf8_lossy(&buffer[..newline]).into_owned();
++        }
++        match stream.read(&mut chunk) {
++            Ok(0) if buffer.is_empty() => {
++                anyhow::bail!("daemon closed connection without response");
++            }
++            Ok(0) => break String::from_utf8_lossy(&buffer).into_owned(),
++            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
++            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
++            Err(error)
++                if matches!(
++                    error.kind(),
++                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
++                ) =>
++            {
++                if Instant::now() >= overall_deadline {
++                    anyhow::bail!(
++                        "timed out after 120s waiting for daemon response (received {} bytes so far)",
++                        buffer.len()
++                    );
++                }
++            }
++            Err(error) => return Err(error.into()),
++        }
++    };
++
++    Ok(serde_json::from_str(&response_line)?)
++}
++
++#[cfg(not(unix))]
++pub fn send_request(socket_path: &str, request: &DaemonRequest) -> anyhow::Result<DaemonResponse> {
++    #[cfg(target_os = "windows")]
++    {
++        use std::io::{BufRead, BufReader, Write};
++        use std::time::Duration;
++
++        let deadline = std::time::Instant::now() + Duration::from_secs(3);
++        let pipe = loop {
++            match std::fs::OpenOptions::new()
++                .read(true)
++                .write(true)
++                .open(socket_path)
++            {
++                Ok(pipe) => break pipe,
++                Err(_) if std::time::Instant::now() < deadline => {
++                    std::thread::sleep(Duration::from_millis(50));
++                }
++                Err(error) => anyhow::bail!("connect to named pipe {socket_path}: {error}"),
++            }
++        };
++
++        let mut writer = pipe.try_clone()?;
++        writer.write_all((serde_json::to_string(request)? + "\n").as_bytes())?;
++        writer.flush()?;
++
++        let response_line = BufReader::new(pipe)
++            .lines()
++            .next()
++            .ok_or_else(|| anyhow::anyhow!("daemon closed connection without response"))??;
++        Ok(serde_json::from_str(&response_line)?)
++    }
++    #[cfg(not(target_os = "windows"))]
++    {
++        anyhow::bail!("daemon client not supported on this platform (socket path: {socket_path})");
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn socket_path_keeps_the_selected_namespace() {
++        let path = socket_path_for_namespace("cua-driver-test");
++        assert!(path.contains("cua-driver-test"));
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs
+@@ -3,7 +3,9 @@
+ //! Stdio supports legacy initialization and modern per-request negotiation.
+ //! Protocol metadata does not grant Driver permissions or session ownership.
+ 
++#[cfg(feature = "mcp-server")]
+ pub mod mcp_skills;
++#[cfg(feature = "mcp-server")]
+ pub mod mcp_wire;
+ 
+ pub const RESPONSIBILITY_DISCLAIMED_ENV: &str = "CUA_DRIVER_RS_RESPONSIBILITY_DISCLAIMED";
+@@ -55,43 +57,60 @@
+ pub mod controlled;
+ pub mod cursor_events;
+ pub mod cursor_hook;
++#[cfg(feature = "recording")]
+ pub mod cursor_sampler;
+ pub mod cursor_shape;
+ pub mod daemon;
++#[cfg(feature = "daemon-client")]
++mod daemon_transport;
+ pub mod element_cache;
+ pub mod element_query;
+ pub mod element_token;
+ pub mod expectation;
++#[cfg(feature = "recording")]
+ pub mod ffmpeg_install;
+ pub mod health_report;
++#[cfg(feature = "history")]
+ pub mod history;
+ pub mod image_utils;
+ pub mod mcp_result;
+ pub mod page;
++#[cfg(feature = "recording")]
+ pub mod pip_hook;
+ pub mod policy;
+ pub mod protocol;
++#[cfg(feature = "recording")]
+ pub mod recording;
++#[cfg(feature = "recording")]
+ pub mod recording_loader;
++#[cfg(feature = "recording")]
+ pub mod recording_render;
++#[cfg(feature = "recording")]
+ pub mod recording_tools;
++#[cfg(feature = "recording")]
+ pub mod recording_zoom;
+ pub mod server;
++#[cfg(feature = "mcp-server")]
++mod server_transport;
+ pub mod session;
+ pub mod session_authorization;
+ pub mod session_manifest;
+ pub mod session_tools;
+ #[cfg(test)]
+ pub(crate) mod snapshot_test_support;
++#[cfg(feature = "daemon-client")]
+ pub mod socket_io;
+ pub mod text_sanitize;
+ pub mod tool;
+ pub mod tool_args;
+ pub mod tool_schema;
++#[cfg(feature = "recording")]
+ pub mod video;
++#[cfg(feature = "recording")]
+ pub mod video_ffmpeg;
+ pub mod window_inspection;
+ pub mod window_target;
+ 
+ pub use cua_driver_contract::{CaptureScope, EscalationReason, TOOL_INVOCATION_FAILED_CODE};
++#[cfg(feature = "recording")]
+ pub use recording::RecordingSession;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
+@@ -365,6 +365,7 @@
+ 
+ // ── Initialize result ─────────────────────────────────────────────────────────
+ 
++#[cfg(feature = "mcp-server")]
+ pub fn initialize_result() -> Value {
+     serde_json::json!({
+         "protocolVersion": "2025-06-18",
+@@ -385,6 +386,7 @@
+ /// agent only sees the path that applies, not all three. Same pattern
+ /// Goose uses in its `ComputerController` extension and Open
+ /// Interpreter uses for its system message.
++#[cfg(feature = "mcp-server")]
+ fn agent_instructions() -> String {
+     let (tree_kind, platform_skill_pointer) = if cfg!(target_os = "macos") {
+         (
+@@ -568,7 +570,7 @@
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(all(test, feature = "mcp-server"))]
+ mod agent_instruction_tests {
+     use super::{agent_instructions, initialize_result};
+ 
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/server.rs
+@@ -1,64 +1,16 @@
+-//! Shared MCP request dispatch and privacy-bounded observations.
+-
+-use std::sync::{Arc, OnceLock};
++//! Shared privacy-bounded tool observations and classifiers.
++//!
++//! Session accounting uses this data without compiling the MCP dispatcher.
++
++use crate::protocol::{Request, Response, ResponseBody};
+ use std::time::Instant;
+-use tracing::warn;
+-
+-use crate::authorization::authorize_tool_call;
+-use crate::mcp_result::{conforming_tool_result, tool_error_result};
+-use crate::protocol::{initialize_result, InitializeMetadata, Request, Response, ResponseBody};
+-use crate::tool::ToolRegistry;
+-
+-/// Runtime contract consumed by protocol adapters such as MCP.
+-///
+-/// The standalone server implements this with the public Cua Driver SDK; the
+-/// `ToolRegistry` implementation remains for core-level tests and embedders.
+-/// Keeping the protocol dependent on this small contract prevents transports
+-/// from reaching through the SDK into its private platform registry.
+-#[async_trait::async_trait]
+-pub trait ToolProvider: Send + Sync {
+-    fn tools_list(&self) -> serde_json::Value;
+-    async fn invoke_tool(
+-        &self,
+-        name: &str,
+-        arguments: serde_json::Value,
+-    ) -> Result<serde_json::Value, String>;
+-}
+-
+-#[async_trait::async_trait]
+-impl ToolProvider for ToolRegistry {
+-    fn tools_list(&self) -> serde_json::Value {
+-        ToolRegistry::tools_list(self)
+-    }
+-
+-    async fn invoke_tool(
+-        &self,
+-        name: &str,
+-        arguments: serde_json::Value,
+-    ) -> Result<serde_json::Value, String> {
+-        serde_json::to_value(self.invoke_from_trusted_adapter(name, arguments).await)
+-            .map_err(|error| format!("Serialize error: {error}"))
+-    }
+-}
+-
+-/// Receives privacy-bounded observations from the stdio MCP transport.
+-///
+-/// The observer never receives tool arguments, text/image content, response
+-/// bodies, arbitrary MCP metadata, or raw errors. HTTP dispatch reuses the
+-/// bounded tool timer directly; HTTP session-start telemetry remains deferred
+-/// until the transport has explicit session semantics.
+-pub trait StdioObserver: Send + Sync + 'static {
+-    fn on_session_started(&self, metadata: InitializeMetadata);
+-    fn on_tool_completed(&self, outcome: ToolCompletionObservation);
+-}
+-
+-static STDIO_OBSERVER: OnceLock<Arc<dyn StdioObserver>> = OnceLock::new();
+-
+-/// Register the process-wide stdio observer. Registration is intentionally
+-/// one-shot so a second subsystem cannot replace the privacy policy at runtime.
+-pub fn set_stdio_observer(observer: Arc<dyn StdioObserver>) -> bool {
+-    STDIO_OBSERVER.set(observer).is_ok()
+-}
++
++#[cfg(feature = "mcp-server")]
++pub use crate::server_transport::{
++    handle_request, handle_request_with_transport_session, observe_proxy_session_started,
++    observe_proxy_tool_completed, session_tool_context, set_stdio_observer, StdioObserver,
++    ToolProvider,
++};
+ 
+ /// Coarse duration buckets used by tool-completion observations.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -550,16 +502,6 @@
+     }
+ }
+ 
+-/// Notify the registered observer about a proxy-path initialize request.
+-pub fn observe_proxy_session_started(metadata: InitializeMetadata) {
+-    notify_session_started(metadata);
+-}
+-
+-/// Notify the registered observer about a proxy-path tool result.
+-pub fn observe_proxy_tool_completed(outcome: ToolCompletionObservation) {
+-    notify_tool_completed(outcome);
+-}
+-
+ /// Build a completion timer from a `tools/call` request while extracting only
+ /// the declared tool name and validity/allowlist booleans. Tool arguments are
+ /// neither cloned nor retained.
+@@ -598,41 +540,6 @@
+         valid_params,
+         path,
+     ))
+-}
+-
+-/// Build a private aggregate-session context from a valid, known tool call.
+-/// Only the public `session` argument is considered; reserved fallback keys
+-/// and all other arguments remain outside the observer seam.
+-pub fn session_tool_context(
+-    req: &Request,
+-    is_known_tool: impl Fn(&str) -> bool,
+-    transport: crate::session::SessionTransport,
+-) -> Option<crate::session::SessionToolContext> {
+-    if req.method != "tools/call" {
+-        return None;
+-    }
+-    let call = req.tool_call().ok()?;
+-    let known_tool = call.name == "type_text_chars" || is_known_tool(&call.name);
+-    let client_kind = match transport {
+-        crate::session::SessionTransport::Cli => crate::session::SessionClientKind::Cli,
+-        crate::session::SessionTransport::Daemon => crate::session::SessionClientKind::Direct,
+-        crate::session::SessionTransport::McpStdio | crate::session::SessionTransport::McpHttp => {
+-            crate::session::SessionClientKind::Mcp
+-        }
+-    };
+-    crate::session::begin_tool_call(&call.name, &call.args, known_tool, transport, client_kind)
+-}
+-
+-fn notify_session_started(metadata: InitializeMetadata) {
+-    if let Some(observer) = STDIO_OBSERVER.get() {
+-        observer.on_session_started(metadata);
+-    }
+-}
+-
+-fn notify_tool_completed(outcome: ToolCompletionObservation) {
+-    if let Some(observer) = STDIO_OBSERVER.get() {
+-        observer.on_tool_completed(outcome);
+-    }
+ }
+ 
+ const MAX_TOOL_NAME_CHARS: usize = 64;
+@@ -844,422 +751,11 @@
+     }
+ }
+ 
+-/// Dispatch one MCP JSON-RPC request against the registry (initialize /
+-/// tools/list / tools/call). Shared by the stdio loop above and the
+-/// daemon's HTTP transport (`cua-driver`'s `mcp_http`) so both speak the
+-/// exact same MCP semantics.
+-pub async fn handle_request(
+-    req: Request,
+-    id: serde_json::Value,
+-    provider: &dyn ToolProvider,
+-) -> Response {
+-    handle_request_inner(req, id, provider, None).await
+-}
+-
+-/// Dispatch one MCP request with a transport identity proved by the local
+-/// adapter rather than supplied by the MCP client.
+-///
+-/// The ordinary untrusted entry point above must continue to discard every
+-/// reserved argument. Direct stdio and authenticated HTTP each own a transport
+-/// lease, so their adapters pass that lease here after parsing the untrusted
+-/// request. The inner boundary sanitizes caller claims first and then stamps
+-/// this trusted owner onto both implicit and explicitly named lifecycle
+-/// sessions.
+-pub async fn handle_request_with_transport_session(
+-    req: Request,
+-    id: serde_json::Value,
+-    provider: &dyn ToolProvider,
+-    transport_session: &str,
+-) -> Response {
+-    handle_request_inner(req, id, provider, Some(transport_session)).await
+-}
+-
+-async fn handle_request_inner(
+-    req: Request,
+-    id: serde_json::Value,
+-    provider: &dyn ToolProvider,
+-    transport_session: Option<&str>,
+-) -> Response {
+-    let era = match crate::mcp_wire::classify_request(&req) {
+-        Ok(era) => era,
+-        Err(response) => return response,
+-    };
+-    if req.method == "tools/call" {
+-        if let Err(response) =
+-            crate::mcp_wire::validate_tool_call(&req, id.clone(), era, &provider.tools_list())
+-        {
+-            return response;
+-        }
+-    }
+-    let method = req.method.clone();
+-    let response =
+-        if let Some(response) = crate::mcp_wire::handle_metadata_request(&req, id.clone()) {
+-            response
+-        } else {
+-            dispatch_request(req, id, provider, transport_session, era).await
+-        };
+-    crate::mcp_wire::finish_response(era, &method, response)
+-}
+-
+-async fn dispatch_request(
+-    req: Request,
+-    id: serde_json::Value,
+-    provider: &dyn ToolProvider,
+-    transport_session: Option<&str>,
+-    era: crate::mcp_wire::ProtocolEra,
+-) -> Response {
+-    match req.method.as_str() {
+-        "initialize" if era == crate::mcp_wire::ProtocolEra::Legacy => {
+-            Response::ok(id, initialize_result())
+-        }
+-
+-        "tools/list" => Response::ok(id, provider.tools_list()),
+-
+-        "tools/call" => match req.tool_call() {
+-            Err(e) => Response::error(id, -32602, format!("Invalid params: {e}")),
+-            Ok(mut call) => {
+-                crate::tool_args::sanitize_reserved_args(&mut call.args);
+-                if let Err(error) = authorize_tool_call(&call.name, &call.args) {
+-                    return Response::ok(
+-                        id,
+-                        conforming_tool_result(
+-                            &call.name,
+-                            tool_error_result(
+-                                error.to_string(),
+-                                serde_json::json!({"code": "permission_denied"}),
+-                            ),
+-                        ),
+-                    );
+-                }
+-
+-                let public_session = call
+-                    .args
+-                    .get("session")
+-                    .and_then(serde_json::Value::as_str)
+-                    .filter(|session| !session.is_empty())
+-                    .map(str::to_owned);
+-                if let Some(arguments) = call.args.as_object_mut() {
+-                    if let Some(session) = public_session.as_deref().or(transport_session) {
+-                        arguments.insert(
+-                            "_session_id".to_owned(),
+-                            serde_json::Value::String(session.to_owned()),
+-                        );
+-                    }
+-                    if let Some(owner) = transport_session.or(public_session.as_deref()) {
+-                        arguments.insert(
+-                            "_transport_session_id".to_owned(),
+-                            serde_json::Value::String(owner.to_owned()),
+-                        );
+-                    }
+-                }
+-                if call.name == "browser_download" {
+-                    if let Some(arguments) = call.args.as_object_mut() {
+-                        arguments.insert(
+-                            crate::browser::download::MCP_HOST_DOWNLOAD_APPROVAL_ARG.to_owned(),
+-                            serde_json::Value::Bool(true),
+-                        );
+-                    }
+-                }
+-
+-                // Both arms answer through the shared boundary, so a tool
+-                // payload and an invocation failure are held to the same
+-                // advertised `outputSchema`.
+-                let result = match provider.invoke_tool(&call.name, call.args).await {
+-                    Ok(result) => result,
+-                    Err(error) => tool_error_result(error, serde_json::json!({"exit_code": 1})),
+-                };
+-                Response::ok(id, conforming_tool_result(&call.name, result))
+-            }
+-        },
+-
+-        other => {
+-            warn!(method = other, "unknown method");
+-            Response::method_not_found(id, other)
+-        }
+-    }
+-}
+-
+-#[cfg(test)]
+-mod dispatch_contract_tests {
+-    //! The boundary itself is unit-tested in `crate::mcp_result`; these pin
+-    //! that `tools/call` dispatch actually routes through it, on the path a
+-    //! strict MCP client exercises.
+-
+-    use super::*;
+-    use cua_driver_contract::{advertised_tool_output_schema, TOOL_INVOCATION_FAILED_CODE};
+-
+-    struct NeverInvokeProvider;
+-
+-    #[async_trait::async_trait]
+-    impl ToolProvider for NeverInvokeProvider {
+-        fn tools_list(&self) -> serde_json::Value {
+-            serde_json::json!({"tools": [{"name": "get_config"}]})
+-        }
+-
+-        async fn invoke_tool(
+-            &self,
+-            _name: &str,
+-            _arguments: serde_json::Value,
+-        ) -> Result<serde_json::Value, String> {
+-            panic!("invalid requests must not execute tools")
+-        }
+-    }
+-
+-    #[tokio::test]
+-    async fn modern_invalid_requests_never_execute_tools() {
+-        for (version, capabilities, name, arguments, expected_code) in [
+-            (
+-                "2026-07-28",
+-                serde_json::json!({}),
+-                "unknown",
+-                serde_json::json!({}),
+-                -32602,
+-            ),
+-            (
+-                "2026-07-28",
+-                serde_json::json!({}),
+-                "get_config",
+-                serde_json::json!([]),
+-                -32602,
+-            ),
+-            (
+-                "2026-07-28",
+-                serde_json::Value::Null,
+-                "get_config",
+-                serde_json::json!({}),
+-                -32602,
+-            ),
+-            (
+-                "unknown",
+-                serde_json::json!({}),
+-                "get_config",
+-                serde_json::json!({}),
+-                -32022,
+-            ),
+-        ] {
+-            let req = serde_json::from_value(serde_json::json!({
+-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+-                "params": {"name": name, "arguments": arguments, "_meta": {
+-                    "io.modelcontextprotocol/protocolVersion": version,
+-                    "io.modelcontextprotocol/clientCapabilities": capabilities
+-                }}
+-            }))
+-            .unwrap();
+-            let response = handle_request(req, serde_json::json!(1), &NeverInvokeProvider).await;
+-            let wire = serde_json::to_value(response).unwrap();
+-            assert_eq!(wire["error"]["code"], expected_code);
+-        }
+-    }
+-
+-    struct StubProvider(Result<serde_json::Value, String>);
+-
+-    #[async_trait::async_trait]
+-    impl ToolProvider for StubProvider {
+-        fn tools_list(&self) -> serde_json::Value {
+-            serde_json::json!({"tools": []})
+-        }
+-
+-        async fn invoke_tool(
+-            &self,
+-            _name: &str,
+-            _arguments: serde_json::Value,
+-        ) -> Result<serde_json::Value, String> {
+-            self.0.clone()
+-        }
+-    }
+-
+-    fn call_request(name: &str) -> Request {
+-        serde_json::from_value(serde_json::json!({
+-            "jsonrpc": "2.0",
+-            "id": 1,
+-            "method": "tools/call",
+-            "params": { "name": name, "arguments": {} }
+-        }))
+-        .expect("request parses")
+-    }
+-
+-    fn result_of(response: Response) -> serde_json::Value {
+-        match response.body {
+-            ResponseBody::Result { result } => result,
+-            ResponseBody::Error { error } => panic!("expected a result, got {}", error.message),
+-        }
+-    }
+-
+-    #[track_caller]
+-    fn assert_conforms(tool: &str, structured: &serde_json::Value) {
+-        let schema = advertised_tool_output_schema(tool).expect("tool advertises a schema");
+-        assert!(
+-            jsonschema::validator_for(&schema)
+-                .expect("schema compiles")
+-                .is_valid(structured),
+-            "advertised schema rejected {structured}"
+-        );
+-    }
+-
+-    /// Reverting the boundary call fails this with the bug as the message:
+-    /// the advertised schema rejects the bare `{"exit_code": 1}` diagnostic.
+-    #[tokio::test]
+-    async fn an_invocation_failure_is_dispatched_as_a_conforming_refusal() {
+-        let provider = StubProvider(Err("daemon transport closed".to_owned()));
+-
+-        let result =
+-            result_of(handle_request(call_request("click"), serde_json::json!(1), &provider).await);
+-
+-        assert_conforms("click", &result["structuredContent"]);
+-        // The diagnostic survives the normalization; only the marker is added.
+-        assert_eq!(result["structuredContent"]["exit_code"], 1);
+-        assert_eq!(
+-            result["structuredContent"]["code"],
+-            TOOL_INVOCATION_FAILED_CODE
+-        );
+-    }
+-
+-    /// The class of failure the two `exit_code` paths were only one instance
+-    /// of: a provider result that is invalid under the advertised schema no
+-    /// longer reaches the client as a success.
+-    #[tokio::test]
+-    async fn a_provider_success_that_violates_the_schema_is_replaced() {
+-        let provider = StubProvider(Ok(serde_json::json!({"content": [], "isError": false})));
+-
+-        let result =
+-            result_of(handle_request(call_request("click"), serde_json::json!(1), &provider).await);
+-
+-        assert_conforms("click", &result["structuredContent"]);
+-        assert_eq!(result["isError"], true);
+-        assert_eq!(
+-            result["structuredContent"]["code"],
+-            crate::mcp_result::TOOL_OUTPUT_INVALID_CODE
+-        );
+-    }
+-}
+-
+ #[cfg(test)]
+ mod observation_tests {
+     use super::*;
+-    use std::sync::Mutex;
+-
+-    struct CapturingProvider {
+-        arguments: Mutex<Option<serde_json::Value>>,
+-    }
+-
+-    #[async_trait::async_trait]
+-    impl ToolProvider for CapturingProvider {
+-        fn tools_list(&self) -> serde_json::Value {
+-            serde_json::json!({"tools": []})
+-        }
+-
+-        async fn invoke_tool(
+-            &self,
+-            _name: &str,
+-            arguments: serde_json::Value,
+-        ) -> Result<serde_json::Value, String> {
+-            self.arguments.lock().unwrap().replace(arguments);
+-            Ok(serde_json::json!({"content": [], "isError": false}))
+-        }
+-    }
+-
+     fn timer(known: bool, valid: bool, path: StdioExecutionPath) -> ToolObservationTimer {
+         ToolObservationTimer::start("click".to_owned(), known, valid, path)
+-    }
+-
+-    #[tokio::test]
+-    async fn mcp_boundary_replaces_forged_reserved_fields_with_host_evidence() {
+-        let provider = CapturingProvider {
+-            arguments: Mutex::new(None),
+-        };
+-        let request: Request = serde_json::from_value(serde_json::json!({
+-            "jsonrpc": "2.0",
+-            "id": 1,
+-            "method": "tools/call",
+-            "params": {
+-                "name": "browser_download",
+-                "arguments": {
+-                    "session": "public",
+-                    "_session_id": "forged-owner",
+-                    "_transport_session_id": "forged-transport",
+-                    "_cua_browser_download_mcp_host_approved": false,
+-                    "_protected_process_fingerprint": {"pid": 1}
+-                }
+-            }
+-        }))
+-        .unwrap();
+-        let response = handle_request(request, serde_json::json!(1), &provider).await;
+-        assert!(matches!(response.body, ResponseBody::Result { .. }));
+-
+-        let arguments = provider.arguments.lock().unwrap().clone().unwrap();
+-        assert_eq!(arguments["_session_id"], "public");
+-        assert_eq!(arguments["_transport_session_id"], "public");
+-        assert_eq!(arguments["_cua_browser_download_mcp_host_approved"], true);
+-        assert!(arguments.get("_protected_process_fingerprint").is_none());
+-    }
+-
+-    #[tokio::test]
+-    async fn trusted_transport_boundary_keeps_public_label_separate_from_owner() {
+-        let provider = CapturingProvider {
+-            arguments: Mutex::new(None),
+-        };
+-        let request: Request = serde_json::from_value(serde_json::json!({
+-            "jsonrpc": "2.0",
+-            "id": 1,
+-            "method": "tools/call",
+-            "params": {
+-                "name": "browser_download",
+-                "arguments": {
+-                    "session": "public",
+-                    "_session_id": "forged-owner",
+-                    "_transport_session_id": "forged-transport",
+-                    "_cua_browser_download_mcp_host_approved": false,
+-                    "_protected_process_fingerprint": {"pid": 1}
+-                }
+-            }
+-        }))
+-        .unwrap();
+-        let response = handle_request_with_transport_session(
+-            request,
+-            serde_json::json!(1),
+-            &provider,
+-            "mcp-trusted-lease",
+-        )
+-        .await;
+-        assert!(matches!(response.body, ResponseBody::Result { .. }));
+-
+-        let arguments = provider.arguments.lock().unwrap().clone().unwrap();
+-        assert_eq!(arguments["_session_id"], "public");
+-        assert_eq!(arguments["_transport_session_id"], "mcp-trusted-lease");
+-        assert_eq!(arguments["_cua_browser_download_mcp_host_approved"], true);
+-        assert!(arguments.get("_protected_process_fingerprint").is_none());
+-    }
+-
+-    #[tokio::test]
+-    async fn trusted_transport_boundary_mints_implicit_identity_from_lease() {
+-        let provider = CapturingProvider {
+-            arguments: Mutex::new(None),
+-        };
+-        let request: Request = serde_json::from_value(serde_json::json!({
+-            "jsonrpc": "2.0",
+-            "id": 1,
+-            "method": "tools/call",
+-            "params": {
+-                "name": "get_config",
+-                "arguments": {
+-                    "_session_id": "forged-owner",
+-                    "_transport_session_id": "forged-transport"
+-                }
+-            }
+-        }))
+-        .unwrap();
+-        let response = handle_request_with_transport_session(
+-            request,
+-            serde_json::json!(1),
+-            &provider,
+-            "mcp-trusted-lease",
+-        )
+-        .await;
+-        assert!(matches!(response.body, ResponseBody::Result { .. }));
+-
+-        let arguments = provider.arguments.lock().unwrap().clone().unwrap();
+-        assert_eq!(arguments["_session_id"], "mcp-trusted-lease");
+-        assert_eq!(arguments["_transport_session_id"], "mcp-trusted-lease");
+     }
+ 
+     #[test]
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/server_transport.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/server_transport.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/server_transport.rs
+@@ -0,0 +1,522 @@
++//! Optional legacy MCP dispatch and process-wide transport observer.
++
++use crate::authorization::authorize_tool_call;
++use crate::mcp_result::{conforming_tool_result, tool_error_result};
++#[cfg(test)]
++use crate::protocol::ResponseBody;
++use crate::protocol::{initialize_result, InitializeMetadata, Request, Response};
++use crate::server::ToolCompletionObservation;
++use crate::tool::ToolRegistry;
++use std::sync::{Arc, OnceLock};
++use tracing::warn;
++
++/// Runtime contract consumed by protocol adapters such as MCP.
++///
++/// The standalone server implements this with the public Cua Driver SDK; the
++/// `ToolRegistry` implementation remains for core-level tests and embedders.
++/// Keeping the protocol dependent on this small contract prevents transports
++/// from reaching through the SDK into its private platform registry.
++#[async_trait::async_trait]
++pub trait ToolProvider: Send + Sync {
++    fn tools_list(&self) -> serde_json::Value;
++    async fn invoke_tool(
++        &self,
++        name: &str,
++        arguments: serde_json::Value,
++    ) -> Result<serde_json::Value, String>;
++}
++
++#[async_trait::async_trait]
++impl ToolProvider for ToolRegistry {
++    fn tools_list(&self) -> serde_json::Value {
++        ToolRegistry::tools_list(self)
++    }
++
++    async fn invoke_tool(
++        &self,
++        name: &str,
++        arguments: serde_json::Value,
++    ) -> Result<serde_json::Value, String> {
++        serde_json::to_value(self.invoke_from_trusted_adapter(name, arguments).await)
++            .map_err(|error| format!("Serialize error: {error}"))
++    }
++}
++
++/// Receives privacy-bounded observations from the stdio MCP transport.
++///
++/// The observer never receives tool arguments, text/image content, response
++/// bodies, arbitrary MCP metadata, or raw errors. HTTP dispatch reuses the
++/// bounded tool timer directly; HTTP session-start telemetry remains deferred
++/// until the transport has explicit session semantics.
++pub trait StdioObserver: Send + Sync + 'static {
++    fn on_session_started(&self, metadata: InitializeMetadata);
++    fn on_tool_completed(&self, outcome: ToolCompletionObservation);
++}
++
++static STDIO_OBSERVER: OnceLock<Arc<dyn StdioObserver>> = OnceLock::new();
++
++/// Register the process-wide stdio observer. Registration is intentionally
++/// one-shot so a second subsystem cannot replace the privacy policy at runtime.
++pub fn set_stdio_observer(observer: Arc<dyn StdioObserver>) -> bool {
++    STDIO_OBSERVER.set(observer).is_ok()
++}
++
++/// Notify the registered observer about a proxy-path initialize request.
++pub fn observe_proxy_session_started(metadata: InitializeMetadata) {
++    notify_session_started(metadata);
++}
++
++/// Notify the registered observer about a proxy-path tool result.
++pub fn observe_proxy_tool_completed(outcome: ToolCompletionObservation) {
++    notify_tool_completed(outcome);
++}
++
++/// Build a private aggregate-session context from a valid, known tool call.
++/// Only the public `session` argument is considered; reserved fallback keys
++/// and all other arguments remain outside the observer seam.
++pub fn session_tool_context(
++    req: &Request,
++    is_known_tool: impl Fn(&str) -> bool,
++    transport: crate::session::SessionTransport,
++) -> Option<crate::session::SessionToolContext> {
++    if req.method != "tools/call" {
++        return None;
++    }
++    let call = req.tool_call().ok()?;
++    let known_tool = call.name == "type_text_chars" || is_known_tool(&call.name);
++    let client_kind = match transport {
++        crate::session::SessionTransport::Cli => crate::session::SessionClientKind::Cli,
++        crate::session::SessionTransport::Daemon => crate::session::SessionClientKind::Direct,
++        crate::session::SessionTransport::McpStdio | crate::session::SessionTransport::McpHttp => {
++            crate::session::SessionClientKind::Mcp
++        }
++    };
++    crate::session::begin_tool_call(&call.name, &call.args, known_tool, transport, client_kind)
++}
++
++fn notify_session_started(metadata: InitializeMetadata) {
++    if let Some(observer) = STDIO_OBSERVER.get() {
++        observer.on_session_started(metadata);
++    }
++}
++
++fn notify_tool_completed(outcome: ToolCompletionObservation) {
++    if let Some(observer) = STDIO_OBSERVER.get() {
++        observer.on_tool_completed(outcome);
++    }
++}
++
++/// Dispatch one MCP JSON-RPC request against the registry (initialize /
++/// tools/list / tools/call). Shared by the stdio loop above and the
++/// daemon's HTTP transport (`cua-driver`'s `mcp_http`) so both speak the
++/// exact same MCP semantics.
++pub async fn handle_request(
++    req: Request,
++    id: serde_json::Value,
++    provider: &dyn ToolProvider,
++) -> Response {
++    handle_request_inner(req, id, provider, None).await
++}
++
++/// Dispatch one MCP request with a transport identity proved by the local
++/// adapter rather than supplied by the MCP client.
++///
++/// The ordinary untrusted entry point above must continue to discard every
++/// reserved argument. Direct stdio and authenticated HTTP each own a transport
++/// lease, so their adapters pass that lease here after parsing the untrusted
++/// request. The inner boundary sanitizes caller claims first and then stamps
++/// this trusted owner onto both implicit and explicitly named lifecycle
++/// sessions.
++pub async fn handle_request_with_transport_session(
++    req: Request,
++    id: serde_json::Value,
++    provider: &dyn ToolProvider,
++    transport_session: &str,
++) -> Response {
++    handle_request_inner(req, id, provider, Some(transport_session)).await
++}
++
++async fn handle_request_inner(
++    req: Request,
++    id: serde_json::Value,
++    provider: &dyn ToolProvider,
++    transport_session: Option<&str>,
++) -> Response {
++    let era = match crate::mcp_wire::classify_request(&req) {
++        Ok(era) => era,
++        Err(response) => return response,
++    };
++    if req.method == "tools/call" {
++        if let Err(response) =
++            crate::mcp_wire::validate_tool_call(&req, id.clone(), era, &provider.tools_list())
++        {
++            return response;
++        }
++    }
++    let method = req.method.clone();
++    let response =
++        if let Some(response) = crate::mcp_wire::handle_metadata_request(&req, id.clone()) {
++            response
++        } else {
++            dispatch_request(req, id, provider, transport_session, era).await
++        };
++    crate::mcp_wire::finish_response(era, &method, response)
++}
++
++async fn dispatch_request(
++    req: Request,
++    id: serde_json::Value,
++    provider: &dyn ToolProvider,
++    transport_session: Option<&str>,
++    era: crate::mcp_wire::ProtocolEra,
++) -> Response {
++    match req.method.as_str() {
++        "initialize" if era == crate::mcp_wire::ProtocolEra::Legacy => {
++            Response::ok(id, initialize_result())
++        }
++
++        "tools/list" => Response::ok(id, provider.tools_list()),
++
++        "tools/call" => match req.tool_call() {
++            Err(e) => Response::error(id, -32602, format!("Invalid params: {e}")),
++            Ok(mut call) => {
++                crate::tool_args::sanitize_reserved_args(&mut call.args);
++                if let Err(error) = authorize_tool_call(&call.name, &call.args) {
++                    return Response::ok(
++                        id,
++                        conforming_tool_result(
++                            &call.name,
++                            tool_error_result(
++                                error.to_string(),
++                                serde_json::json!({"code": "permission_denied"}),
++                            ),
++                        ),
++                    );
++                }
++
++                let public_session = call
++                    .args
++                    .get("session")
++                    .and_then(serde_json::Value::as_str)
++                    .filter(|session| !session.is_empty())
++                    .map(str::to_owned);
++                if let Some(arguments) = call.args.as_object_mut() {
++                    if let Some(session) = public_session.as_deref().or(transport_session) {
++                        arguments.insert(
++                            "_session_id".to_owned(),
++                            serde_json::Value::String(session.to_owned()),
++                        );
++                    }
++                    if let Some(owner) = transport_session.or(public_session.as_deref()) {
++                        arguments.insert(
++                            "_transport_session_id".to_owned(),
++                            serde_json::Value::String(owner.to_owned()),
++                        );
++                    }
++                }
++                if call.name == "browser_download" {
++                    if let Some(arguments) = call.args.as_object_mut() {
++                        arguments.insert(
++                            crate::browser::download::MCP_HOST_DOWNLOAD_APPROVAL_ARG.to_owned(),
++                            serde_json::Value::Bool(true),
++                        );
++                    }
++                }
++
++                // Both arms answer through the shared boundary, so a tool
++                // payload and an invocation failure are held to the same
++                // advertised `outputSchema`.
++                let result = match provider.invoke_tool(&call.name, call.args).await {
++                    Ok(result) => result,
++                    Err(error) => tool_error_result(error, serde_json::json!({"exit_code": 1})),
++                };
++                Response::ok(id, conforming_tool_result(&call.name, result))
++            }
++        },
++
++        other => {
++            warn!(method = other, "unknown method");
++            Response::method_not_found(id, other)
++        }
++    }
++}
++
++#[cfg(test)]
++mod dispatch_contract_tests {
++    //! The boundary itself is unit-tested in `crate::mcp_result`; these pin
++    //! that `tools/call` dispatch actually routes through it, on the path a
++    //! strict MCP client exercises.
++
++    use super::*;
++    use cua_driver_contract::{advertised_tool_output_schema, TOOL_INVOCATION_FAILED_CODE};
++
++    struct NeverInvokeProvider;
++
++    #[async_trait::async_trait]
++    impl ToolProvider for NeverInvokeProvider {
++        fn tools_list(&self) -> serde_json::Value {
++            serde_json::json!({"tools": [{"name": "get_config"}]})
++        }
++
++        async fn invoke_tool(
++            &self,
++            _name: &str,
++            _arguments: serde_json::Value,
++        ) -> Result<serde_json::Value, String> {
++            panic!("invalid requests must not execute tools")
++        }
++    }
++
++    #[tokio::test]
++    async fn modern_invalid_requests_never_execute_tools() {
++        for (version, capabilities, name, arguments, expected_code) in [
++            (
++                "2026-07-28",
++                serde_json::json!({}),
++                "unknown",
++                serde_json::json!({}),
++                -32602,
++            ),
++            (
++                "2026-07-28",
++                serde_json::json!({}),
++                "get_config",
++                serde_json::json!([]),
++                -32602,
++            ),
++            (
++                "2026-07-28",
++                serde_json::Value::Null,
++                "get_config",
++                serde_json::json!({}),
++                -32602,
++            ),
++            (
++                "unknown",
++                serde_json::json!({}),
++                "get_config",
++                serde_json::json!({}),
++                -32022,
++            ),
++        ] {
++            let req = serde_json::from_value(serde_json::json!({
++                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
++                "params": {"name": name, "arguments": arguments, "_meta": {
++                    "io.modelcontextprotocol/protocolVersion": version,
++                    "io.modelcontextprotocol/clientCapabilities": capabilities
++                }}
++            }))
++            .unwrap();
++            let response = handle_request(req, serde_json::json!(1), &NeverInvokeProvider).await;
++            let wire = serde_json::to_value(response).unwrap();
++            assert_eq!(wire["error"]["code"], expected_code);
++        }
++    }
++
++    struct StubProvider(Result<serde_json::Value, String>);
++
++    #[async_trait::async_trait]
++    impl ToolProvider for StubProvider {
++        fn tools_list(&self) -> serde_json::Value {
++            serde_json::json!({"tools": []})
++        }
++
++        async fn invoke_tool(
++            &self,
++            _name: &str,
++            _arguments: serde_json::Value,
++        ) -> Result<serde_json::Value, String> {
++            self.0.clone()
++        }
++    }
++
++    fn call_request(name: &str) -> Request {
++        serde_json::from_value(serde_json::json!({
++            "jsonrpc": "2.0",
++            "id": 1,
++            "method": "tools/call",
++            "params": { "name": name, "arguments": {} }
++        }))
++        .expect("request parses")
++    }
++
++    fn result_of(response: Response) -> serde_json::Value {
++        match response.body {
++            ResponseBody::Result { result } => result,
++            ResponseBody::Error { error } => panic!("expected a result, got {}", error.message),
++        }
++    }
++
++    #[track_caller]
++    fn assert_conforms(tool: &str, structured: &serde_json::Value) {
++        let schema = advertised_tool_output_schema(tool).expect("tool advertises a schema");
++        assert!(
++            jsonschema::validator_for(&schema)
++                .expect("schema compiles")
++                .is_valid(structured),
++            "advertised schema rejected {structured}"
++        );
++    }
++
++    /// Reverting the boundary call fails this with the bug as the message:
++    /// the advertised schema rejects the bare `{"exit_code": 1}` diagnostic.
++    #[tokio::test]
++    async fn an_invocation_failure_is_dispatched_as_a_conforming_refusal() {
++        let provider = StubProvider(Err("daemon transport closed".to_owned()));
++
++        let result =
++            result_of(handle_request(call_request("click"), serde_json::json!(1), &provider).await);
++
++        assert_conforms("click", &result["structuredContent"]);
++        // The diagnostic survives the normalization; only the marker is added.
++        assert_eq!(result["structuredContent"]["exit_code"], 1);
++        assert_eq!(
++            result["structuredContent"]["code"],
++            TOOL_INVOCATION_FAILED_CODE
++        );
++    }
++
++    /// The class of failure the two `exit_code` paths were only one instance
++    /// of: a provider result that is invalid under the advertised schema no
++    /// longer reaches the client as a success.
++    #[tokio::test]
++    async fn a_provider_success_that_violates_the_schema_is_replaced() {
++        let provider = StubProvider(Ok(serde_json::json!({"content": [], "isError": false})));
++
++        let result =
++            result_of(handle_request(call_request("click"), serde_json::json!(1), &provider).await);
++
++        assert_conforms("click", &result["structuredContent"]);
++        assert_eq!(result["isError"], true);
++        assert_eq!(
++            result["structuredContent"]["code"],
++            crate::mcp_result::TOOL_OUTPUT_INVALID_CODE
++        );
++    }
++}
++
++#[cfg(test)]
++mod observation_tests {
++    use super::*;
++    use std::sync::Mutex;
++
++    struct CapturingProvider {
++        arguments: Mutex<Option<serde_json::Value>>,
++    }
++
++    #[async_trait::async_trait]
++    impl ToolProvider for CapturingProvider {
++        fn tools_list(&self) -> serde_json::Value {
++            serde_json::json!({"tools": []})
++        }
++
++        async fn invoke_tool(
++            &self,
++            _name: &str,
++            arguments: serde_json::Value,
++        ) -> Result<serde_json::Value, String> {
++            self.arguments.lock().unwrap().replace(arguments);
++            Ok(serde_json::json!({"content": [], "isError": false}))
++        }
++    }
++
++    #[tokio::test]
++    async fn mcp_boundary_replaces_forged_reserved_fields_with_host_evidence() {
++        let provider = CapturingProvider {
++            arguments: Mutex::new(None),
++        };
++        let request: Request = serde_json::from_value(serde_json::json!({
++            "jsonrpc": "2.0",
++            "id": 1,
++            "method": "tools/call",
++            "params": {
++                "name": "browser_download",
++                "arguments": {
++                    "session": "public",
++                    "_session_id": "forged-owner",
++                    "_transport_session_id": "forged-transport",
++                    "_cua_browser_download_mcp_host_approved": false,
++                    "_protected_process_fingerprint": {"pid": 1}
++                }
++            }
++        }))
++        .unwrap();
++        let response = handle_request(request, serde_json::json!(1), &provider).await;
++        assert!(matches!(response.body, ResponseBody::Result { .. }));
++
++        let arguments = provider.arguments.lock().unwrap().clone().unwrap();
++        assert_eq!(arguments["_session_id"], "public");
++        assert_eq!(arguments["_transport_session_id"], "public");
++        assert_eq!(arguments["_cua_browser_download_mcp_host_approved"], true);
++        assert!(arguments.get("_protected_process_fingerprint").is_none());
++    }
++
++    #[tokio::test]
++    async fn trusted_transport_boundary_keeps_public_label_separate_from_owner() {
++        let provider = CapturingProvider {
++            arguments: Mutex::new(None),
++        };
++        let request: Request = serde_json::from_value(serde_json::json!({
++            "jsonrpc": "2.0",
++            "id": 1,
++            "method": "tools/call",
++            "params": {
++                "name": "browser_download",
++                "arguments": {
++                    "session": "public",
++                    "_session_id": "forged-owner",
++                    "_transport_session_id": "forged-transport",
++                    "_cua_browser_download_mcp_host_approved": false,
++                    "_protected_process_fingerprint": {"pid": 1}
++                }
++            }
++        }))
++        .unwrap();
++        let response = handle_request_with_transport_session(
++            request,
++            serde_json::json!(1),
++            &provider,
++            "mcp-trusted-lease",
++        )
++        .await;
++        assert!(matches!(response.body, ResponseBody::Result { .. }));
++
++        let arguments = provider.arguments.lock().unwrap().clone().unwrap();
++        assert_eq!(arguments["_session_id"], "public");
++        assert_eq!(arguments["_transport_session_id"], "mcp-trusted-lease");
++        assert_eq!(arguments["_cua_browser_download_mcp_host_approved"], true);
++        assert!(arguments.get("_protected_process_fingerprint").is_none());
++    }
++
++    #[tokio::test]
++    async fn trusted_transport_boundary_mints_implicit_identity_from_lease() {
++        let provider = CapturingProvider {
++            arguments: Mutex::new(None),
++        };
++        let request: Request = serde_json::from_value(serde_json::json!({
++            "jsonrpc": "2.0",
++            "id": 1,
++            "method": "tools/call",
++            "params": {
++                "name": "get_config",
++                "arguments": {
++                    "_session_id": "forged-owner",
++                    "_transport_session_id": "forged-transport"
++                }
++            }
++        }))
++        .unwrap();
++        let response = handle_request_with_transport_session(
++            request,
++            serde_json::json!(1),
++            &provider,
++            "mcp-trusted-lease",
++        )
++        .await;
++        assert!(matches!(response.body, ResponseBody::Result { .. }));
++
++        let arguments = provider.arguments.lock().unwrap().clone().unwrap();
++        assert_eq!(arguments["_session_id"], "mcp-trusted-lease");
++        assert_eq!(arguments["_transport_session_id"], "mcp-trusted-lease");
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool/recording_profile_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool/recording_profile_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool/recording_profile_tests.rs
+@@ -0,0 +1,23 @@
++use super::ToolRegistry;
++
++#[test]
++fn controlled_history_profile_does_not_construct_or_register_a_store() {
++    let registry = ToolRegistry::new();
++    assert!(!registry.history_enabled());
++    assert!(registry.get_def("history_status").is_none());
++    assert!(registry.get_def("history_query").is_none());
++}
++
++#[test]
++fn controlled_recording_profile_matches_compiled_implementation() {
++    let mut registry = ToolRegistry::new();
++    registry.register_recording_tools();
++    registry.retain_recording_session_end_hook();
++    for name in ["start_recording", "stop_recording", "get_recording_state", "replay_trajectory", "install_ffmpeg"] {
++        assert_eq!(registry.get_def(name).is_some(), cfg!(feature = "recording"), "{name}");
++    }
++    assert!(!registry.recording_enabled());
++    registry.stop_recording_owner(Some("no-live-recording")).unwrap();
++    registry.stop_recording_owner(None).unwrap();
++    assert!(!registry.recording_enabled());
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -13,15 +13,17 @@
+         const { std::cell::RefCell::new(None) };
+ }
+ 
++use crate::protocol::{Content, ToolResult};
++#[cfg(feature = "recording")]
++use crate::tool_args::ArgsExt;
++#[cfg(feature = "recording")]
+ use crate::{
+     pip_hook,
+-    protocol::{Content, ToolResult},
+     recording::{now_ms, screenshot_for, RecordingSession},
+     recording_tools::{
+         GetRecordingStateTool, ReplayRegistrySlot, ReplayTrajectoryTool, StartRecordingTool,
+         StopRecordingTool,
+     },
+-    tool_args::ArgsExt,
+ };
+ 
+ tokio::task_local! {
+@@ -644,15 +646,19 @@
+     tools: HashMap<String, Box<dyn Tool>>,
+     /// Ordered list of tool names for `tools/list`.
+     order: Vec<String>,
+-    /// Shared recording session — auto-records each non-read-only tool call.
++    /// Shared recording session, absent from the controlled Computer build.
++    #[cfg(feature = "recording")]
+     pub recording: Arc<RecordingSession>,
+     /// Optional encrypted Computer History runtime. It is installed only by a
+     /// trusted host that admitted the experimental preview.
++    #[cfg(feature = "history")]
+     history: Option<Arc<crate::history::HistoryManager>>,
++    #[cfg(feature = "recording")]
+     replay_registry: ReplayRegistrySlot,
+     session_end_hooks: Vec<crate::session::SessionEndHookRegistration>,
+     session_revive_hooks: Vec<crate::session::SessionReviveHookRegistration>,
+     cursor_outcome_readers: Vec<crate::session::CursorOutcomeReaderRegistration>,
++    #[cfg(feature = "recording")]
+     _recording_state_readers: Vec<crate::session::RecordingStateReaderRegistration>,
+     runtime_cleanups: Vec<RuntimeCleanup>,
+     /// Runtime-owned protected-consent broker shared by every resource
+@@ -702,24 +708,31 @@
+                     });
+                 }
+             });
++        #[cfg(feature = "recording")]
+         let recording = Arc::new(RecordingSession::new());
+-        let weak_recording = Arc::downgrade(&recording);
+-        let recording_state_reader =
++        #[cfg(feature = "recording")]
++        let recording_state_reader = {
++            let weak_recording = Arc::downgrade(&recording);
+             crate::session::register_scoped_recording_state_reader(Arc::new(move |session_id| {
+                 weak_recording.upgrade().is_some_and(|recording| {
+                     let state = recording.current_state();
+                     state.enabled && state.owner.as_deref() == Some(session_id)
+                 })
+-            }));
++            }))
++        };
+         Self {
+             tools: HashMap::new(),
+             order: Vec::new(),
++            #[cfg(feature = "recording")]
+             recording,
++            #[cfg(feature = "history")]
+             history: None,
++            #[cfg(feature = "recording")]
+             replay_registry: Arc::new(std::sync::Mutex::new(std::sync::Weak::new())),
+             session_end_hooks: vec![session_end_hook],
+             session_revive_hooks: Vec::new(),
+             cursor_outcome_readers: Vec::new(),
++            #[cfg(feature = "recording")]
+             _recording_state_readers: vec![recording_state_reader],
+             runtime_cleanups: Vec::new(),
+             approval_broker,
+@@ -841,18 +854,49 @@
+     /// Register the four platform-independent recording/replay tools.
+     /// Call this after all platform tools have been registered.
+     pub fn register_recording_tools(&mut self) {
+-        let session = self.recording.clone();
+-        self.register(Box::new(StartRecordingTool::new(session.clone())));
+-        self.register(Box::new(StopRecordingTool::new(session.clone())));
+-        self.register(Box::new(GetRecordingStateTool::new(session)));
+-        self.register(Box::new(ReplayTrajectoryTool::new(
+-            self.replay_registry.clone(),
+-        )));
+-        self.register(Box::new(crate::recording_tools::InstallFfmpegTool));
++        #[cfg(feature = "recording")]
++        {
++            let session = self.recording.clone();
++            self.register(Box::new(StartRecordingTool::new(session.clone())));
++            self.register(Box::new(StopRecordingTool::new(session.clone())));
++            self.register(Box::new(GetRecordingStateTool::new(session)));
++            self.register(Box::new(ReplayTrajectoryTool::new(self.replay_registry.clone())));
++            self.register(Box::new(crate::recording_tools::InstallFfmpegTool));
++        }
++    }
++
++    /// Query the optional facility without constructing a recorder in lean builds.
++    pub fn recording_enabled(&self) -> bool {
++        #[cfg(feature = "recording")]
++        { self.recording.current_state().enabled }
++        #[cfg(not(feature = "recording"))]
++        { false }
++    }
++
++    /// No recording can exist when its implementation is not compiled.
++    /// This is facility cleanup, never controlled-operation terminal proof.
++    pub fn stop_recording_owner(&self, requester: Option<&str>) -> anyhow::Result<()> {
++        #[cfg(feature = "recording")]
++        { self.recording.stop_owner(requester) }
++        #[cfg(not(feature = "recording"))]
++        { let _ = requester; Ok(()) }
++    }
++
++    pub fn retain_recording_session_end_hook(&mut self) {
++        #[cfg(feature = "recording")]
++        {
++            let recording = Arc::downgrade(&self.recording);
++            let hook = crate::session::register_scoped_fallible_session_end_hook("recording", move |session| {
++                let Some(recording) = recording.upgrade() else { return Ok(()); };
++                recording.stop_owner(Some(session)).map_err(|error| error.to_string())
++            });
++            self.retain_session_end_hook(hook);
++        }
+     }
+ 
+     /// Install the encrypted history hook and its two permission-gated,
+     /// read-only agent tools. Lifecycle mutation remains daemon-private.
++    #[cfg(feature = "history")]
+     pub fn register_history_tools(&mut self, manager: Arc<crate::history::HistoryManager>) {
+         self.history = Some(manager.clone());
+         self.register(Box::new(crate::history::HistoryStatusTool::new(
+@@ -861,8 +905,16 @@
+         self.register(Box::new(crate::history::HistoryQueryTool::new(manager)));
+     }
+ 
++    #[cfg(feature = "history")]
+     pub fn history(&self) -> Option<Arc<crate::history::HistoryManager>> {
+         self.history.clone()
++    }
++
++    pub fn history_enabled(&self) -> bool {
++        #[cfg(feature = "history")]
++        { self.history.is_some() }
++        #[cfg(not(feature = "history"))]
++        { false }
+     }
+ 
+     /// Register the platform-independent lifecycle and compatibility tools
+@@ -885,7 +937,8 @@
+     /// Wire up the replay tool's weak self-reference.
+     /// Call this once, immediately after `Arc::new(registry)`.
+     pub fn init_self_weak(self: &Arc<Self>) {
+-        *self.replay_registry.lock().unwrap() = Arc::downgrade(self);
++        #[cfg(feature = "recording")]
++        { *self.replay_registry.lock().unwrap() = Arc::downgrade(self); }
+     }
+ 
+     pub fn tools_list(&self) -> Value {
+@@ -1316,6 +1369,7 @@
+             args = public_args.clone();
+             namespace_runtime_args(&mut args, context, evidence);
+         }
++        #[cfg(feature = "recording")]
+         let recording_args = recording_args_for(resolved_name, &public_args);
+         if has_adapter("desktop_input")
+             && (!runtime_proves_driver_owned || context.capability_manifest().is_some())
+@@ -1512,19 +1566,23 @@
+         } else {
+             None
+         };
++        #[cfg(feature = "recording")]
+         let start_ms = now_ms();
+         let cursor_event = if controlled.is_none() { crate::cursor_events::begin_tool(resolved_name, &args) } else { None };
++        #[cfg(feature = "history")]
+         let pending_history = self.history.as_ref().filter(|_| controlled.is_none()).and_then(|history| {
+             history.begin_action(resolved_name, &public_args, runtime_session.as_deref())
+         });
+ 
+         // Reserve and capture the turn before dispatch so recorded evidence
+         // shows the application immediately before the action changed it.
++        #[cfg(feature = "recording")]
+         let should_record = controlled.is_none() && !tool.def().read_only
+             && !matches!(
+                 resolved_name,
+                 "start_recording" | "stop_recording" | "get_recording_state" | "replay_trajectory"
+             );
++        #[cfg(feature = "recording")]
+         let private_consent_turn = is_existing_profile_prepare(resolved_name, &args);
+         let _desktop_action = if requires_desktop_coordination(
+             resolved_name,
+@@ -1549,6 +1607,7 @@
+                 return protected_refusal("controlled_cancelled", "controlled admission was revoked");
+             }
+         }
++        #[cfg(feature = "recording")]
+         let pending_turn = should_record
+             .then(|| {
+                 if private_consent_turn {
+@@ -1561,11 +1620,14 @@
+             })
+             .flatten();
+ 
++        #[cfg(feature = "recording")]
+         let mut result = crate::recording::scope_dispatch_click_capture(
+             pending_turn.as_ref(),
+             tool.invoke(args.clone()),
+         )
+         .await;
++        #[cfg(not(feature = "recording"))]
++        let mut result = tool.invoke(args.clone()).await;
+         drop(lifecycle_dispatch);
+         // The platform worker has exited, so another text operation for this
+         // pid may now start even while result projection and evidence capture
+@@ -1617,6 +1679,7 @@
+         // the public ActionResult projection deliberately replaces legacy
+         // prose. Coordinate recovery and other internal diagnostics must not
+         // depend on the narrowed MCP text surface.
++        #[cfg(feature = "recording")]
+         let recording_result_text = result.content.iter().find_map(|content| {
+             if let Content::Text { text, .. } = content {
+                 Some(text.clone())
+@@ -1657,8 +1720,10 @@
+         // Use the original name for downstream code paths below so the
+         // exit-code matching and recording paths keep treating the alias
+         // as a distinct call site.
++        #[cfg(any(feature = "history", feature = "recording"))]
+         let name = resolved_name;
+ 
++        #[cfg(feature = "history")]
+         if let (Some(history), Some(pending)) = (self.history.as_ref(), pending_history) {
+             history.finish_action(
+                 pending,
+@@ -1666,6 +1731,7 @@
+                 result.is_error == Some(true),
+             );
+         }
++        #[cfg(feature = "history")]
+         if result.is_error != Some(true) && matches!(name, "start_session" | "end_session") {
+             self.history.as_ref().map(|history| {
+                 history.session_event(
+@@ -1682,6 +1748,7 @@
+         // control tools themselves are excluded so the recorded turn
+         // stream stays the actual user-action sequence (not the meta
+         // start/stop frames).
++        #[cfg(feature = "recording")]
+         if let Some(pending_turn) = pending_turn {
+             self.recording.finish_turn_with_outcome(
+                 pending_turn,
+@@ -1697,6 +1764,7 @@
+         // of action tools the recording pipeline cares about (non-read-only,
+         // not the recording-control meta-tools) so the live view matches
+         // what the recorder would have captured for the turn.
++        #[cfg(feature = "recording")]
+         if pip_hook::pip_enabled() && should_record && !private_consent_turn {
+             let window_id = args.opt_u64("window_id");
+             let pid = args.opt_i64("pid");
+@@ -2132,6 +2200,7 @@
+                         .to_owned(),
+                 )
+             }
++            #[cfg(feature = "recording")]
+             "stop_recording" => {
+                 let state = self.recording.current_state();
+                 let Some(output_dir) = state.output_dir else {
+@@ -2886,6 +2955,7 @@
+             .unwrap()
+     }
+ 
++    #[cfg(feature = "recording")]
+     struct ReplayProbe {
+         hits: Arc<AtomicUsize>,
+         def: super::ToolDef,
+@@ -3163,6 +3233,7 @@
+         Arc::new(registry)
+     }
+ 
++    #[cfg(feature = "recording")]
+     #[async_trait::async_trait]
+     impl super::Tool for ReplayProbe {
+         fn def(&self) -> &super::ToolDef {
+@@ -3175,6 +3246,7 @@
+         }
+     }
+ 
++    #[cfg(feature = "recording")]
+     fn replay_registry(hits: Arc<AtomicUsize>) -> Arc<super::ToolRegistry> {
+         let mut registry = super::ToolRegistry::new();
+         registry.register(Box::new(ReplayProbe {
+@@ -3198,6 +3270,7 @@
+         registry
+     }
+ 
++    #[cfg(feature = "recording")]
+     #[tokio::test]
+     async fn replay_dispatches_only_through_the_owning_registry() {
+         let hits_a = Arc::new(AtomicUsize::new(0));
+@@ -4853,6 +4926,7 @@
+     }))
+ }
+ 
++#[cfg(any(test, feature = "recording"))]
+ fn is_existing_profile_prepare(tool_name: &str, args: &Value) -> bool {
+     tool_name == "browser_prepare"
+         && args
+@@ -4862,6 +4936,7 @@
+             == Some("existing_profile")
+ }
+ 
++#[cfg(any(test, feature = "recording"))]
+ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
+     let mut redacted = args.clone();
+     if let Some(arguments) = redacted.as_object_mut() {
+@@ -4918,6 +4993,7 @@
+ /// Build a short, human-friendly label for the PiP overlay from the
+ /// tool name + raw args. Kept under ~60 chars so the macOS NSTextField
+ /// has room without truncation at default geometry.
++#[cfg(feature = "recording")]
+ fn synthesize_action_label(tool_name: &str, args: &Value) -> String {
+     let arg = |k: &str| -> Option<String> {
+         args.get(k).map(|v| match v {
+@@ -4961,6 +5037,9 @@
+         format!("{tool_name}: {summary}")
+     }
+ }
++
++#[cfg(test)]
++mod recording_profile_tests;
+ 
+ #[cfg(test)]
+ mod capability_tests {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml b/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml
+@@ -22,10 +22,10 @@
+ tracing = { workspace = true }
+ uniffi = { workspace = true, features = ["tokio"] }
+ uuid = { workspace = true }
+-cursor-overlay = { path = "../cursor-overlay" }
++cursor-overlay = { path = "../cursor-overlay", default-features = false }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
+-platform-macos = { path = "../platform-macos" }
++platform-macos = { path = "../platform-macos", default-features = false }
+ core-foundation = "0.10"
+ 
+ [target.'cfg(target_os = "windows")'.dependencies]
+@@ -39,6 +39,14 @@
+ 
+ [features]
+ default = []
++legacy-pip-preview = ["platform-macos/pip-preview", "legacy-recording"]
++legacy-browser-tls = ["platform-macos/browser-tls"]
++legacy-clipboard = ["platform-macos/clipboard"]
++legacy-remote-receiver = ["legacy-transports"]
++legacy-transports = ["cua-driver-core/daemon-client"]
++legacy-cursor-renderer = ["platform-macos/cursor-renderer"]
++legacy-recording = ["cua-driver-core/recording", "platform-macos/recording"]
++legacy-history = ["cua-driver-core/history", "platform-macos/history"]
+ portal-input = ["platform-linux/portal-input"]
+ portal-capture = ["platform-linux/portal-capture"]
+ portal-libei = ["portal-input", "portal-capture"]
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs
+@@ -1310,6 +1310,7 @@
+         &self.runtime_scope_key
+     }
+ 
++    #[cfg(feature = "legacy-history")]
+     pub(crate) fn history(&self) -> Option<Arc<cua_driver_core::history::HistoryManager>> {
+         unsafe {
+             self.raw_handle()
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/action_completion.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/action_completion.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/action_completion.rs
+@@ -0,0 +1,32 @@
++//! Transport-independent completion classification; contains no worker execution.
++
++use serde::{Deserialize, Serialize};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
++#[serde(rename_all = "snake_case")]
++pub enum ActionCompletion {
++    NotStarted,
++    Completed,
++    Unknown,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn completion_classification_remains_transport_independent() {
++        for (completion, value) in [
++            (ActionCompletion::NotStarted, "not_started"),
++            (ActionCompletion::Completed, "completed"),
++            (ActionCompletion::Unknown, "unknown"),
++        ] {
++            assert_eq!(serde_json::to_value(completion).unwrap(), value);
++            assert_eq!(
++                serde_json::from_value::<ActionCompletion>(value.into()).unwrap(),
++                completion
++            );
++        }
++        assert!(serde_json::from_str::<ActionCompletion>("\"timed_out_means_done\"").is_err());
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs
+@@ -17,8 +17,12 @@
+     VerifyStateOutput, WindowStateOutput,
+ };
+ use cua_driver_core::daemon::{
++    DaemonClientKind,
++};
++#[cfg(feature = "legacy-transports")]
++use cua_driver_core::daemon::{
+     is_daemon_listening, request_daemon_metadata, send_request, socket_path_for_namespace,
+-    DaemonClientKind, DaemonMetadata, DaemonRequest, ToolObservationOrigin,
++    DaemonMetadata, DaemonRequest, ToolObservationOrigin,
+ };
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+@@ -26,17 +30,25 @@
+ use thiserror::Error;
+ 
+ mod abi;
++mod action_completion;
+ mod activity_observer;
+ mod authorization_host;
+ mod computer;
++#[cfg(feature = "legacy-transports")]
+ mod embedded;
++#[cfg(feature = "legacy-transports")]
+ pub mod remote;
++#[cfg(feature = "legacy-transports")]
+ pub mod remote_foreign;
++#[cfg(feature = "legacy-transports")]
+ pub mod remote_mcp;
++#[cfg(feature = "legacy-remote-receiver")]
+ pub mod remote_receiver;
+ mod runtime;
++#[cfg(feature = "legacy-transports")]
+ mod service_session;
+ #[doc(hidden)]
++#[cfg(feature = "legacy-transports")]
+ pub mod worker;
+ use abi::{NativeAbiDriver, NativeAbiSession};
+ pub use activity_observer::{DriverActivityEvent, DriverActivityKind, DriverActivityObserver};
+@@ -49,15 +61,21 @@
+     ComputerOperation, ComputerPlan, ComputerPlanResult, ComputerPlanStatus, ComputerResult,
+     ComputerSelector, ComputerSession, ComputerStep, ComputerStepResult, ComputerTerminal,
+ };
++#[cfg(feature = "legacy-transports")]
+ pub use embedded::*;
++#[cfg(feature = "legacy-transports")]
+ use remote::{DriverEnvelopeChannel, RemoteBoundSession, RemoteDriverClient};
++#[cfg(feature = "legacy-transports")]
+ pub use remote_mcp::{
+     open_mcp_driver_channel, DriverServiceHeader, DriverServiceRequest, DriverServiceResponse,
+     DriverServiceTransport, DriverServiceTransportError, McpDriverChannel,
+ };
+ use runtime::RuntimeOptions;
++#[cfg(feature = "legacy-transports")]
+ use service_session::ServiceSessionClient;
+-use worker::{ActionCompletion, PrivateWorkerClient};
++pub use action_completion::ActionCompletion;
++#[cfg(feature = "legacy-transports")]
++use worker::PrivateWorkerClient;
+ 
+ fn host_sessions_json_for_prefix(runtime_prefix: &str) -> Value {
+     let sessions = cua_driver_core::session::list_session_snapshots_with_prefix(
+@@ -282,23 +300,30 @@
+ #[derive(uniffi::Object)]
+ pub struct CuaDriver {
+     backend: DriverBackend,
++    // The importing-runtime label is only consumed by legacy daemon requests.
++    #[cfg_attr(not(feature = "legacy-transports"), allow(dead_code))]
+     client_kind: DaemonClientKind,
+ }
+ 
+ enum DriverBackend {
+     Embedded(Arc<NativeAbiDriver>),
++    #[cfg(feature = "legacy-transports")]
+     Daemon(Arc<DaemonBackend>),
++    #[cfg(feature = "legacy-transports")]
+     PrivateWorker(Arc<PrivateWorkerClient>),
++    #[cfg(feature = "legacy-transports")]
+     Remote(Arc<RemoteDriverClient>),
+ }
+ 
+ impl CuaDriver {
+     /// Trusted Rust-host access to the daemon-owned local history controller.
+     /// This is intentionally absent from UniFFI and public agent protocols.
++    #[cfg(feature = "legacy-history")]
+     #[doc(hidden)]
+     pub fn local_history_manager(&self) -> Option<Arc<cua_driver_core::history::HistoryManager>> {
+         match &self.backend {
+             DriverBackend::Embedded(runtime) => runtime.history(),
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(_)
+             | DriverBackend::PrivateWorker(_)
+             | DriverBackend::Remote(_) => None,
+@@ -306,11 +331,13 @@
+     }
+ }
+ 
++#[cfg(feature = "legacy-transports")]
+ struct DaemonBackend {
+     socket_path: String,
+     transport_session: String,
+ }
+ 
++#[cfg(feature = "legacy-transports")]
+ impl DaemonBackend {
+     fn new(socket_path: String) -> Arc<Self> {
+         Arc::new(Self {
+@@ -339,6 +366,7 @@
+     }
+ }
+ 
++#[cfg(feature = "legacy-transports")]
+ impl Drop for DaemonBackend {
+     fn drop(&mut self) {
+         let request = DaemonRequest {
+@@ -353,6 +381,7 @@
+     }
+ }
+ 
++#[cfg(feature = "legacy-transports")]
+ fn validate_daemon_metadata(metadata: &DaemonMetadata) -> Result<(), DriverError> {
+     let mismatch = if metadata.contract_version != cua_driver_contract::CONTRACT_VERSION {
+         Some(format!(
+@@ -490,15 +519,18 @@
+ 
+ enum SessionBackend {
+     Embedded(Arc<NativeAbiSession>),
++    #[cfg(feature = "legacy-transports")]
+     PrivateWorker {
+         client: Arc<PrivateWorkerClient>,
+         session_handle: String,
+         closed: std::sync::atomic::AtomicBool,
+     },
++    #[cfg(feature = "legacy-transports")]
+     Service {
+         client: Arc<ServiceSessionClient>,
+         closed: std::sync::atomic::AtomicBool,
+     },
++    #[cfg(feature = "legacy-transports")]
+     Remote(Arc<RemoteBoundSession>),
+ }
+ 
+@@ -506,6 +538,7 @@
+     async fn close_async(&self) {
+         match self {
+             Self::Embedded(session) => session.close(),
++            #[cfg(feature = "legacy-transports")]
+             Self::PrivateWorker {
+                 client,
+                 session_handle,
+@@ -520,12 +553,14 @@
+                     .await;
+                 }
+             }
++            #[cfg(feature = "legacy-transports")]
+             Self::Service { client, closed } => {
+                 if !closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                     let client = client.clone();
+                     let _ = tokio::task::spawn_blocking(move || client.close()).await;
+                 }
+             }
++            #[cfg(feature = "legacy-transports")]
+             Self::Remote(session) => session.close(),
+         }
+     }
+@@ -533,6 +568,7 @@
+     fn close(&self) {
+         match self {
+             Self::Embedded(session) => session.close(),
++            #[cfg(feature = "legacy-transports")]
+             Self::PrivateWorker {
+                 client,
+                 session_handle,
+@@ -542,11 +578,13 @@
+                     client.close_session(session_handle);
+                 }
+             }
++            #[cfg(feature = "legacy-transports")]
+             Self::Service { client, closed } => {
+                 if !closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                     client.close();
+                 }
+             }
++            #[cfg(feature = "legacy-transports")]
+             Self::Remote(session) => session.close(),
+         }
+     }
+@@ -554,6 +592,7 @@
+     fn abandon(&self) {
+         match self {
+             Self::Embedded(session) => session.close(),
++            #[cfg(feature = "legacy-transports")]
+             Self::PrivateWorker {
+                 client,
+                 session_handle,
+@@ -565,11 +604,13 @@
+                     std::thread::spawn(move || client.close_session(&session_handle));
+                 }
+             }
++            #[cfg(feature = "legacy-transports")]
+             Self::Service { client, closed } => {
+                 if !closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                     client.abandon();
+                 }
+             }
++            #[cfg(feature = "legacy-transports")]
+             Self::Remote(session) => session.close(),
+         }
+     }
+@@ -587,6 +628,7 @@
+ ///
+ /// The child receives configuration and actions only over inherited stdio. It
+ /// exposes no socket and cannot be reconnected after the host channel closes.
++#[cfg(feature = "legacy-transports")]
+ #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+ pub struct PrivateWorkerOptions {
+     pub binary_path: String,
+@@ -763,6 +805,7 @@
+             DriverBackend::Embedded(native) => {
+                 Some(format!("__cua_runtime_{}:", native.runtime_scope_key()))
+             }
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(_)
+             | DriverBackend::PrivateWorker(_)
+             | DriverBackend::Remote(_) => None,
+@@ -872,8 +915,10 @@
+         client_kind: SdkClientKind,
+     ) -> Result<Arc<Self>, DriverError> {
+         let driver = Self::create_configured_with_authorization_host(options, host)?;
+-        let DriverBackend::Embedded(runtime) = &driver.backend else {
+-            unreachable!("protected-host constructor always returns an embedded runtime")
++        let runtime = match &driver.backend {
++            DriverBackend::Embedded(runtime) => runtime,
++            #[cfg(feature = "legacy-transports")]
++            _ => unreachable!("protected-host constructor always returns an embedded runtime"),
+         };
+         Ok(Arc::new(Self {
+             backend: DriverBackend::Embedded(runtime.clone()),
+@@ -889,8 +934,10 @@
+         client_kind: SdkClientKind,
+     ) -> Result<Arc<Self>, DriverError> {
+         let driver = Self::create_configured_with_activity_observer(options, observer)?;
+-        let DriverBackend::Embedded(runtime) = &driver.backend else {
+-            unreachable!("activity-observer constructor always returns an embedded runtime")
++        let runtime = match &driver.backend {
++            DriverBackend::Embedded(runtime) => runtime,
++            #[cfg(feature = "legacy-transports")]
++            _ => unreachable!("activity-observer constructor always returns an embedded runtime"),
+         };
+         Ok(Arc::new(Self {
+             backend: DriverBackend::Embedded(runtime.clone()),
+@@ -907,8 +954,10 @@
+         client_kind: SdkClientKind,
+     ) -> Result<Arc<Self>, DriverError> {
+         let driver = Self::create_configured_with_host_integrations(options, host, observer)?;
+-        let DriverBackend::Embedded(runtime) = &driver.backend else {
+-            unreachable!("host-integration constructor always returns an embedded runtime")
++        let runtime = match &driver.backend {
++            DriverBackend::Embedded(runtime) => runtime,
++            #[cfg(feature = "legacy-transports")]
++            _ => unreachable!("host-integration constructor always returns an embedded runtime"),
+         };
+         Ok(Arc::new(Self {
+             backend: DriverBackend::Embedded(runtime.clone()),
+@@ -923,8 +972,10 @@
+         client_kind: SdkClientKind,
+     ) -> Result<Arc<Self>, DriverError> {
+         let driver = Self::create_configured(options)?;
+-        let DriverBackend::Embedded(runtime) = &driver.backend else {
+-            unreachable!("create_configured always returns an embedded runtime")
++        let runtime = match &driver.backend {
++            DriverBackend::Embedded(runtime) => runtime,
++            #[cfg(feature = "legacy-transports")]
++            _ => unreachable!("create_configured always returns an embedded runtime"),
+         };
+         Ok(Arc::new(Self {
+             backend: DriverBackend::Embedded(runtime.clone()),
+@@ -940,8 +991,10 @@
+         client_kind: SdkClientKind,
+     ) -> Result<Arc<Self>, DriverError> {
+         let driver = Self::create(options)?;
+-        let DriverBackend::Embedded(runtime) = &driver.backend else {
+-            unreachable!("create always returns an embedded runtime")
++        let runtime = match &driver.backend {
++            DriverBackend::Embedded(runtime) => runtime,
++            #[cfg(feature = "legacy-transports")]
++            _ => unreachable!("create always returns an embedded runtime"),
+         };
+         Ok(Arc::new(Self {
+             backend: DriverBackend::Embedded(runtime.clone()),
+@@ -949,6 +1002,48 @@
+         }))
+     }
+ 
++    pub fn execution_mode(&self) -> DriverExecutionMode {
++        match &self.backend {
++            DriverBackend::Embedded(_) => DriverExecutionMode::Embedded,
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::Daemon(_) => DriverExecutionMode::Daemon,
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::PrivateWorker(_) => DriverExecutionMode::PrivateWorker,
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::Remote(_) => DriverExecutionMode::Remote,
++        }
++    }
++
++    /// Compatibility accessor. Embedded runtimes have no socket and return an
++    /// empty string; new code should branch on [`Self::execution_mode`].
++    pub fn socket_path(&self) -> String {
++        match &self.backend {
++            DriverBackend::Embedded(_) => String::new(),
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::Daemon(daemon) => daemon.socket_path.clone(),
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::PrivateWorker(_) => String::new(),
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::Remote(_) => String::new(),
++        }
++    }
++
++    pub fn is_available(&self) -> bool {
++        match &self.backend {
++            DriverBackend::Embedded(runtime) => runtime.is_available(),
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::Daemon(daemon) => is_daemon_listening(&daemon.socket_path),
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::PrivateWorker(worker) => worker.is_available(),
++            #[cfg(feature = "legacy-transports")]
++            DriverBackend::Remote(remote) => remote.is_available(),
++        }
++    }
++}
++
++#[cfg(feature = "legacy-transports")]
++#[uniffi::export]
++impl CuaDriver {
+     /// Connect to the default installed daemon or an explicitly selected socket.
+     /// This is the temporary compatibility path for released socket clients.
+     #[uniffi::constructor]
+@@ -1002,36 +1097,9 @@
+         create_private_worker_for_client(options, client_kind.into())
+     }
+ 
+-    pub fn execution_mode(&self) -> DriverExecutionMode {
+-        match &self.backend {
+-            DriverBackend::Embedded(_) => DriverExecutionMode::Embedded,
+-            DriverBackend::Daemon(_) => DriverExecutionMode::Daemon,
+-            DriverBackend::PrivateWorker(_) => DriverExecutionMode::PrivateWorker,
+-            DriverBackend::Remote(_) => DriverExecutionMode::Remote,
+-        }
+-    }
+-
+-    /// Compatibility accessor. Embedded runtimes have no socket and return an
+-    /// empty string; new code should branch on [`Self::execution_mode`].
+-    pub fn socket_path(&self) -> String {
+-        match &self.backend {
+-            DriverBackend::Embedded(_) => String::new(),
+-            DriverBackend::Daemon(daemon) => daemon.socket_path.clone(),
+-            DriverBackend::PrivateWorker(_) => String::new(),
+-            DriverBackend::Remote(_) => String::new(),
+-        }
+-    }
+-
+-    pub fn is_available(&self) -> bool {
+-        match &self.backend {
+-            DriverBackend::Embedded(runtime) => runtime.is_available(),
+-            DriverBackend::Daemon(daemon) => is_daemon_listening(&daemon.socket_path),
+-            DriverBackend::PrivateWorker(worker) => worker.is_available(),
+-            DriverBackend::Remote(remote) => remote.is_available(),
+-        }
+-    }
+-}
+-
++}
++
++#[cfg(feature = "legacy-transports")]
+ fn create_private_worker_for_client(
+     options: PrivateWorkerOptions,
+     client_kind: DaemonClientKind,
+@@ -1078,6 +1146,7 @@
+ 
+     /// Rust-only constructor for a transport adapter that exchanges generated
+     /// Driver envelopes over an authenticated asynchronous channel.
++    #[cfg(feature = "legacy-transports")]
+     pub fn connect_remote(
+         channel: Arc<dyn DriverEnvelopeChannel>,
+     ) -> Result<Arc<Self>, DriverError> {
+@@ -1109,6 +1178,7 @@
+                     )),
+                 }))
+             }
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::PrivateWorker(worker) => {
+                 let session_handle = worker.bind_session(options)?;
+                 Ok(Arc::new(CuaDriverSession {
+@@ -1119,6 +1189,7 @@
+                     },
+                 }))
+             }
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(daemon) => {
+                 let client = ServiceSessionClient::connect_and_bind(
+                     daemon.socket_path.clone(),
+@@ -1132,6 +1203,7 @@
+                     },
+                 }))
+             }
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Remote(_) => Err(DriverError::Configuration {
+                 reason:
+                     "remote trusted sessions require create_remote_trusted_session so the authenticated carrier can bind a new logical channel"
+@@ -1143,6 +1215,7 @@
+     /// Daemon-host bridge for reconnecting one trusted host lease without
+     /// exposing its transport identity through generated bindings.
+     #[doc(hidden)]
++    #[cfg(feature = "legacy-transports")]
+     pub fn create_trusted_session_for_transport(
+         &self,
+         options: TrustedSessionOptions,
+@@ -1176,6 +1249,7 @@
+ 
+     /// Bind a trusted session through an authenticated remote carrier without
+     /// exposing serialized authority to the caller.
++    #[cfg(feature = "legacy-transports")]
+     pub async fn create_remote_trusted_session(
+         &self,
+         options: TrustedSessionOptions,
+@@ -1334,8 +1408,11 @@
+     pub async fn metadata(&self) -> Result<DriverMetadata, DriverError> {
+         match &self.backend {
+             DriverBackend::Embedded(runtime) => runtime.metadata(),
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::PrivateWorker(worker) => worker.metadata().await,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Remote(remote) => remote.metadata().await,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(daemon) => {
+                 let metadata = daemon.compatible_metadata().await?;
+                 Ok(DriverMetadata {
+@@ -1369,8 +1446,11 @@
+     pub async fn list_tools_json(&self) -> Result<String, DriverError> {
+         let result = match &self.backend {
+             DriverBackend::Embedded(runtime) => runtime.tools_list()?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::PrivateWorker(worker) => worker.list_tools().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Remote(remote) => remote.list_tools().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(daemon) => {
+                 daemon.compatible_metadata().await?;
+                 let socket_path = daemon.socket_path.clone();
+@@ -1417,8 +1497,11 @@
+                 let prefix = format!("__cua_runtime_{}:", runtime.runtime_scope_key());
+                 host_sessions_json_for_prefix(&prefix)
+             }
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::PrivateWorker(worker) => worker.list_host_sessions().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Remote(remote) => remote.list_host_sessions().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(daemon) => {
+                 daemon.compatible_metadata().await?;
+                 let socket_path = daemon.socket_path.clone();
+@@ -1512,8 +1595,11 @@
+     pub async fn shutdown(&self) -> Result<(), DriverError> {
+         match &self.backend {
+             DriverBackend::Embedded(runtime) => runtime.shutdown().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::PrivateWorker(worker) => worker.shutdown().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Remote(remote) => remote.shutdown().await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(_) => {}
+         }
+         Ok(())
+@@ -1629,6 +1715,7 @@
+         }
+         let raw = match &self.backend {
+             SessionBackend::Embedded(runtime) => runtime.invoke(name, arguments).await?,
++            #[cfg(feature = "legacy-transports")]
+             SessionBackend::PrivateWorker {
+                 client,
+                 session_handle,
+@@ -1641,12 +1728,14 @@
+                     .invoke(name, arguments, Some(session_handle.clone()))
+                     .await?
+             }
++            #[cfg(feature = "legacy-transports")]
+             SessionBackend::Service { client, closed } => {
+                 if closed.load(std::sync::atomic::Ordering::Acquire) {
+                     return Err(DriverError::Shutdown);
+                 }
+                 client.invoke(name, arguments).await?
+             }
++            #[cfg(feature = "legacy-transports")]
+             SessionBackend::Remote(session) => session.invoke(name, arguments).await?,
+         };
+         normalize_result(name, raw)
+@@ -1661,7 +1750,7 @@
+     pub async fn call_tool_from_trusted_adapter(
+         &self,
+         name: &str,
+-        mut arguments: Value,
++        arguments: Value,
+     ) -> Result<ToolResult, DriverError> {
+         if !arguments.is_object() {
+             return Err(DriverError::InvalidArguments {
+@@ -1669,19 +1758,22 @@
+                 reason: "arguments must be a JSON object".into(),
+             });
+         }
+-        if let DriverBackend::Embedded(runtime) = &self.backend {
+-            let raw = runtime.invoke_from_trusted_adapter(name, arguments).await?;
+-            return normalize_result(name, raw);
+-        }
+-
+-        // Trust evidence is local to the adapter/runtime boundary. A private
+-        // worker re-establishes it in the child; remote and daemon transports
+-        // derive their own evidence from their authenticated connection and
+-        // must never receive underscore-prefixed claims from this process.
+-        if !matches!(&self.backend, DriverBackend::PrivateWorker(_)) {
+-            cua_driver_core::tool_args::sanitize_reserved_args(&mut arguments);
+-        }
+-        self.invoke(name, arguments).await
++        match &self.backend {
++            DriverBackend::Embedded(runtime) => {
++                let raw = runtime.invoke_from_trusted_adapter(name, arguments).await?;
++                normalize_result(name, raw)
++            }
++            #[cfg(feature = "legacy-transports")]
++            _ => {
++                // A worker re-establishes local trust evidence in the child.
++                // Daemon/remote transports derive it from their own connection.
++                let mut arguments = arguments;
++                if !matches!(&self.backend, DriverBackend::PrivateWorker(_)) {
++                    cua_driver_core::tool_args::sanitize_reserved_args(&mut arguments);
++                }
++                self.invoke(name, arguments).await
++            }
++        }
+     }
+ 
+     async fn invoke_typed<T: ToolInput>(
+@@ -1712,8 +1804,11 @@
+         }
+         let raw = match &self.backend {
+             DriverBackend::Embedded(runtime) => runtime.invoke(name, arguments).await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::PrivateWorker(worker) => worker.invoke(name, arguments, None).await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Remote(remote) => remote.invoke(name, arguments).await?,
++            #[cfg(feature = "legacy-transports")]
+             DriverBackend::Daemon(daemon) => {
+                 daemon.compatible_metadata().await?;
+                 let socket_path = daemon.socket_path.clone();
+@@ -1988,9 +2083,9 @@
+ mod tests {
+     mod native_windows;
+     use super::*;
+-    #[cfg(unix)]
++    #[cfg(all(unix, feature = "legacy-transports"))]
+     use std::io::{BufRead, BufReader, Write};
+-    #[cfg(unix)]
++    #[cfg(all(unix, feature = "legacy-transports"))]
+     use std::os::unix::net::UnixListener;
+ 
+     #[test]
+@@ -2006,7 +2101,7 @@
+         assert_eq!(exported, expected);
+     }
+ 
+-    #[cfg(unix)]
++    #[cfg(all(unix, feature = "legacy-transports"))]
+     fn serve_once(response: Value) -> (tempfile::TempDir, String, std::thread::JoinHandle<Value>) {
+         let directory = tempfile::tempdir().unwrap();
+         let socket = directory.path().join("driver.sock");
+@@ -2756,6 +2851,7 @@
+ 
+     #[tokio::test]
+     #[cfg(unix)]
++    #[cfg(feature = "legacy-transports")]
+     async fn typed_desktop_call_serializes_contract_and_normalizes_result() {
+         let response = serde_json::json!({
+             "ok": true,
+@@ -2893,6 +2989,7 @@
+ 
+     #[tokio::test]
+     #[cfg(unix)]
++    #[cfg(feature = "legacy-transports")]
+     async fn tool_discovery_uses_the_shared_direct_daemon_protocol() {
+         let response = serde_json::json!({
+             "ok": true,
+@@ -2911,6 +3008,7 @@
+ 
+     #[tokio::test]
+     #[cfg(unix)]
++    #[cfg(feature = "legacy-transports")]
+     async fn daemon_version_mismatch_is_refused_before_action_dispatch() {
+         let directory = tempfile::tempdir().unwrap();
+         let socket = directory.path().join("incompatible.sock");
+@@ -2965,6 +3063,7 @@
+ 
+     #[tokio::test]
+     #[cfg(unix)]
++    #[cfg(feature = "legacy-transports")]
+     async fn session_method_returns_the_canonical_typed_output() {
+         let response = serde_json::json!({
+             "ok": true,
+@@ -2999,11 +3098,13 @@
+         server.join().unwrap();
+     }
+ 
++    #[cfg(feature = "legacy-transports")]
+     struct FakeRemoteChannel {
+         bound: bool,
+     }
+ 
+     #[async_trait::async_trait]
++    #[cfg(feature = "legacy-transports")]
+     impl remote::DriverEnvelopeChannel for FakeRemoteChannel {
+         async fn negotiate(&self) -> Result<remote::DriverChannelCapabilities, String> {
+             Ok(remote::DriverChannelCapabilities {
+@@ -3074,6 +3175,7 @@
+     }
+ 
+     #[tokio::test]
++    #[cfg(feature = "legacy-transports")]
+     async fn remote_carrier_uses_generated_envelopes_behind_the_typed_sdk() {
+         let driver = CuaDriver::connect_remote(Arc::new(FakeRemoteChannel { bound: false }))
+             .expect("authenticated carrier");
+@@ -3111,11 +3213,13 @@
+         driver.shutdown().await.unwrap();
+     }
+ 
++    #[cfg(feature = "legacy-transports")]
+     struct UncertainRemoteChannel {
+         transport_error: bool,
+     }
+ 
+     #[async_trait::async_trait]
++    #[cfg(feature = "legacy-transports")]
+     impl remote::DriverEnvelopeChannel for UncertainRemoteChannel {
+         async fn negotiate(&self) -> Result<remote::DriverChannelCapabilities, String> {
+             Ok(remote::DriverChannelCapabilities {
+@@ -3171,6 +3275,7 @@
+     }
+ 
+     #[tokio::test]
++    #[cfg(feature = "legacy-transports")]
+     async fn remote_action_transport_failures_never_look_safe_to_retry() {
+         for transport_error in [true, false] {
+             let driver =
+@@ -3242,9 +3347,11 @@
+         driver.shutdown().await.unwrap();
+     }
+ 
++    #[cfg(feature = "legacy-transports")]
+     struct IncompatibleRemoteChannel;
+ 
+     #[async_trait::async_trait]
++    #[cfg(feature = "legacy-transports")]
+     impl remote::DriverEnvelopeChannel for IncompatibleRemoteChannel {
+         async fn negotiate(&self) -> Result<remote::DriverChannelCapabilities, String> {
+             Ok(remote::DriverChannelCapabilities {
+@@ -3286,6 +3393,7 @@
+     }
+ 
+     #[tokio::test]
++    #[cfg(feature = "legacy-transports")]
+     async fn remote_carrier_negotiates_before_dispatch() {
+         let driver = CuaDriver::connect_remote(Arc::new(IncompatibleRemoteChannel)).unwrap();
+         let error = driver.metadata().await.unwrap_err();
+@@ -3308,9 +3416,11 @@
+         assert!(matches!(error, DriverError::Protocol { .. }));
+     }
+ 
++    #[cfg(feature = "legacy-transports")]
+     struct LegacyRemoteChannel;
+ 
+     #[async_trait::async_trait]
++    #[cfg(feature = "legacy-transports")]
+     impl remote::DriverEnvelopeChannel for LegacyRemoteChannel {
+         async fn exchange(
+             &self,
+@@ -3340,6 +3450,7 @@
+     }
+ 
+     #[tokio::test]
++    #[cfg(feature = "legacy-transports")]
+     async fn legacy_remote_trait_implementors_compile_but_fail_closed_before_dispatch() {
+         let driver = CuaDriver::connect_remote(Arc::new(LegacyRemoteChannel)).unwrap();
+         let error = driver.metadata().await.unwrap_err();
+@@ -3349,12 +3460,14 @@
+             .contains("does not support request cancellation"));
+     }
+ 
++    #[cfg(feature = "legacy-transports")]
+     struct CancellableRemoteChannel {
+         started: Arc<tokio::sync::Notify>,
+         cancelled: Arc<std::sync::atomic::AtomicBool>,
+     }
+ 
+     #[async_trait::async_trait]
++    #[cfg(feature = "legacy-transports")]
+     impl remote::DriverEnvelopeChannel for CancellableRemoteChannel {
+         async fn negotiate(&self) -> Result<remote::DriverChannelCapabilities, String> {
+             Ok(remote::DriverChannelCapabilities {
+@@ -3399,6 +3512,7 @@
+     }
+ 
+     #[tokio::test]
++    #[cfg(feature = "legacy-transports")]
+     async fn dropping_remote_action_future_cancels_its_request_identity() {
+         let started = Arc::new(tokio::sync::Notify::new());
+         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_receiver.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_receiver.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_receiver.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/remote_receiver.rs
+@@ -3,6 +3,9 @@
+ //! This module opens no listener and authenticates no credentials. The service
+ //! adapter must authorize access before creating or looking up a connection.
+ //! Generation and connection identities are lifecycle markers, not credentials.
++
++// The controlled Computer library does not host an inbound service carrier.
++#![cfg(feature = "legacy-remote-receiver")]
+ 
+ use crate::remote::{
+     DriverChannelCapabilities, DriverRequestEnvelope, DriverResponseEnvelope,
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+@@ -312,8 +312,8 @@
+         cua_driver_core::element_cache::retire_runtime_scope(
+             &self.compatibility_context.runtime_scope_key(),
+         );
+-        let recording = self.registry.recording.clone();
+-        let _ = tokio::task::spawn_blocking(move || recording.stop_owner(None)).await;
++        let registry = self.registry.clone();
++        let _ = tokio::task::spawn_blocking(move || registry.stop_recording_owner(None)).await;
+     }
+ 
+     fn computer_drop_session(&self, id: &str) -> bool {
+@@ -382,7 +382,7 @@
+         let _drained = self.lifecycle.write().await;
+         let _serial = self.computer_cleanup.lock().await;
+         if self.lifecycle_maintenance.lock().map_err(|_| "poisoned_maintenance")?.is_some()
+-            || self.registry.recording.current_state().enabled || self.registry.history().is_some() {
++            || self.registry.recording_enabled() || self.registry.history_enabled() {
+             return Err("unexpected_runtime_facility");
+         }
+         self.authorization_registry.revoke_all();
+@@ -411,6 +411,7 @@
+         self.is_running().then(|| self.registry.tools_list())
+     }
+ 
++    #[cfg(feature = "legacy-history")]
+     pub(crate) fn history(&self) -> Option<Arc<cua_driver_core::history::HistoryManager>> {
+         self.is_running().then(|| self.registry.history()).flatten()
+     }
+@@ -544,8 +545,8 @@
+         if let Some(session) = ending_session {
+             // `end_session` is a lifecycle boundary: do not report completion
+             // until any recording owned by the session has finalized.
+-            let recording = self.registry.recording.clone();
+-            let _ = tokio::task::spawn_blocking(move || recording.stop_owner(Some(&session))).await;
++            let registry = self.registry.clone();
++            let _ = tokio::task::spawn_blocking(move || registry.stop_recording_owner(Some(&session))).await;
+         }
+         Some(result)
+     }
+@@ -654,8 +655,7 @@
+         // runtime-scoped and non-blocking so a retained binding cannot affect
+         // another generation.
+         if was_running {
+-            let recording = self.registry.recording.clone();
+-            let _ = recording.stop_owner(None);
++            let _ = self.registry.stop_recording_owner(None);
+         }
+     }
+ }
+@@ -723,9 +723,9 @@
+             );
+         }
+         let idle = now_unix_secs().saturating_sub(runtime.last_activity.load(Ordering::Relaxed));
+-        if idle >= recording_ttl && runtime.registry.recording.current_state().enabled {
++        if idle >= recording_ttl && runtime.registry.recording_enabled() {
+             tracing::warn!("recording idle {idle}s ≥ {recording_ttl}s TTL; auto-stopping");
+-            let _ = runtime.registry.recording.stop_owner(None);
++            let _ = runtime.registry.stop_recording_owner(None);
+         }
+     });
+     LifecycleMaintenance { shutdown, thread }
+@@ -759,6 +759,7 @@
+ fn build_registry(options: &RuntimeOptions) -> ToolRegistry {
+     #[cfg(target_os = "macos")]
+     let mut registry = {
++        #[cfg(feature = "legacy-recording")]
+         configure_macos_runtime();
+         platform_macos::register_tools_with_cursor_and_provider(
+             options.authorization_host.clone(),
+@@ -798,23 +799,11 @@
+     if let Some(register_host_tools) = options.register_host_tools {
+         register_host_tools(&mut registry);
+     }
+-    let recording = Arc::downgrade(&registry.recording);
+-    let recording_session_end = cua_driver_core::session::register_scoped_fallible_session_end_hook(
+-        "recording",
+-        move |session| {
+-            let Some(recording) = recording.upgrade() else {
+-                return Ok(());
+-            };
+-            recording
+-                .stop_owner(Some(session))
+-                .map_err(|error| error.to_string())
+-        },
+-    );
+-    registry.retain_session_end_hook(recording_session_end);
++    registry.retain_recording_session_end_hook();
+     registry
+ }
+ 
+-#[cfg(target_os = "macos")]
++#[cfg(all(target_os = "macos", feature = "legacy-recording"))]
+ fn configure_macos_runtime() {
+     cua_driver_core::recording::set_screenshot_fn(|window_id, pid| {
+         if let Some(window_id) = window_id {
+@@ -984,6 +973,7 @@
+         runtime.shutdown().await;
+     }
+ 
++    #[cfg(feature = "legacy-recording")]
+     #[tokio::test]
+     async fn idle_eviction_finalizes_the_owning_runtime_recording() {
+         let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
+@@ -1014,18 +1004,18 @@
+             .await
+             .unwrap();
+         assert_ne!(started.is_error, Some(true));
+-        assert!(runtime.registry.recording.current_state().enabled);
++        assert!(runtime.registry.recording_enabled());
+ 
+         let evicted = cua_driver_core::session::evict_idle_with_prefix(Duration::ZERO, &prefix);
+         assert!(evicted.contains(&internal));
+         for _ in 0..100 {
+-            if !runtime.registry.recording.current_state().enabled {
++            if !runtime.registry.recording_enabled() {
+                 break;
+             }
+             std::thread::sleep(Duration::from_millis(10));
+         }
+         assert!(
+-            !runtime.registry.recording.current_state().enabled,
++            !runtime.registry.recording_enabled(),
+             "session-end hook must finalize recording after idle eviction"
+         );
+ 
+@@ -1118,8 +1108,8 @@
+         options.authorization_host = None;
+         let runtime = DriverRuntime::create_computer(options).unwrap();
+         assert!(runtime.lifecycle_maintenance.lock().unwrap().is_none());
+-        assert!(runtime.registry.history().is_none());
+-        assert!(!runtime.registry.recording.current_state().enabled);
++        assert!(!runtime.registry.history_enabled());
++        assert!(!runtime.registry.recording_enabled());
+         let native = runtime.create_trusted_session(DelegatedSessionRequest {
+             public_session: "controlled-cleanup-proof".into(),
+             transport_session: "controlled-cleanup-proof-transport".into(),
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/tests/native_windows.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/tests/native_windows.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/tests/native_windows.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/tests/native_windows.rs
+@@ -1,4 +1,5 @@
+ use super::*;
++#[cfg(feature = "legacy-transports")]
+ use cua_driver_contract::{ActionTarget, ClickPosition, InputDeliveryMode};
+ use serde_json::json;
+ 
+@@ -206,6 +207,7 @@
+ 
+ #[tokio::test]
+ #[cfg(unix)]
++#[cfg(feature = "legacy-transports")]
+ async fn typed_discovery_requests_use_the_existing_daemon_transport() {
+     let (_directory, socket, server) = serve_once(
+         json!({"ok":true,"result":{"structuredContent":{"apps":[]},"content":[],"isError":false}}),
+@@ -241,6 +243,7 @@
+ 
+ #[tokio::test]
+ #[cfg(unix)]
++#[cfg(feature = "legacy-transports")]
+ async fn typed_click_returns_action_facts_and_flat_native_arguments() {
+     let (_directory, socket, server) = serve_once(json!({"ok":true,"result":{
+         "structuredContent":{"effect":"confirmed","route":"accessibility","delivery":{"mode":"background"},"evidence":[{"kind":"value_readback"}]},
+@@ -272,6 +275,7 @@
+ 
+ #[tokio::test]
+ #[cfg(unix)]
++#[cfg(feature = "legacy-transports")]
+ async fn typed_snapshot_request_preserves_target_and_session() {
+     let (_directory, socket, server) = serve_once(json!({"ok":true,"result":snapshot_envelope()}));
+     let driver = CuaDriver::connect(Some(socket)).unwrap();
+@@ -290,6 +294,7 @@
+ }
+ 
+ #[tokio::test]
++#[cfg(feature = "legacy-transports")]
+ async fn invalid_typed_click_is_rejected_before_transport() {
+     let driver = CuaDriver::connect(Some("/nonexistent/typed-click-test.sock".into())).unwrap();
+     for (target, position, delivery_mode) in [
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/worker.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/worker.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/worker.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/worker.rs
+@@ -21,13 +21,7 @@
+ const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 10_000;
+ const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 2_000;
+ 
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+-#[serde(rename_all = "snake_case")]
+-pub enum ActionCompletion {
+-    NotStarted,
+-    Completed,
+-    Unknown,
+-}
++pub use crate::action_completion::ActionCompletion;
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct ChannelRequest {
+diff --git a/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml b/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml
+--- a/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml
++++ b/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml
+@@ -4,8 +4,9 @@
+ edition.workspace = true
+ 
+ [features]
+-default = []
+-theme-authoring = []
++default = ["renderer"]
++renderer = ["dep:tiny-skia", "dep:fontdue", "dep:postcard", "dep:sha2", "dep:zstd"]
++theme-authoring = ["renderer"]
+ 
+ [dependencies]
+ cua-driver-contract = { path = "../cua-driver-contract" }
+@@ -13,10 +14,10 @@
+ serde_json = { workspace = true }
+ anyhow = { workspace = true }
+ tracing = { workspace = true }
+-postcard.workspace = true
+-sha2.workspace = true
+-zstd.workspace = true
++postcard = { workspace = true, optional = true }
++sha2 = { workspace = true, optional = true }
++zstd = { workspace = true, optional = true }
+ 
+-tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
++tiny-skia = { version = "0.11", default-features = false, features = ["std"], optional = true }
+ image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+-fontdue = { version = "0.9", default-features = false }
++fontdue = { version = "0.9", default-features = false, optional = true }
+diff --git a/libs/cua-driver/rust/crates/cursor-overlay/src/lib.rs b/libs/cua-driver/rust/crates/cursor-overlay/src/lib.rs
+--- a/libs/cua-driver/rust/crates/cursor-overlay/src/lib.rs
++++ b/libs/cua-driver/rust/crates/cursor-overlay/src/lib.rs
+@@ -6,37 +6,46 @@
+ //! - `CubicBezier` + `PathPlanner` — Bezier path math (ported 1:1 from C#)
+ //! - `OverlayCommand` — messages sent from MCP tools to the overlay thread
+ 
++#[cfg(feature = "renderer")]
+ pub mod badge_glyphs;
+ pub mod bezier;
+ pub mod capture_utils;
+ pub mod motion;
+ pub mod path_planner;
++#[cfg(feature = "renderer")]
+ pub mod render_state;
++#[cfg(feature = "renderer")]
+ pub mod session_badge;
++pub mod session_label;
+ pub mod theme;
++#[cfg(feature = "renderer")]
+ pub mod theme_artifact;
+ pub mod util;
+ pub mod z_order;
+ 
++#[cfg(feature = "renderer")]
+ pub use badge_glyphs::{BadgeChip, BadgeGlyph};
+ pub use bezier::CubicBezier;
+ pub use motion::{MotionConfig, Spring};
+ pub use path_planner::{PathPlanner, PathState, PlannedPath};
++#[cfg(feature = "renderer")]
+ pub use render_state::{
+     paint_cursor, render_frame, FocusRect, RenderStateCore, SESSION_BADGE_FADE_SECS,
+     SESSION_BADGE_HOLD_SECS,
+ };
++#[cfg(feature = "renderer")]
+ pub use session_badge::{
+-    paint_session_badge, sanitize_session_label, session_badge_extents, session_badge_layout,
+-    BadgeExtents, BadgeLabelLayout, SessionBadgeInput, SessionBadgeLayout, BADGE_CHIP_GAP,
+-    BADGE_CHIP_GROUP_GAP, BADGE_CHIP_SIZE, BADGE_CURSOR_GAP, BADGE_HEIGHT, BADGE_MAX_WIDTH,
+-    MAX_SESSION_LABEL_CHARS,
++    paint_session_badge, session_badge_extents, session_badge_layout, BadgeExtents,
++    BadgeLabelLayout, SessionBadgeInput, SessionBadgeLayout, BADGE_CHIP_GAP, BADGE_CHIP_GROUP_GAP,
++    BADGE_CHIP_SIZE, BADGE_CURSOR_GAP, BADGE_HEIGHT, BADGE_MAX_WIDTH,
+ };
++pub use session_label::{sanitize_session_label, MAX_SESSION_LABEL_CHARS};
+ pub use theme::{
+     session_fill_hex, session_fill_rgba, CursorAction, CursorVisualState, DeliveryModifier,
+     PlaybackKind, ReducedMotion, TargetModifier, DEFAULT_CURSOR_FILL, DEFAULT_THEME_ID,
+     DEFAULT_THEME_VERSION, THEME_PROFILE,
+ };
++#[cfg(feature = "renderer")]
+ pub use theme_artifact::{
+     decode_theme, embedded_default_theme, inspect_artifact, list_installed_themes,
+     load_installed_theme, paint_compiled_theme, paint_compiled_theme_with_tint,
+diff --git a/libs/cua-driver/rust/crates/cursor-overlay/src/session_badge.rs b/libs/cua-driver/rust/crates/cursor-overlay/src/session_badge.rs
+--- a/libs/cua-driver/rust/crates/cursor-overlay/src/session_badge.rs
++++ b/libs/cua-driver/rust/crates/cursor-overlay/src/session_badge.rs
+@@ -18,7 +18,7 @@
+     Rect, SpreadMode, Stroke, Transform,
+ };
+ 
+-pub const MAX_SESSION_LABEL_CHARS: usize = 28;
++pub use crate::session_label::{sanitize_session_label, MAX_SESSION_LABEL_CHARS};
+ pub const BADGE_MAX_WIDTH: f32 = 188.0;
+ pub const BADGE_HEIGHT: f32 = 28.0;
+ pub const BADGE_CURSOR_GAP: f32 = 25.0;
+@@ -164,42 +164,6 @@
+     }
+     let layout = text_layout(font, "…", font_size);
+     text_bounds(&layout).map(|bounds| ("…".to_owned(), bounds))
+-}
+-
+-/// Convert an untrusted public session label into compact display text.
+-///
+-/// Controls are removed, all whitespace runs collapse to one ASCII space,
+-/// and the visible value is bounded by Unicode scalar count. Runtime keys and
+-/// transport identifiers must never be passed to this function.
+-pub fn sanitize_session_label(input: &str) -> Option<String> {
+-    let mut normalized = String::new();
+-    let mut pending_space = false;
+-    for character in input.chars() {
+-        if character.is_control() {
+-            continue;
+-        }
+-        if character.is_whitespace() {
+-            pending_space = !normalized.is_empty();
+-            continue;
+-        }
+-        if pending_space {
+-            normalized.push(' ');
+-            pending_space = false;
+-        }
+-        normalized.push(character);
+-    }
+-
+-    let normalized = normalized.trim();
+-    if normalized.is_empty() {
+-        return None;
+-    }
+-    let mut chars = normalized.chars();
+-    let mut result: String = chars.by_ref().take(MAX_SESSION_LABEL_CHARS).collect();
+-    if chars.next().is_some() {
+-        result.pop();
+-        result.push('…');
+-    }
+-    Some(result)
+ }
+ 
+ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
+diff --git a/libs/cua-driver/rust/crates/cursor-overlay/src/session_label.rs b/libs/cua-driver/rust/crates/cursor-overlay/src/session_label.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cursor-overlay/src/session_label.rs
+@@ -0,0 +1,58 @@
++// SPDX-License-Identifier: MIT
++// Copyright (c) 2026 Cua AI, Inc.
++
++//! Display-only label normalization shared by metadata and the optional renderer.
++
++pub const MAX_SESSION_LABEL_CHARS: usize = 28;
++
++/// Convert an untrusted public session label into compact display text.
++///
++/// Controls are removed, all whitespace runs collapse to one ASCII space,
++/// and the visible value is bounded by Unicode scalar count. Runtime keys and
++/// transport identifiers must never be passed to this function.
++pub fn sanitize_session_label(input: &str) -> Option<String> {
++    let mut normalized = String::new();
++    let mut pending_space = false;
++    for character in input.chars() {
++        if character.is_control() {
++            continue;
++        }
++        if character.is_whitespace() {
++            pending_space = !normalized.is_empty();
++            continue;
++        }
++        if pending_space {
++            normalized.push(' ');
++            pending_space = false;
++        }
++        normalized.push(character);
++    }
++
++    let normalized = normalized.trim();
++    if normalized.is_empty() {
++        return None;
++    }
++    let mut chars = normalized.chars();
++    let mut result: String = chars.by_ref().take(MAX_SESSION_LABEL_CHARS).collect();
++    if chars.next().is_some() {
++        result.pop();
++        result.push('…');
++    }
++    Some(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn metadata_label_normalization_does_not_require_a_renderer() {
++        assert_eq!(
++            sanitize_session_label("  Research\n\t run \u{0007} "),
++            Some("Research run".to_owned())
++        );
++        assert_eq!(sanitize_session_label("\n\t"), None);
++        let label = sanitize_session_label(&"界".repeat(40)).unwrap();
++        assert_eq!(label.chars().count(), MAX_SESSION_LABEL_CHARS);
++        assert!(label.ends_with('…'));
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cursor-overlay/src/theme.rs b/libs/cua-driver/rust/crates/cursor-overlay/src/theme.rs
+--- a/libs/cua-driver/rust/crates/cursor-overlay/src/theme.rs
++++ b/libs/cua-driver/rust/crates/cursor-overlay/src/theme.rs
+@@ -17,6 +17,7 @@
+ pub const THEME_PROFILE: &str = "cua-driver-actions-v2";
+ pub const CANVAS_SIZE: f32 = 128.0;
+ pub const DISPLAY_SIZE: f32 = 42.0;
++#[cfg(any(test, feature = "renderer"))]
+ const FLOAT_DURATION_SECS: f32 = 4.0;
+ 
+ pub const DEFAULT_CURSOR_FILL: [u8; 4] = [94, 192, 232, 255];
+@@ -179,6 +180,7 @@
+     }
+ }
+ 
++#[cfg(any(test, feature = "renderer"))]
+ pub(crate) fn shared_float_motion(visual: &CursorVisualState) -> (f32, f32, f32) {
+     if visual.reduced_motion == ReducedMotion::On {
+         return (0.0, 0.0, 0.0);
+@@ -199,6 +201,7 @@
+ /// `anchor_x/y` is the existing overlay's cursor centre. The Lottie canvas is
+ /// centred there so the established click offset and path physics remain
+ /// unchanged. `heading` rotates the artwork around the canvas centre.
++#[cfg(feature = "renderer")]
+ pub fn paint_default_theme(
+     pm: &mut tiny_skia::Pixmap,
+     visual: &CursorVisualState,
+@@ -220,6 +223,7 @@
+     );
+ }
+ 
++#[cfg(feature = "renderer")]
+ #[allow(clippy::too_many_arguments)]
+ pub fn paint_default_theme_with_fill(
+     pm: &mut tiny_skia::Pixmap,
+@@ -276,6 +280,7 @@
+         assert_ne!(session_fill_rgba("agent-2"), DEFAULT_CURSOR_FILL);
+     }
+ 
++    #[cfg(feature = "renderer")]
+     #[test]
+     fn default_cursor_uses_parameterized_fill_white_ink_and_matching_glow() {
+         let mut pixmap = tiny_skia::Pixmap::new(256, 256).unwrap();
+@@ -300,6 +305,7 @@
+             && pixel[3] < 200));
+     }
+ 
++    #[cfg(feature = "renderer")]
+     #[test]
+     fn matching_glow_surrounds_the_full_pointer_silhouette() {
+         let mut pixmap = tiny_skia::Pixmap::new(256, 256).unwrap();
+@@ -359,6 +365,7 @@
+         );
+     }
+ 
++    #[cfg(feature = "renderer")]
+     #[test]
+     fn action_theme_ignores_host_owned_modifiers() {
+         let mut base = tiny_skia::Pixmap::new(128, 128).unwrap();
+@@ -452,6 +459,7 @@
+         assert_eq!(state.resolved_action, CursorAction::Idle);
+     }
+ 
++    #[cfg(feature = "renderer")]
+     #[test]
+     fn every_action_renders_pixels_at_one_and_two_x() {
+         for action in CursorAction::ALL {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/Cargo.toml b/libs/cua-driver/rust/crates/platform-macos/Cargo.toml
+--- a/libs/cua-driver/rust/crates/platform-macos/Cargo.toml
++++ b/libs/cua-driver/rust/crates/platform-macos/Cargo.toml
+@@ -2,6 +2,16 @@
+ name = "platform-macos"
+ version.workspace = true
+ edition.workspace = true
++
++[features]
++default = ["pip-preview", "browser-tls", "clipboard", "cursor-renderer", "recording", "history"]
++pip-preview = ["dep:pip-preview", "recording"]
++recording = ["cua-driver-core/recording"]
++history = ["cua-driver-core/history", "dep:zeroize", "dep:getrandom"]
++# Controlled Computer CDP admits only loopback ws:// endpoints.
++browser-tls = ["tokio-tungstenite/native-tls"]
++clipboard = ["dep:clipboard-rs"]
++cursor-renderer = ["cursor-overlay/renderer", "dep:tiny-skia", "dep:indexmap", "dep:objc2-quartz-core"]
+ 
+ [dependencies]
+ tokio = { workspace = true }
+@@ -18,14 +28,14 @@
+ # Insertion-ordered map for the keyed per-session cursor render collection.
+ # IndexMap gives deterministic iteration order = stable cursor z-order frame
+ # to frame (a plain HashMap would flicker overlapping cursors).
+-indexmap = "2"
+-cua-driver-core = { path = "../cua-driver-core" }
++indexmap = { version = "2", optional = true }
++cua-driver-core = { path = "../cua-driver-core", default-features = false, features = ["yaml", "rego"] }
+ cua-driver-contract = { path = "../cua-driver-contract" }
+-cursor-overlay = { path = "../cursor-overlay" }
+-pip-preview = { path = "../pip-preview" }
++cursor-overlay = { path = "../cursor-overlay", default-features = false }
++pip-preview = { path = "../pip-preview", optional = true }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
+-clipboard-rs = "0.3.5"
++clipboard-rs = { version = "0.3.5", optional = true }
+ # macOS system bindings
+ core-foundation = "0.10"
+ core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
+@@ -58,7 +68,7 @@
+ ] }
+ 
+ # QuartzCore for CALayer
+-objc2-quartz-core = { version = "0.2", features = ["CALayer"] }
++objc2-quartz-core = { version = "0.2", features = ["CALayer"], optional = true }
+ 
+ # Native ScreenCaptureKit bindings — used by `video_sckit` to replace the
+ # ffmpeg subprocess on macOS. `macos_15_0` enables the `SCRecordingOutput`
+@@ -66,14 +76,14 @@
+ # Screen Recording TCC prompt that subprocess capture would otherwise trip.
+ screencapturekit = { version = "8.0.1", features = ["macos_15_0"] }
+ security-framework = { version = "3.7.0", default-features = false, features = ["OSX_10_15"] }
+-zeroize = { workspace = true }
+-getrandom = { workspace = true }
++zeroize = { workspace = true, optional = true }
++getrandom = { workspace = true, optional = true }
+ 
+ # tiny-skia for cursor rendering
+-tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
++tiny-skia = { version = "0.11", default-features = false, features = ["std"], optional = true }
+ 
+ # WebSocket CDP client (used by browser/cdp_client.rs for the page tool)
+-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
++tokio-tungstenite = "0.24"
+ futures-util = "0.3"
+ 
+ [dev-dependencies]
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/cursor/inactive_overlay.rs b/libs/cua-driver/rust/crates/platform-macos/src/cursor/inactive_overlay.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/cursor/inactive_overlay.rs
+@@ -0,0 +1,49 @@
++//! Compile-time absent visual facility for the controlled Computer profile.
++//!
++//! These are the existing uninitialised-channel semantics: visual cues are
++//! discarded and readbacks never claim visibility. No AppKit renderer, window,
++//! thread, input event, animation waiter or fallback is constructed. This is
++//! not an actuator or an input/terminal receipt. Explicit cursor controls are
++//! refused by the existing `cursor_overlay_available` facility gate.
++
++use cursor_overlay::{CursorKey, CursorVisualState, MotionConfig, OverlayCommand};
++
++pub(crate) fn is_overlay_window(_window_id: u32) -> bool {
++    false
++}
++pub fn send_command(_key: CursorKey, _command: OverlayCommand) {}
++pub fn send_command_default(_command: OverlayCommand) {}
++pub fn is_visible_for_session(_key: &str) -> bool {
++    false
++}
++pub fn remove_cursor(_key: CursorKey) {}
++pub fn revive_cursor(_key: CursorKey) {}
++pub fn current_motion(_key: &str) -> MotionConfig {
++    MotionConfig::default()
++}
++pub fn current_theme_state(
++    _key: &str,
++) -> Option<(String, String, String, Option<String>, CursorVisualState)> {
++    None
++}
++pub async fn animate_cursor_to(_key: CursorKey, _x: f64, _y: f64) {}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn controlled_absent_renderer_never_reports_a_visual_effect_or_waits() {
++        let key = "no-renderer".to_owned();
++        send_command(key.clone(), OverlayCommand::SetEnabled(true));
++        send_command_default(OverlayCommand::PinAbove(42));
++        animate_cursor_to(key.clone(), 10.0, 20.0).await;
++        assert!(!is_visible_for_session(&key));
++        assert!(!is_overlay_window(42));
++        assert!(current_theme_state(&key).is_none());
++        assert_eq!(current_motion(&key), MotionConfig::default());
++        remove_cursor(key.clone());
++        revive_cursor(key.clone());
++        assert!(!is_visible_for_session(&key));
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/cursor/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/cursor/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/cursor/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/cursor/mod.rs
+@@ -5,8 +5,13 @@
+ //! - `overlay::run_on_main_thread()` — called from `main()` on the main thread
+ //! - `overlay::send_command(cmd)` — called from tool implementations
+ 
++#[cfg(feature = "cursor-renderer")]
++pub mod overlay;
++#[cfg(not(feature = "cursor-renderer"))]
++#[path = "inactive_overlay.rs"]
+ pub mod overlay;
+ /// System cursor shape reporting (what the OS draws, not what Cua draws).
++#[cfg(feature = "cursor-renderer")]
+ pub mod shape;
+ pub mod state;
+ 
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/lib.rs b/libs/cua-driver/rust/crates/platform-macos/src/lib.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/lib.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/lib.rs
+@@ -22,7 +22,7 @@
+ pub mod focus_guard;
+ #[cfg(target_os = "macos")]
+ pub mod focus_steal;
+-#[cfg(target_os = "macos")]
++#[cfg(all(target_os = "macos", feature = "history"))]
+ pub mod history;
+ #[cfg(target_os = "macos")]
+ pub mod input;
+@@ -30,9 +30,9 @@
+ mod permission_observation;
+ #[cfg(target_os = "macos")]
+ pub mod permissions;
+-#[cfg(target_os = "macos")]
++#[cfg(all(target_os = "macos", feature = "pip-preview"))]
+ pub mod pip;
+-#[cfg(target_os = "macos")]
++#[cfg(all(target_os = "macos", feature = "recording"))]
+ pub mod recording_hooks;
+ #[cfg(target_os = "macos")]
+ pub mod session;
+@@ -40,7 +40,7 @@
+ pub mod terminal;
+ #[cfg(target_os = "macos")]
+ pub mod tools;
+-#[cfg(target_os = "macos")]
++#[cfg(all(target_os = "macos", feature = "recording"))]
+ pub mod video_sckit;
+ #[cfg(target_os = "macos")]
+ pub mod window_change_detector;
+@@ -113,6 +113,7 @@
+     {
+         let cursor_overlay_available =
+             cursor_overlay_facility_available(cfg.enabled, session::has_graphic_access());
++        #[cfg(feature = "cursor-renderer")]
+         if cursor_overlay_available {
+             cursor::overlay::init(cfg);
+         }
+@@ -120,6 +121,7 @@
+         // overlay: a remote viewer wants the I-beam even when Cua draws no
+         // cursor of its own. It needs only a Window Server session, so it is
+         // gated on graphic access rather than on `cfg.enabled`.
++        #[cfg(feature = "cursor-renderer")]
+         if session::has_graphic_access() {
+             cursor::shape::install();
+         }
+@@ -153,7 +155,7 @@
+ 
+ #[cfg(target_os = "macos")]
+ fn cursor_overlay_facility_available(enabled: bool, graphic_access: bool) -> bool {
+-    enabled && graphic_access
++    cfg!(feature = "cursor-renderer") && enabled && graphic_access
+ }
+ 
+ #[cfg(all(test, target_os = "macos"))]
+@@ -162,7 +164,7 @@
+ 
+     #[test]
+     fn overlay_requires_both_host_enablement_and_graphic_session_access() {
+-        assert!(cursor_overlay_facility_available(true, true));
++        assert_eq!(cursor_overlay_facility_available(true, true), cfg!(feature = "cursor-renderer"));
+         assert!(!cursor_overlay_facility_available(false, true));
+         assert!(!cursor_overlay_facility_available(true, false));
+         assert!(!cursor_overlay_facility_available(false, false));
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/cursor_tools.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/cursor_tools.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/cursor_tools.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/cursor_tools.rs
+@@ -166,6 +166,7 @@
+     THEME_DEF.get_or_init(|| canonical_cursor_def("set_agent_cursor_theme"))
+ }
+ 
++#[cfg(feature = "cursor-renderer")]
+ fn parse_reduced_motion(value: Option<&str>) -> cursor_overlay::ReducedMotion {
+     match value {
+         Some("on") => cursor_overlay::ReducedMotion::On,
+@@ -180,6 +181,13 @@
+         theme_def()
+     }
+ 
++    #[cfg(not(feature = "cursor-renderer"))]
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let _ = (&self.state, args);
++        super::cursor_overlay_unavailable()
++    }
++
++    #[cfg(feature = "cursor-renderer")]
+     async fn invoke(&self, args: Value) -> ToolResult {
+         if !self.state.cursor_overlay_available {
+             return super::cursor_overlay_unavailable();
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_config.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_config.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_config.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_config.rs
+@@ -67,7 +67,10 @@
+         // backend is initialised once at startup. Read fresh so the
+         // response reflects whatever set_config (or a direct JSON edit)
+         // last wrote.
++        #[cfg(feature = "pip-preview")]
+         let (pip_enabled, pip_geometry) = pip_preview::read_pip_keys_from_file();
++        #[cfg(not(feature = "pip-preview"))]
++        let (pip_enabled, pip_geometry) = (false, None::<String>);
+         ToolResult::text("cua-driver-rs configuration").with_structured(serde_json::json!({
+             "version": env!("CARGO_PKG_VERSION"),
+             // Maintainer E2E builds set this at compile time so the
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+@@ -4,6 +4,7 @@
+ mod click;
+ mod computer;
+ pub mod computer_discovery;
++#[cfg(feature = "clipboard")]
+ mod clipboard;
+ mod double_click;
+ mod drag;
+@@ -908,6 +909,7 @@
+     }
+     // Share the element cache with the recording-hook layer so it can
+     // resolve element_index → window-local screenshot coords for click.png.
++    #[cfg(feature = "recording")]
+     crate::recording_hooks::set_element_cache(state.element_cache.clone());
+ 
+     // Drop a disconnecting session's config overrides + owned cursor on
+@@ -994,6 +996,7 @@
+         scroll::ScrollTool::new(state.clone()),
+         &pid_window_candidates,
+     ));
++    #[cfg(feature = "clipboard")]
+     cua_driver_core::clipboard::register_clipboard_tools(
+         registry,
+         Arc::new(clipboard::MacosClipboard::new()),
+@@ -1256,7 +1259,7 @@
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(all(test, feature = "recording"))]
+ mod recording_start_guard_tests {
+     use cua_driver_core::recording::RecordingSession;
+     use cua_driver_core::session::fire_session_end;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/set_config.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/set_config.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/set_config.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/set_config.rs
+@@ -15,6 +15,36 @@
+ impl SetConfigTool {
+     pub fn new(state: Arc<ToolState>) -> Self {
+         Self { state }
++    }
++}
++
++#[cfg(not(feature = "pip-preview"))]
++fn requests_pip(args: &Value) -> bool {
++    args.get("experimental_pip").is_some()
++        || args.get("experimental_pip_geometry").is_some()
++        || matches!(
++            args.get("key").and_then(Value::as_str),
++            Some("experimental_pip" | "experimental_pip_geometry")
++        )
++}
++
++#[cfg(all(test, not(feature = "pip-preview")))]
++mod computer_trim_tests {
++    use super::requests_pip;
++    use serde_json::json;
++
++    #[test]
++    fn disabled_preview_rejects_both_shapes_before_other_configuration_writes() {
++        for args in [
++            json!({"experimental_pip": false}),
++            json!({"experimental_pip_geometry": "10x10"}),
++            json!({"key": "experimental_pip", "value": true}),
++            json!({"key": "experimental_pip_geometry", "value": "10x10"}),
++            json!({"experimental_pip": null, "max_image_dimension": 128}),
++        ] {
++            assert!(requests_pip(&args));
++        }
++        assert!(!requests_pip(&json!({"max_image_dimension": 128})));
+     }
+ }
+ 
+@@ -75,6 +105,11 @@
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
+         use cua_driver_core::tool_args::ArgsExt;
++        #[cfg(not(feature = "pip-preview"))]
++        if requests_pip(&args) {
++            // Refuse before any other configuration field can be persisted.
++            return ToolResult::error("pip_preview_not_compiled");
++        }
+         if args.get("capture_scope").is_some()
+             || args.get("key").and_then(Value::as_str) == Some("capture_scope")
+         {
+@@ -147,7 +182,11 @@
+         };
+         // PiP keys persist to the same config.json but take effect only on
+         // next daemon restart — the backend is initialised once at startup.
++        #[cfg(feature = "pip-preview")]
+         let mut pip_note = String::new();
++        #[cfg(not(feature = "pip-preview"))]
++        let pip_note = String::new();
++        #[cfg(feature = "pip-preview")]
+         if let Some(enabled) = args.get("experimental_pip").and_then(|v| v.as_bool()) {
+             if let Err(e) = pip_preview::write_config_key("experimental_pip", Value::Bool(enabled))
+             {
+@@ -156,6 +195,7 @@
+             pip_note =
+                 format!(" — restart cua-driver for experimental_pip={enabled} to take effect");
+         }
++        #[cfg(feature = "pip-preview")]
+         if let Some(geom) = args.opt_str("experimental_pip_geometry") {
+             // Validate before persisting so the user gets an immediate error.
+             if pip_preview::PipGeometry::parse(&geom).is_none() {
+diff --git a/libs/cua-driver/typescript/package.json b/libs/cua-driver/typescript/package.json
+--- a/libs/cua-driver/typescript/package.json
++++ b/libs/cua-driver/typescript/package.json
+@@ -15,6 +15,10 @@
+       "types": "./dist/index.d.ts",
+       "import": "./dist/index.js"
+     },
++    "./computer": {
++      "types": "./dist/computer.d.ts",
++      "import": "./dist/computer.js"
++    },
+     "./embedded": {
+       "types": "./dist/embedded.d.ts",
+       "import": "./dist/embedded.js"
+@@ -31,6 +35,8 @@
+   "files": [
+     "dist/index.js",
+     "dist/index.d.ts",
++    "dist/computer.js",
++    "dist/computer.d.ts",
+     "dist/embedded.js",
+     "dist/embedded.d.ts",
+     "dist/electron.js",
+@@ -45,6 +51,7 @@
+   },
+   "scripts": {
+     "build": "tsc -p tsconfig.json",
++    "build:computer": "tsc -p tsconfig.computer.json",
+     "prepack": "npm run build",
+     "typecheck": "tsc -p tsconfig.json --noEmit && tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext test/fleet-types.ts",
+     "test": "npm run build && node --test test/*.test.mjs",
+diff --git a/libs/cua-driver/typescript/src/computer.ts b/libs/cua-driver/typescript/src/computer.ts
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/typescript/src/computer.ts
+@@ -0,0 +1,40 @@
++/**
++ * Controlled in-process Computer entry for the trimmed native profile.
++ * Import loads the generated runtime; only ComputerHost.create acquires an owner.
++ * No daemon, worker, remote carrier or general CuaDriver facade is exported.
++ */
++export {
++  ActionDeliveryMode,
++  ActionEffect,
++  ActionEscalationReason,
++  ActionEscalationTarget,
++  ActionEvidenceKind,
++  ActionRoute,
++  ComputerAddress,
++  ComputerCondition,
++  ComputerDiscoveredWindow,
++  ComputerDispatch,
++  ComputerError,
++  ComputerHost,
++  ComputerImage,
++  ComputerImageGeometry,
++  ComputerKey,
++  ComputerOperation,
++  ComputerPlan,
++  ComputerPlanResult,
++  ComputerPlanStatus,
++  ComputerResult,
++  ComputerSelector,
++  ComputerSession,
++  ComputerStep,
++  ComputerStepResult,
++  ComputerTerminal,
++  ConfiguredDriverOptions,
++  RuntimeAuthorizationOptions,
++  ScrollDirection,
++  SessionPermissionMode,
++  WindowStateOutput,
++  currentMacOsPermissionStatus,
++  openMacOsScreenRecordingSettings,
++  requestMacOsPermissions,
++} from "./native/index.js"
+diff --git a/libs/cua-driver/typescript/tsconfig.computer.json b/libs/cua-driver/typescript/tsconfig.computer.json
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/typescript/tsconfig.computer.json
+@@ -0,0 +1,4 @@
++{
++  "extends": "./tsconfig.json",
++  "include": ["src/computer.ts", "src/native/**/*.ts"]
++}
