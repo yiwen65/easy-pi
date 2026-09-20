@@ -80,6 +80,7 @@ import {
 	HfCompactionHost,
 } from "./compaction/subsystem/session-integration.ts";
 import type { TriggerDecision } from "./compaction/subsystem/trigger.ts";
+import type { ComputerSessionBinding } from "./computer/binding.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -221,6 +222,8 @@ export interface AgentSessionConfig {
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
+	/** Explicit, non-persisted capability; this session owns its revocation and drain. */
+	computer?: ComputerSessionBinding;
 	/** Canonical model/auth runtime used by coding-agent internals. */
 	modelRuntime: ModelRuntime;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
@@ -398,6 +401,8 @@ export class AgentSession {
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
+	private _computer?: ComputerSessionBinding;
+	private _computerGeneration = 0;
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
@@ -444,6 +449,8 @@ export class AgentSession {
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
+		this._computer = config.computer;
+		if (this._computer) this.agent.executionScheduler = this._computer.scheduler;
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -499,6 +506,27 @@ export class AgentSession {
 
 	get modelRuntime(): ModelRuntime {
 		return this._modelRuntime;
+	}
+
+	/** Live binding for trusted child factories; old tool closures never acquire this replacement. */
+	get computer(): ComputerSessionBinding | undefined {
+		return this._computer;
+	}
+
+	/** Close the entire capability subtree before lifecycle callbacks or asynchronous cleanup. */
+	revokeComputer(): void {
+		this._computerGeneration++;
+		this._computer?.revoke();
+	}
+
+	/** Trusted lifecycle transition: revoke now; call the renewal guard only after successful drain. */
+	revokeComputerForReplacement(): () => ComputerSessionBinding | undefined {
+		const computer = this._computer;
+		const renewComputer = computer && !computer.revoked;
+		// Capture before native revoke/cancel callbacks can synchronously narrow authority again.
+		const generation = this._computerGeneration + 1;
+		this.revokeComputer();
+		return () => (renewComputer && generation === this._computerGeneration ? computer.renew() : undefined);
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -1159,30 +1187,11 @@ export class AgentSession {
 	/** Awaitable shutdown report for the resources owned by this session. */
 	async shutdown(): Promise<SessionShutdownReport> {
 		if (this._shutdownPromise) return this._shutdownPromise;
-		this._shutdownPromise = (async () => {
-			if (!this._disposed) {
-				this._disposed = true;
-				this._lifecycleGeneration++;
-				try {
-					this.abortRetry();
-					this.abortCompaction();
-					this.abortBranchSummary();
-					this.abortBash();
-					this.agent.abort();
-				} catch {
-					// Shutdown must continue even if an abort hook throws.
-				}
-
-				this._extensionRunner.invalidate(
-					"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-				);
-				this._disconnectFromAgent();
-				this._eventListeners = [];
-				for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
-				this._backgroundTaskNotifications.dispose();
-			}
-
-			await this.abort();
+		const computer = this._computer;
+		// Reserve before revocation/abort callbacks can reenter shutdown(). Native drain is trusted
+		// session cleanup, not an extension shutdown handler whose errors would be swallowed.
+		this._shutdownPromise = Promise.resolve().then(async () => {
+			const stopped = await Promise.allSettled([this.abort(), computer?.close()]);
 			let backgroundReport:
 				| { complete: boolean; failed: string[]; timedOut: string[]; remaining: string[] }
 				| undefined;
@@ -1192,19 +1201,42 @@ export class AgentSession {
 				await this._backgroundTaskManager?.cleanup();
 			}
 			cleanupSessionResources(this.sessionId);
+			for (const result of stopped) {
+				if (result.status === "rejected") throw result.reason;
+			}
 			return {
 				complete: backgroundReport?.complete ?? true,
 				failedResources: backgroundReport?.failed ?? [],
 				timedOutResources: backgroundReport?.timedOut ?? [],
 				remainingResources: backgroundReport?.remaining ?? [],
 			};
-		})();
+		});
+		this._disposed = true;
+		this._lifecycleGeneration++;
+		// Replacement may already have closed the gate. Its duplicate shutdown is not a new denial.
+		if (!computer?.revoked) this.revokeComputer();
+		try {
+			this.abortRetry();
+			this.abortCompaction();
+			this.abortBranchSummary();
+			this.abortBash();
+			this.agent.abort();
+		} catch {
+			// Shutdown must continue even if an abort hook throws.
+		}
+		this._extensionRunner.invalidate(
+			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+		);
+		this._disconnectFromAgent();
+		this._eventListeners = [];
+		for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
+		this._backgroundTaskNotifications.dispose();
 		return this._shutdownPromise;
 	}
 
-	/** Begin shutdown without changing the synchronous public disposal contract. */
+	/** Begin shutdown; owners needing a drain acknowledgement must await shutdown() instead. */
 	dispose(): void {
-		void this.shutdown();
+		void this.shutdown().catch(() => undefined);
 	}
 
 	// =========================================================================
@@ -1278,9 +1310,19 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		const computerNames = new Set(this._computer?.tools.map((tool) => tool.name));
+		const previouslyActive = this.getActiveToolNames();
+		if (
+			[...computerNames].some((name) => previouslyActive.includes(name) && !toolNames.includes(name)) ||
+			(computerNames.size > 0 && !toolNames.some((name) => computerNames.has(name)))
+		) {
+			// Authority narrowing is permanent for this capability, including already-snapshotted calls.
+			this.revokeComputer();
+		}
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
+			if (this._computer?.revoked && computerNames.has(name)) continue;
 			const tool = this._toolRegistry.get(name);
 			if (tool) {
 				tools.push(tool);
@@ -1912,6 +1954,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this._computer?.cancel();
 		this.abortRetry();
 		this.agent.abort();
 		await this.waitForIdle();
@@ -2933,10 +2976,12 @@ export class AgentSession {
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
 			...registeredTools,
-			...this._customTools.map((definition) => ({
-				definition,
-				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
-			})),
+			...[...this._customTools, ...(this._computer?.revoked ? [] : (this._computer?.tools ?? []))].map(
+				(definition) => ({
+					definition,
+					sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
+				}),
+			),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
@@ -3147,14 +3192,20 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		if (this._disposed) throw new Error("AgentSession is disposed");
+		const computer = this._computer;
+		const renewComputer = this.revokeComputerForReplacement();
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
+		await computer?.close();
 		oldRunner.invalidate();
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
+		if (this._disposed) throw new Error("AgentSession is disposed");
+		this._computer = renewComputer() ?? computer;
 		const activeToolNames = this.getActiveToolNames();
 		this._buildRuntime({
 			activeToolNames,
@@ -3594,6 +3645,16 @@ export class AgentSession {
 			} else {
 				// Non-user message: leaf = selected node
 				newLeafId = targetId;
+			}
+
+			// Accepted navigation must not restore executable observation references from history.
+			const computer = this._computer;
+			if (computer && (summaryText || newLeafId !== oldLeafId)) {
+				const renewComputer = this.revokeComputerForReplacement();
+				await computer.close();
+				if (this._disposed) throw new Error("AgentSession is disposed");
+				this._computer = renewComputer() ?? computer;
+				this._refreshToolRegistry();
 			}
 
 			// Switch leaf (with or without summary)

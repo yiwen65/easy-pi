@@ -52,6 +52,7 @@ export class CollaborationController {
 	private shutdownPromise: Promise<void> | undefined;
 	private readonly activity = new CollaborationMailboxActivity();
 	private readonly observers = new Set<() => void>();
+	private readonly authorityObservers = new Set<() => void>();
 	private readonly liveTools = new Map<string, () => readonly string[]>();
 
 	constructor(options: {
@@ -152,7 +153,13 @@ export class CollaborationController {
 		};
 	}
 
+	private refreshAuthority(): void {
+		for (const refresh of this.authorityObservers) refresh();
+	}
+
 	private changed(): void {
+		// Native capability gates close before display observers can synchronously reenter.
+		this.refreshAuthority();
 		for (const listener of this.observers) {
 			try {
 				listener();
@@ -167,6 +174,7 @@ export class CollaborationController {
 		this.assertCaller(caller);
 		if (this.liveTools.has(caller.agentPath)) throw new CollaborationError("busy", "Tool authority already bound");
 		this.liveTools.set(caller.agentPath, getTools);
+		this.refreshAuthority();
 		return () => {
 			if (this.liveTools.get(caller.agentPath) !== getTools) return;
 			try {
@@ -500,6 +508,10 @@ export class CollaborationController {
 			prefix,
 			toolAllowed: (name) =>
 				this.toolAllowed({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name),
+			subscribeAuthority: (refresh) => {
+				this.authorityObservers.add(refresh);
+				return () => this.authorityObservers.delete(refresh);
+			},
 			getPermissions: this.getPermissions,
 			storage: this.store.directory
 				? {
@@ -543,6 +555,7 @@ export class CollaborationController {
 			this.store.commit(snapshot);
 		} catch (error) {
 			this.failure = error;
+			this.refreshAuthority();
 			this.activity.close();
 			// A failed durable update has an uncertain outcome. Stop rather than replay it.
 			for (const loading of this.loading.values()) loading.abort.abort();
@@ -730,11 +743,7 @@ export class CollaborationController {
 	shutdown(): Promise<void> {
 		if (this.shutdownPromise) return this.shutdownPromise;
 		this.stopping = true;
-		for (const loading of this.loading.values()) loading.abort.abort();
-		this.activity.close();
-		this.changed();
-		this.observers.clear();
-		this.shutdownPromise = (async () => {
+		this.shutdownPromise = Promise.resolve().then(async () => {
 			await this.queue;
 			// Do not hold the serialization queue while finish() persists an aborted turn.
 			const aborting = Promise.allSettled([...this.sessions.values()].map((session) => session.abort()));
@@ -743,12 +752,18 @@ export class CollaborationController {
 			await Promise.all([...this.active.values()]);
 			const disposals = await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
 			this.sessions.clear();
+			this.authorityObservers.clear();
 			this.liveTools.clear();
 			this.store.close();
 			if ([...aborts, ...disposals].some((result) => result.status === "rejected")) {
 				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");
 			}
-		})();
+		});
+		this.refreshAuthority();
+		for (const loading of this.loading.values()) loading.abort.abort();
+		this.activity.close();
+		this.changed();
+		this.observers.clear();
 		return this.shutdownPromise;
 	}
 }

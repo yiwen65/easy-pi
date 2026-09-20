@@ -1,0 +1,2068 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_image.rs b/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_image.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_image.rs
+@@ -0,0 +1,281 @@
++//! Owned PNG output and explicit pixel/desktop mapping for controlled capture.
++//! Geometry and an image ID are facts, never an authorization capability. Input
++//! callers must separately revalidate their native session, target and image.
++
++pub const COMPUTER_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
++pub const COMPUTER_IMAGE_MAX_SOURCE_EDGE: u32 = 16_384;
++pub const COMPUTER_IMAGE_MAX_OUTPUT_EDGE: u32 = 2_048;
++pub const COMPUTER_IMAGE_MAX_OUTPUT_PIXELS: u64 = 4 * 1024 * 1024;
++const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
++
++/// Top-left origin, x right and y down. Crop coordinates are source pixels;
++/// desktop/window dimensions are logical points, not device pixels. Separate
++/// axis ratios preserve the actual integer output dimensions after rounding.
++#[derive(Debug, Clone, PartialEq, uniffi::Record)]
++pub struct ComputerImageGeometry {
++    pub desktop_x: f64,
++    pub desktop_y: f64,
++    pub window_width: f64,
++    pub window_height: f64,
++    pub source_width: u32,
++    pub source_height: u32,
++    pub crop_x: u32,
++    pub crop_y: u32,
++    pub crop_width: u32,
++    pub crop_height: u32,
++    pub output_width: u32,
++    pub output_height: u32,
++}
++
++impl ComputerImageGeometry {
++    pub fn validate(&self) -> Result<(), &'static str> {
++        if ![
++            self.desktop_x,
++            self.desktop_y,
++            self.window_width,
++            self.window_height,
++        ]
++        .iter()
++        .all(|value| value.is_finite())
++            || self.window_width <= 0.0
++            || self.window_height <= 0.0
++            || !(self.desktop_x + self.window_width).is_finite()
++            || !(self.desktop_y + self.window_height).is_finite()
++        {
++            return Err("image_geometry_unproved");
++        }
++        if self.source_width == 0
++            || self.source_height == 0
++            || self.source_width > COMPUTER_IMAGE_MAX_SOURCE_EDGE
++            || self.source_height > COMPUTER_IMAGE_MAX_SOURCE_EDGE
++            || self.crop_width == 0
++            || self.crop_height == 0
++            || self
++                .crop_x
++                .checked_add(self.crop_width)
++                .is_none_or(|end| end > self.source_width)
++            || self
++                .crop_y
++                .checked_add(self.crop_height)
++                .is_none_or(|end| end > self.source_height)
++            || self.output_width == 0
++            || self.output_height == 0
++            || self.output_width > COMPUTER_IMAGE_MAX_OUTPUT_EDGE
++            || self.output_height > COMPUTER_IMAGE_MAX_OUTPUT_EDGE
++            || u64::from(self.output_width) * u64::from(self.output_height)
++                > COMPUTER_IMAGE_MAX_OUTPUT_PIXELS
++            || self.output_width > self.crop_width
++            || self.output_height > self.crop_height
++        {
++            return Err("image_dimensions_unproved");
++        }
++        Ok(())
++    }
++
++    /// Map the center of one output pixel. Never clamp an out-of-bounds point
++    /// into a different target. This calculation alone does not admit input.
++    pub fn desktop_pixel_center(&self, x: u32, y: u32) -> Result<(f64, f64), &'static str> {
++        self.validate()?;
++        if x >= self.output_width || y >= self.output_height {
++            return Err("image_point_out_of_bounds");
++        }
++        let source_x = f64::from(self.crop_x)
++            + (f64::from(x) + 0.5) * f64::from(self.crop_width) / f64::from(self.output_width);
++        let source_y = f64::from(self.crop_y)
++            + (f64::from(y) + 0.5) * f64::from(self.crop_height) / f64::from(self.output_height);
++        let point = (
++            self.desktop_x + source_x * self.window_width / f64::from(self.source_width),
++            self.desktop_y + source_y * self.window_height / f64::from(self.source_height),
++        );
++        if !point.0.is_finite() || !point.1.is_finite() {
++            return Err("image_geometry_unproved");
++        }
++        Ok(point)
++    }
++}
++
++/// One native-owned encoded image, transferred through genuine UniFFI bytes.
++/// Intentionally not a serde/JSON result: no Base64 or duplicate raw envelope.
++#[derive(Clone, PartialEq, uniffi::Record)]
++pub struct ComputerImage {
++    pub image_id: String,
++    pub pid: u32,
++    pub window_id: u64,
++    pub geometry: ComputerImageGeometry,
++    pub png: Vec<u8>,
++}
++
++impl std::fmt::Debug for ComputerImage {
++    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        out.debug_struct("ComputerImage")
++            .field("image_id", &self.image_id)
++            .field("pid", &self.pid)
++            .field("window_id", &self.window_id)
++            .field("geometry", &self.geometry)
++            .field("png_bytes", &self.png.len())
++            .finish()
++    }
++}
++
++impl ComputerImage {
++    /// Validate bounds and the encoder's PNG header. This does not replace a
++    /// full PNG decoder or prove capture provenance; only the owned producer
++    /// supplies images and the session/target proof remains outside this record.
++    pub fn validate(&self) -> Result<(), &'static str> {
++        self.geometry.validate()?;
++        if self.pid == 0
++            || self.pid > i32::MAX as u32
++            || self.window_id == 0
++            || self.image_id.is_empty()
++            || self.image_id.len() > 64
++            || !self
++                .image_id
++                .bytes()
++                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
++        {
++            return Err("image_identity_unproved");
++        }
++        if self.png.len() < 33
++            || self.png.len() > COMPUTER_IMAGE_MAX_BYTES
++            || &self.png[..8] != PNG_SIGNATURE
++            || self.png[8..12] != 13u32.to_be_bytes()
++            || &self.png[12..16] != b"IHDR"
++            || self.png[16..20] != self.geometry.output_width.to_be_bytes()
++            || self.png[20..24] != self.geometry.output_height.to_be_bytes()
++        {
++            return Err("image_encoding_unproved");
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn geometry() -> ComputerImageGeometry {
++        ComputerImageGeometry {
++            desktop_x: -100.0,
++            desktop_y: 40.0,
++            window_width: 400.0,
++            window_height: 300.0,
++            source_width: 800,
++            source_height: 600,
++            crop_x: 100,
++            crop_y: 80,
++            crop_width: 400,
++            crop_height: 200,
++            output_width: 200,
++            output_height: 100,
++        }
++    }
++
++    // Deliberately only a synthetic IHDR for shape tests, not a valid PNG file.
++    fn header_record() -> ComputerImage {
++        let geometry = geometry();
++        let mut png = vec![0; 33];
++        png[..8].copy_from_slice(PNG_SIGNATURE);
++        png[8..12].copy_from_slice(&13u32.to_be_bytes());
++        png[12..16].copy_from_slice(b"IHDR");
++        png[16..20].copy_from_slice(&geometry.output_width.to_be_bytes());
++        png[20..24].copy_from_slice(&geometry.output_height.to_be_bytes());
++        ComputerImage {
++            image_id: "image-fixture".into(),
++            pid: 7,
++            window_id: 9,
++            geometry,
++            png,
++        }
++    }
++
++    #[test]
++    fn controlled_image_geometry_maps_crop_scale_dpi_and_negative_desktop_origin() {
++        let geometry = geometry();
++        assert_eq!(geometry.desktop_pixel_center(0, 0), Ok((-49.5, 80.5)));
++        assert_eq!(geometry.desktop_pixel_center(199, 99), Ok((149.5, 179.5)));
++        assert_eq!(
++            geometry.desktop_pixel_center(200, 0),
++            Err("image_point_out_of_bounds")
++        );
++        assert_eq!(
++            geometry.desktop_pixel_center(0, 100),
++            Err("image_point_out_of_bounds")
++        );
++    }
++
++    #[test]
++    fn controlled_image_geometry_rejects_overflow_zero_upscale_and_nonfinite_facts() {
++        let valid = geometry();
++        for broken in [
++            ComputerImageGeometry {
++                crop_x: u32::MAX,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                crop_width: 0,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                crop_height: 601,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                output_width: 401,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                source_height: 0,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                source_width: COMPUTER_IMAGE_MAX_SOURCE_EDGE + 1,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                desktop_x: f64::NAN,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                desktop_y: f64::INFINITY,
++                ..valid.clone()
++            },
++            ComputerImageGeometry {
++                window_width: -1.0,
++                ..valid
++            },
++        ] {
++            assert!(broken.validate().is_err());
++            assert!(broken.desktop_pixel_center(0, 0).is_err());
++        }
++    }
++
++    #[test]
++    fn controlled_image_header_and_identity_must_match_bounded_metadata() {
++        let valid = header_record();
++        assert!(valid.validate().is_ok());
++        let mut wrong = valid.clone();
++        wrong.png[19] ^= 1;
++        assert_eq!(wrong.validate(), Err("image_encoding_unproved"));
++        let mut short = valid.clone();
++        short.png.truncate(24);
++        assert!(short.validate().is_err());
++        let mut large = valid.clone();
++        large.png.resize(COMPUTER_IMAGE_MAX_BYTES + 1, 0);
++        assert!(large.validate().is_err());
++        let mut no_pid = valid.clone();
++        no_pid.pid = 0;
++        assert!(no_pid.validate().is_err());
++        let mut injected = valid;
++        injected.image_id = "image\ncontent".into();
++        assert!(injected.validate().is_err());
++    }
++
++    #[test]
++    fn controlled_image_debug_never_duplicates_encoded_bytes() {
++        let image = header_record();
++        let debug = format!("{image:?}");
++        assert!(debug.contains("png_bytes: 33"));
++        assert!(!debug.contains("IHDR"));
++        assert!(!debug.contains("137, 80, 78, 71"));
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-contract/src/lib.rs b/libs/cua-driver/rust/crates/cua-driver-contract/src/lib.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-contract/src/lib.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-contract/src/lib.rs
+@@ -14,6 +14,7 @@
+ use std::sync::OnceLock;
+ 
+ pub mod compatibility;
++pub mod computer_image;
+ pub mod cursor;
+ mod cursor_tools;
+ mod desktop;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/image_reference.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/image_reference.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/image_reference.rs
+@@ -0,0 +1,46 @@
++//! Small image freshness facts, not input authority or retained image bytes.
++use cua_driver_contract::computer_image::{ComputerImage, ComputerImageGeometry};
++use sha2::{Digest, Sha256};
++
++#[derive(Debug)]
++pub struct ImageReference {
++    id: String,
++    pid: u32,
++    window_id: u64,
++    geometry: ComputerImageGeometry,
++    digest: [u8; 32],
++}
++
++impl ImageReference {
++    pub fn from_image(image: &ComputerImage) -> Result<Self, &'static str> {
++        image.validate()?;
++        Ok(Self {
++            id: image.image_id.clone(),
++            pid: image.pid,
++            window_id: image.window_id,
++            geometry: image.geometry.clone(),
++            digest: Sha256::digest(&image.png).into(),
++        })
++    }
++
++    pub fn geometry(&self) -> &ComputerImageGeometry {
++        &self.geometry
++    }
++
++    pub fn target_matches(&self, pid: u32, window_id: u64) -> bool {
++        self.pid == pid && self.window_id == window_id
++    }
++
++    pub fn addresses(&self, id: &str, x: u32, y: u32) -> Result<(), &'static str> {
++        if self.id != id {
++            return Err("stale_image_observation");
++        }
++        self.geometry.desktop_pixel_center(x, y).map(|_| ())
++    }
++
++    pub fn matches(&self, image: &ComputerImage) -> bool {
++        self.target_matches(image.pid, image.window_id)
++            && self.geometry == image.geometry
++            && self.digest == <[u8; 32]>::from(Sha256::digest(&image.png))
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/pointer_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/pointer_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/pointer_tests.rs
+@@ -0,0 +1,51 @@
++use super::*;
++
++#[tokio::test]
++async fn controlled_pointer_primitives_are_native_only_bounded_and_not_mixed() {
++    let gate = Gate::new();
++    let session = gate
++        .session(None, Arc::new(|| true), 1, 2, Some((3, 4)))
++        .unwrap();
++    let op = session.new_operation().unwrap();
++    assert_eq!(op.pointer_primary(|| ()), Err("invalid_primitive"));
++    op.begin().unwrap();
++    op.pointer_primary(|| ()).unwrap();
++    assert_eq!(op.primary(true, || ()), Err("invalid_primitive"));
++    assert_eq!(op.browser_primary(|| ()), Err("invalid_primitive"));
++    op.pointer_primary(|| ()).unwrap();
++    assert_eq!(op.pointer_primary(|| ()), Err("invalid_primitive"));
++    op.finish();
++    assert!(op.terminal().await.unwrap().input_committed);
++    let browser = gate.browser_session(Arc::new(|| true)).unwrap();
++    let op = browser.new_operation().unwrap();
++    op.begin().unwrap();
++    assert_eq!(
++        op.pointer_primary(|| panic!("browser pointer input")),
++        Err("unsupported_route")
++    );
++    op.finish();
++    assert!(!op.terminal().await.unwrap().input_committed);
++}
++
++#[tokio::test]
++async fn controlled_pointer_cancel_or_ancestor_revoke_prevents_next_primary() {
++    for revoke in [false, true] {
++        let gate = Gate::new();
++        let root = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++        let child = gate
++            .session(Some(root.clone()), Arc::new(|| true), 1, 2, None)
++            .unwrap();
++        let op = child.new_operation().unwrap();
++        op.begin().unwrap();
++        op.pointer_primary(|| ()).unwrap();
++        if revoke {
++            root.revoke();
++        } else {
++            op.cancel();
++        }
++        assert!(op.pointer_primary(|| panic!("down after revoke")).is_err());
++        op.finish();
++        let terminal = op.terminal().await.unwrap();
++        assert!(terminal.cancelled && terminal.input_committed);
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/routes_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/routes_tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/routes_tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/routes_tests.rs
+@@ -1,4 +1,24 @@
+ use super::*;
++
++#[test]
++fn controlled_scroll_is_native_scoped_and_does_not_enable_other_tools() {
++    let gate = Gate::new();
++    let native = gate
++        .session(None, Arc::new(|| true), 42, 7, None)
++        .unwrap()
++        .new_operation()
++        .unwrap();
++    let browser = gate
++        .browser_session(Arc::new(|| true))
++        .unwrap()
++        .new_operation()
++        .unwrap();
++    let args = serde_json::json!({"pid":42,"window_id":7,"direction":"down","x":1,"y":1});
++    assert!(native.permits_tool("scroll", &args, false));
++    assert!(!browser.permits_tool("scroll", &args, true));
++    assert!(!native.permits_tool("press_key", &args, false));
++    assert!(!native.permits_tool("get_desktop_state", &args, false));
++}
+ 
+ #[test]
+ fn controlled_browser_routes_require_native_attestation_and_opaque_binding_shape() {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs
+@@ -89,7 +89,7 @@
+     ) -> bool {
+         match self.session.scope {
+             SessionScope::NativeWindow(_) => {
+-                matches!(name, "get_window_state" | "click" | "set_value")
++                matches!(name, "get_window_state" | "click" | "set_value" | "scroll")
+             }
+             SessionScope::IsolatedBrowser => {
+                 if !controlled_browser_route
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+@@ -12,8 +12,10 @@
+ };
+ use tokio::sync::watch;
+ 
++mod image_reference;
+ mod resources;
+ mod scope;
++pub use image_reference::ImageReference;
+ pub use resources::{SessionResource, SessionResources};
+ pub use scope::NativeWindowTarget;
+ use scope::SessionScope;
+@@ -386,6 +388,14 @@
+         self.primary_with_limit(true, 16, call)
+     }
+ 
++    /// Native image pointer: one tracking move and one button-down or discrete
++    /// wheel event, each admitted on its own stack. The down's matching up is a synchronous release
++    /// obligation, not permission for another click after cancellation.
++    pub fn pointer_primary<T>(&self, call: impl FnOnce() -> T) -> Result<T, &'static str> {
++        self.session.native_window()?;
++        self.primary_with_limit(true, 2, call)
++    }
++
+     fn primary_with_limit<T>(
+         &self,
+         input: bool,
+@@ -727,6 +737,8 @@
+ }
+ 
+ #[cfg(test)]
++mod pointer_tests;
++#[cfg(test)]
+ mod browser_tests;
+ #[cfg(test)]
+ mod plan_tests;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs
+@@ -306,6 +306,12 @@
+     /// the MCP result envelope or its legacy structured payload.
+     #[serde(skip)]
+     pub action_record: Option<crate::action_record::ActionExecutionRecord>,
++    /// One owned controlled-capture payload. The canonical invocation still
++    /// validates its structured metadata; only the typed SDK consumes bytes.
++    /// Never serialize a second raw/Base64 representation into MCP or logs.
++    #[cfg(target_os = "macos")]
++    #[serde(skip)]
++    pub computer_image: Option<cua_driver_contract::computer_image::ComputerImage>,
+ }
+ 
+ impl ToolResult {
+@@ -327,6 +333,25 @@
+     pub fn with_structured(mut self, v: Value) -> Self {
+         self.structured_content = Some(v);
+         self
++    }
++
++    #[cfg(target_os = "macos")]
++    pub fn with_computer_image(
++        mut self,
++        image: cua_driver_contract::computer_image::ComputerImage,
++    ) -> Result<Self, &'static str> {
++        image.validate()?;
++        if self.computer_image.is_some()
++            || self.is_error == Some(true)
++            || self
++                .content
++                .iter()
++                .any(|part| matches!(part, Content::Image { .. }))
++        {
++            return Err("duplicate_or_failed_image_result");
++        }
++        self.computer_image = Some(image);
++        Ok(self)
+     }
+ 
+     pub fn with_action_record(
+@@ -397,6 +422,72 @@
+     )
+ }
+ 
++#[cfg(all(test, target_os = "macos"))]
++mod computer_image_wire_tests {
++    use super::*;
++    use cua_driver_contract::computer_image::{ComputerImage, ComputerImageGeometry};
++
++    fn image() -> ComputerImage {
++        ComputerImage {
++            image_id: "private-image".into(),
++            pid: 7,
++            window_id: 9,
++            geometry: ComputerImageGeometry {
++                desktop_x: 0.0,
++                desktop_y: 0.0,
++                window_width: 1.0,
++                window_height: 1.0,
++                source_width: 1,
++                source_height: 1,
++                crop_x: 0,
++                crop_y: 0,
++                crop_width: 1,
++                crop_height: 1,
++                output_width: 1,
++                output_height: 1,
++            },
++            png: crate::image_utils::encode_rgba_to_png(&[255, 0, 0, 255], 1, 1).unwrap(),
++        }
++    }
++
++    #[test]
++    fn controlled_image_bytes_are_not_copied_into_json_or_debug() {
++        let payload = image();
++        let pointer = payload.png.as_ptr();
++        let size = payload.png.len();
++        let plain = ToolResult::text("image captured");
++        let mut result = ToolResult::text("image captured")
++            .with_computer_image(payload)
++            .unwrap();
++        assert_eq!(
++            serde_json::to_value(&result).unwrap(),
++            serde_json::to_value(plain).unwrap()
++        );
++        let moved = result.computer_image.take().unwrap();
++        assert_eq!(moved.png.as_ptr(), pointer);
++        assert_eq!(moved.png.len(), size);
++        assert!(result.computer_image.is_none());
++        assert!(!format!("{moved:?}").contains("IHDR"));
++    }
++
++    #[test]
++    fn controlled_image_result_refuses_duplicate_encodings_and_failure_payloads() {
++        assert!(ToolResult::text("one")
++            .with_computer_image(image())
++            .unwrap()
++            .with_computer_image(image())
++            .is_err());
++        assert!(ToolResult::error("refused")
++            .with_computer_image(image())
++            .is_err());
++        let mut result = ToolResult::text("legacy");
++        result
++            .content
++            .push(Content::image_png("legacy-base64".into()));
++        assert!(result.with_computer_image(image()).is_err());
++    }
++}
++
+ #[cfg(test)]
+ mod image_mime_type_tests {
+     use super::Content;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/browser.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/browser.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/browser.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/browser.rs
+@@ -69,6 +69,7 @@
+                 native,
+                 gate,
+                 observation: Mutex::new(None),
++                image_reference: Mutex::new(None),
+                 // Each delegated session gets its own fresh profile; it never
+                 // borrows the parent's tab, cookies, refs or connection.
+                 browser: Some(BrowserContext::new(bundle, scratch)),
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/image.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/image.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/image.rs
+@@ -0,0 +1,204 @@
++//! Typed image facade. The producer still enters canonical get_window_state;
++//! only the image bytes bypass its JSON/base64 presentation envelope.
++use super::{refused, ComputerError, ComputerOperation};
++use cua_driver_contract::computer_image::{ComputerImage, COMPUTER_IMAGE_MAX_OUTPUT_EDGE};
++use cua_driver_contract::{ScrollDirection, WindowStateOutput};
++use std::sync::Arc;
++
++#[uniffi::export]
++impl ComputerOperation {
++    /// One single left click at a pixel center in the last returned native
++    /// image. A fresh image/geometry comparison is required before dispatch.
++    pub fn start_image_click(
++        self: Arc<Self>,
++        image_id: String,
++        x: u32,
++        y: u32,
++    ) -> Result<(), ComputerError> {
++        self.start_image_input(image_id, x, y, None)
++    }
++
++    /// One discrete line-wheel event at a current image pixel center. No
++    /// keyboard, AX-scroll or foreground fallback; effect remains unverified.
++    pub fn start_image_scroll(
++        self: Arc<Self>,
++        image_id: String,
++        x: u32,
++        y: u32,
++        direction: ScrollDirection,
++    ) -> Result<(), ComputerError> {
++        self.start_image_input(image_id, x, y, Some(direction))
++    }
++
++    pub fn start_capture(self: Arc<Self>, max_dimension: u32) -> Result<(), ComputerError> {
++        if max_dimension == 0 || max_dimension > COMPUTER_IMAGE_MAX_OUTPUT_EDGE {
++            return Err(refused("invalid_capture_bounds"));
++        }
++        // Browser is a distinct authority scope, not permission to use native AX
++        // or a generic native window route with a reconstructed PID.
++        let target = self.session.gate.native_window().map_err(refused)?;
++        self.start(
++            "get_window_state",
++            serde_json::json!({
++                "pid":target.pid,"window_id":target.window_id,
++                "include_accessibility_tree":false,"include_screenshot":true,
++                "max_dimension":max_dimension,
++            }),
++        )
++    }
++}
++
++impl ComputerOperation {
++    fn start_image_input(
++        self: &Arc<Self>,
++        image_id: String,
++        x: u32,
++        y: u32,
++        direction: Option<ScrollDirection>,
++    ) -> Result<(), ComputerError> {
++        if image_id.is_empty()
++            || image_id.len() > 64
++            || !image_id
++                .bytes()
++                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
++        {
++            return Err(refused("invalid_image_reference"));
++        }
++        let target = self.session.gate.native_window().map_err(refused)?;
++        #[cfg(not(target_os = "macos"))]
++        {
++            let _ = (target, x, y, direction);
++            Err(refused("unsupported_platform"))
++        }
++        #[cfg(target_os = "macos")]
++        {
++            let mut args = serde_json::json!({"pid":target.pid,"window_id":target.window_id,"x":x,"y":y,"delivery_mode":"background"});
++            let tool = if let Some(direction) = direction {
++                args["direction"] = serde_json::json!(direction.as_str());
++                args["by"] = serde_json::json!("line");
++                args["amount"] = serde_json::json!(1);
++                "scroll"
++            } else {
++                args["action"] = serde_json::json!("press");
++                "click"
++            };
++            let worker = self.clone();
++            self.launch(None, async move {
++                let reference = worker.take_image_reference(&image_id, x, y)?;
++                platform_macos::input::controlled::scope(reference, worker.invoke(tool, args)).await
++            })
++        }
++    }
++}
++
++#[cfg(target_os = "macos")]
++impl ComputerOperation {
++    pub(super) fn take_image_reference(
++        &self,
++        id: &str,
++        x: u32,
++        y: u32,
++    ) -> Result<Arc<platform_macos::input::controlled::ImageReference>, ComputerError> {
++        let reference = self
++            .session
++            .image_reference
++            .lock()
++            .map_err(|_| self.session.host.quarantine())?
++            .take()
++            .ok_or_else(|| refused("stale_image_observation"))?;
++        reference.addresses(id, x, y).map_err(refused)?;
++        Ok(reference)
++    }
++}
++
++pub(super) fn validate_result(
++    image: &ComputerImage,
++    metadata: &WindowStateOutput,
++    pid: u32,
++    window_id: u64,
++    max_dimension: u32,
++) -> Result<(), ComputerError> {
++    image.validate().map_err(refused)?;
++    let geometry = &image.geometry;
++    if image.pid != pid
++        || image.window_id != window_id
++        || metadata.pid != pid
++        || metadata.window_id != window_id
++        || metadata.snapshot_id.as_deref() != Some(image.image_id.as_str())
++        || metadata.screenshot_width != Some(geometry.output_width)
++        || metadata.screenshot_height != Some(geometry.output_height)
++        || metadata.screenshot_frame_valid != Some(true)
++        || metadata.screenshot_mime_type.as_deref() != Some("image/png")
++        || metadata.screenshot_file_path.is_some()
++        || !metadata.images.is_empty()
++        || geometry.output_width > max_dimension
++        || geometry.output_height > max_dimension
++        || metadata.window_bounds.as_ref().is_none_or(|bounds| {
++            bounds.x.to_bits() != geometry.desktop_x.to_bits()
++                || bounds.y.to_bits() != geometry.desktop_y.to_bits()
++                || bounds.width.to_bits() != geometry.window_width.to_bits()
++                || bounds.height.to_bits() != geometry.window_height.to_bits()
++        })
++    {
++        return Err(refused("image_metadata_mismatch"));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use cua_driver_contract::computer_image::ComputerImageGeometry;
++
++    fn fixture() -> (ComputerImage, WindowStateOutput) {
++        let image = ComputerImage {
++            image_id: "image-fixture".into(),
++            pid: 7,
++            window_id: 9,
++            geometry: ComputerImageGeometry {
++                desktop_x: 0.0,
++                desktop_y: 0.0,
++                window_width: 1.0,
++                window_height: 1.0,
++                source_width: 1,
++                source_height: 1,
++                crop_x: 0,
++                crop_y: 0,
++                crop_width: 1,
++                crop_height: 1,
++                output_width: 1,
++                output_height: 1,
++            },
++            png: cua_driver_core::image_utils::encode_rgba_to_png(&[1, 2, 3, 255], 1, 1).unwrap(),
++        };
++        let metadata = serde_json::from_value(serde_json::json!({
++            "pid":7,"window_id":9,"snapshot_id":"image-fixture",
++            "screenshot_width":1,"screenshot_height":1,"screenshot_frame_valid":true,
++            "screenshot_mime_type":"image/png","window_bounds":{"x":0,"y":0,"width":1,"height":1}
++        }))
++        .unwrap();
++        (image, metadata)
++    }
++
++    #[test]
++    fn controlled_image_facade_requires_matching_canonical_metadata_and_target() {
++        let (image, metadata) = fixture();
++        assert!(validate_result(&image, &metadata, 7, 9, 1).is_ok());
++        assert!(validate_result(&image, &metadata, 8, 9, 1).is_err());
++        assert!(validate_result(&image, &metadata, 7, 10, 1).is_err());
++        assert!(validate_result(&image, &metadata, 7, 9, 0).is_err());
++        for mutate in [
++            |value: &mut WindowStateOutput| value.snapshot_id = Some("another-frame".into()),
++            |value: &mut WindowStateOutput| value.screenshot_width = Some(2),
++            |value: &mut WindowStateOutput| value.screenshot_frame_valid = Some(false),
++            |value: &mut WindowStateOutput| value.window_bounds.as_mut().unwrap().x = 1.0,
++            |value: &mut WindowStateOutput| {
++                value.screenshot_file_path = Some("not-image-bytes".into())
++            },
++        ] {
++            let mut wrong = metadata.clone();
++            mutate(&mut wrong);
++            assert!(validate_result(&image, &wrong, 7, 9, 1).is_err());
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/plan_native.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/plan_native.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/plan_native.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/plan_native.rs
+@@ -69,6 +69,13 @@
+         tool: &'static str,
+         args: Value,
+     ) -> Result<ComputerResult, ComputerError> {
++        let capture_requested = tool == "get_window_state"
++            && args["include_screenshot"] == true
++            && args["include_accessibility_tree"] == false;
++        let capture_maximum = args["max_dimension"]
++            .as_u64()
++            .and_then(|value| u32::try_from(value).ok())
++            .unwrap_or(0);
+         self.core
+             .checkpoint()
+             .map_err(|_| ComputerError::Cancelled {
+@@ -83,6 +90,8 @@
+             .lock()
+             .map_err(|_| self.session.host.quarantine())? = None;
+         #[cfg(target_os = "macos")]
++        { *self.session.image_reference.lock().map_err(|_| self.session.host.quarantine())? = None; }
++        #[cfg(target_os = "macos")]
+         let raw = if let Some(context) = &self.session.browser {
+             platform_macos::browser::controlled_browser::session::scope(
+                 context.clone(),
+@@ -95,6 +104,17 @@
+         #[cfg(not(target_os = "macos"))]
+         let raw = self.session.native.invoke(tool, args).await;
+         let raw = raw.ok_or_else(|| refused("runtime_closed"))?;
++        #[cfg(target_os = "macos")]
++        let (raw, image) = {
++            let mut raw = raw;
++            let image = raw.computer_image.take();
++            (raw, image)
++        };
++        #[cfg(not(target_os = "macos"))]
++        let image: Option<cua_driver_contract::computer_image::ComputerImage> = None;
++        if !capture_requested && image.is_some() {
++            return Err(refused("unexpected_native_image"));
++        }
+         if matches!(
+             tool,
+             "get_browser_state" | "browser_type" | "browser_click" | "browser_navigate"
+@@ -138,6 +158,24 @@
+             return Err(refused(
+                 result.error_code.as_deref().unwrap_or("native_refused"),
+             ));
++        }
++        if capture_requested {
++            let image = image.ok_or_else(|| refused("capture_unconfirmed"))?;
++            let target = self.session.gate.native_window().map_err(refused)?;
++            let metadata = result
++                .window_state_success()
++                .map_err(|_| refused("invalid_image_metadata"))?;
++            super::image::validate_result(
++                &image,
++                &metadata,
++                target.pid as u32,
++                u64::from(target.window_id),
++                capture_maximum,
++            )?;
++            #[cfg(target_os = "macos")]
++            { *self.session.image_reference.lock().map_err(|_| self.session.host.quarantine())? =
++                Some(std::sync::Arc::new(platform_macos::input::controlled::ImageReference::from_image(&image).map_err(refused)?)); }
++            return Ok(ComputerResult::Image { value: image });
+         }
+         if tool == "get_window_state" {
+             let value = result
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/images.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/images.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/images.rs
+@@ -0,0 +1,107 @@
++//! Synthetic owned image outcomes only: no capture, native owner or canonical lease.
++use super::*;
++use cua_driver_contract::computer_image::{ComputerImage, ComputerImageGeometry};
++
++pub(super) fn image() -> ComputerImage {
++    ComputerImage {
++        image_id: "private-image-result".into(),
++        pid: 42,
++        window_id: 7,
++        geometry: ComputerImageGeometry {
++            desktop_x: 0.0,
++            desktop_y: 0.0,
++            window_width: 1.0,
++            window_height: 1.0,
++            source_width: 1,
++            source_height: 1,
++            crop_x: 0,
++            crop_y: 0,
++            crop_width: 1,
++            crop_height: 1,
++            output_width: 1,
++            output_height: 1,
++        },
++        png: cua_driver_core::image_utils::encode_rgba_to_png(&[1, 2, 3, 255], 1, 1).unwrap(),
++    }
++}
++
++#[tokio::test]
++async fn controlled_image_invalid_bounds_and_preabort_do_not_launch() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    for maximum in [0, 2049, u32::MAX] {
++        assert!(matches!(operation.clone().start_capture(maximum),
++            Err(ComputerError::Refused{reason}) if reason=="invalid_capture_bounds"));
++        assert!(operation.outcome.lock().unwrap().is_none());
++    }
++    operation.cancel();
++    assert!(matches!(
++        operation.clone().start_capture(1024),
++        Err(ComputerError::Cancelled {
++            input_committed: false
++        })
++    ));
++    assert!(operation.outcome.lock().unwrap().is_none());
++    assert!(host.scheduler.clone().try_lock_owned().is_ok());
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_image_cancel_waits_for_drain_and_never_publishes_the_payload() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    let weak = Arc::downgrade(&operation);
++    operation.core.begin().unwrap();
++    let pending = operation.core.track_callback().unwrap();
++    *operation.outcome.lock().unwrap() = Some(Ok(ComputerResult::Image { value: image() }));
++    operation.cancel();
++    operation.core.finish();
++    let mut result = Box::pin(operation.result());
++    assert!(result
++        .as_mut()
++        .poll(&mut Context::from_waker(Waker::noop()))
++        .is_pending());
++    assert!(!operation.core.is_proven_terminal());
++    drop(pending);
++    assert!(matches!(
++        result.await,
++        Err(ComputerError::Cancelled {
++            input_committed: false
++        })
++    ));
++    drop(operation);
++    assert!(
++        weak.upgrade().is_none(),
++        "proof records must not retain the image outcome owner"
++    );
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_image_native_result_owner_is_reclaimed_after_foreign_handle_retirement() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    let operation = session.clone().new_operation().unwrap();
++    let weak = Arc::downgrade(&operation);
++    operation.core.begin().unwrap();
++    *operation.outcome.lock().unwrap() = Some(Ok(ComputerResult::Image { value: image() }));
++    operation.core.finish();
++    let result = operation.result().await.unwrap();
++    assert!(matches!(&result,ComputerResult::Image{value} if value.validate().is_ok()));
++    assert!(
++        session.observation.lock().unwrap().is_none(),
++        "image-only result must not grant AX refs"
++    );
++    // Returned bytes belong to the consumer; destroying the native operation
++    // releases its retained outcome without invalidating that returned copy.
++    drop(operation);
++    assert!(weak.upgrade().is_none());
++    session.close().await.unwrap();
++    host.close().await.unwrap();
++    assert!(matches!(&result,ComputerResult::Image{value} if value.validate().is_ok()));
++    drop(result);
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/pointer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/pointer.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/pointer.rs
+@@ -0,0 +1,108 @@
++//! No GUI calls: reference ownership, rejection and native lane tests.
++use super::*;
++use platform_macos::input::controlled::ImageReference;
++
++fn reference() -> Arc<ImageReference> {
++    Arc::new(ImageReference::from_image(&super::images::image()).unwrap())
++}
++
++#[tokio::test]
++async fn controlled_pointer_ref_is_session_local_single_use_and_bad_id_consumes_it() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let first = session(&host, None);
++    let second = session(&host, None);
++    let op = first.clone().new_operation().unwrap();
++    let foreign = second.new_operation().unwrap();
++    *first.image_reference.lock().unwrap() = Some(reference());
++    assert!(foreign
++        .take_image_reference("private-image-result", 0, 0)
++        .is_err());
++    assert!(first.image_reference.lock().unwrap().is_some());
++    assert!(op.take_image_reference("wrong", 0, 0).is_err());
++    assert!(first.image_reference.lock().unwrap().is_none());
++    *first.image_reference.lock().unwrap() = Some(reference());
++    assert!(op
++        .take_image_reference("private-image-result", 0, 0)
++        .is_ok());
++    assert!(op
++        .take_image_reference("private-image-result", 0, 0)
++        .is_err());
++    *first.image_reference.lock().unwrap() = Some(reference());
++    assert!(op
++        .take_image_reference("private-image-result", 1, 0)
++        .is_err());
++    assert!(first.image_reference.lock().unwrap().is_none());
++    op.cancel();
++    foreign.cancel();
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_pointer_busy_and_preabort_do_not_consume_a_reference() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    *session.image_reference.lock().unwrap() = Some(reference());
++    let op = session.clone().new_operation().unwrap();
++    let lane = host.scheduler.clone().try_lock_owned().unwrap();
++    assert!(
++        matches!(op.clone().start_image_click("private-image-result".into(),0,0),
++        Err(ComputerError::Refused{reason}) if reason=="native_busy")
++    );
++    assert!(session.image_reference.lock().unwrap().is_some());
++    drop(lane);
++    op.cancel();
++    assert!(matches!(
++        op.clone()
++            .start_image_click("private-image-result".into(), 0, 0),
++        Err(ComputerError::Cancelled {
++            input_committed: false
++        })
++    ));
++    assert!(session.image_reference.lock().unwrap().is_some());
++    assert!(!op.terminal().await.unwrap().input_committed);
++    host.close().await.unwrap();
++    assert!(session.image_reference.lock().unwrap().is_none());
++}
++
++#[tokio::test]
++async fn controlled_pointer_missing_image_rejects_before_platform_and_other_observation_invalidates(
++) {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    let op = session.clone().new_operation().unwrap();
++    op.clone()
++        .start_image_click("missing".into(), 0, 0)
++        .unwrap();
++    assert!(
++        matches!(op.result().await,Err(ComputerError::Refused{reason}) if reason=="stale_image_observation")
++    );
++    assert!(!op.terminal().await.unwrap().input_committed);
++    *session.image_reference.lock().unwrap() = Some(reference());
++    let next = session.clone().new_operation().unwrap();
++    next.start("controlled_diagnostic_no_such_tool", serde_json::json!({}))
++        .unwrap();
++    assert!(next.result().await.is_err());
++    assert!(session.image_reference.lock().unwrap().is_none());
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_pointer_subtree_close_retires_only_its_reference_facts() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let root = session(&host, None);
++    let child = session(&host, Some(&root));
++    let sibling = session(&host, None);
++    for session in [&root, &child, &sibling] {
++        *session.image_reference.lock().unwrap() = Some(reference());
++    }
++    root.clone().close().await.unwrap();
++    assert!(root.image_reference.lock().unwrap().is_none());
++    assert!(child.image_reference.lock().unwrap().is_none());
++    assert!(sibling.image_reference.lock().unwrap().is_some());
++    host.close().await.unwrap();
++    assert!(sibling.image_reference.lock().unwrap().is_none());
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/scroll.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/scroll.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/scroll.rs
+@@ -0,0 +1,55 @@
++//! Facade refusal paths only; no platform scroll, capture or canonical lease.
++use super::*;
++use cua_driver_contract::ScrollDirection;
++
++#[tokio::test]
++async fn controlled_scroll_missing_image_and_preabort_never_reach_platform() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    let operation = session.clone().new_operation().unwrap();
++    operation
++        .clone()
++        .start_image_scroll("missing".into(), 0, 0, ScrollDirection::Down)
++        .unwrap();
++    assert!(
++        matches!(operation.result().await, Err(ComputerError::Refused { reason }) if reason == "stale_image_observation")
++    );
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    let operation = session.new_operation().unwrap();
++    operation.cancel();
++    assert!(matches!(
++        operation
++            .clone()
++            .start_image_scroll("missing".into(), 0, 0, ScrollDirection::Right),
++        Err(ComputerError::Cancelled {
++            input_committed: false
++        })
++    ));
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_scroll_cannot_convert_browser_scope_to_window_permission() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let browser = host
++        .clone()
++        .open_browser_session(
++            "/nonexistent/qualified".into(),
++            "/nonexistent/scratch".into(),
++            None,
++        )
++        .unwrap();
++    let operation = browser.new_operation().unwrap();
++    assert!(
++        matches!(operation.clone().start_image_scroll("missing".into(), 0, 0, ScrollDirection::Up),
++        Err(ComputerError::Refused { reason }) if reason == "unsupported_route")
++    );
++    assert!(operation.outcome.lock().unwrap().is_none());
++    assert!(host.scheduler.clone().try_lock_owned().is_ok());
++    operation.cancel();
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    host.close().await.unwrap();
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+@@ -8,6 +8,11 @@
+ use std::task::{Context, Poll, Waker};
+ use std::time::Duration;
+ 
++mod images;
++#[cfg(target_os = "macos")]
++mod pointer;
++#[cfg(target_os = "macos")]
++mod scroll;
+ mod resources;
+ 
+ #[cfg(target_os = "macos")]
+@@ -193,6 +198,8 @@
+         drop_barrier: Mutex::new(None),
+         #[cfg(target_os = "macos")]
+         browser: None,
++        #[cfg(target_os = "macos")]
++        image_reference: Mutex::new(None),
+     });
+     let mut sessions = host.sessions.lock().unwrap();
+     sessions.retain(|session| session.strong_count() > 0);
+@@ -695,12 +702,15 @@
+         drop_barrier: Mutex::new(None),
+         #[cfg(target_os = "macos")]
+         browser: None,
++        #[cfg(target_os = "macos")]
++        image_reference: Mutex::new(None),
+     });
+     host.sessions.lock().unwrap().push(Arc::downgrade(&session));
+     let operation = session.new_operation().unwrap();
+     for result in [
+         operation.clone().start_observe(1, 1),
+         operation.clone().start_click("s00000001:0".into()),
++        operation.clone().start_image_click("image-fixture".into(), 0, 0),
+         operation.clone().start_plan(missing_observation_plan()),
+     ] {
+         assert!(
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+@@ -1,5 +1,6 @@
+ //! Pi-owned controlled facade. Native sequential plans retain the same gate and drain proof.
+ mod browser;
++mod image;
+ mod plan;
+ mod plan_native;
+ use crate::runtime::{DriverRuntime, RuntimeSession};
+@@ -38,6 +39,7 @@
+ pub enum ComputerResult {
+     BrowserPrepared { pid: u32, window_id: u64 },
+     Observation { value: WindowStateOutput },
++    Image { value: cua_driver_contract::computer_image::ComputerImage },
+     Action { value: ActionResult },
+     Plan { value: ComputerPlanResult },
+ }
+@@ -201,6 +203,8 @@
+             gate,
+             observation: Mutex::new(None),
+             #[cfg(target_os = "macos")]
++            image_reference: Mutex::new(None),
++            #[cfg(target_os = "macos")]
+             browser: None,
+             closing: OnceLock::new(),
+             closed: AtomicBool::new(false),
+@@ -290,6 +294,8 @@
+         }
+         for session in sessions.iter().filter_map(Weak::upgrade) {
+             *session.observation.lock().map_err(|_| self.quarantine())? = None;
++            #[cfg(target_os = "macos")]
++            { *session.image_reference.lock().map_err(|_| self.quarantine())? = None; }
+             session.closed.store(true, Ordering::Release);
+         }
+         operations.clear();
+@@ -312,6 +318,8 @@
+     native: Arc<RuntimeSession>,
+     gate: Arc<Session>,
+     observation: Mutex<Option<WindowStateOutput>>,
++    #[cfg(target_os = "macos")]
++    image_reference: Mutex<Option<Arc<platform_macos::input::controlled::ImageReference>>>,
+     #[cfg(target_os = "macos")]
+     browser: Option<Arc<platform_macos::browser::controlled_browser::session::BrowserContext>>,
+     closing: OnceLock<Closing>,
+@@ -413,6 +421,8 @@
+                             .observation
+                             .lock()
+                             .map_err(|_| session.host.quarantine())? = None;
++                        #[cfg(target_os = "macos")]
++                        { *child.image_reference.lock().map_err(|_| session.host.quarantine())? = None; }
+                         child.closed.store(true, Ordering::Release);
+                     }
+                     session
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs b/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs
+@@ -0,0 +1,185 @@
++//! Exact-window capture on the caller's tracked blocking worker. No timeout
++//! detachment, shell fallback, cached filter, display capture or input replay.
++use super::{build_window_capture_plan, current_window_capture_identity, native_capture_gate};
++use cua_driver_contract::computer_image::{
++    ComputerImage, ComputerImageGeometry, COMPUTER_IMAGE_MAX_OUTPUT_EDGE,
++    COMPUTER_IMAGE_MAX_SOURCE_EDGE,
++};
++use cua_driver_core::controlled::Operation;
++use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
++
++fn output_dimensions(width: u32, height: u32, maximum: u32) -> Result<(u32, u32), &'static str> {
++    if width == 0
++        || height == 0
++        || width > COMPUTER_IMAGE_MAX_SOURCE_EDGE
++        || height > COMPUTER_IMAGE_MAX_SOURCE_EDGE
++        || maximum == 0
++        || maximum > COMPUTER_IMAGE_MAX_OUTPUT_EDGE
++    {
++        return Err("image_dimensions_unproved");
++    }
++    let longest = width.max(height);
++    if longest <= maximum {
++        return Ok((width, height));
++    }
++    Ok((
++        (u64::from(width) * u64::from(maximum) / u64::from(longest)).max(1) as u32,
++        (u64::from(height) * u64::from(maximum) / u64::from(longest)).max(1) as u32,
++    ))
++}
++
++/// Called only after canonical get_window_state admission, inside the same
++/// Operation::blocking scope that awaits every platform call and local drop.
++pub(crate) fn capture(operation: &Operation, maximum: u32) -> Result<ComputerImage, &'static str> {
++    operation.checkpoint()?;
++    let target = operation.session.native_window()?;
++    if maximum == 0 || maximum > COMPUTER_IMAGE_MAX_OUTPUT_EDGE {
++        return Err("image_dimensions_unproved");
++    }
++    let target_live = || {
++        target.process_stamp.is_some()
++            && crate::tools::computer_process_stamp(target.pid) == target.process_stamp
++    };
++    if !target_live() {
++        return Err("controlled_target_stale");
++    }
++    let identity =
++        current_window_capture_identity(target.window_id).map_err(|_| "controlled_target_stale")?;
++    // Exact authorized floating panels are valid targets too. Keep the layer
++    // in the before/after identity proof, rather than requiring normal level.
++    if identity.pid != target.pid {
++        return Err("controlled_target_stale");
++    }
++    // The shared gate prevents overlap with legacy SCK calls without borrowing
++    // their detached timeout worker. The permit is held through image release.
++    let _permit = native_capture_gate().try_acquire().ok_or("capture_busy")?;
++    let plan = operation
++        .primary(false, || {
++            build_window_capture_plan(target.window_id, identity)
++        })?
++        .map_err(|_| "capture_window_unproved")?;
++    let mut plan = std::sync::Arc::try_unwrap(plan).map_err(|_| "capture_plan_shared")?;
++    let rect = plan.filter.content_rect();
++    let width = f64::from_bits(identity.width);
++    let height = f64::from_bits(identity.height);
++    // This first route captures the entire shadowless window. Refuse a partial
++    // content extent rather than invent its offset relative to WindowServer.
++    if rect.size.width.to_bits() != identity.width || rect.size.height.to_bits() != identity.height
++    {
++        return Err("image_geometry_unproved");
++    }
++    let source_width = plan.config.width();
++    let source_height = plan.config.height();
++    let (output_width, output_height) = output_dimensions(source_width, source_height, maximum)?;
++    let geometry = ComputerImageGeometry {
++        desktop_x: f64::from_bits(identity.x),
++        desktop_y: f64::from_bits(identity.y),
++        window_width: width,
++        window_height: height,
++        source_width,
++        source_height,
++        crop_x: 0,
++        crop_y: 0,
++        crop_width: source_width,
++        crop_height: source_height,
++        output_width,
++        output_height,
++    };
++    geometry.validate()?;
++    plan.config = plan
++        .config
++        .with_width(output_width)
++        .with_height(output_height)
++        .with_scales_to_fit(false)
++        .with_preserves_aspect_ratio(false)
++        .with_ignores_shadows_single_window(true)
++        .with_includes_child_windows(false)
++        .with_shows_cursor(false);
++    if !target_live()
++        || current_window_capture_identity(target.window_id)
++            .map_err(|_| "controlled_target_stale")?
++            != identity
++    {
++        return Err("controlled_target_stale");
++    }
++    // The dependency waits for its completion; unlike the legacy wrapper, this
++    // call does not return after a timer while a detached capture keeps running.
++    let image = operation
++        .primary(false, || {
++            SCScreenshotManager::capture_image(&plan.filter, &plan.config)
++        })?
++        .map_err(|_| "capture_unconfirmed")?;
++    operation.checkpoint()?;
++    if image.width() != output_width as usize || image.height() != output_height as usize {
++        return Err("image_dimensions_unproved");
++    }
++    if !target_live()
++        || current_window_capture_identity(target.window_id)
++            .map_err(|_| "controlled_target_stale")?
++            != identity
++    {
++        return Err("controlled_target_stale");
++    }
++    let rgba = image.rgba_data().map_err(|_| "image_pixels_unproved")?;
++    let length = u64::from(output_width) * u64::from(output_height) * 4;
++    if rgba.len() as u64 != length {
++        return Err("image_pixels_unproved");
++    }
++    operation.checkpoint()?;
++    let png = cua_driver_core::image_utils::encode_rgba_to_png(&rgba, output_width, output_height)
++        .map_err(|_| "image_encoding_unproved")?;
++    operation.checkpoint()?;
++    if !target_live()
++        || current_window_capture_identity(target.window_id)
++            .map_err(|_| "controlled_target_stale")?
++            != identity
++    {
++        return Err("controlled_target_stale");
++    }
++    let result = ComputerImage {
++        image_id: format!("i{}", uuid::Uuid::new_v4()),
++        pid: target.pid as u32,
++        window_id: u64::from(target.window_id),
++        geometry,
++        png,
++    };
++    result.validate()?;
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use cua_driver_core::controlled::Gate;
++    use std::sync::Arc;
++
++    #[test]
++    fn controlled_capture_dimensions_are_bounded_and_never_upscaled() {
++        assert_eq!(output_dimensions(1120, 1084, 1024), Ok((1024, 991)));
++        assert_eq!(output_dimensions(400, 300, 1024), Ok((400, 300)));
++        assert_eq!(output_dimensions(16384, 1, 1), Ok((1, 1)));
++        for (width, height, maximum) in [
++            (0, 1, 1),
++            (1, 0, 1),
++            (1, 1, 0),
++            (16385, 1, 1024),
++            (1, 1, 2049),
++        ] {
++            assert_eq!(
++                output_dimensions(width, height, maximum),
++                Err("image_dimensions_unproved")
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn controlled_capture_refuses_browser_scope_before_native_capture() {
++        let gate = Gate::new();
++        let session = gate.browser_session(Arc::new(|| true)).unwrap();
++        let operation = session.new_operation().unwrap();
++        operation.begin().unwrap();
++        assert_eq!(capture(&operation, 1024).unwrap_err(), "unsupported_route");
++        operation.finish();
++        assert!(!operation.terminal().await.unwrap().input_committed);
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/capture.rs b/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/capture.rs
+@@ -24,6 +24,8 @@
+ //!
+ //! `screencapture -x <file>` still captures the full main display (unchanged
+ //! in this slice).
++
++pub(crate) mod controlled;
+ 
+ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+ use std::collections::HashMap;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
+@@ -0,0 +1,381 @@
++//! Image-bound native pointer input. No global HID, fallback, duplicate
++//! transport, queued event batch or authority derived from caller geometry.
++use core_graphics::{
++    event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, ScrollEventUnit},
++    event_source::{CGEventSource, CGEventSourceStateID},
++    geometry::CGPoint,
++};
++use cua_driver_contract::ScrollDirection;
++pub use cua_driver_core::controlled::ImageReference;
++use cua_driver_core::controlled::Operation;
++use foreign_types::ForeignType;
++use std::{future::Future, sync::Arc};
++
++#[link(name = "CoreGraphics", kind = "framework")]
++unsafe extern "C" {
++    // Same two-FP ABI declaration as the existing mouse/interactive modules
++    // on supported macOS arm64; CGPoint is an HFA of two doubles there.
++    fn CGEventSetLocation(event: *mut std::ffi::c_void, x: f64, y: f64);
++    fn CGEventSourceCounterForEventType(state: i32, kind: u32) -> u32;
++    fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
++    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
++}
++
++fn held_input(
++    keys: impl IntoIterator<Item = (u16, bool)>,
++    buttons: impl IntoIterator<Item = bool>,
++) -> bool {
++    // kVK_CapsLock (HIToolbox Events.h) reports a toggle state, not an
++    // ordinary held modifier. It does not modify this unmodified pointer pair;
++    // concurrent toggles are still detected by the FlagsChanged counter.
++    buttons.into_iter().any(|down| down) || keys.into_iter().any(|(key, down)| key != 0x39 && down)
++}
++
++// Public Quartz HID state, not a key/event stream: no input content is retained.
++// Private PID-routed synthetic events do not use the hardware state table.
++fn hardware_stamp() -> Result<[u32; 16], &'static str> {
++    let held = held_input(
++        (0..128).map(|key| (key, unsafe { CGEventSourceKeyState(1, key) })),
++        (0..3).map(|button| unsafe { CGEventSourceButtonState(1, button) }),
++    );
++    if held {
++        return Err("user_input_conflict");
++    }
++    Ok([1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 22, 23, 24, 25, 26, 27]
++        .map(|kind| unsafe { CGEventSourceCounterForEventType(1, kind) }))
++}
++
++fn revalidate(reference: &ImageReference, operation: &Operation) -> Result<(), &'static str> {
++    let target = operation.session.native_window()?;
++    if !reference.target_matches(target.pid as u32, u64::from(target.window_id)) {
++        return Err("controlled_target_stale");
++    }
++    let geometry = reference.geometry();
++    let image = crate::capture::controlled::capture(
++        operation,
++        geometry.output_width.max(geometry.output_height),
++    )?;
++    if !reference.matches(&image) {
++        return Err("stale_image_observation");
++    }
++    operation.checkpoint()
++}
++
++tokio::task_local! { static REFERENCE: Arc<ImageReference>; }
++
++pub async fn scope<T>(reference: Arc<ImageReference>, future: impl Future<Output = T>) -> T {
++    REFERENCE.scope(reference, future).await
++}
++
++pub(crate) fn current() -> Option<Arc<ImageReference>> {
++    REFERENCE.try_with(Arc::clone).ok()
++}
++
++fn checked_primary<T>(
++    operation: &Operation,
++    validate: impl FnOnce() -> Result<(), &'static str>,
++    call: impl FnOnce() -> T,
++) -> Result<T, &'static str> {
++    operation.checkpoint()?;
++    validate()?;
++    operation.pointer_primary(call)
++}
++
++/// Once a down has been admitted, its matching up is a release obligation even
++/// if cancellation arrives meanwhile. This cannot emit another down, move or
++/// click. The caller's tracked blocking stack owns the complete lifetime.
++fn press_and_release(
++    operation: &Operation,
++    validate: impl FnOnce() -> Result<(), &'static str>,
++    down: impl FnOnce(),
++    release: impl FnOnce(),
++) -> Result<(), &'static str> {
++    struct Release<F: FnOnce()>(Option<F>);
++    impl<F: FnOnce()> Drop for Release<F> {
++        fn drop(&mut self) {
++            if let Some(release) = self.0.take() {
++                release();
++            }
++        }
++    }
++    let mut pending = Some(release);
++    checked_primary(operation, validate, || {
++        let _release = Release(pending.take());
++        down();
++    })
++}
++
++#[derive(Clone, Copy)]
++pub(crate) enum ImageAction {
++    Click,
++    Scroll(ScrollDirection),
++}
++
++fn wheel_delta(direction: ScrollDirection) -> (i32, i32) {
++    match direction {
++        ScrollDirection::Up => (1, 0),
++        ScrollDirection::Down => (-1, 0),
++        ScrollDirection::Left => (0, 1),
++        ScrollDirection::Right => (0, -1),
++    }
++}
++
++pub(crate) fn pointer(
++    operation: &Operation,
++    reference: &ImageReference,
++    x: u32,
++    y: u32,
++    action: ImageAction,
++    validate_target: impl Fn() -> Result<(), &'static str>,
++) -> Result<(), &'static str> {
++    let target = operation.session.native_window()?;
++    let hardware = hardware_stamp()?;
++    let geometry = reference.geometry();
++    let point = geometry.desktop_pixel_center(x, y)?;
++    revalidate(reference, operation)?;
++    let source = CGEventSource::new(CGEventSourceStateID::Private)
++        .map_err(|_| "pointer_event_unavailable")?;
++    // Group only this move/down/up, never distinct clicks on the same window.
++    let group = (uuid::Uuid::new_v4().as_u128() & i64::MAX as u128) as i64;
++    let stamp = |event: &CGEvent| -> Result<(), &'static str> {
++        event.set_flags(CGEventFlags::empty());
++        let ptr = event.as_ptr() as *mut std::ffi::c_void;
++        if !super::skylight::set_window_location(
++            ptr,
++            point.0 - geometry.desktop_x,
++            point.1 - geometry.desktop_y,
++        ) {
++            return Err("pointer_window_route_unavailable");
++        }
++        for (field, value) in [
++            (40, i64::from(target.pid)),
++            (51, i64::from(target.window_id)),
++            (91, i64::from(target.window_id)),
++            (92, i64::from(target.window_id)),
++        ] {
++            if !super::skylight::set_integer_field(ptr, field, value) {
++                return Err("pointer_window_route_unavailable");
++            }
++        }
++        Ok(())
++    };
++    let make = |kind: CGEventType, count: i64| -> Result<CGEvent, &'static str> {
++        let event = CGEvent::new_mouse_event(
++            source.clone(),
++            kind,
++            CGPoint::new(point.0, point.1),
++            CGMouseButton::Left,
++        )
++        .map_err(|_| "pointer_event_unavailable")?;
++        stamp(&event)?;
++        let ptr = event.as_ptr() as *mut std::ffi::c_void;
++        for (field, value) in [(1, count), (3, 0), (7, 3), (58, group)] {
++            if !super::skylight::set_integer_field(ptr, field, value) {
++                return Err("pointer_window_route_unavailable");
++            }
++        }
++        Ok(event)
++    };
++    // Allocate/stamp every event before the first input; no partial allocation
++    // can strand a pressed button. Never post through both public and SPI paths.
++    let moved = make(CGEventType::MouseMoved, 0)?;
++    enum Prepared {
++        Click(CGEvent, CGEvent),
++        Scroll(CGEvent),
++    }
++    let prepared = match action {
++        ImageAction::Click => Prepared::Click(
++            make(CGEventType::LeftMouseDown, 1)?,
++            make(CGEventType::LeftMouseUp, 1)?,
++        ),
++        ImageAction::Scroll(direction) => {
++            let (dy, dx) = wheel_delta(direction);
++            // Exactly one discrete line wheel event: no momentum/gesture
++            // stream, repeated ticks, AX/key path or transport fallback.
++            let wheel =
++                CGEvent::new_scroll_event(source.clone(), ScrollEventUnit::LINE, 2, dy, dx, 0)
++                    .map_err(|_| "pointer_event_unavailable")?;
++            unsafe {
++                CGEventSetLocation(wheel.as_ptr() as *mut std::ffi::c_void, point.0, point.1);
++            }
++            stamp(&wheel)?;
++            Prepared::Scroll(wheel)
++        }
++    };
++    let live = || {
++        target.process_stamp.is_some()
++            && crate::tools::computer_process_stamp(target.pid) == target.process_stamp
++    };
++    if !live() {
++        return Err("controlled_target_stale");
++    }
++    if hardware_stamp()? != hardware {
++        return Err("user_input_conflict");
++    }
++    let check = || {
++        validate_target()?;
++        if !live() {
++            return Err("controlled_target_stale");
++        }
++        if hardware_stamp()? != hardware {
++            return Err("user_input_conflict");
++        }
++        Ok(())
++    };
++    checked_primary(operation, &check, || moved.post_to_pid(target.pid))?;
++    // Hover is itself committed input and may change the picture. Refuse that
++    // change instead of assuming a tracking move is visually inert.
++    revalidate(reference, operation)?;
++    if !live() {
++        return Err("controlled_target_stale");
++    }
++    if hardware_stamp()? != hardware {
++        return Err("user_input_conflict");
++    }
++    match prepared {
++        Prepared::Click(down, up) => press_and_release(
++            operation,
++            &check,
++            || down.post_to_pid(target.pid),
++            || {
++                if live() {
++                    up.post_to_pid(target.pid);
++                } else {
++                    operation.quarantine();
++                }
++            },
++        ),
++        Prepared::Scroll(wheel) => {
++            checked_primary(operation, &check, || wheel.post_to_pid(target.pid))
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use cua_driver_contract::computer_image::{ComputerImage, ComputerImageGeometry};
++    use cua_driver_core::controlled::Gate;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    #[tokio::test]
++    async fn controlled_pointer_rechecks_target_after_tracking_before_final_primary() {
++        use std::sync::atomic::AtomicBool;
++        let gate = Gate::new();
++        let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++        let op = session.new_operation().unwrap();
++        op.begin().unwrap();
++        let modal = AtomicBool::new(false);
++        let input = AtomicUsize::new(0);
++        let validate = || {
++            if modal.load(Ordering::SeqCst) {
++                Err("unexpected_modal_surface")
++            } else {
++                Ok(())
++            }
++        };
++        checked_primary(&op, &validate, || {
++            input.fetch_add(1, Ordering::SeqCst);
++            modal.store(true, Ordering::SeqCst);
++        })
++        .unwrap();
++        let result = checked_primary(&op, &validate, || {
++            input.fetch_add(1, Ordering::SeqCst);
++        });
++        assert_eq!(result, Err("unexpected_modal_surface"));
++        assert_eq!(input.load(Ordering::SeqCst), 1);
++        op.finish();
++        let terminal = op.terminal().await.unwrap();
++        assert!(terminal.input_committed && !terminal.cancelled);
++    }
++
++    #[test]
++    fn controlled_pointer_caps_toggle_is_not_a_held_key_but_other_keys_and_buttons_are() {
++        assert!(!held_input([(0x39, true)], [false, false, false]));
++        assert!(held_input([(0x39, true), (0, true)], [false]));
++        assert!(held_input([(0x39, false)], [true]));
++        assert!(!held_input([(0, false), (1, false)], [false]));
++    }
++
++    #[test]
++    fn controlled_scroll_is_one_line_on_one_explicit_axis() {
++        assert_eq!(wheel_delta(ScrollDirection::Up), (1, 0));
++        assert_eq!(wheel_delta(ScrollDirection::Down), (-1, 0));
++        assert_eq!(wheel_delta(ScrollDirection::Left), (0, 1));
++        assert_eq!(wheel_delta(ScrollDirection::Right), (0, -1));
++    }
++
++    fn image() -> ComputerImage {
++        ComputerImage {
++            image_id: "image-fixture".into(),
++            pid: 1,
++            window_id: 2,
++            geometry: ComputerImageGeometry {
++                desktop_x: -2.0,
++                desktop_y: 3.0,
++                window_width: 1.0,
++                window_height: 1.0,
++                source_width: 1,
++                source_height: 1,
++                crop_x: 0,
++                crop_y: 0,
++                crop_width: 1,
++                crop_height: 1,
++                output_width: 1,
++                output_height: 1,
++            },
++            png: cua_driver_core::image_utils::encode_rgba_to_png(&[0, 0, 0, 255], 1, 1).unwrap(),
++        }
++    }
++
++    #[test]
++    fn controlled_pointer_reference_binds_identity_geometry_and_pixels_not_new_frame_id() {
++        let mut image = image();
++        let reference = ImageReference::from_image(&image).unwrap();
++        assert!(reference.addresses("image-fixture", 0, 0).is_ok());
++        assert!(reference.addresses("foreign", 0, 0).is_err());
++        assert!(reference.addresses("image-fixture", 1, 0).is_err());
++        image.image_id = "fresh-frame-id".into();
++        assert!(reference.matches(&image));
++        image.geometry.desktop_x += 1.0;
++        assert!(!reference.matches(&image));
++        image.geometry.desktop_x -= 1.0;
++        image.png =
++            cua_driver_core::image_utils::encode_rgba_to_png(&[255, 0, 0, 255], 1, 1).unwrap();
++        assert!(!reference.matches(&image));
++        image = super::tests::image();
++        image.pid = 3;
++        assert!(!reference.matches(&image));
++    }
++
++    #[tokio::test]
++    async fn controlled_pointer_cancel_before_down_never_emits_release_but_committed_down_does() {
++        for before in [true, false] {
++            let gate = Gate::new();
++            let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++            let op = session.new_operation().unwrap();
++            op.begin().unwrap();
++            let calls = AtomicUsize::new(0);
++            if before {
++                op.cancel();
++            }
++            let result = press_and_release(
++                &op,
++                || Ok(()),
++                || {
++                    calls.fetch_add(1, Ordering::SeqCst);
++                    op.cancel();
++                },
++                || {
++                    calls.fetch_add(10, Ordering::SeqCst);
++                },
++            );
++            assert_eq!(result.is_ok(), !before);
++            assert_eq!(calls.load(Ordering::SeqCst), if before { 0 } else { 11 });
++            op.finish();
++            let terminal = op.terminal().await.unwrap();
++            assert!(terminal.cancelled);
++            assert_eq!(terminal.input_committed, !before);
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/mod.rs
+@@ -9,6 +9,7 @@
+ //!    the activity-monitor tickle required for live-input detection.
+ 
+ pub mod ax_actions;
++pub mod controlled;
+ pub mod interactive;
+ pub mod keyboard;
+ pub mod mouse;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+@@ -6,6 +6,7 @@
+ mod scope_tests;
+ use super::ToolState;
+ use crate::ax::bindings;
++use crate::input::controlled::ImageAction;
+ use cua_driver_core::{controlled::Operation, protocol::ToolResult};
+ use observation::{Native, Reader};
+ use serde_json::{json, Value};
+@@ -91,6 +92,9 @@
+     args: Value,
+     operation: Arc<Operation>,
+ ) -> ToolResult {
++    if args["include_screenshot"] == true {
++        return capture(args, operation).await;
++    }
+     if !target_matches(&args, &operation)
+         || args["include_screenshot"] != false
+         || args
+@@ -175,6 +179,50 @@
+     }
+ }
+ 
++async fn capture(args: Value, operation: Arc<Operation>) -> ToolResult {
++    if !target_matches(&args, &operation)
++        || args["include_accessibility_tree"] != false
++        || ["screenshot_out_file", "query"]
++            .iter()
++            .any(|key| args.get(key).is_some_and(|value| !value.is_null()))
++    {
++        return refusal("controlled_capture_refused");
++    }
++    let Some(maximum) = args["max_dimension"]
++        .as_u64()
++        .filter(|value| (1..=2048).contains(value))
++    else {
++        return refusal("image_dimensions_unproved");
++    };
++    operation.reset_snapshot();
++    let worker = operation.clone();
++    match operation.blocking(move || {
++        if !target_matches(&args, &worker) { return refusal("controlled_target_stale"); }
++        with_focus_cleanup(&worker, "capture", || {
++            let image = match crate::capture::controlled::capture(&worker, maximum as u32) {
++                Ok(image) => image,
++                Err(reason) => return refusal(reason),
++            };
++            if !target_matches(&args, &worker) { return refusal("controlled_target_stale"); }
++            let geometry = &image.geometry;
++            let result = ToolResult::text("Controlled exact-window image; bytes in typed result")
++                .with_structured(json!({
++                    "pid":image.pid, "window_id":image.window_id, "snapshot_id":image.image_id,
++                    "element_count":0, "returned_element_count":0, "elements_complete":false,
++                    "truncated":false, "degraded":false, "elements":[],
++                    "window_bounds":{"x":geometry.desktop_x,"y":geometry.desktop_y,
++                        "width":geometry.window_width,"height":geometry.window_height},
++                    "screenshot_width":geometry.output_width,"screenshot_height":geometry.output_height,
++                    "screenshot_mime_type":"image/png","screenshot_frame_valid":true
++                }));
++            result.with_computer_image(image).unwrap_or_else(refusal)
++        })
++    }).await {
++        Ok(result) => result,
++        Err(_) => refusal("controlled_quarantined"),
++    }
++}
++
+ enum Mutation {
+     Press,
+     Fill(String),
+@@ -185,6 +233,9 @@
+     args: Value,
+     operation: Arc<Operation>,
+ ) -> ToolResult {
++    if args.get("x").is_some() || args.get("y").is_some() {
++        return image_action(args, operation, ImageAction::Click).await;
++    }
+     if !target_matches(&args, &operation)
+         || args["action"] != "press"
+         || args["delivery_mode"] != "background"
+@@ -195,6 +246,64 @@
+         return refusal("controlled_click_refused");
+     }
+     mutate(state, args, operation, Mutation::Press).await
++}
++
++pub(super) async fn scroll(args: Value, operation: Arc<Operation>) -> ToolResult {
++    let Ok(direction) = serde_json::from_value::<cua_driver_contract::ScrollDirection>(args["direction"].clone()) else {
++        return refusal("controlled_scroll_refused");
++    };
++    image_action(args, operation, ImageAction::Scroll(direction)).await
++}
++
++async fn image_action(args: Value, operation: Arc<Operation>, action: ImageAction) -> ToolResult {
++    let shape = match action {
++        ImageAction::Click => args["action"] == "press"
++            && ["direction", "by", "amount"].iter().all(|key| args.get(key).is_none()),
++        ImageAction::Scroll(_) => args.get("action").is_none() && args["by"] == "line" && args["amount"] == 1,
++    };
++    if !target_matches(&args, &operation)
++        || args["delivery_mode"] != "background" || !shape
++        || ["element_token", "element_index", "snapshot_id", "scope", "modifiers", "button", "count", "from_zoom", "debug_image_out"]
++            .iter().any(|key| args.get(key).is_some()) {
++        return refusal("controlled_click_refused");
++    }
++    let coordinate = |key: &str| args[key].as_f64()
++        .filter(|v| v.is_finite() && *v >= 0.0 && *v < 2048.0 && v.fract() == 0.0)
++        .map(|v| v as u32);
++    let (Some(x), Some(y), Some(reference)) = (coordinate("x"), coordinate("y"), crate::input::controlled::current()) else {
++        return refusal("image_reference_required");
++    };
++    let Ok(target) = operation.session.native_window() else { return refusal("unsupported_route"); };
++    operation.reset_snapshot();
++    let lease = super::acquire_background_mutation(target.pid).await;
++    let worker = operation.clone();
++    match operation.blocking(move || {
++        let _lease = lease;
++        if !target_matches(&args, &worker) { return refusal("controlled_target_stale"); }
++        with_focus_cleanup(&worker, match action { ImageAction::Click => "image_click", ImageAction::Scroll(_) => "image_scroll" }, || {
++            let validate = || -> Result<(), &'static str> {
++                if !target_matches(&args, &worker) { return Err("controlled_target_stale"); }
++                let facts = crate::ax::exact_target::gather_background_facts(target.pid, target.window_id, None);
++                let decision = cua_driver_core::background_input::decide_background_input(
++                    cua_driver_core::background_input::ExactWindowTarget { pid:target.pid, window_id:target.window_id },
++                    &facts, cua_driver_core::background_input::BackgroundAction::WindowPointer);
++                if !decision.is_execute() { return Err("controlled_target_unproven"); }
++                let native = Native { operation:&worker };
++                let root = native.exact_window()?;
++                let tree = observation::scan(&native, root, 512, 32);
++                if !tree.complete() { return Err(tree.failure.unwrap_or("condition_unknown")); }
++                Ok(())
++            };
++            if let Err(reason) = validate() { return refusal(reason); }
++            match crate::input::controlled::pointer(&worker, &reference, x, y, action, validate) {
++                Ok(()) => ToolResult::text("Image-bound pointer input dispatched; effect unverified")
++                    .with_structured(json!({"path":"cgevent","verified":false,"effect":"unverifiable"})),
++                Err(reason) => refusal(reason),
++            }
++        })
++    }).await {
++        Ok(result)=>result, Err(_)=>refusal("controlled_quarantined"),
++    }
+ }
+ 
+ pub(super) async fn set_value(
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_desktop_state.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_desktop_state.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_desktop_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_desktop_state.rs
+@@ -128,6 +128,7 @@
+             is_error: None,
+             structured_content: Some(structured),
+             action_record: None,
++            computer_image: None,
+         }
+     }
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -700,6 +700,7 @@
+             is_error: None,
+             structured_content: Some(structured),
+             action_record: None,
++            computer_image: None,
+         }
+     }
+ }
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+@@ -826,6 +826,7 @@
+     registry.register(Box::new(kill_app::KillAppTool));
+     registry.register(Box::new(get_window_state::GetWindowStateTool::new(state.clone())));
+     registry.register(Box::new(click::ClickTool::new(state.clone())));
++    registry.register(Box::new(scroll::ScrollTool::new(state.clone())));
+     registry.register(Box::new(set_value::SetValueTool::new(state)));
+ }
+ 
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/scroll.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/scroll.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/scroll.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/scroll.rs
+@@ -122,6 +122,9 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if let Some(operation) = cua_driver_core::controlled::current() {
++            return super::computer::scroll(args, operation).await;
++        }
+         use cua_driver_core::tool_args::ArgsExt;
+         if args.opt_str("scope").as_deref() == Some("desktop")
+             && args.get("pid").is_none()
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/zoom.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/zoom.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/zoom.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/zoom.rs
+@@ -117,6 +117,7 @@
+                         "mime_type": "image/jpeg"
+                     })),
+                     action_record: None,
++                    computer_image: None,
+                 }
+             }
+             Ok(Err(e)) => ToolResult::error(format!("Zoom failed: {e}")),

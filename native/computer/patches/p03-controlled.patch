@@ -1,0 +1,4110 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/computer_desktop_lease.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/computer_desktop_lease.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/computer_desktop_lease.rs
+@@ -0,0 +1,909 @@
++//! Cooperating-process ownership of the actual user's local desktop.
++//!
++//! A successful flock after process death is NOT a terminal acknowledgement. An
++//! unclean generation stays dirty and requires an out-of-band recovery decision;
++//! this module never repairs, expires, unlinks, or steals it. The native owner
++//! must retain this value until all effect-capable work and cleanup have drained.
++
++/// Native desktop ownership. There is deliberately no Clone or automatic clean
++/// release. Dropping an acquired lease quarantines its lock FD until process exit.
++/// This is an advisory protocol, not isolation from the user or other automation.
++pub struct ComputerDesktopLease {
++    #[cfg(target_os = "macos")]
++    inner: macos::Lease,
++}
++
++impl ComputerDesktopLease {
++    /// Acquire without waiting. Refuse contention, an unclean predecessor, unsafe
++    /// storage, elevated/mismatched user identity, and unsupported platforms.
++    pub fn acquire() -> anyhow::Result<Self> {
++        #[cfg(target_os = "macos")]
++        {
++            Ok(Self {
++                inner: macos::Lease::acquire(macos::Directory::canonical()?)?,
++            })
++        }
++        #[cfg(not(target_os = "macos"))]
++        anyhow::bail!("the controlled desktop lease is supported only on macOS")
++    }
++
++    /// ONLY call after explicit native terminal shutdown has proved all owned
++    /// work and cleanup drained. This method cannot establish that proof itself.
++    /// Repeated successful release is harmless. An error retains ownership.
++    pub fn release_clean(&mut self) -> anyhow::Result<()> {
++        #[cfg(target_os = "macos")]
++        {
++            self.inner.release_clean()
++        }
++        #[cfg(not(target_os = "macos"))]
++        anyhow::bail!("the controlled desktop lease is supported only on macOS")
++    }
++}
++
++#[cfg(target_os = "macos")]
++mod macos {
++    use anyhow::{bail, ensure, Context, Result};
++    use std::ffi::CStr;
++    use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
++    use std::io;
++    use std::mem::MaybeUninit;
++    use std::os::fd::{AsRawFd, IntoRawFd};
++    use std::os::unix::ffi::OsStrExt;
++    use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt};
++    use std::path::{Path, PathBuf};
++
++    // Do not move this namespace to HOME/TMPDIR, agentDir, or a runtime directory.
++    // getpwuid_r identifies the actual user's persistent home, not environment
++    // overrides. A temp/cache directory can be evicted while an owner is alive.
++    const DIRECTORY: &str = ".pi-computer-desktop-v1";
++    const LOCK: &str = "desktop.lock";
++    const PREFIX: &str = "pi-computer-desktop-v1 ";
++    const MARKER_LEN: usize = PREFIX.len() + 1 + 1 + 16 + 1;
++    // Darwin rejects O_NOFOLLOW | O_NOFOLLOW_ANY together with EINVAL.
++    // ANY alone covers both the leaf and every ancestor (regression-tested).
++    const NOFOLLOW: i32 = libc::O_NOFOLLOW_ANY | libc::O_CLOEXEC;
++
++    pub(super) struct Directory {
++        path: PathBuf,
++        file: File,
++        uid: u32,
++        // Hold and revalidate the account-home inode too, not just the leaf.
++        home: Option<(PathBuf, File)>,
++    }
++
++    impl Directory {
++        pub(super) fn canonical() -> Result<Self> {
++            let uid = actual_uid()?;
++            let home_path = account_home(uid)?;
++            // The account database, system ancestors, and this user are trusted;
++            // reject group/world-writable or symlinked resolved ancestors.
++            for ancestor in home_path.ancestors() {
++                let metadata = fs::symlink_metadata(ancestor)?;
++                ensure!(
++                    metadata.is_dir()
++                        && (metadata.uid() == 0 || metadata.uid() == uid)
++                        && metadata.mode() & 0o022 == 0,
++                    "unsafe account-home ancestor"
++                );
++            }
++            let home = open_directory(&home_path)?;
++            ensure!(
++                home.metadata()?.uid() == uid,
++                "account home has another owner"
++            );
++            validate_identity(&home_path, &home)?;
++            let path = home_path.join(DIRECTORY);
++            match DirBuilder::new().mode(0o700).create(&path) {
++                Ok(()) => home.sync_all().context("sync new lease directory")?,
++                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
++                Err(error) => return Err(error).context("create desktop lease directory"),
++            }
++            let file = open_directory(&path)?;
++            let directory = Self {
++                path,
++                file,
++                uid,
++                home: Some((home_path, home)),
++            };
++            directory.validate()?;
++            Ok(directory)
++        }
++
++        fn validate(&self) -> Result<()> {
++            ensure!(actual_uid()? == self.uid, "desktop lease user changed");
++            if let Some((path, file)) = &self.home {
++                validate_identity(path, file)?;
++                let metadata = file.metadata()?;
++                ensure!(
++                    metadata.is_dir() && metadata.uid() == self.uid && metadata.mode() & 0o022 == 0,
++                    "unsafe account home"
++                );
++            }
++            validate_identity(&self.path, &self.file)?;
++            let metadata = self.file.metadata()?;
++            ensure!(
++                metadata.is_dir()
++                    && metadata.uid() == self.uid
++                    && metadata.mode() & 0o7777 == 0o700,
++                "lease directory must be owned by this user and mode 0700"
++            );
++            refuse_extended_acl(&self.file)?;
++            let mut filesystem = MaybeUninit::<libc::statfs>::uninit();
++            let status = unsafe { libc::fstatfs(self.file.as_raw_fd(), filesystem.as_mut_ptr()) };
++            ensure!(
++                status == 0,
++                "inspect lease filesystem: {}",
++                io::Error::last_os_error()
++            );
++            ensure!(
++                unsafe { filesystem.assume_init() }.f_flags & libc::MNT_LOCAL as u32 != 0,
++                "desktop lease requires a local filesystem"
++            );
++            Ok(())
++        }
++
++        #[cfg(test)]
++        fn for_test(path: &Path) -> Result<Self> {
++            // The test supplies an already-private directory. Never canonicalize
++            // it here: symlinks, including ancestor symlinks, must be refused.
++            let directory = Self {
++                path: path.to_owned(),
++                file: open_directory(path)?,
++                uid: actual_uid()?,
++                home: None,
++            };
++            directory.validate()?;
++            Ok(directory)
++        }
++    }
++
++    pub(super) struct Lease {
++        directory: Directory,
++        file: Option<File>,
++        generation: u64,
++        // A failed clean-marker write must never be retried as normal release.
++        poisoned: bool,
++    }
++
++    impl Lease {
++        pub(super) fn acquire(directory: Directory) -> Result<Self> {
++            directory.validate()?;
++            let path = directory.path.join(LOCK);
++            let mut options = OpenOptions::new();
++            options
++                .read(true)
++                .write(true)
++                .mode(0o600)
++                .custom_flags(NOFOLLOW | libc::O_NONBLOCK);
++            let (file, created) = match options.create_new(true).open(&path) {
++                Ok(file) => (file, true),
++                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (
++                    options
++                        .create_new(false)
++                        .open(&path)
++                        .context("open desktop lease")?,
++                    false,
++                ),
++                Err(error) => return Err(error).context("create desktop lease"),
++            };
++            validate_file(&directory, &file)?;
++            fs2::FileExt::try_lock_exclusive(&file)
++                .context("desktop lease busy or locking unavailable")?;
++            // Validate again after flock: the path must still name this inode.
++            directory.validate()?;
++            validate_file(&directory, &file)?;
++            let generation = if created {
++                ensure!(file.metadata()?.len() == 0, "new lease inode was modified");
++                1
++            } else {
++                let (state, previous) = read_marker(&file)?;
++                ensure!(state == b'C', "desktop lease has a dirty generation; native terminality is unknown (no automatic recovery)");
++                previous
++                    .checked_add(1)
++                    .context("desktop lease generation exhausted")?
++            };
++            write_marker(&file, b'D', generation).context("persist dirty desktop generation")?;
++            // Both the marker and its directory entry must exist before dispatch.
++            directory.file.sync_all().context("sync lease directory")?;
++            directory.validate()?;
++            validate_file(&directory, &file)?;
++            Ok(Self {
++                directory,
++                file: Some(file),
++                generation,
++                poisoned: false,
++            })
++        }
++
++        pub(super) fn release_clean(&mut self) -> Result<()> {
++            let Some(file) = &self.file else {
++                return Ok(());
++            };
++            ensure!(
++                !self.poisoned,
++                "desktop lease is quarantined after release failure"
++            );
++            self.directory.validate()?;
++            validate_file(&self.directory, file)?;
++            ensure!(
++                read_marker(file)? == (b'D', self.generation),
++                "desktop lease generation changed"
++            );
++            // The caller has already proved native terminality. Never clean from
++            // Drop, acquisition failure, cancellation, a timeout, or process death.
++            if let Err(error) = write_marker(file, b'C', self.generation)
++                .and_then(|()| self.directory.validate())
++                .and_then(|()| validate_file(&self.directory, file))
++                .and_then(|()| fs2::FileExt::unlock(file).context("unlock desktop lease"))
++            {
++                self.poisoned = true;
++                // Best effort after a partial I/O failure; retain the kernel lock
++                // even if this repair also fails. No lease can recover this owner.
++                let repair = write_marker(file, b'D', self.generation);
++                return Err(error).context(format!(
++                    "desktop release failed; lock quarantined; dirty-marker repair: {repair:?}"
++                ));
++            }
++            self.file.take();
++            Ok(())
++        }
++    }
++
++    impl Drop for Lease {
++        fn drop(&mut self) {
++            if let Some(file) = self.file.take() {
++                // Deliberate fail-closed fallback for an incorrectly dropped
++                // native owner. Only OS process exit closes this quarantined FD;
++                // the dirty marker then prevents a successor from treating death
++                // as proof that an external application's work has finished.
++                let _quarantined_fd = file.into_raw_fd();
++            }
++        }
++    }
++
++    fn actual_uid() -> Result<u32> {
++        let uid = unsafe { libc::getuid() };
++        ensure!(
++            uid != 0 && uid == unsafe { libc::geteuid() },
++            "desktop lease refuses root or changed effective user"
++        );
++        Ok(uid)
++    }
++
++    fn account_home(uid: u32) -> Result<PathBuf> {
++        let mut record = MaybeUninit::<libc::passwd>::uninit();
++        let mut result = std::ptr::null_mut();
++        let mut buffer = vec![0_u8; 65536];
++        // SAFETY: all output pointers remain valid until the home is copied;
++        // bounded ERANGE is a refusal, not an environment-dependent fallback.
++        let status = unsafe {
++            libc::getpwuid_r(
++                uid,
++                record.as_mut_ptr(),
++                buffer.as_mut_ptr().cast(),
++                buffer.len(),
++                &mut result,
++            )
++        };
++        ensure!(
++            status == 0,
++            "lookup actual user's home: {}",
++            io::Error::from_raw_os_error(status)
++        );
++        ensure!(!result.is_null(), "actual user has no account home");
++        let record = unsafe { record.assume_init() };
++        ensure!(
++            record.pw_uid == uid && !record.pw_dir.is_null(),
++            "invalid account home"
++        );
++        let bytes = unsafe { CStr::from_ptr(record.pw_dir) }.to_bytes();
++        let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
++        ensure!(path.is_absolute(), "account home must be absolute");
++        fs::canonicalize(path).context("resolve account home")
++    }
++
++    fn refuse_extended_acl(file: &File) -> Result<()> {
++        // Darwin's public libc ACL functions are not declared by the libc crate.
++        // Refuse all entries, including inherited ones, rather than guess which
++        // grants are compatible with a private 0700/0600 namespace.
++        unsafe extern "C" {
++            fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
++            fn acl_get_entry(
++                acl: *mut libc::c_void,
++                entry_id: libc::c_int,
++                entry: *mut *mut libc::c_void,
++            ) -> libc::c_int;
++            fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
++        }
++        // ACL_TYPE_EXTENDED = 0x100; ACL_FIRST_ENTRY = 0 (sys/acl.h).
++        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), 0x100) };
++        if acl.is_null() {
++            let error = io::Error::last_os_error();
++            // Darwin returns NULL/ENOENT when this already-open, validated
++            // inode has no extended ACL. Other retrieval errors fail closed.
++            ensure!(
++                error.raw_os_error() == Some(libc::ENOENT),
++                "read desktop lease ACL: {error}"
++            );
++            return Ok(());
++        }
++        let mut entry = std::ptr::null_mut();
++        let status = unsafe { acl_get_entry(acl, 0, &mut entry) };
++        let error = io::Error::last_os_error();
++        let freed = unsafe { acl_free(acl) };
++        ensure!(freed == 0, "free desktop lease ACL failed");
++        // Darwin returns 0 for an entry and -1/EINVAL for an empty ACL (unlike
++        // Linux's POSIX ACL iteration convention).
++        ensure!(
++            status == -1 && error.raw_os_error() == Some(libc::EINVAL),
++            "desktop lease refuses extended ACL entries or unreadable ACLs"
++        );
++        Ok(())
++    }
++
++    fn open_directory(path: &Path) -> Result<File> {
++        OpenOptions::new()
++            .read(true)
++            .custom_flags(NOFOLLOW | libc::O_DIRECTORY)
++            .open(path)
++            .context("open desktop lease directory without symlinks")
++    }
++
++    fn same_inode(left: &Metadata, right: &Metadata) -> bool {
++        left.dev() == right.dev() && left.ino() == right.ino()
++    }
++
++    fn validate_identity(path: &Path, file: &File) -> Result<()> {
++        // Opening the absolute path with NOFOLLOW_ANY also rejects a replaced
++        // ancestor symlink; comparing only the leaf's lstat would miss that case.
++        let current = OpenOptions::new()
++            .read(true)
++            .custom_flags(NOFOLLOW | libc::O_NONBLOCK)
++            .open(path)?;
++        ensure!(
++            same_inode(&current.metadata()?, &file.metadata()?),
++            "desktop lease path/inode mismatch"
++        );
++        ensure!(
++            !fs::symlink_metadata(path)?.file_type().is_symlink(),
++            "desktop lease path is a symlink"
++        );
++        Ok(())
++    }
++
++    fn validate_file(directory: &Directory, file: &File) -> Result<()> {
++        let metadata = file.metadata()?;
++        ensure!(
++            metadata.is_file()
++                && metadata.uid() == directory.uid
++                && metadata.mode() & 0o7777 == 0o600
++                && metadata.nlink() == 1,
++            "lease inode must be a singly-linked regular file owned by this user with mode 0600"
++        );
++        ensure!(
++            metadata.dev() == directory.file.metadata()?.dev(),
++            "desktop lease filesystem changed"
++        );
++        refuse_extended_acl(file)?;
++        validate_identity(&directory.path.join(LOCK), file)
++    }
++
++    fn read_marker(file: &File) -> Result<(u8, u64)> {
++        ensure!(
++            file.metadata()?.len() == MARKER_LEN as u64,
++            "missing or malformed desktop lease marker; refuse crash recovery"
++        );
++        let mut bytes = [0; MARKER_LEN];
++        file.read_exact_at(&mut bytes, 0)?;
++        let state = bytes[PREFIX.len()];
++        ensure!(
++            bytes.starts_with(PREFIX.as_bytes())
++                && matches!(state, b'C' | b'D')
++                && bytes[PREFIX.len() + 1] == b' '
++                && bytes[MARKER_LEN - 1] == b'\n',
++            "invalid desktop lease marker; refuse crash recovery"
++        );
++        let generation = u64::from_str_radix(
++            std::str::from_utf8(&bytes[PREFIX.len() + 2..MARKER_LEN - 1])?,
++            16,
++        )?;
++        ensure!(
++            generation != 0 && bytes == marker(state, generation).as_bytes(),
++            "invalid desktop lease generation"
++        );
++        Ok((state, generation))
++    }
++
++    fn marker(state: u8, generation: u64) -> String {
++        format!("{PREFIX}{} {generation:016x}\n", state as char)
++    }
++
++    fn write_marker(file: &File, state: u8, generation: u64) -> Result<()> {
++        if !matches!(state, b'C' | b'D') {
++            bail!("invalid desktop lease state")
++        }
++        // Never truncate, rename, unlink, or replace the inode holding flock.
++        file.write_all_at(marker(state, generation).as_bytes(), 0)?;
++        file.sync_all().context("sync desktop lease marker")
++    }
++
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++        use std::ffi::CString;
++        use std::io::{BufRead, BufReader, Write};
++        use std::os::unix::fs::{symlink, PermissionsExt};
++        use std::process::{Child, ChildStdin, Command, Stdio};
++        use std::sync::mpsc::{self, Receiver};
++        use std::thread::{self, JoinHandle};
++        use std::time::Duration;
++        use tempfile::TempDir;
++
++        fn fixture() -> (TempDir, PathBuf) {
++            let temporary = tempfile::tempdir().unwrap();
++            fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
++            let path = fs::canonicalize(temporary.path()).unwrap();
++            (temporary, path)
++        }
++
++        fn acquire_private(path: &Path) -> Result<Lease> {
++            Lease::acquire(Directory::for_test(path)?)
++        }
++
++        fn fixture_marker(path: &Path, contents: &[u8]) {
++            let mut file = OpenOptions::new()
++                .write(true)
++                .create_new(true)
++                .mode(0o600)
++                .open(path.join(LOCK))
++                .unwrap();
++            file.write_all(contents).unwrap();
++            file.sync_all().unwrap();
++        }
++
++        // All signals target an unreaped Child created here. Drop kills/reaps
++        // exactly that handle on assertion failure; never enumerate other PIDs.
++        struct OwnedChild {
++            child: Option<Child>,
++            stdin: ChildStdin,
++            lines: Receiver<String>,
++            reader: Option<JoinHandle<()>>,
++        }
++
++        impl OwnedChild {
++            fn spawn(path: &Path, mode: &str) -> Self {
++                let test = format!(
++                    "{}::process_fixture",
++                    module_path!().split_once("::").unwrap().1
++                );
++                let mut child = Command::new(std::env::current_exe().unwrap())
++                    .args(["--exact", &test, "--nocapture", "--test-threads=1"])
++                    .env("PI_DESKTOP_LEASE_TEST_MODE", mode)
++                    .env("PI_DESKTOP_LEASE_TEST_DIRECTORY", path)
++                    // Different cwd/config/temp namespaces must not change the
++                    // account-home resolver or an explicitly shared test inode.
++                    .env("HOME", path.join("unrelated-home"))
++                    .env("TMPDIR", path.join("unrelated-temp"))
++                    .env("TMP", path.join("unrelated-tmp"))
++                    .env("TEMP", path.join("unrelated-temp2"))
++                    .env("PI_AGENT_DIR", path.join("unrelated-agent"))
++                    .current_dir(path)
++                    .stdin(Stdio::piped())
++                    .stdout(Stdio::piped())
++                    .stderr(Stdio::inherit())
++                    .spawn()
++                    .unwrap();
++                let stdin = child.stdin.take().unwrap();
++                let stdout = child.stdout.take().unwrap();
++                let (sender, lines) = mpsc::channel();
++                let reader = thread::spawn(move || {
++                    for line in BufReader::new(stdout).lines() {
++                        let Ok(line) = line else { break };
++                        if sender.send(line).is_err() {
++                            break;
++                        }
++                    }
++                });
++                Self {
++                    child: Some(child),
++                    stdin,
++                    lines,
++                    reader: Some(reader),
++                }
++            }
++
++            fn message(&self) -> String {
++                loop {
++                    // A watchdog can only FAIL a test. It cannot certify drain,
++                    // unlock an owner, or turn a dirty marker into a clean one.
++                    let line = self
++                        .lines
++                        .recv_timeout(Duration::from_secs(20))
++                        .expect("lease child failed to reach its pipe barrier");
++                    if let Some(message) = line.strip_prefix("LEASE-TEST ") {
++                        return message.to_owned();
++                    }
++                }
++            }
++
++            fn command(&mut self, command: &str) {
++                writeln!(self.stdin, "{command}").unwrap();
++                self.stdin.flush().unwrap();
++            }
++
++            fn stop(&mut self) {
++                self.command("stop");
++                let pid = self.child.as_ref().unwrap().id() as libc::pid_t;
++                let mut status = 0;
++                let result = loop {
++                    let result = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
++                    if result != -1
++                        || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
++                    {
++                        break result;
++                    }
++                };
++                assert_eq!(result, pid);
++                assert!(libc::WIFSTOPPED(status));
++                assert_eq!(libc::WSTOPSIG(status), libc::SIGSTOP);
++            }
++
++            fn resume(&self) {
++                let pid = self.child.as_ref().unwrap().id() as libc::pid_t;
++                assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
++            }
++
++            fn crash(mut self) {
++                let child = self.child.as_mut().unwrap();
++                child.kill().unwrap();
++                assert!(!child.wait().unwrap().success());
++                self.child.take();
++            }
++
++            fn finish(mut self) {
++                let status = self.child.as_mut().unwrap().wait().unwrap();
++                self.child.take();
++                assert!(status.success(), "lease child failed: {status}");
++            }
++        }
++
++        impl Drop for OwnedChild {
++            fn drop(&mut self) {
++                if let Some(mut child) = self.child.take() {
++                    let _ = child.kill();
++                    let _ = child.wait();
++                }
++                if let Some(reader) = self.reader.take() {
++                    let _ = reader.join();
++                }
++            }
++        }
++
++        fn probe(path: &Path) -> String {
++            let child = OwnedChild::spawn(path, "probe");
++            let result = child.message();
++            child.finish();
++            result
++        }
++
++        fn announce(message: &str) {
++            println!("\nLEASE-TEST {message}");
++            std::io::stdout().flush().unwrap();
++        }
++
++        #[test]
++        fn process_fixture() {
++            let Ok(mode) = std::env::var("PI_DESKTOP_LEASE_TEST_MODE") else {
++                return;
++            };
++            if mode == "home" {
++                announce(&format!(
++                    "HOME {}",
++                    account_home(actual_uid().unwrap()).unwrap().display()
++                ));
++                return;
++            }
++            let path = PathBuf::from(std::env::var_os("PI_DESKTOP_LEASE_TEST_DIRECTORY").unwrap());
++            if mode == "probe" {
++                match acquire_private(&path) {
++                    Ok(mut lease) => {
++                        lease.release_clean().unwrap();
++                        announce("ACQUIRED-AND-CLEAN");
++                    }
++                    Err(error) => announce(&format!("REFUSED {error:#}")),
++                }
++                return;
++            }
++            assert_eq!(mode, "owner");
++            let mut lease = Some(acquire_private(&path).unwrap());
++            announce("READY");
++            for command in std::io::stdin().lock().lines() {
++                match command.unwrap().as_str() {
++                    "stop" => assert_eq!(unsafe { libc::raise(libc::SIGSTOP) }, 0),
++                    "clean" => {
++                        lease.as_mut().unwrap().release_clean().unwrap();
++                        announce("CLEAN");
++                        return;
++                    }
++                    "drop" => {
++                        drop(lease.take());
++                        announce("DROPPED");
++                    }
++                    "exit" => {
++                        assert!(lease.is_none());
++                        return;
++                    }
++                    command => panic!("unknown lease child command: {command}"),
++                }
++            }
++            panic!("owner pipe closed without an explicit fixture command");
++        }
++
++        #[test]
++        fn real_process_contention_stopped_owner_and_clean_handoff() {
++            let (_temporary, path) = fixture();
++            let mut owner = OwnedChild::spawn(&path, "owner");
++            assert_eq!(owner.message(), "READY");
++            let original = fs::metadata(path.join(LOCK)).unwrap();
++            assert!(probe(&path).contains("desktop lease busy"));
++            owner.stop();
++            assert!(probe(&path).contains("desktop lease busy"));
++            owner.resume();
++            owner.command("clean");
++            assert_eq!(owner.message(), "CLEAN");
++            owner.finish();
++            assert_eq!(probe(&path), "ACQUIRED-AND-CLEAN");
++            assert!(same_inode(
++                &original,
++                &fs::metadata(path.join(LOCK)).unwrap()
++            ));
++            assert_eq!(
++                read_marker(&File::open(path.join(LOCK)).unwrap()).unwrap(),
++                (b'C', 2)
++            );
++        }
++
++        #[test]
++        fn real_process_crash_refuses_even_after_kernel_lock_is_free() {
++            let (_temporary, path) = fixture();
++            let owner = OwnedChild::spawn(&path, "owner");
++            assert_eq!(owner.message(), "READY");
++            let original = fs::metadata(path.join(LOCK)).unwrap();
++            owner.crash();
++            let file = OpenOptions::new()
++                .read(true)
++                .write(true)
++                .open(path.join(LOCK))
++                .unwrap();
++            fs2::FileExt::try_lock_exclusive(&file).unwrap();
++            assert_eq!(read_marker(&file).unwrap(), (b'D', 1));
++            fs2::FileExt::unlock(&file).unwrap();
++            for _ in 0..2 {
++                assert!(probe(&path).contains("dirty generation"));
++            }
++            assert!(same_inode(
++                &original,
++                &fs::metadata(path.join(LOCK)).unwrap()
++            ));
++        }
++
++        #[test]
++        fn dropped_owner_quarantines_live_fd_and_leaves_dirty_after_exit() {
++            let (_temporary, path) = fixture();
++            let mut owner = OwnedChild::spawn(&path, "owner");
++            assert_eq!(owner.message(), "READY");
++            owner.command("drop");
++            assert_eq!(owner.message(), "DROPPED");
++            assert!(probe(&path).contains("desktop lease busy"));
++            owner.command("exit");
++            owner.finish();
++            assert!(probe(&path).contains("dirty generation"));
++        }
++
++        #[test]
++        fn account_home_ignores_environment_and_cwd_without_acquiring_real_lease() {
++            let (_temporary, path) = fixture();
++            let expected = format!(
++                "HOME {}",
++                account_home(actual_uid().unwrap()).unwrap().display()
++            );
++            let child = OwnedChild::spawn(&path, "home");
++            assert_eq!(child.message(), expected);
++            child.finish();
++        }
++
++        #[test]
++        fn clean_release_keeps_inode_generation_and_cloexec() {
++            let (_temporary, path) = fixture();
++            let mut lease = acquire_private(&path).unwrap();
++            let original = fs::metadata(path.join(LOCK)).unwrap();
++            for file in [&lease.directory.file, lease.file.as_ref().unwrap()] {
++                let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
++                assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
++            }
++            assert_eq!(
++                read_marker(lease.file.as_ref().unwrap()).unwrap(),
++                (b'D', 1)
++            );
++            assert!(acquire_private(&path).is_err());
++            lease.release_clean().unwrap();
++            lease.release_clean().unwrap();
++            let mut successor = acquire_private(&path).unwrap();
++            assert_eq!(
++                read_marker(successor.file.as_ref().unwrap()).unwrap(),
++                (b'D', 2)
++            );
++            assert!(same_inode(
++                &original,
++                &fs::metadata(path.join(LOCK)).unwrap()
++            ));
++            successor.release_clean().unwrap();
++        }
++
++        #[test]
++        fn refuses_symlink_parent_and_ancestor() {
++            let (_temporary, path) = fixture();
++            let real = path.join("real");
++            DirBuilder::new().mode(0o700).create(&real).unwrap();
++            symlink(&real, path.join("link")).unwrap();
++            assert!(Directory::for_test(&path.join("link")).is_err());
++            DirBuilder::new()
++                .mode(0o700)
++                .create(real.join("nested"))
++                .unwrap();
++            assert!(Directory::for_test(&path.join("link/nested")).is_err());
++        }
++
++        #[test]
++        fn refuses_symlink_hardlink_directory_and_fifo_lock_files() {
++            for kind in ["symlink", "hardlink", "directory", "fifo"] {
++                let (_temporary, path) = fixture();
++                let lock = path.join(LOCK);
++                match kind {
++                    "symlink" | "hardlink" => {
++                        let target = path.join("unrelated");
++                        fs::write(&target, b"untouched").unwrap();
++                        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
++                        if kind == "symlink" {
++                            symlink(&target, &lock).unwrap();
++                        } else {
++                            fs::hard_link(&target, &lock).unwrap();
++                        }
++                    }
++                    "directory" => fs::create_dir(&lock).unwrap(),
++                    "fifo" => {
++                        let name = CString::new(lock.as_os_str().as_bytes()).unwrap();
++                        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
++                    }
++                    _ => unreachable!(),
++                }
++                assert!(acquire_private(&path).is_err(), "accepted {kind}");
++                if kind == "symlink" || kind == "hardlink" {
++                    assert_eq!(fs::read(path.join("unrelated")).unwrap(), b"untouched");
++                }
++            }
++        }
++
++        #[test]
++        fn refuses_nonprivate_modes_and_wrong_owner_expectation() {
++            let (_temporary, path) = fixture();
++            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
++            assert!(acquire_private(&path).is_err());
++            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
++            fixture_marker(&path, marker(b'C', 1).as_bytes());
++            fs::set_permissions(path.join(LOCK), fs::Permissions::from_mode(0o644)).unwrap();
++            assert!(acquire_private(&path).is_err());
++            fs::set_permissions(path.join(LOCK), fs::Permissions::from_mode(0o600)).unwrap();
++            let mut directory = Directory::for_test(&path).unwrap();
++            directory.uid = directory.uid.checked_add(1).unwrap();
++            assert!(validate_file(&directory, &File::open(path.join(LOCK)).unwrap()).is_err());
++            assert!(directory.validate().is_err());
++        }
++
++        #[test]
++        fn refuses_extended_acl_even_when_posix_mode_is_private() {
++            for directory_acl in [false, true] {
++                let (_temporary, path) = fixture();
++                fixture_marker(&path, marker(b'C', 1).as_bytes());
++                let mut baseline = acquire_private(&path).unwrap();
++                baseline.release_clean().unwrap();
++                let target = if directory_acl {
++                    path.clone()
++                } else {
++                    path.join(LOCK)
++                };
++                // macOS chmod affects only the test's private fixture. No ACL on
++                // the actual account home or canonical lease is ever changed.
++                assert!(Command::new("/bin/chmod")
++                    .args(["+a", "everyone allow read"])
++                    .arg(&target)
++                    .status()
++                    .unwrap()
++                    .success());
++                assert_eq!(
++                    fs::metadata(&target).unwrap().mode() & 0o7777,
++                    if directory_acl { 0o700 } else { 0o600 }
++                );
++                let error = acquire_private(&path).err().expect("extended ACL admitted");
++                assert!(error.to_string().contains("extended ACL"), "{error:#}");
++            }
++        }
++
++        #[test]
++        fn refuses_empty_dirty_malformed_and_exhausted_markers_without_repair() {
++            for contents in [
++                Vec::new(),
++                b"malformed".to_vec(),
++                marker(b'D', 7).into_bytes(),
++                marker(b'C', 0).into_bytes(),
++                marker(b'C', u64::MAX).into_bytes(),
++                format!("{}extra", marker(b'C', 1)).into_bytes(),
++            ] {
++                let (_temporary, path) = fixture();
++                fixture_marker(&path, &contents);
++                let original = fs::metadata(path.join(LOCK)).unwrap();
++                assert!(acquire_private(&path).is_err());
++                assert_eq!(fs::read(path.join(LOCK)).unwrap(), contents);
++                assert!(same_inode(
++                    &original,
++                    &fs::metadata(path.join(LOCK)).unwrap()
++                ));
++            }
++        }
++
++        #[test]
++        fn replaced_file_or_directory_cannot_clean_the_owned_inode() {
++            for replace_directory in [false, true] {
++                let (_temporary, root) = fixture();
++                let path = root.join("lease");
++                DirBuilder::new().mode(0o700).create(&path).unwrap();
++                let mut lease = acquire_private(&path).unwrap();
++                if replace_directory {
++                    fs::rename(&path, root.join("old-directory")).unwrap();
++                    DirBuilder::new().mode(0o700).create(&path).unwrap();
++                } else {
++                    fs::rename(path.join(LOCK), path.join("old-lock")).unwrap();
++                }
++                fixture_marker(&path, marker(b'C', 9).as_bytes());
++                assert!(lease.release_clean().is_err());
++                assert_eq!(
++                    read_marker(lease.file.as_ref().unwrap()).unwrap(),
++                    (b'D', 1)
++                );
++                assert_eq!(
++                    fs::read(path.join(LOCK)).unwrap(),
++                    marker(b'C', 9).as_bytes()
++                );
++                // The old inode is still owned even after its path was replaced.
++                let old = if replace_directory {
++                    root.join("old-directory").join(LOCK)
++                } else {
++                    path.join("old-lock")
++                };
++                let competitor = OpenOptions::new().read(true).write(true).open(old).unwrap();
++                assert!(fs2::FileExt::try_lock_exclusive(&competitor).is_err());
++            }
++        }
++
++        #[test]
++        fn changed_generation_cannot_be_cleaned_by_an_old_owner() {
++            let (_temporary, path) = fixture();
++            let mut lease = acquire_private(&path).unwrap();
++            let file = lease.file.as_ref().unwrap();
++            write_marker(file, b'D', 2).unwrap();
++            assert!(lease.release_clean().is_err());
++            assert_eq!(
++                read_marker(lease.file.as_ref().unwrap()).unwrap(),
++                (b'D', 2)
++            );
++        }
++    }
++}
++
++#[cfg(all(test, not(target_os = "macos")))]
++mod unsupported_tests {
++    #[test]
++    fn desktop_lease_is_not_supported() {
++        assert!(super::ComputerDesktopLease::acquire().is_err());
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+@@ -0,0 +1,586 @@
++//! Pi's narrow controlled-operation lifetime. Not a generic tool capability.
++//!
++//! A foreign waiter never owns the producer. Cancellation closes primary
++//! admission, not already committed calls; terminal means driver-owned work
++//! drained, not that another application has processed all submitted input.
++
++use std::cell::RefCell;
++use std::future::Future;
++use std::sync::{
++    atomic::{AtomicBool, Ordering},
++    Arc, Condvar, Mutex, MutexGuard,
++};
++use tokio::sync::watch;
++
++fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
++    value.lock().unwrap_or_else(|error| error.into_inner())
++}
++
++pub struct Gate {
++    closed: Mutex<bool>,
++    quarantined: AtomicBool,
++    changed: watch::Sender<u64>,
++}
++
++impl Gate {
++    pub fn new() -> Arc<Self> {
++        Arc::new(Self {
++            closed: Mutex::new(false),
++            quarantined: AtomicBool::new(false),
++            changed: watch::channel(0).0,
++        })
++    }
++
++    fn guard(&self) -> MutexGuard<'_, bool> {
++        let mut closed = lock(&self.closed);
++        if self.closed.is_poisoned() || self.is_quarantined() {
++            self.quarantined.store(true, Ordering::Release);
++            *closed = true;
++            self.notify();
++        }
++        closed
++    }
++
++    fn notify(&self) {
++        self.changed
++            .send_modify(|value| *value = value.wrapping_add(1));
++    }
++
++    pub fn revoke(&self) {
++        *self.guard() = true;
++        self.notify();
++    }
++
++    pub fn quarantine(&self) {
++        self.quarantined.store(true, Ordering::Release);
++        self.revoke();
++    }
++
++    pub fn is_quarantined(&self) -> bool {
++        self.quarantined.load(Ordering::Acquire)
++    }
++
++    pub fn session(
++        self: &Arc<Self>,
++        parent: Option<Arc<Session>>,
++        authority_live: Arc<dyn Fn() -> bool + Send + Sync>,
++        pid: i32,
++        window_id: u32,
++        process_stamp: Option<(u64, u64)>,
++    ) -> Result<Arc<Session>, &'static str> {
++        let closed = self.guard();
++        if *closed {
++            return Err("host_closed");
++        }
++        if let Some(parent) = &parent {
++            if !Arc::ptr_eq(self, &parent.gate)
++                || !parent.live()
++                || parent.pid != pid
++                || parent.window_id != window_id
++                || parent.process_stamp != process_stamp
++            {
++                return Err("invalid_parent");
++            }
++        }
++        if !authority_live() {
++            return Err("authorization_unavailable");
++        }
++        Ok(Arc::new(Session {
++            gate: self.clone(),
++            parent,
++            revoked: Mutex::new(false),
++            authority_live,
++            pid,
++            window_id,
++            process_stamp,
++            snapshot: Mutex::new(None),
++            snapshots: Arc::new(SnapshotOwner::default()),
++        }))
++    }
++}
++
++pub struct Session {
++    gate: Arc<Gate>,
++    parent: Option<Arc<Session>>,
++    revoked: Mutex<bool>,
++    authority_live: Arc<dyn Fn() -> bool + Send + Sync>,
++    pub pid: i32,
++    pub window_id: u32,
++    pub process_stamp: Option<(u64, u64)>,
++    snapshot: Mutex<Option<u32>>,
++    pub snapshots: Arc<SnapshotOwner>,
++}
++
++/// Native cleanup ownership, independent of a foreign session facade and of
++/// token validity. Callbacks may only retire retained observation resources.
++#[derive(Default)]
++pub struct SnapshotOwner(Mutex<Option<Box<dyn FnOnce() + Send>>>);
++
++impl SnapshotOwner {
++    pub fn replace(&self, cleanup: impl FnOnce() + Send + 'static) -> Result<(), &'static str> {
++        let mut slot = self.0.lock().map_err(|_| "snapshot_cleanup_poisoned")?;
++        if let Some(previous) = slot.take() {
++            previous();
++        }
++        *slot = Some(Box::new(cleanup));
++        Ok(())
++    }
++
++    pub fn retire(&self) -> Result<(), &'static str> {
++        let mut slot = self.0.lock().map_err(|_| "snapshot_cleanup_poisoned")?;
++        if let Some(cleanup) = slot.take() {
++            cleanup();
++        }
++        Ok(())
++    }
++}
++
++impl Session {
++    // Only while the common gate is held. The checker is native authorization
++    // state, never a foreign-language callback.
++    fn live(&self) -> bool {
++        if self.revoked.is_poisoned() || self.snapshot.is_poisoned() {
++            self.gate.quarantined.store(true, Ordering::Release);
++            self.gate.notify();
++        }
++        !self.gate.is_quarantined()
++            && !*lock(&self.revoked)
++            && (self.authority_live)()
++            && self.parent.as_ref().is_none_or(|parent| parent.live())
++    }
++
++    pub fn revoke(&self) {
++        let _gate = self.gate.guard();
++        *lock(&self.revoked) = true;
++        *lock(&self.snapshot) = None;
++        self.gate.notify();
++    }
++
++    pub fn descends_from(&self, ancestor: &Arc<Self>) -> bool {
++        std::ptr::eq(self, Arc::as_ptr(ancestor))
++            || self
++                .parent
++                .as_ref()
++                .is_some_and(|parent| parent.descends_from(ancestor))
++    }
++
++    pub fn new_operation(self: &Arc<Self>) -> Result<Arc<Operation>, &'static str> {
++        let closed = self.gate.guard();
++        if *closed || !self.live() {
++            return Err("session_closed");
++        }
++        Ok(Arc::new(Operation {
++            id: uuid::Uuid::new_v4().to_string(),
++            session: self.clone(),
++            state: Mutex::new(State::default()),
++            cleanup_changed: Condvar::new(),
++        }))
++    }
++}
++
++#[derive(Default)]
++struct State {
++    started: bool,
++    cancelled: bool,
++    producer_done: bool,
++    active: usize,
++    callbacks: usize,
++    quarantine: bool,
++    input_committed: bool,
++    terminal: Option<Terminal>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Terminal {
++    pub cancelled: bool,
++    pub input_committed: bool,
++}
++
++pub struct Operation {
++    pub id: String,
++    pub session: Arc<Session>,
++    state: Mutex<State>,
++    cleanup_changed: Condvar,
++}
++
++impl Operation {
++    fn state(&self) -> MutexGuard<'_, State> {
++        let mut state = lock(&self.state);
++        if self.state.is_poisoned() {
++            self.session.gate.quarantined.store(true, Ordering::Release);
++            state.quarantine = true;
++            self.session.gate.notify();
++            self.cleanup_changed.notify_all();
++        }
++        state
++    }
++
++    pub fn begin(&self) -> Result<(), &'static str> {
++        let closed = self.session.gate.guard();
++        let mut state = self.state();
++        if state.started {
++            return Err("already_started");
++        }
++        if *closed || !self.session.live() || state.cancelled || state.producer_done {
++            state.cancelled = true;
++            state.producer_done = true;
++            self.session.gate.notify();
++            return Err("cancelled");
++        }
++        state.started = true;
++        Ok(())
++    }
++
++    pub fn cancel(&self) {
++        let closed = self.session.gate.guard();
++        let mut state = self.state();
++        if state.terminal.is_some() {
++            return;
++        }
++        state.cancelled = true;
++        if !state.started {
++            state.producer_done = true;
++        }
++        self.settle(&mut state, *closed);
++        self.session.gate.notify();
++    }
++
++    /// Last facade-owner destruction is not cancellation of a running task.
++    /// The independent supervisor normally keeps that owner alive through
++    /// drain; losing it early makes proof unavailable and quarantines the host.
++    pub fn abandon(&self) {
++        let closed = self.session.gate.guard();
++        let mut state = self.state();
++        if state.terminal.is_some() {
++            return;
++        }
++        if !state.started && state.active == 0 {
++            state.cancelled = true;
++            state.producer_done = true;
++            self.settle(&mut state, *closed);
++        } else {
++            state.quarantine = true;
++            self.session.gate.quarantined.store(true, Ordering::Release);
++        }
++        self.session.gate.notify();
++        self.cleanup_changed.notify_all();
++    }
++
++    fn settle(&self, state: &mut State, closed: bool) {
++        if state.terminal.is_none()
++            && state.producer_done
++            && state.active == 0
++            && !state.quarantine
++            && !self.session.gate.is_quarantined()
++        {
++            let live = self.session.live();
++            let cancelled = closed || !live || state.cancelled;
++            if !self.session.gate.is_quarantined() {
++                state.terminal = Some(Terminal {
++                    cancelled,
++                    input_committed: state.input_committed,
++                });
++            }
++        }
++    }
++
++    pub fn checkpoint(&self) -> Result<(), &'static str> {
++        let closed = self.session.gate.guard();
++        let state = self.state();
++        if *closed
++            || !self.session.live()
++            || state.cancelled
++            || state.producer_done
++            || state.quarantine
++        {
++            Err("cancelled")
++        } else {
++            Ok(())
++        }
++    }
++
++    /// Commit and immediately invoke one primary primitive on this stack.
++    /// No permit is returned or queued. The common gate is NOT held across
++    /// the OS call, so Stop remains prompt. A committed call must drain.
++    pub fn primary<T>(&self, input: bool, call: impl FnOnce() -> T) -> Result<T, &'static str> {
++        {
++            let closed = self.session.gate.guard();
++            let mut state = self.state();
++            if *closed
++                || !self.session.live()
++                || state.cancelled
++                || state.producer_done
++                || state.quarantine
++            {
++                return Err("cancelled");
++            }
++            if !state.started || (input && state.input_committed) {
++                return Err("invalid_primitive");
++            }
++            if input {
++                state.input_committed = true;
++            }
++        }
++        Ok(call())
++    }
++
++    pub fn reset_snapshot(&self) {
++        let _gate = self.session.gate.guard();
++        *lock(&self.session.snapshot) = None;
++    }
++
++    pub fn remember_snapshot(
++        &self,
++        id: u32,
++        cleanup: impl FnOnce() + Send + 'static,
++    ) -> Result<(), &'static str> {
++        // Resource retirement never holds the admission gate across native
++        // releases. Session close waits the independently retained producer.
++        if self.session.snapshots.replace(cleanup).is_err() {
++            self.quarantine();
++            return Err("snapshot_cleanup_poisoned");
++        }
++        let closed = self.session.gate.guard();
++        let state = self.state();
++        if *closed
++            || !self.session.live()
++            || state.cancelled
++            || state.producer_done
++            || state.quarantine
++        {
++            return Err("cancelled");
++        }
++        *lock(&self.session.snapshot) = Some(id);
++        Ok(())
++    }
++
++    pub fn consume_token(&self, token: &str) -> Result<(), &'static str> {
++        let closed = self.session.gate.guard();
++        let state = self.state();
++        if *closed
++            || !self.session.live()
++            || state.cancelled
++            || state.producer_done
++            || state.quarantine
++        {
++            return Err("cancelled");
++        }
++        let mut snapshot = lock(&self.session.snapshot);
++        if !snapshot.is_some_and(|id| token.starts_with(&format!("s{id:08x}:"))) {
++            return Err("stale_session_observation");
++        }
++        *snapshot = None;
++        Ok(())
++    }
++
++    /// Register before spawning or snapshotting a callback. Cleanup is allowed
++    /// after cancellation, but never after the supervisor closes producers.
++    pub fn track(self: &Arc<Self>) -> Result<Work, &'static str> {
++        self.track_kind(false)
++    }
++
++    pub fn track_callback(self: &Arc<Self>) -> Result<Work, &'static str> {
++        self.track_kind(true)
++    }
++
++    fn track_kind(self: &Arc<Self>, callback: bool) -> Result<Work, &'static str> {
++        let _gate = self.session.gate.guard();
++        let mut state = self.state();
++        if !state.started
++            || state.producer_done
++            || state.quarantine
++            || self.session.gate.is_quarantined()
++        {
++            return Err("producer_closed");
++        }
++        state.active += 1;
++        if callback {
++            state.callbacks += 1;
++        }
++        Ok(Work(self.clone(), callback))
++    }
++
++    /// Called only after all this operation's focus entries have been removed.
++    /// Retains the blocking worker and per-PID lane while matched callbacks
++    /// finish. No cancellation gate is held while a foreign callback runs.
++    pub fn wait_callbacks(&self) -> Result<(), &'static str> {
++        let mut state = self.state();
++        while state.callbacks > 0 {
++            state = match self.cleanup_changed.wait(state) {
++                Ok(state) => state,
++                Err(error) => {
++                    self.session.gate.quarantined.store(true, Ordering::Release);
++                    let mut state = error.into_inner();
++                    state.quarantine = true;
++                    state
++                }
++            };
++        }
++        if state.quarantine {
++            Err("quarantined")
++        } else {
++            Ok(())
++        }
++    }
++
++    pub fn quarantine(&self) {
++        let mut closed = self.session.gate.guard();
++        *closed = true;
++        self.session.gate.quarantined.store(true, Ordering::Release);
++        self.state().quarantine = true;
++        self.session.gate.notify();
++        self.cleanup_changed.notify_all();
++    }
++
++    pub fn finish(&self) {
++        let closed = self.session.gate.guard();
++        let mut state = self.state();
++        state.producer_done = true;
++        self.settle(&mut state, *closed);
++        self.session.gate.notify();
++    }
++
++    pub fn is_proven_terminal(&self) -> bool {
++        let state = self.state();
++        state.terminal.is_some() && !state.quarantine && !self.session.gate.is_quarantined()
++    }
++
++    pub fn input_committed(&self) -> bool {
++        self.state().input_committed
++    }
++
++    pub fn is_cancelled(&self) -> bool {
++        let closed = self.session.gate.guard();
++        *closed || !self.session.live() || self.state().cancelled
++    }
++
++    pub async fn cancelled(&self) {
++        let mut changed = self.session.gate.changed.subscribe();
++        loop {
++            if self.is_cancelled() {
++                return;
++            }
++            if changed.changed().await.is_err() {
++                return;
++            }
++        }
++    }
++
++    pub async fn terminal(&self) -> Result<Terminal, &'static str> {
++        let mut changed = self.session.gate.changed.subscribe();
++        loop {
++            {
++                let closed = self.session.gate.guard();
++                let mut state = self.state();
++                if state.quarantine {
++                    return Err("quarantined");
++                }
++                // A different operation's later quarantine cannot invalidate
++                // this operation's already established immutable proof.
++                if let Some(terminal) = state.terminal {
++                    return Ok(terminal);
++                }
++                if self.session.gate.is_quarantined() {
++                    return Err("quarantined");
++                }
++                if !state.started && (*closed || !self.session.live()) {
++                    state.cancelled = true;
++                    state.producer_done = true;
++                }
++                self.settle(&mut state, *closed);
++                if self.session.gate.is_quarantined() {
++                    return Err("quarantined");
++                }
++                if let Some(terminal) = state.terminal {
++                    return Ok(terminal);
++                }
++            }
++            changed.changed().await.map_err(|_| "quarantined")?;
++        }
++    }
++
++    pub async fn blocking<T: Send + 'static>(
++        self: &Arc<Self>,
++        call: impl FnOnce() -> T + Send + 'static,
++    ) -> Result<T, &'static str> {
++        let work = self.track()?;
++        let operation = self.clone();
++        let runtime_scope = crate::tool::current_dispatch_runtime_scope();
++        match tokio::task::spawn_blocking(move || {
++            let _work = work;
++            on_thread(operation, || match runtime_scope {
++                Some(scope) => crate::tool::with_runtime_scope(scope, call),
++                None => call(),
++            })
++        })
++        .await
++        {
++            Ok(value) => Ok(value),
++            Err(_) => {
++                self.quarantine();
++                Err("quarantined")
++            }
++        }
++    }
++}
++
++pub struct Work(Arc<Operation>, bool);
++
++impl Drop for Work {
++    fn drop(&mut self) {
++        let mut closed = self.0.session.gate.guard();
++        let mut state = self.0.state();
++        if state.active == 0 {
++            state.quarantine = true;
++        } else {
++            state.active -= 1;
++        }
++        if self.1 {
++            if state.callbacks == 0 {
++                state.quarantine = true;
++            } else {
++                state.callbacks -= 1;
++            }
++        }
++        state.quarantine |= std::thread::panicking();
++        *closed |= state.quarantine;
++        if state.quarantine {
++            self.0
++                .session
++                .gate
++                .quarantined
++                .store(true, Ordering::Release);
++        }
++        self.0.settle(&mut state, *closed);
++        self.0.session.gate.notify();
++        self.0.cleanup_changed.notify_all();
++    }
++}
++
++tokio::task_local! { static CURRENT: Arc<Operation>; }
++thread_local! { static THREAD: RefCell<Option<Arc<Operation>>> = const { RefCell::new(None) }; }
++
++pub fn current() -> Option<Arc<Operation>> {
++    CURRENT
++        .try_with(Arc::clone)
++        .ok()
++        .or_else(|| THREAD.with(|value| value.borrow().clone()))
++}
++
++pub async fn scope<T>(operation: Arc<Operation>, future: impl Future<Output = T>) -> T {
++    CURRENT.scope(operation, future).await
++}
++
++fn on_thread<T>(operation: Arc<Operation>, call: impl FnOnce() -> T) -> T {
++    struct Restore(Option<Arc<Operation>>);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            THREAD.with(|value| *value.borrow_mut() = self.0.take());
++        }
++    }
++    let _restore = Restore(THREAD.with(|value| value.replace(Some(operation))));
++    call()
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/tests.rs
+@@ -0,0 +1,371 @@
++use super::*;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::task::{Context, Poll, Waker};
++
++fn session(gate: &Arc<Gate>, parent: Option<Arc<Session>>) -> Arc<Session> {
++    gate.session(parent, Arc::new(|| true), 42, 7, None)
++        .unwrap()
++}
++
++fn pending<T>(future: impl Future<Output = T>) {
++    let mut future = std::pin::pin!(future);
++    assert!(matches!(
++        future
++            .as_mut()
++            .poll(&mut Context::from_waker(Waker::noop())),
++        Poll::Pending
++    ));
++}
++
++#[tokio::test]
++async fn controlled_cancel_before_start_is_terminal_without_a_primitive() {
++    let node = session(&Gate::new(), None);
++    let operation = node.new_operation().unwrap();
++    operation.cancel();
++    assert_eq!(operation.begin(), Err("cancelled"));
++    assert_eq!(
++        operation.primary(true, || panic!("cancelled action ran")),
++        Err("cancelled")
++    );
++    assert_eq!(
++        operation.terminal().await.unwrap(),
++        Terminal {
++            cancelled: true,
++            input_committed: false
++        }
++    );
++}
++
++#[tokio::test]
++async fn controlled_parent_revocation_reaches_descendants_not_siblings() {
++    let gate = Gate::new();
++    let parent = session(&gate, None);
++    let child = session(&gate, Some(parent.clone()));
++    let grandchild = session(&gate, Some(child));
++    let sibling = session(&gate, None);
++    let op = grandchild.new_operation().unwrap();
++    op.begin().unwrap();
++    parent.revoke();
++    assert!(op.primary(true, || ()).is_err());
++    assert!(gate
++        .session(Some(parent), Arc::new(|| true), 42, 7, None)
++        .is_err());
++    assert!(sibling.new_operation().is_ok());
++    op.finish();
++    assert!(op.terminal().await.unwrap().cancelled);
++}
++
++#[test]
++fn controlled_foreign_parent_and_changed_target_are_refused() {
++    let gate = Gate::new();
++    let node = session(&gate, None);
++    assert!(Gate::new()
++        .session(Some(node.clone()), Arc::new(|| true), 42, 7, None)
++        .is_err());
++    assert!(gate
++        .session(Some(node), Arc::new(|| true), 42, 8, None)
++        .is_err());
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn controlled_queued_worker_cannot_dispatch_after_cancel() {
++    let op = session(&Gate::new(), None).new_operation().unwrap();
++    op.begin().unwrap();
++    let calls = Arc::new(AtomicUsize::new(0));
++    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
++    let (release_tx, release_rx) = std::sync::mpsc::channel();
++    let producer = {
++        let op = op.clone();
++        let calls = calls.clone();
++        tokio::spawn(async move {
++            let result = op
++                .blocking(move || {
++                    entered_tx.send(()).unwrap();
++                    release_rx.recv().unwrap();
++                    current()
++                        .unwrap()
++                        .primary(true, || calls.fetch_add(1, Ordering::SeqCst))
++                })
++                .await
++                .unwrap();
++            assert_eq!(result, Err("cancelled"));
++            op.finish();
++        })
++    };
++    entered_rx.await.unwrap();
++    op.cancel();
++    pending(op.terminal());
++    release_tx.send(()).unwrap();
++    producer.await.unwrap();
++    assert!(op.terminal().await.unwrap().cancelled);
++    assert_eq!(calls.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn controlled_active_primitive_and_dropped_waiter_retain_work() {
++    let op = session(&Gate::new(), None).new_operation().unwrap();
++    op.begin().unwrap();
++    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
++    let (release_tx, release_rx) = std::sync::mpsc::channel();
++    let producer = {
++        let op = op.clone();
++        tokio::spawn(async move {
++            op.blocking(move || {
++                current().unwrap().primary(true, || {
++                    entered_tx.send(()).unwrap();
++                    release_rx.recv().unwrap();
++                })
++            })
++            .await
++            .unwrap()
++            .unwrap();
++            op.finish();
++        })
++    };
++    entered_rx.await.unwrap();
++    let waiter = {
++        let op = op.clone();
++        tokio::spawn(async move { op.terminal().await })
++    };
++    waiter.abort();
++    let _ = waiter.await;
++    op.cancel(); // Must not wait for the committed primitive's barrier.
++    pending(op.terminal());
++    release_tx.send(()).unwrap();
++    producer.await.unwrap();
++    assert_eq!(
++        op.terminal().await.unwrap(),
++        Terminal {
++            cancelled: true,
++            input_committed: true
++        }
++    );
++}
++
++#[tokio::test]
++async fn controlled_callback_snapshot_drains_after_producer_closes() {
++    let op = session(&Gate::new(), None).new_operation().unwrap();
++    op.begin().unwrap();
++    let callback = op.track_callback().unwrap();
++    op.cancel();
++    op.finish();
++    assert!(
++        op.track().is_err(),
++        "closed producer admitted another callback"
++    );
++    pending(op.terminal());
++    drop(callback);
++    assert!(op.terminal().await.unwrap().cancelled);
++}
++
++#[tokio::test]
++async fn controlled_terminal_is_stable_and_close_is_idempotent() {
++    let gate = Gate::new();
++    let op = session(&gate, None).new_operation().unwrap();
++    op.begin().unwrap();
++    op.primary(true, || ()).unwrap();
++    assert!(op.primary(true, || panic!("second input")).is_err());
++    op.finish();
++    let terminal = op.terminal().await.unwrap();
++    op.cancel();
++    gate.revoke();
++    gate.revoke();
++    op.finish();
++    assert_eq!(terminal, op.terminal().await.unwrap());
++    gate.quarantine();
++    assert_eq!(terminal, op.terminal().await.unwrap());
++    assert!(!terminal.cancelled);
++}
++
++#[tokio::test]
++async fn controlled_failed_proof_never_acknowledges_terminal() {
++    let op = session(&Gate::new(), None).new_operation().unwrap();
++    op.begin().unwrap();
++    op.quarantine();
++    op.finish();
++    assert_eq!(op.terminal().await, Err("quarantined"));
++    assert!(op.primary(true, || ()).is_err());
++}
++
++#[tokio::test]
++async fn controlled_session_scopes_and_consumes_its_snapshot() {
++    let gate = Gate::new();
++    let op = session(&gate, None).new_operation().unwrap();
++    op.begin().unwrap();
++    op.remember_snapshot(7, || ()).unwrap();
++    let foreign = session(&gate, None).new_operation().unwrap();
++    assert!(foreign.consume_token("s00000007:0").is_err());
++    op.consume_token("s00000007:0").unwrap();
++    assert!(op.consume_token("s00000007:0").is_err());
++    op.cancel();
++    assert!(op.remember_snapshot(8, || ()).is_err());
++    op.finish();
++}
++
++#[tokio::test]
++async fn controlled_ancestor_cancel_wakes_scheduler_waiter() {
++    let gate = Gate::new();
++    let parent = session(&gate, None);
++    let op = session(&gate, Some(parent.clone()))
++        .new_operation()
++        .unwrap();
++    op.begin().unwrap();
++    pending(op.cancelled());
++    parent.revoke();
++    op.cancelled().await;
++    op.finish();
++    assert!(op.terminal().await.unwrap().cancelled);
++}
++
++fn poison<T>(mutex: &Mutex<T>) {
++    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let _guard = mutex.lock().unwrap();
++        panic!("synthetic controlled poison");
++    }))
++    .is_err());
++}
++
++#[tokio::test]
++async fn controlled_poisoned_gate_never_admits_or_acknowledges() {
++    let gate = Gate::new();
++    let node = session(&gate, None);
++    let op = node.new_operation().unwrap();
++    op.begin().unwrap();
++    poison(&gate.closed);
++    assert!(op
++        .primary(true, || panic!("poison admitted input"))
++        .is_err());
++    op.finish();
++    assert_eq!(op.terminal().await, Err("quarantined"));
++    assert!(node.new_operation().is_err());
++    assert!(gate.is_quarantined());
++}
++
++#[tokio::test]
++async fn controlled_poison_detection_wakes_an_existing_terminal_waiter() {
++    struct CountWakes(AtomicUsize);
++    impl std::task::Wake for CountWakes {
++        fn wake(self: Arc<Self>) {
++            self.0.fetch_add(1, Ordering::SeqCst);
++        }
++        fn wake_by_ref(self: &Arc<Self>) {
++            self.0.fetch_add(1, Ordering::SeqCst);
++        }
++    }
++    let gate = Gate::new();
++    let op = session(&gate, None).new_operation().unwrap();
++    op.begin().unwrap();
++    let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
++    let waker = Waker::from(wakes.clone());
++    let mut terminal = Box::pin(op.terminal());
++    assert!(matches!(
++        terminal.as_mut().poll(&mut Context::from_waker(&waker)),
++        Poll::Pending
++    ));
++    poison(&op.state);
++    op.cancel();
++    assert!(wakes.0.load(Ordering::SeqCst) > 0);
++    assert_eq!(terminal.await, Err("quarantined"));
++}
++
++#[tokio::test]
++async fn controlled_poisoned_operation_state_closes_the_whole_host() {
++    let gate = Gate::new();
++    let node = session(&gate, None);
++    let op = node.new_operation().unwrap();
++    op.begin().unwrap();
++    poison(&op.state);
++    op.cancel();
++    op.finish();
++    assert_eq!(op.terminal().await, Err("quarantined"));
++    assert!(node.new_operation().is_err());
++    assert!(gate.is_quarantined());
++}
++
++#[tokio::test]
++async fn controlled_poisoned_session_state_is_not_a_cancelled_success() {
++    for snapshot in [false, true] {
++        let gate = Gate::new();
++        let node = session(&gate, None);
++        let op = node.new_operation().unwrap();
++        op.begin().unwrap();
++        if snapshot {
++            poison(&node.snapshot);
++        } else {
++            poison(&node.revoked);
++        }
++        op.finish();
++        assert_eq!(op.terminal().await, Err("quarantined"));
++        assert!(node.new_operation().is_err());
++        assert!(gate.is_quarantined());
++    }
++}
++
++#[tokio::test]
++async fn controlled_panicking_registered_worker_quarantines_without_double_panic() {
++    let gate = Gate::new();
++    let op = session(&gate, None).new_operation().unwrap();
++    op.begin().unwrap();
++    let work = op.track().unwrap();
++    assert!(
++        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
++            let _work = work;
++            panic!("synthetic worker panic");
++        }))
++        .is_err()
++    );
++    op.finish();
++    assert_eq!(op.terminal().await, Err("quarantined"));
++    assert!(gate.is_quarantined());
++}
++
++#[tokio::test]
++async fn controlled_abandoned_inert_handle_settles_but_lost_producer_quarantines() {
++    let gate = Gate::new();
++    let node = session(&gate, None);
++    let inert = node.new_operation().unwrap();
++    inert.abandon();
++    assert_eq!(
++        inert.terminal().await.unwrap(),
++        Terminal {
++            cancelled: true,
++            input_committed: false
++        }
++    );
++    assert!(!gate.is_quarantined());
++    let active = node.new_operation().unwrap();
++    active.begin().unwrap();
++    active.abandon();
++    assert_eq!(active.terminal().await, Err("quarantined"));
++    assert!(node.new_operation().is_err());
++}
++
++#[tokio::test]
++async fn controlled_native_authorization_rechecked_at_each_primitive() {
++    let gate = Gate::new();
++    let live = Arc::new(AtomicBool::new(true));
++    let check = live.clone();
++    let node = gate
++        .session(
++            None,
++            Arc::new(move || check.load(Ordering::Acquire)),
++            42,
++            7,
++            None,
++        )
++        .unwrap();
++    let op = node.new_operation().unwrap();
++    op.begin().unwrap();
++    op.primary(false, || ()).unwrap();
++    live.store(false, Ordering::Release);
++    assert!(op.primary(true, || panic!("expired input")).is_err());
++    op.finish();
++    assert_eq!(
++        op.terminal().await.unwrap(),
++        Terminal {
++            cancelled: true,
++            input_committed: false
++        }
++    );
++    assert!(op.remember_snapshot(1, || ()).is_err());
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/element_cache.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/element_cache.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/element_cache.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/element_cache.rs
+@@ -137,6 +137,21 @@
+         drop(retired);
+     }
+ 
++    /// Retire only the controlled session's exact published generation; a
++    /// sibling may already have replaced the same target's observation.
++    pub fn remove_snapshot(&self, pid: i32, window_id: u64, snapshot_id: u32) {
++        let retired = {
++            let mut inner = self.inner.lock().unwrap();
++            let retired = inner.get_mut(&pid).and_then(|lane| {
++                let index = lane.iter().position(|entry| entry.window_id == window_id && entry.id == snapshot_id)?;
++                Some(lane.remove(index))
++            });
++            if inner.get(&pid).is_some_and(Vec::is_empty) { inner.remove(&pid); }
++            retired
++        };
++        drop(retired);
++    }
++
+     pub fn clear(&self) -> usize {
+         let retired = std::mem::take(&mut *self.inner.lock().unwrap());
+         retired.len()
+@@ -302,6 +317,39 @@
+         cache.publish(1, 1, payload());
+         cache.clear();
+         assert_eq!(drops.load(Ordering::SeqCst), 3);
++    }
++
++    #[test]
++    fn controlled_session_retirement_reclaims_payloads_without_removing_a_sibling() {
++        use crate::controlled::SnapshotOwner;
++        let cache = Arc::new(ElementCacheCore::new());
++        let drops = Arc::new(AtomicUsize::new(0));
++        let payload = || DropCounter { owner: Arc::downgrade(&cache), drops: drops.clone() };
++        let old_owner = SnapshotOwner::default();
++        let new_owner = SnapshotOwner::default();
++        let first = cache.publish(42, 7, payload());
++        let owner_cache = cache.clone();
++        old_owner.replace(move || owner_cache.remove_snapshot(42, 7, first)).unwrap();
++        let second = cache.publish(42, 7, payload());
++        let owner_cache = cache.clone();
++        new_owner.replace(move || owner_cache.remove_snapshot(42, 7, second)).unwrap();
++        assert_eq!(drops.load(Ordering::SeqCst), 1);
++        old_owner.retire().unwrap();
++        assert_eq!(drops.load(Ordering::SeqCst), 1, "old session removed sibling payload");
++        assert!(cache.resolve_element_args(42, None, Some(&token_for(second, 0)), None, Some(7), "click").is_ok());
++        new_owner.retire().unwrap();
++        new_owner.retire().unwrap();
++        assert_eq!(drops.load(Ordering::SeqCst), 2);
++        assert!(cache.inner.lock().unwrap().is_empty(), "empty PID bucket retained");
++        for pid in 100..116 {
++            let owner = SnapshotOwner::default();
++            let id = cache.publish(pid, 7, payload());
++            let owner_cache = cache.clone();
++            owner.replace(move || owner_cache.remove_snapshot(pid, 7, id)).unwrap();
++            owner.retire().unwrap();
++        }
++        assert_eq!(drops.load(Ordering::SeqCst), 18);
++        assert!(cache.inner.lock().unwrap().is_empty());
+     }
+ 
+     #[test]
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs
+@@ -51,6 +51,8 @@
+ pub mod cdp;
+ pub mod clipboard;
+ pub mod consent;
++pub mod computer_desktop_lease;
++pub mod controlled;
+ pub mod cursor_events;
+ pub mod cursor_hook;
+ pub mod cursor_sampler;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -1037,6 +1037,12 @@
+         // fields carry registry-internal attestations and must not be
+         // caller-forgeable here.
+         crate::tool_args::sanitize_reserved_args(&mut args);
++        let controlled = crate::controlled::current();
++        if let Some(operation) = &controlled {
++            if !matches!(name, "get_window_state" | "click") || operation.checkpoint().is_err() {
++                return protected_refusal("controlled_refused", "controlled operation is unavailable");
++            }
++        }
+ 
+         if crate::session::is_runtime_scope_suspended(&context.runtime_scope_key()) {
+             return protected_refusal(
+@@ -1484,14 +1490,14 @@
+             None
+         };
+         let start_ms = now_ms();
+-        let cursor_event = crate::cursor_events::begin_tool(resolved_name, &args);
+-        let pending_history = self.history.as_ref().and_then(|history| {
++        let cursor_event = if controlled.is_none() { crate::cursor_events::begin_tool(resolved_name, &args) } else { None };
++        let pending_history = self.history.as_ref().filter(|_| controlled.is_none()).and_then(|history| {
+             history.begin_action(resolved_name, &public_args, runtime_session.as_deref())
+         });
+ 
+         // Reserve and capture the turn before dispatch so recorded evidence
+         // shows the application immediately before the action changed it.
+-        let should_record = !tool.def().read_only
++        let should_record = controlled.is_none() && !tool.def().read_only
+             && !matches!(
+                 resolved_name,
+                 "start_recording" | "stop_recording" | "get_recording_state" | "replay_trajectory"
+@@ -1515,6 +1521,11 @@
+         } else {
+             None
+         };
++        if let Some(operation) = &controlled {
++            if operation.checkpoint().is_err() || context.commit_authorized_dispatch().is_err() {
++                return protected_refusal("controlled_cancelled", "controlled admission was revoked");
++            }
++        }
+         let pending_turn = should_record
+             .then(|| {
+                 if private_consent_turn {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/abi.rs
+@@ -338,6 +338,15 @@
+         }
+         None => Ok(RuntimeOptions::embedded(options.claude_code_compatibility)),
+     }
++}
++
++pub(crate) fn computer_runtime_options(
++    options: crate::ConfiguredDriverOptions,
++) -> Result<RuntimeOptions, DriverError> {
++    let options = serde_json::from_value(crate::configured_driver_options_json(&options))
++        .map_err(|error| DriverError::Configuration { reason: format!("{error}") })?;
++    runtime_options_from_abi(options)
++        .map_err(|error| DriverError::Configuration { reason: error.message })
+ }
+ 
+ fn environment_flag(name: &str) -> bool {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+@@ -0,0 +1,637 @@
++//! Narrow pi-owned macOS qualification facade. No generic tool or batch API.
++use crate::runtime::{DriverRuntime, RuntimeSession};
++use crate::ConfiguredDriverOptions;
++use cua_driver_contract::{ActionResult, WindowStateOutput};
++use cua_driver_core::computer_desktop_lease::ComputerDesktopLease;
++use cua_driver_core::controlled::{self, Gate, Operation, Session};
++use cua_driver_core::session_authorization::DelegatedSessionRequest;
++use std::sync::{
++    atomic::{AtomicBool, Ordering},
++    Arc, Mutex, OnceLock, Weak,
++};
++use tokio::sync::watch;
++
++#[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
++pub enum ComputerError {
++    #[error("controlled operation refused: {reason}")]
++    Refused { reason: String },
++    #[error("controlled operation cancelled (input committed: {input_committed})")]
++    Cancelled { input_committed: bool },
++    #[error("native terminal proof unavailable; desktop owner retained")]
++    Quarantined,
++}
++
++fn refused(reason: &str) -> ComputerError {
++    ComputerError::Refused {
++        reason: reason.into(),
++    }
++}
++
++#[derive(Debug, Clone, uniffi::Enum)]
++pub enum ComputerResult {
++    Observation { value: WindowStateOutput },
++    Action { value: ActionResult },
++}
++
++#[derive(Debug, Clone, uniffi::Record)]
++pub struct ComputerTerminal {
++    pub operation_id: String,
++    pub cancelled: bool,
++    pub input_committed: bool,
++}
++
++type Closing = watch::Sender<Option<Result<(), ComputerError>>>;
++
++fn executor() -> Result<&'static tokio::runtime::Runtime, ComputerError> {
++    static EXECUTOR: OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> = OnceLock::new();
++    EXECUTOR
++        .get_or_init(|| {
++            tokio::runtime::Builder::new_multi_thread()
++                .worker_threads(2)
++                .enable_all()
++                .thread_name("pi-computer")
++                .build()
++        })
++        .as_ref()
++        .map_err(|_| refused("executor_unavailable"))
++}
++
++// This strong native owner is deliberate: foreign GC or a failed terminal
++// subscriber cannot release the FD. Cleared only by successful close.
++fn owner() -> &'static Mutex<Option<Arc<ComputerHost>>> {
++    static OWNER: OnceLock<Mutex<Option<Arc<ComputerHost>>>> = OnceLock::new();
++    OWNER.get_or_init(|| Mutex::new(None))
++}
++
++#[derive(uniffi::Object)]
++pub struct ComputerHost {
++    runtime: Arc<DriverRuntime>,
++    gate: Arc<Gate>,
++    lease: Mutex<Option<ComputerDesktopLease>>,
++    template: DelegatedSessionRequest,
++    sessions: Mutex<Vec<Weak<ComputerSession>>>,
++    // Only native proof state is retained, never foreign results/facades.
++    operations: Mutex<Vec<Arc<Operation>>>,
++    scheduler: Arc<tokio::sync::Mutex<()>>,
++    closing: OnceLock<Closing>,
++}
++
++#[uniffi::export]
++impl ComputerHost {
++    #[uniffi::constructor]
++    pub fn create(options: ConfiguredDriverOptions) -> Result<Arc<Self>, ComputerError> {
++        if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
++            return Err(refused("unsupported_platform"));
++        }
++        executor()?;
++        let native_options = crate::abi::computer_runtime_options(options.clone())
++            .map_err(|_| refused("authorization_configuration_refused"))?;
++        let (mode, manifest) = native_options
++            .compatibility_authorization
++            .clone()
++            .ok_or_else(|| refused("explicit_authorization_required"))?;
++        let mut slot = owner().lock().map_err(|_| ComputerError::Quarantined)?;
++        if slot.is_some() {
++            return Err(refused("host_already_exists"));
++        }
++        let mut lease =
++            ComputerDesktopLease::acquire().map_err(|_| refused("desktop_lease_unavailable"))?;
++        let runtime = match DriverRuntime::create_computer(native_options) {
++            Ok(runtime) => runtime,
++            Err(_) => {
++                // The narrow constructor has no actuator or callback facility.
++                if lease.release_clean().is_err() {
++                    std::mem::forget(lease);
++                }
++                return Err(refused("runtime_creation_failed"));
++            }
++        };
++        let host = Arc::new(Self {
++            runtime,
++            gate: Gate::new(),
++            lease: Mutex::new(Some(lease)),
++            template: DelegatedSessionRequest {
++                public_session: String::new(),
++                transport_session: String::new(),
++                mode,
++                ttl: std::time::Duration::from_secs(options.authorization.max_session_ttl_seconds),
++                idle_ttl: std::time::Duration::from_secs(
++                    options.authorization.max_idle_ttl_seconds,
++                ),
++                capability_manifest: manifest,
++            },
++            sessions: Mutex::new(Vec::new()),
++            operations: Mutex::new(Vec::new()),
++            scheduler: Arc::new(tokio::sync::Mutex::new(())),
++            closing: OnceLock::new(),
++        });
++        *slot = Some(host.clone());
++        Ok(host)
++    }
++
++    pub fn open_session(
++        self: Arc<Self>,
++        pid: u32,
++        window_id: u64,
++        parent: Option<Arc<ComputerSession>>,
++    ) -> Result<Arc<ComputerSession>, ComputerError> {
++        let pid = i32::try_from(pid)
++            .ok()
++            .filter(|pid| *pid > 0)
++            .ok_or_else(|| refused("invalid_target"))?;
++        let window_id = u32::try_from(window_id)
++            .ok()
++            .filter(|id| *id > 0)
++            .ok_or_else(|| refused("invalid_target"))?;
++        if parent
++            .as_ref()
++            .is_some_and(|parent| !Arc::ptr_eq(&parent.host, &self))
++        {
++            return Err(refused("foreign_parent"));
++        }
++        #[cfg(target_os = "macos")]
++        let process_stamp = Some(
++            platform_macos::tools::computer_process_stamp(pid)
++                .ok_or_else(|| refused("target_process_unavailable"))?,
++        );
++        #[cfg(not(target_os = "macos"))]
++        let process_stamp = None;
++        let mut sessions = self.sessions.lock().map_err(|_| self.quarantine())?;
++        let label = format!("pi-computer-{}", uuid::Uuid::new_v4());
++        let native = self
++            .runtime
++            .create_computer_session(
++                DelegatedSessionRequest {
++                    public_session: label.clone(),
++                    transport_session: label,
++                    mode: self.template.mode,
++                    ttl: self.template.ttl,
++                    idle_ttl: self.template.idle_ttl,
++                    capability_manifest: self.template.capability_manifest.clone(),
++                },
++                parent.as_ref().map(|parent| parent.native.as_ref()),
++            )
++            .map_err(|_| refused("session_authorization_refused"))?;
++        let authority = native.clone();
++        let gate = self
++            .gate
++            .session(
++                parent.map(|parent| parent.gate.clone()),
++                Arc::new(move || authority.computer_authority_live()),
++                pid,
++                window_id,
++                process_stamp,
++            )
++            .map_err(refused)?;
++        if !native.computer_bind_snapshots(gate.snapshots.clone()) {
++            return Err(self.quarantine());
++        }
++        let session = Arc::new(ComputerSession {
++            host: self.clone(),
++            native,
++            gate,
++            closing: OnceLock::new(),
++            closed: AtomicBool::new(false),
++            #[cfg(test)]
++            drop_barrier: Mutex::new(None),
++        });
++        sessions.retain(|session| session.strong_count() > 0);
++        sessions.push(Arc::downgrade(&session));
++        Ok(session)
++    }
++
++    pub fn revoke(&self) {
++        self.gate.revoke();
++        if let Ok(sessions) = self.sessions.lock() {
++            for session in sessions.iter().filter_map(Weak::upgrade) {
++                session.native.computer_revoke();
++            }
++        } else {
++            self.gate.quarantine();
++        }
++        if let Ok(operations) = self.operations.lock() {
++            for operation in operations.iter() {
++                operation.cancel();
++            }
++        } else {
++            self.gate.quarantine();
++        }
++    }
++}
++
++#[uniffi::export(async_runtime = "tokio")]
++impl ComputerHost {
++    pub async fn close(self: Arc<Self>) -> Result<(), ComputerError> {
++        self.revoke();
++        let sender = self.closing.get_or_init(|| {
++            let sender = watch::channel(None).0;
++            let task_sender = sender.clone();
++            let host = self.clone();
++            executor()
++                .expect("executor was created before host")
++                .spawn(async move {
++                    let worker_host = host.clone();
++                    let result = tokio::spawn(async move { worker_host.close_owned().await })
++                        .await
++                        .unwrap_or(Err(ComputerError::Quarantined));
++                    if result.is_err() {
++                        host.gate.quarantine();
++                    }
++                    task_sender.send_replace(Some(result));
++                });
++            sender
++        });
++        wait_close(sender).await
++    }
++}
++
++impl ComputerHost {
++    fn quarantine(&self) -> ComputerError {
++        self.gate.quarantine();
++        ComputerError::Quarantined
++    }
++
++    async fn close_owned(self: Arc<Self>) -> Result<(), ComputerError> {
++        if self.gate.is_quarantined() {
++            return Err(ComputerError::Quarantined);
++        }
++        let operations = self
++            .operations
++            .lock()
++            .map_err(|_| self.quarantine())?
++            .clone();
++        for operation in operations {
++            operation.terminal().await.map_err(|_| self.quarantine())?;
++        }
++        // Runtime-owned IDs include sessions whose last foreign facade is
++        // currently dropping; cleanup is serialized independently of Weak.
++        self.runtime
++            .computer_shutdown()
++            .await
++            .map_err(|_| self.quarantine())?;
++        let mut lease = self.lease.lock().map_err(|_| self.quarantine())?;
++        let mut operations = self.operations.lock().map_err(|_| self.quarantine())?;
++        let mut sessions = self.sessions.lock().map_err(|_| self.quarantine())?;
++        let mut slot = owner().lock().map_err(|_| self.quarantine())?;
++        if self.gate.is_quarantined() {
++            return Err(ComputerError::Quarantined);
++        }
++        for session in sessions.iter().filter_map(Weak::upgrade) {
++            session.closed.store(true, Ordering::Release);
++        }
++        operations.clear();
++        sessions.clear();
++        // All fallible lock/cleanup checks precede clean-marker publication.
++        if let Some(lease) = lease.as_mut() {
++            lease.release_clean().map_err(|_| self.quarantine())?;
++        }
++        *lease = None;
++        if slot.as_ref().is_some_and(|host| Arc::ptr_eq(host, &self)) {
++            *slot = None;
++        }
++        Ok(())
++    }
++}
++
++#[derive(uniffi::Object)]
++pub struct ComputerSession {
++    host: Arc<ComputerHost>,
++    native: Arc<RuntimeSession>,
++    gate: Arc<Session>,
++    closing: OnceLock<Closing>,
++    closed: AtomicBool,
++    #[cfg(test)]
++    drop_barrier: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
++}
++
++#[uniffi::export]
++impl ComputerSession {
++    pub fn new_operation(self: Arc<Self>) -> Result<Arc<ComputerOperation>, ComputerError> {
++        let mut operations = self
++            .host
++            .operations
++            .lock()
++            .map_err(|_| self.host.quarantine())?;
++        let core = self.gate.new_operation().map_err(refused)?;
++        let operation = Arc::new(ComputerOperation {
++            core: core.clone(),
++            session: self.clone(),
++            outcome: Mutex::new(None),
++        });
++        operations.retain(|operation| !operation.is_proven_terminal());
++        operations.push(core);
++        Ok(operation)
++    }
++
++    pub fn revoke(&self) {
++        self.gate.revoke();
++        if let Ok(sessions) = self.host.sessions.lock() {
++            for session in sessions
++                .iter()
++                .filter_map(Weak::upgrade)
++                .filter(|session| session.gate.descends_from(&self.gate))
++            {
++                session.native.computer_revoke();
++            }
++        } else {
++            self.host.gate.quarantine();
++        }
++        if let Ok(operations) = self.host.operations.lock() {
++            for operation in operations
++                .iter()
++                .filter(|op| op.session.descends_from(&self.gate))
++            {
++                operation.cancel();
++            }
++        } else {
++            self.host.gate.quarantine();
++        }
++    }
++}
++
++#[uniffi::export(async_runtime = "tokio")]
++impl ComputerSession {
++    pub async fn close(self: Arc<Self>) -> Result<(), ComputerError> {
++        self.revoke();
++        let sender = self.closing.get_or_init(|| {
++            let sender = watch::channel(None).0;
++            let task_sender = sender.clone();
++            let session = self.clone();
++            executor().expect("executor exists").spawn(async move {
++                let host = session.host.clone();
++                let result = tokio::spawn(async move {
++                    if session.host.gate.is_quarantined() {
++                        return Err(ComputerError::Quarantined);
++                    }
++                    let operations = session
++                        .host
++                        .operations
++                        .lock()
++                        .map_err(|_| session.host.quarantine())?
++                        .iter()
++                        .filter(|op| op.session.descends_from(&session.gate))
++                        .cloned()
++                        .collect::<Vec<_>>();
++                    for operation in operations {
++                        operation
++                            .terminal()
++                            .await
++                            .map_err(|_| session.host.quarantine())?;
++                    }
++                    if !session.native.computer_close_subtree()
++                        || session.host.gate.is_quarantined()
++                    {
++                        return Err(session.host.quarantine());
++                    }
++                    let sessions = session
++                        .host
++                        .sessions
++                        .lock()
++                        .map_err(|_| session.host.quarantine())?
++                        .iter()
++                        .filter_map(Weak::upgrade)
++                        .filter(|child| child.gate.descends_from(&session.gate))
++                        .collect::<Vec<_>>();
++                    for child in sessions {
++                        child.closed.store(true, Ordering::Release);
++                    }
++                    session
++                        .host
++                        .operations
++                        .lock()
++                        .map_err(|_| session.host.quarantine())?
++                        .retain(|operation| !operation.is_proven_terminal());
++                    session
++                        .host
++                        .sessions
++                        .lock()
++                        .map_err(|_| session.host.quarantine())?
++                        .retain(|child| {
++                            child
++                                .upgrade()
++                                .is_some_and(|child| !child.closed.load(Ordering::Acquire))
++                        });
++                    Ok(())
++                })
++                .await
++                .unwrap_or(Err(ComputerError::Quarantined));
++                if result.is_err() {
++                    host.gate.quarantine();
++                }
++                task_sender.send_replace(Some(result));
++            });
++            sender
++        });
++        wait_close(sender).await
++    }
++}
++
++impl Drop for ComputerSession {
++    fn drop(&mut self) {
++        // No facade-registry locks here: Weak upgrades can lose their last
++        // owner while the registry is being pruned. Runtime cleanup has its
++        // own native ownership lock and retains failed session IDs.
++        #[cfg(test)]
++        if let Some((entered, resume)) = self.drop_barrier.get_mut().unwrap().take() {
++            entered.send(()).unwrap();
++            resume.recv().unwrap();
++        }
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            self.gate.revoke();
++            self.closed.swap(true, Ordering::AcqRel) || self.native.computer_close()
++        }));
++        if !matches!(result, Ok(true)) {
++            self.host.gate.quarantine();
++        }
++    }
++}
++
++async fn wait_close(sender: &Closing) -> Result<(), ComputerError> {
++    let mut receiver = sender.subscribe();
++    loop {
++        if let Some(result) = receiver.borrow().clone() {
++            return result;
++        }
++        receiver
++            .changed()
++            .await
++            .map_err(|_| ComputerError::Quarantined)?;
++    }
++}
++
++#[derive(uniffi::Object)]
++pub struct ComputerOperation {
++    core: Arc<Operation>,
++    session: Arc<ComputerSession>,
++    outcome: Mutex<Option<Result<ComputerResult, ComputerError>>>,
++}
++
++#[uniffi::export]
++impl ComputerOperation {
++    pub fn cancel(&self) {
++        self.core.cancel();
++    }
++
++    pub fn start_observe(
++        self: Arc<Self>,
++        max_elements: u32,
++        max_depth: u32,
++    ) -> Result<(), ComputerError> {
++        if !(1..=512).contains(&max_elements) || !(1..=32).contains(&max_depth) {
++            return Err(refused("invalid_observation_bounds"));
++        }
++        self.start(
++            "get_window_state",
++            serde_json::json!({
++                "pid": self.session.gate.pid, "window_id": self.session.gate.window_id,
++                "include_accessibility_tree": true, "include_screenshot": false,
++                "max_elements": max_elements, "max_depth": max_depth,
++            }),
++        )
++    }
++
++    pub fn start_click(self: Arc<Self>, element_token: String) -> Result<(), ComputerError> {
++        if element_token.is_empty() || element_token.len() > 128 {
++            return Err(refused("invalid_element_token"));
++        }
++        self.start(
++            "click",
++            serde_json::json!({
++                "pid": self.session.gate.pid, "window_id": self.session.gate.window_id,
++                "element_token": element_token, "action": "press", "delivery_mode": "background",
++            }),
++        )
++    }
++}
++
++impl ComputerOperation {
++    fn start(
++        self: &Arc<Self>,
++        tool: &'static str,
++        args: serde_json::Value,
++    ) -> Result<(), ComputerError> {
++        // Fail fast; never queue a stale observation/click behind another
++        // operation. The owned guard spans all callback/cleanup drain.
++        let serial = self
++            .session
++            .host
++            .scheduler
++            .clone()
++            .try_lock_owned()
++            .map_err(|_| refused("native_busy"))?;
++        self.core.begin().map_err(|reason| {
++            if reason == "cancelled" {
++                ComputerError::Cancelled {
++                    input_committed: self.core.input_committed(),
++                }
++            } else {
++                refused(reason)
++            }
++        })?;
++        let operation = self.clone();
++        executor()?.spawn(async move {
++            let worker = operation.clone();
++            let result = tokio::spawn(controlled::scope(operation.core.clone(), async move {
++                worker
++                    .core
++                    .checkpoint()
++                    .map_err(|_| ComputerError::Cancelled {
++                        input_committed: false,
++                    })?;
++                let raw = worker
++                    .session
++                    .native
++                    .invoke(tool, args)
++                    .await
++                    .ok_or_else(|| refused("runtime_closed"))?;
++                let result = crate::normalize_result(
++                    tool,
++                    serde_json::to_value(raw).map_err(|_| refused("invalid_native_result"))?,
++                )
++                .map_err(|_| refused("invalid_native_result"))?;
++                if tool == "get_window_state" {
++                    result
++                        .window_state_success()
++                        .map(|value| ComputerResult::Observation { value })
++                        .map_err(|_| refused("native_observation_refused"))
++                } else {
++                    result
++                        .typed_success(tool)
++                        .map(|value| ComputerResult::Action { value })
++                        .map_err(|_| refused("native_action_unconfirmed"))
++                }
++            }))
++            .await;
++            let result = match result {
++                Ok(result) => result,
++                Err(_) => {
++                    operation.core.quarantine();
++                    Err(ComputerError::Quarantined)
++                }
++            };
++            match operation.outcome.lock() {
++                Ok(mut outcome) => *outcome = Some(result),
++                Err(_) => operation.core.quarantine(),
++            }
++            operation.core.finish();
++            // Keep the host input lane through callback/cleanup drain, not
++            // merely until the tool's value or its async worker returns.
++            let _ = operation.core.terminal().await;
++            drop(serial);
++        });
++        Ok(())
++    }
++}
++
++impl Drop for ComputerOperation {
++    fn drop(&mut self) {
++        self.core.abandon();
++    }
++}
++
++#[uniffi::export(async_runtime = "tokio")]
++impl ComputerOperation {
++    pub async fn result(&self) -> Result<ComputerResult, ComputerError> {
++        let terminal = self.terminal().await?;
++        let outcome = self
++            .outcome
++            .lock()
++            .map_err(|_| self.session.host.quarantine())?
++            .clone();
++        // Cancellation is terminal metadata, not permission to erase an
++        // already fulfilled canonical ActionResult (including Unverifiable).
++        if let Some(Ok(ComputerResult::Action { value })) = &outcome {
++            return Ok(ComputerResult::Action {
++                value: value.clone(),
++            });
++        }
++        if terminal.cancelled {
++            return Err(ComputerError::Cancelled {
++                input_committed: terminal.input_committed,
++            });
++        }
++        outcome.unwrap_or(Err(ComputerError::Quarantined))
++    }
++
++    pub async fn terminal(&self) -> Result<ComputerTerminal, ComputerError> {
++        // The pinned foreign bridge can block inside wake until JS returns.
++        // Keep that waker off the core channel: notifications may hold the
++        // admission gate needed by synchronous foreign cancel/revoke calls.
++        // Dropping a foreign waiter detaches this native proof monitor, not
++        // the independently owned producer. Retain only core proof state.
++        let core = self.core.clone();
++        let terminal = executor()?
++            .spawn(async move { core.terminal().await })
++            .await
++            .map_err(|_| self.session.host.quarantine())?
++            .map_err(|_| ComputerError::Quarantined)?;
++        Ok(ComputerTerminal {
++            operation_id: self.core.id.clone(),
++            cancelled: terminal.cancelled,
++            input_committed: terminal.input_committed,
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+@@ -0,0 +1,439 @@
++//! Pure lifecycle tests. No canonical lease, OS tool invocation, SDK loading,
++//! Accessibility, AppKit, TCC, or input occurs here.
++use super::*;
++use crate::runtime::{RuntimeOptions, TEST_RUNTIME_LOCK};
++use cua_driver_core::authorization::PermissionMode;
++use cua_driver_core::session_authorization::SessionModeCeiling;
++use std::future::Future;
++use std::task::{Context, Poll, Waker};
++use std::time::Duration;
++
++fn host() -> Arc<ComputerHost> {
++    executor().unwrap();
++    let ceiling = SessionModeCeiling::for_trusted_sessions(
++        [PermissionMode::Standard],
++        false,
++        Duration::from_secs(60),
++        Duration::from_secs(30),
++    )
++    .unwrap();
++    let runtime = DriverRuntime::create_computer(RuntimeOptions::embedded_with_ceiling(
++        false,
++        ceiling,
++        PermissionMode::Standard,
++        None,
++    ))
++    .unwrap();
++    Arc::new(ComputerHost {
++        runtime,
++        gate: Gate::new(),
++        lease: Mutex::new(None),
++        template: DelegatedSessionRequest {
++            public_session: String::new(),
++            transport_session: String::new(),
++            mode: PermissionMode::Standard,
++            ttl: Duration::from_secs(60),
++            idle_ttl: Duration::from_secs(30),
++            capability_manifest: None,
++        },
++        sessions: Mutex::new(Vec::new()),
++        operations: Mutex::new(Vec::new()),
++        scheduler: Arc::new(tokio::sync::Mutex::new(())),
++        closing: OnceLock::new(),
++    })
++}
++
++fn session(
++    host: &Arc<ComputerHost>,
++    parent: Option<&Arc<ComputerSession>>,
++) -> Arc<ComputerSession> {
++    let label = format!("controlled-test-{}", uuid::Uuid::new_v4());
++    let native = host
++        .runtime
++        .create_computer_session(
++            DelegatedSessionRequest {
++                public_session: label.clone(),
++                transport_session: label,
++                mode: host.template.mode,
++                ttl: host.template.ttl,
++                idle_ttl: host.template.idle_ttl,
++                capability_manifest: None,
++            },
++            parent.map(|parent| parent.native.as_ref()),
++        )
++        .unwrap();
++    let authority = native.clone();
++    let gate = host
++        .gate
++        .session(
++            parent.map(|parent| parent.gate.clone()),
++            Arc::new(move || authority.computer_authority_live()),
++            42,
++            7,
++            None,
++        )
++        .unwrap();
++    assert!(native.computer_bind_snapshots(gate.snapshots.clone()));
++    let session = Arc::new(ComputerSession {
++        host: host.clone(),
++        native,
++        gate,
++        closing: OnceLock::new(),
++        closed: AtomicBool::new(false),
++        drop_barrier: Mutex::new(None),
++    });
++    let mut sessions = host.sessions.lock().unwrap();
++    sessions.retain(|session| session.strong_count() > 0);
++    sessions.push(Arc::downgrade(&session));
++    session
++}
++
++#[tokio::test]
++async fn controlled_healthy_close_and_drop_do_not_retain_facades_or_results() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    for _ in 0..8 {
++        let host = host();
++        let weak_host = Arc::downgrade(&host);
++        for _ in 0..8 {
++            let session = session(&host, None);
++            let weak_session = Arc::downgrade(&session);
++            let native = session.native.clone();
++            let operation = session.clone().new_operation().unwrap();
++            let weak_operation = Arc::downgrade(&operation);
++            let core = operation.core.clone();
++            drop(operation);
++            assert!(weak_operation.upgrade().is_none());
++            assert!(core.terminal().await.unwrap().cancelled);
++            assert!(!host.gate.is_quarantined());
++            drop(core);
++            session.clone().close().await.unwrap();
++            session.clone().close().await.unwrap();
++            assert!(!native.computer_authority_live());
++            drop(session);
++            assert!(weak_session.upgrade().is_none());
++        }
++        assert!(host.sessions.lock().unwrap().is_empty());
++        assert!(host.operations.lock().unwrap().len() <= 1);
++        host.clone().close().await.unwrap();
++        host.clone().close().await.unwrap();
++        assert!(host.operations.lock().unwrap().is_empty());
++        drop(host);
++        assert!(
++            weak_host.upgrade().is_none(),
++            "native facade ownership cycle"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controlled_started_refusal_completes_both_subscribers_without_platform_dispatch() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let parent = session(&host, None);
++    let child = session(&host, Some(&parent));
++    let operation = child.new_operation().unwrap();
++    // The canonical controlled registry refuses this name before tool lookup
++    // or any platform call. Exercise the actual independent producer anyway.
++    operation
++        .start("controlled_diagnostic_no_such_tool", serde_json::json!({}))
++        .unwrap();
++    tokio::time::timeout(Duration::from_secs(5), async {
++        let (terminal, result) = tokio::join!(operation.terminal(), operation.result());
++        let terminal = terminal.unwrap();
++        assert!(!terminal.cancelled && !terminal.input_committed);
++        assert!(matches!(result, Err(ComputerError::Refused { .. })));
++        host.close().await.unwrap();
++    })
++    .await
++    .expect("independent native producer or subscribers stalled");
++}
++
++#[tokio::test]
++async fn controlled_foreign_subscribers_can_reenter_while_wake_is_pending() {
++    use std::sync::mpsc;
++    use std::task::Wake;
++
++    // The pinned N-API bridge waits for JS to finish a continuation callback.
++    // Hold that callback while the foreign thread cancels and polls the same
++    // result/terminal pair used by the generated adapter.
++    struct ForeignWake {
++        entered: mpsc::Sender<()>,
++        resume: Mutex<mpsc::Receiver<()>>,
++    }
++    impl Wake for ForeignWake {
++        fn wake(self: Arc<Self>) {
++            self.wake_by_ref();
++        }
++        fn wake_by_ref(self: &Arc<Self>) {
++            self.entered.send(()).unwrap();
++            self.resume.lock().unwrap().recv().unwrap();
++        }
++    }
++
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    let (entered_tx, entered_rx) = mpsc::channel();
++    let (resume_tx, resume_rx) = mpsc::channel();
++    let waker = Waker::from(Arc::new(ForeignWake {
++        entered: entered_tx,
++        resume: Mutex::new(resume_rx),
++    }));
++    *operation.outcome.lock().unwrap() = Some(Err(refused("synthetic_no_platform_result")));
++    let terminal_operation = operation.clone();
++    let mut terminal = Box::pin(async move { terminal_operation.terminal().await });
++    let result_operation = operation.clone();
++    let mut result = Box::pin(async move { result_operation.result().await });
++    assert!(matches!(
++        terminal.as_mut().poll(&mut Context::from_waker(&waker)),
++        Poll::Pending
++    ));
++    assert!(matches!(
++        result.as_mut().poll(&mut Context::from_waker(&waker)),
++        Poll::Pending
++    ));
++    let producer_operation = operation.clone();
++    let producer = std::thread::spawn(move || producer_operation.core.finish());
++    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
++    let (attempting_tx, attempting_rx) = mpsc::channel();
++    let (progress_tx, progress_rx) = mpsc::channel();
++    let reentering_operation = operation.clone();
++    let reentering = std::thread::spawn(move || {
++        attempting_tx.send(()).unwrap();
++        reentering_operation.cancel();
++        let results = executor()
++            .unwrap()
++            .block_on(async { tokio::join!(terminal, result) });
++        progress_tx.send(()).unwrap();
++        results
++    });
++    attempting_rx.recv().unwrap();
++    let progressed_while_callback_blocked =
++        progress_rx.recv_timeout(Duration::from_secs(5)).is_ok();
++    // Always release both callbacks and join synthetic work before asserting.
++    // This watchdog is never a product terminal/lease decision.
++    resume_tx.send(()).unwrap();
++    resume_tx.send(()).unwrap();
++    producer.join().unwrap();
++    let (terminal, result) = reentering.join().unwrap();
++    assert!(!terminal.unwrap().cancelled);
++    assert!(
++        matches!(result, Err(ComputerError::Refused { reason }) if reason == "synthetic_no_platform_result")
++    );
++    host.close().await.unwrap();
++    assert!(
++        progressed_while_callback_blocked,
++        "foreign terminal wake held the native gate while waiting for foreign callback completion"
++    );
++}
++
++#[tokio::test]
++async fn controlled_dropped_subscribers_neither_cancel_producer_nor_skip_drain() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    let work = operation.core.track_callback().unwrap();
++    let mut terminal = Box::pin(operation.terminal());
++    let mut result = Box::pin(operation.result());
++    let mut context = Context::from_waker(Waker::noop());
++    assert!(terminal.as_mut().poll(&mut context).is_pending());
++    assert!(result.as_mut().poll(&mut context).is_pending());
++    drop(terminal);
++    drop(result);
++    assert!(operation.core.checkpoint().is_ok());
++    assert!(!operation.core.is_proven_terminal());
++
++    // Synthetic producer completion still cannot skip outstanding cleanup.
++    operation.core.finish();
++    let mut closer = Box::pin(host.clone().close());
++    assert!(closer.as_mut().poll(&mut context).is_pending());
++    assert!(!operation.core.is_proven_terminal());
++    assert!(host.runtime.is_running());
++    assert!(!host.gate.is_quarantined());
++    drop(work);
++    let terminal = operation.terminal().await.unwrap();
++    assert!(terminal.cancelled && !terminal.input_committed);
++    assert!(matches!(
++        operation.result().await,
++        Err(ComputerError::Cancelled {
++            input_committed: false
++        })
++    ));
++    closer.await.unwrap();
++    assert!(!host.runtime.is_running());
++    let weak_operation = Arc::downgrade(&operation);
++    drop(operation);
++    assert!(weak_operation.upgrade().is_none());
++}
++
++#[tokio::test]
++async fn controlled_validation_failure_still_cancels_inert_handle() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    let operation = session.new_operation().unwrap();
++    assert!(matches!(
++        operation.clone().start_observe(0, 1),
++        Err(ComputerError::Refused { .. })
++    ));
++    operation.cancel();
++    assert!(operation.terminal().await.unwrap().cancelled);
++    assert!(matches!(
++        operation.result().await,
++        Err(ComputerError::Cancelled {
++            input_committed: false
++        })
++    ));
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_native_lane_refuses_without_starting_or_queueing() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    let lane = host.scheduler.clone().try_lock_owned().unwrap();
++    assert!(matches!(operation.clone().start_observe(1, 1),
++        Err(ComputerError::Refused { reason }) if reason == "native_busy"));
++    operation.cancel();
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    drop(lane);
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_fulfilled_action_survives_cancellation_metadata() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    operation.core.primary(true, || ()).unwrap(); // synthetic primitive only
++    let value = ActionResult {
++        effect: cua_driver_contract::ActionEffect::Unverifiable,
++        route: cua_driver_contract::ActionRoute::Accessibility,
++        delivery: None,
++        evidence: None,
++        escalation: None,
++    };
++    *operation.outcome.lock().unwrap() = Some(Ok(ComputerResult::Action {
++        value: value.clone(),
++    }));
++    operation.cancel();
++    operation.core.finish();
++    assert!(operation.terminal().await.unwrap().cancelled);
++    assert!(
++        matches!(operation.result().await.unwrap(), ComputerResult::Action { value: actual } if actual == value)
++    );
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_dropped_ancestor_revokes_inert_descendant_without_foreign_cancel() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let parent = session(&host, None);
++    let child = session(&host, Some(&parent));
++    let operation = child.clone().new_operation().unwrap();
++    drop(parent);
++    assert!(operation.terminal().await.unwrap().cancelled);
++    assert!(child.new_operation().is_err());
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_unexpected_producer_loss_retains_quarantine() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    drop(operation); // unlike a real start, no independent supervisor exists
++    assert!(host.gate.is_quarantined());
++    assert!(matches!(
++        host.close().await,
++        Err(ComputerError::Quarantined)
++    ));
++}
++
++#[tokio::test]
++async fn controlled_subtree_close_owns_cleanup_before_paused_final_child_drop() {
++    use std::sync::atomic::AtomicUsize;
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let parent = session(&host, None);
++    let child = session(&host, Some(&parent));
++    let sibling = session(&host, None);
++    let retirements = Arc::new(AtomicUsize::new(0));
++    let retired = retirements.clone();
++    child
++        .gate
++        .snapshots
++        .replace(move || {
++            retired.fetch_add(1, Ordering::SeqCst);
++        })
++        .unwrap();
++    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
++    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
++    *child.drop_barrier.lock().unwrap() = Some((entered_tx, resume_rx));
++    let weak_child = Arc::downgrade(&child);
++    let dropping = std::thread::spawn(move || drop(child));
++    entered_rx.recv().unwrap();
++    assert!(weak_child.upgrade().is_none(), "child is in final Drop");
++    parent.close().await.unwrap();
++    assert_eq!(
++        retirements.load(Ordering::SeqCst),
++        1,
++        "subtree proof skipped inaccessible child"
++    );
++    assert!(sibling.native.computer_authority_live());
++    let sibling_op = sibling.new_operation().unwrap();
++    sibling_op.cancel();
++    resume_tx.send(()).unwrap();
++    dropping.join().unwrap();
++    assert_eq!(
++        retirements.load(Ordering::SeqCst),
++        1,
++        "late Drop repeated cleanup"
++    );
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_session_close_refuses_lost_quarantined_operation() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    let operation = session.clone().new_operation().unwrap();
++    operation.core.begin().unwrap();
++    drop(operation);
++    assert!(matches!(
++        session.close().await,
++        Err(ComputerError::Quarantined)
++    ));
++    assert!(matches!(
++        host.close().await,
++        Err(ComputerError::Quarantined)
++    ));
++}
++
++#[tokio::test]
++async fn controlled_dropped_close_waiter_does_not_own_native_cleanup() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let operation = session(&host, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    let work = operation.core.track_callback().unwrap();
++    operation.core.finish();
++    let mut closer = Box::pin(host.clone().close());
++    assert!(matches!(
++        closer
++            .as_mut()
++            .poll(&mut Context::from_waker(Waker::noop())),
++        Poll::Pending
++    ));
++    drop(closer);
++    drop(work);
++    host.clone().close().await.unwrap();
++    assert!(!host.runtime.is_running());
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/lib.rs
+@@ -28,6 +28,7 @@
+ mod abi;
+ mod activity_observer;
+ mod authorization_host;
++mod computer;
+ mod embedded;
+ pub mod remote;
+ pub mod remote_foreign;
+@@ -43,6 +44,7 @@
+     DriverAuthorizationAction, DriverAuthorizationDecision, DriverAuthorizationHost,
+     DriverAuthorizationHostError, DriverAuthorizationRequest,
+ };
++pub use computer::{ComputerError, ComputerHost, ComputerOperation, ComputerResult, ComputerSession, ComputerTerminal};
+ pub use embedded::*;
+ use remote::{DriverEnvelopeChannel, RemoteBoundSession, RemoteDriverClient};
+ pub use remote_mcp::{
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+@@ -18,6 +18,7 @@
+ };
+ use cursor_overlay::CursorConfig;
+ use serde_json::Value;
++use std::collections::HashMap;
+ use std::sync::{
+     atomic::{AtomicBool, AtomicU64, Ordering},
+     Arc, Mutex,
+@@ -107,6 +108,34 @@
+ }
+ 
+ impl RuntimeSession {
++    pub(crate) fn computer_authority_live(&self) -> bool {
++        self.runtime.is_running() && !self.context.is_revoked() && !self.context.is_expired()
++    }
++
++    pub(crate) fn computer_revoke(&self) {
++        self.authorization_registry.revoke_connection(&self.connection);
++        self.authorization_registry.revoke_host(&self.host);
++    }
++
++    pub(crate) fn computer_close(&self) -> bool {
++        self.computer_revoke();
++        self.runtime.computer_close_sessions(&self.context.runtime_session_key(&self.public_session), false)
++    }
++
++    pub(crate) fn computer_close_subtree(&self) -> bool {
++        self.computer_revoke();
++        self.runtime.computer_close_sessions(&self.context.runtime_session_key(&self.public_session), true)
++    }
++
++    pub(crate) fn computer_bind_snapshots(&self, snapshots: Arc<cua_driver_core::controlled::SnapshotOwner>) -> bool {
++        let Some(sessions) = &self.runtime.computer_sessions else { return false; };
++        let Ok(mut sessions) = sessions.lock() else { return false; };
++        let Some(record) = sessions.get_mut(&self.context.runtime_session_key(&self.public_session)) else { return false; };
++        if record.snapshots.is_some() { return false; }
++        record.snapshots = Some(snapshots);
++        true
++    }
++
+     pub(crate) async fn invoke(&self, name: &str, mut args: Value) -> Option<CoreToolResult> {
+         cua_driver_core::tool_args::sanitize_reserved_args(&mut args);
+         let Some(arguments) = args.as_object_mut() else {
+@@ -163,7 +192,22 @@
+     /// previously admitted operation is still executing.
+     lifecycle: tokio::sync::RwLock<()>,
+     lifecycle_maintenance: Mutex<Option<LifecycleMaintenance>>,
++    // Native cleanup ownership outlives weak foreign facades. This lock
++    // serializes session Drop/close with host shutdown; failures retain IDs.
++    computer_sessions: Option<Mutex<HashMap<String, ComputerSessionRecord>>>,
+     activity_observer: Option<Arc<dyn DriverActivityObserver>>,
++}
++
++struct ComputerSessionRecord {
++    ancestors: Vec<String>,
++    snapshots: Option<Arc<cua_driver_core::controlled::SnapshotOwner>>,
++}
++
++fn clean_computer_record(id: &str, record: &ComputerSessionRecord) -> bool {
++    cua_driver_core::session::end_session(id);
++    let report = cua_driver_core::session::session_cleanup_status(id);
++    cua_driver_core::session::is_session_ended(id) && report.complete && !report.in_progress
++        && record.snapshots.as_ref().is_none_or(|snapshots| snapshots.retire().is_ok())
+ }
+ 
+ struct LifecycleMaintenance {
+@@ -173,6 +217,18 @@
+ 
+ impl DriverRuntime {
+     pub(crate) fn create(options: RuntimeOptions) -> Result<Arc<Self>, RuntimeCreateError> {
++        Self::create_inner(options, false)
++    }
++
++    pub(crate) fn create_computer(options: RuntimeOptions) -> Result<Arc<Self>, RuntimeCreateError> {
++        if options.authorization_host.is_some() || options.activity_observer.is_some()
++            || options.register_host_tools.is_some() {
++            return Err(RuntimeCreateError::Unavailable("controlled runtime cannot install host callbacks".into()));
++        }
++        Self::create_inner(options, true)
++    }
++
++    fn create_inner(options: RuntimeOptions, computer: bool) -> Result<Arc<Self>, RuntimeCreateError> {
+         #[cfg(target_os = "windows")]
+         if let Err(reason) = platform_windows::diagnostics::interactive_desktop_check() {
+             return Err(RuntimeCreateError::Unavailable(format!(
+@@ -194,7 +250,7 @@
+         };
+         let registry = Arc::new(cua_driver_core::tool::with_runtime_scope(
+             compatibility_context.runtime_scope_key(),
+-            || build_registry(&options),
++            || if computer { build_computer_registry() } else { build_registry(&options) },
+         ));
+         registry.init_self_weak();
+         let runtime = Arc::new(Self {
+@@ -205,10 +261,13 @@
+             last_activity: AtomicU64::new(now_unix_secs()),
+             lifecycle: tokio::sync::RwLock::new(()),
+             lifecycle_maintenance: Mutex::new(None),
++            computer_sessions: computer.then(|| Mutex::new(HashMap::new())),
+             activity_observer: options.activity_observer.clone(),
+         });
+-        *runtime.lifecycle_maintenance.lock().unwrap() =
+-            Some(spawn_lifecycle_maintenance(&runtime));
++        if !computer {
++            *runtime.lifecycle_maintenance.lock().unwrap() =
++                Some(spawn_lifecycle_maintenance(&runtime));
++        }
+         Ok(runtime)
+     }
+ 
+@@ -239,6 +298,46 @@
+         );
+         let recording = self.registry.recording.clone();
+         let _ = tokio::task::spawn_blocking(move || recording.stop_owner(None)).await;
++    }
++
++    fn computer_close_sessions(&self, id: &str, subtree: bool) -> bool {
++        let Some(sessions) = &self.computer_sessions else { return false; };
++        let Ok(mut sessions) = sessions.lock() else { return false; };
++        let ids = sessions.iter().filter(|(key, record)| key.as_str() == id
++            || (subtree && record.ancestors.iter().any(|ancestor| ancestor == id)))
++            .map(|(key, _)| key.clone()).collect::<Vec<_>>();
++        for key in &ids {
++            if !clean_computer_record(key, &sessions[key]) { return false; }
++        }
++        for key in ids { sessions.remove(&key); }
++        true
++    }
++
++    /// Only the metadata-only controlled composition may use this proof.
++    /// It never starts recording, history, a browser engine or maintenance;
++    /// without a consent provider no protected grants can be issued, so its
++    /// default session hook has no asynchronous grant-revocation work.
++    /// Every known session is synchronously ended and checked before any
++    /// cleanup record is forgotten. Callers retain the native owner on error.
++    pub(crate) async fn computer_shutdown(&self) -> Result<(), &'static str> {
++        self.shutdown.store(true, Ordering::Release);
++        let _drained = self.lifecycle.write().await;
++        let sessions = self.computer_sessions.as_ref().ok_or("not_controlled")?;
++        let mut sessions = sessions.lock().map_err(|_| "poisoned_cleanup")?;
++        if self.lifecycle_maintenance.lock().map_err(|_| "poisoned_maintenance")?.is_some()
++            || self.registry.recording.current_state().enabled || self.registry.history().is_some() {
++            return Err("unexpected_runtime_facility");
++        }
++        self.authorization_registry.revoke_all();
++        for (id, record) in sessions.iter() {
++            if !clean_computer_record(id, record) { return Err("session_cleanup_unproved"); }
++        }
++        let scope = self.runtime_scope_key();
++        cua_driver_core::element_cache::retire_runtime_scope(&scope);
++        cua_driver_core::session::forget_ended_sessions_with_prefix(&format!("__cua_runtime_{scope}:"));
++        cua_driver_core::session::forget_suspended_runtime_scope(&scope);
++        sessions.clear();
++        Ok(())
+     }
+ 
+     fn stop_lifecycle_maintenance(&self) {
+@@ -397,9 +496,29 @@
+         self: &Arc<Self>,
+         request: DelegatedSessionRequest,
+     ) -> Result<Arc<RuntimeSession>, SessionAuthorizationError> {
++        self.create_computer_session(request, None)
++    }
++
++    pub(crate) fn create_computer_session(
++        self: &Arc<Self>, request: DelegatedSessionRequest, parent: Option<&RuntimeSession>,
++    ) -> Result<Arc<RuntimeSession>, SessionAuthorizationError> {
++        let mut computer_sessions = self.computer_sessions.as_ref()
++            .map(|sessions| sessions.lock().map_err(|_| SessionAuthorizationError::RuntimeUnavailable))
++            .transpose()?;
+         if !self.is_running() {
+             return Err(SessionAuthorizationError::RuntimeUnavailable);
+         }
++        let ancestors = match parent {
++            Some(parent) => {
++                let id = parent.context.runtime_session_key(&parent.public_session);
++                let record = computer_sessions.as_ref().and_then(|sessions| sessions.get(&id))
++                    .ok_or(SessionAuthorizationError::RuntimeUnavailable)?;
++                let mut ancestors = record.ancestors.clone();
++                ancestors.push(id);
++                ancestors
++            }
++            None => Vec::new(),
++        };
+         let public_session = request.public_session.clone();
+         let transport_session = request.transport_session.clone();
+         let (host, connection) = self.authorization_registry.trusted_in_process_binding();
+@@ -410,6 +529,9 @@
+             &public_session,
+             &transport_session,
+         )?;
++        if let Some(sessions) = &mut computer_sessions {
++            sessions.insert(context.runtime_session_key(&public_session), ComputerSessionRecord { ancestors, snapshots: None });
++        }
+         Ok(Arc::new(RuntimeSession {
+             runtime: self.clone(),
+             authorization_registry: self.authorization_registry.clone(),
+@@ -448,6 +570,14 @@
+ 
+ impl Drop for DriverRuntime {
+     fn drop(&mut self) {
++        if self.computer_sessions.is_some() {
++            // Successful controlled shutdown already cleaned synchronously.
++            // Never erase evidence or run the legacy best-effort path after
++            // an unproved shutdown. The public facade retains that owner.
++            self.shutdown.store(true, Ordering::Release);
++            self.authorization_registry.revoke_all();
++            return;
++        }
+         let was_running = !self.shutdown.swap(true, Ordering::AcqRel);
+         self.stop_lifecycle_maintenance();
+         self.authorization_registry.revoke_all();
+@@ -546,6 +676,15 @@
+ /// desktop-free compatibility contract without weakening runtime admission.
+ pub(crate) fn tool_inventory(options: RuntimeOptions) -> Value {
+     build_registry(&options).tools_list()
++}
++
++fn build_computer_registry() -> ToolRegistry {
++    let mut registry = ToolRegistry::new();
++    #[cfg(target_os = "macos")]
++    platform_macos::tools::register_computer(&mut registry);
++    // No cursor hooks, history, recording, browser engine, permission UX,
++    // screenshot providers, or maintenance thread in this qualification route.
++    registry
+ }
+ 
+ fn build_registry(options: &RuntimeOptions) -> ToolRegistry {
+@@ -903,6 +1042,67 @@
+     }
+ 
+     #[tokio::test]
++    async fn controlled_composition_is_inert_and_retains_failed_cleanup_evidence() {
++        let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
++        let mut options = standard_options();
++        assert!(DriverRuntime::create_computer(options.clone()).is_err(), "host provider must be refused");
++        options.authorization_host = None;
++        let runtime = DriverRuntime::create_computer(options).unwrap();
++        assert!(runtime.lifecycle_maintenance.lock().unwrap().is_none());
++        assert!(runtime.registry.history().is_none());
++        assert!(!runtime.registry.recording.current_state().enabled);
++        let native = runtime.create_trusted_session(DelegatedSessionRequest {
++            public_session: "controlled-cleanup-proof".into(),
++            transport_session: "controlled-cleanup-proof-transport".into(),
++            mode: PermissionMode::Standard, ttl: Duration::from_secs(60),
++            idle_ttl: Duration::from_secs(30), capability_manifest: None,
++        }).unwrap();
++        let id = native.context.runtime_session_key(&native.public_session);
++        let fail = Arc::new(AtomicBool::new(true));
++        let hook_fail = fail.clone();
++        let hook_id = id.clone();
++        let _hook = cua_driver_core::session::register_scoped_fallible_session_end_hook(
++            "controlled-proof-test", move |ended| {
++                if ended == hook_id && hook_fail.load(Ordering::Acquire) {
++                    Err("synthetic cleanup failure".into())
++                } else { Ok(()) }
++            });
++        assert!(!native.computer_close());
++        assert!(!native.computer_authority_live());
++        assert!(runtime.computer_sessions.as_ref().unwrap().lock().unwrap().contains_key(&id));
++        assert_eq!(runtime.computer_shutdown().await, Err("session_cleanup_unproved"));
++        let report = cua_driver_core::session::session_cleanup_status(&id);
++        assert!(!report.complete);
++        assert_eq!(report.failures.len(), 1);
++        assert!(cua_driver_core::session::is_session_ended(&id));
++        // Only this private runtime test retries; the public facade quarantines
++        // permanently on the preceding error and exposes no recovery method.
++        fail.store(false, Ordering::Release);
++        runtime.computer_shutdown().await.unwrap();
++        assert!(runtime.computer_sessions.as_ref().unwrap().lock().unwrap().is_empty());
++        assert!(!cua_driver_core::session::is_session_ended(&id));
++    }
++
++    #[tokio::test]
++    async fn controlled_shutdown_tracks_native_sessions_after_foreign_handle_loss() {
++        let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
++        let mut options = standard_options();
++        options.authorization_host = None;
++        let runtime = DriverRuntime::create_computer(options).unwrap();
++        let native = runtime.create_trusted_session(DelegatedSessionRequest {
++            public_session: "controlled-lost-native-handle".into(),
++            transport_session: "controlled-lost-native-transport".into(),
++            mode: PermissionMode::Standard, ttl: Duration::from_secs(60),
++            idle_ttl: Duration::from_secs(30), capability_manifest: None,
++        }).unwrap();
++        drop(native);
++        assert_eq!(runtime.computer_sessions.as_ref().unwrap().lock().unwrap().len(), 1);
++        runtime.computer_shutdown().await.unwrap();
++        runtime.computer_shutdown().await.unwrap();
++        assert!(runtime.computer_sessions.as_ref().unwrap().lock().unwrap().is_empty());
++    }
++
++    #[tokio::test]
+     async fn shutdown_joins_lifecycle_maintenance() {
+         let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
+         let runtime = DriverRuntime::create(standard_options()).unwrap();
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+@@ -50,7 +50,8 @@
+ #[link(name = "ApplicationServices", kind = "framework")]
+ extern "C" {
+     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+-    pub fn AXUIElementCopyAttributeValue(
++    #[link_name = "AXUIElementCopyAttributeValue"]
++    fn raw_copy_attribute_value(
+         element: AXUIElementRef,
+         attribute: CFStringRef,
+         value: *mut CFTypeRef,
+@@ -59,20 +60,24 @@
+         element: AXUIElementRef,
+         names: *mut CFArrayRef,
+     ) -> AXError;
+-    pub fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError;
++    #[link_name = "AXUIElementCopyActionNames"]
++    fn raw_copy_action_names(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError;
+     pub fn AXUIElementCopyElementAtPosition(
+         application: AXUIElementRef,
+         x: f32,
+         y: f32,
+         element: *mut AXUIElementRef,
+     ) -> AXError;
+-    pub fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+-    pub fn AXUIElementSetAttributeValue(
++    #[link_name = "AXUIElementPerformAction"]
++    fn raw_perform_action(element: AXUIElementRef, action: CFStringRef) -> AXError;
++    #[link_name = "AXUIElementSetAttributeValue"]
++    fn raw_set_attribute_value(
+         element: AXUIElementRef,
+         attribute: CFStringRef,
+         value: CFTypeRef,
+     ) -> AXError;
+-    pub fn AXUIElementIsAttributeSettable(
++    #[link_name = "AXUIElementIsAttributeSettable"]
++    fn raw_is_attribute_settable(
+         element: AXUIElementRef,
+         attribute: CFStringRef,
+         settable: *mut u8,
+@@ -93,7 +98,46 @@
+ 
+     /// Private SPI: maps an AX window element to its CGWindowID.
+     /// Stable since macOS 10.9; used by yabai, Hammerspoon, Accessibility Inspector.
+-    pub fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> AXError;
++    #[link_name = "_AXUIElementGetWindow"]
++    fn raw_get_window(element: AXUIElementRef, window_id: *mut u32) -> AXError;
++}
++
++fn admitted_ax_call(input: bool, call: impl FnOnce() -> AXError) -> AXError {
++    match cua_driver_core::controlled::current() {
++        Some(operation) => operation.primary(input, call).unwrap_or(kAXErrorFailure),
++        None => call(),
++    }
++}
++
++pub unsafe fn AXUIElementCopyAttributeValue(element: AXUIElementRef, attribute: CFStringRef, value: *mut CFTypeRef) -> AXError {
++    admitted_ax_call(false, || raw_copy_attribute_value(element, attribute, value))
++}
++
++pub unsafe fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError {
++    admitted_ax_call(false, || raw_copy_action_names(element, names))
++}
++
++pub unsafe fn AXUIElementIsAttributeSettable(element: AXUIElementRef, attribute: CFStringRef, settable: *mut u8) -> AXError {
++    admitted_ax_call(false, || raw_is_attribute_settable(element, attribute, settable))
++}
++
++pub unsafe fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> AXError {
++    admitted_ax_call(false, || raw_get_window(element, window_id))
++}
++
++pub unsafe fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError {
++    if cua_driver_core::controlled::current().is_some() && CFStr::wrap_under_get_rule(action).to_string() != "AXPress" {
++        return kAXErrorFailure;
++    }
++    admitted_ax_call(true, || raw_perform_action(element, action))
++}
++
++pub unsafe fn AXUIElementSetAttributeValue(element: AXUIElementRef, attribute: CFStringRef, value: CFTypeRef) -> AXError {
++    if cua_driver_core::controlled::current().is_some()
++        && !matches!(CFStr::wrap_under_get_rule(attribute).to_string().as_str(), "AXManualAccessibility" | "AXEnhancedUserInterface") {
++        return kAXErrorFailure;
++    }
++    admitted_ax_call(false, || raw_set_attribute_value(element, attribute, value))
+ }
+ 
+ /// Hit-test one process's accessibility tree at a screen point. The returned
+@@ -752,6 +796,24 @@
+ mod tests {
+     use super::*;
+     use core_foundation::{boolean::CFBoolean, number::CFNumber};
++
++    #[tokio::test]
++    async fn controlled_ax_gate_blocks_cancelled_reads_and_repeated_input() {
++        use cua_driver_core::controlled::{scope, Gate};
++        let gate = Gate::new();
++        let session = gate.session(None, std::sync::Arc::new(|| true), 42, 7, None).unwrap();
++        let operation = session.new_operation().unwrap();
++        operation.begin().unwrap();
++        scope(operation.clone(), async {
++            // Synthetic closures only: no AX/CoreFoundation/AppKit call.
++            assert_eq!(admitted_ax_call(true, || kAXErrorSuccess), kAXErrorSuccess);
++            assert_eq!(admitted_ax_call(true, || panic!("repeated input")), kAXErrorFailure);
++            operation.cancel();
++            assert_eq!(admitted_ax_call(false, || panic!("read after cancellation")), kAXErrorFailure);
++        }).await;
++        operation.finish();
++        assert!(operation.terminal().await.unwrap().input_committed);
++    }
+ 
+     #[test]
+     fn binary_value_accepts_booleans_and_exact_zero_or_one() {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs
+@@ -26,7 +26,7 @@
+ 
+ /// Kernel start time of a process: `(pbi_start_tvsec, pbi_start_tvusec)`.
+ /// `None` when the process is gone or proc info is unreadable.
+-fn process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
++pub(crate) fn process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
+     // SAFETY: proc_pidinfo writes at most `size` bytes into `info` and returns
+     // the number of bytes filled (<= size) or <= 0 on failure.
+     unsafe {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
+@@ -256,8 +256,9 @@
+                 .map(|&child| {
+                     set_messaging_timeout(child);
+                     let role = copy_string_attr(child, "AXRole").unwrap_or_default();
+-                    let subrole = copy_string_attr(child, "AXSubrole");
+-                    let identifier = copy_string_attr(child, "AXIdentifier");
++                    let controlled = cua_driver_core::controlled::current().is_some();
++                    let subrole = if controlled { None } else { copy_string_attr(child, "AXSubrole") };
++                    let identifier = if controlled { None } else { copy_string_attr(child, "AXIdentifier") };
+                     // Match AX window element → CGWindowID via private SPI.
+                     // Only windows carry one, so skip the round-trip elsewhere.
+                     let ax_window_id = if role == "AXWindow" {
+@@ -279,6 +280,8 @@
+             let walk = decision
+                 .walk
+                 .iter()
++                .filter(|&&index| cua_driver_core::controlled::current().is_none()
++                    || controlled_window_root(&candidates[index], wid))
+                 .map(|&index| top_level[index])
+                 .collect();
+             window_scope = Some(decision.scope);
+@@ -337,6 +340,22 @@
+     }
+ }
+ 
++fn controlled_window_root(candidate: &TopLevelCandidate, requested: u32) -> bool {
++    candidate.role == "AXWindow" && candidate.ax_window_id == Some(requested)
++}
++
++#[cfg(test)]
++mod controlled_tests {
++    use super::*;
++    #[test]
++    fn controlled_walk_excludes_menu_and_sibling_sheet_roots() {
++        assert!(controlled_window_root(&TopLevelCandidate::new("AXWindow", Some(7)), 7));
++        assert!(!controlled_window_root(&TopLevelCandidate::new("AXWindow", Some(8)), 7));
++        assert!(!controlled_window_root(&TopLevelCandidate::new("AXMenuBar", None), 7));
++        assert!(!controlled_window_root(&TopLevelCandidate::new("AXSheet", None), 7));
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ unsafe fn walk_element(
+     element: AXUIElementRef,
+@@ -351,6 +370,10 @@
+     max_elements: usize,
+     max_depth: usize,
+ ) {
++    if cua_driver_core::controlled::current().is_some_and(|operation| operation.checkpoint().is_err()) {
++        *truncated = true;
++        return;
++    }
+     if depth > max_depth {
+         return;
+     }
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/focus_steal.rs b/libs/cua-driver/rust/crates/platform-macos/src/focus_steal.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/focus_steal.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/focus_steal.rs
+@@ -81,7 +81,6 @@
+ pub struct SuppressionHandle(Uuid);
+ 
+ /// Dispatcher-internal entry shape.
+-#[derive(Debug)]
+ struct Entry {
+     /// `Some(pid)` matches only that pid's activations. `None` is a
+     /// wildcard — matches any activation whose pid != `restore_to`.
+@@ -103,6 +102,13 @@
+     /// Provenance for tracing — e.g. `"LaunchAppTool.pre"`.
+     #[allow(dead_code)]
+     origin: &'static str,
++    controlled: Option<Arc<cua_driver_core::controlled::Operation>>,
++}
++
++struct RestoreWork {
++    pid: i32,
++    operation: Option<Arc<cua_driver_core::controlled::Operation>>,
++    _work: Option<cua_driver_core::controlled::Work>,
+ }
+ 
+ /// Singleton focus-steal preventer.
+@@ -298,6 +304,7 @@
+             restore_to,
+             deadline: Instant::now() + ENTRY_DEADLINE,
+             origin,
++            controlled: cua_driver_core::controlled::current(),
+         };
+         {
+             let mut guard = self.entries.lock().unwrap();
+@@ -327,12 +334,27 @@
+     /// Snapshot the entries (cloned to a small Vec) — used by tests
+     /// and the activation handler to evaluate matches without holding
+     /// the lock across the restore call.
++    #[cfg(test)]
+     fn snapshot_matches(&self, activated_pid: i32) -> Vec<i32> {
+-        let mut guard = self.entries.lock().unwrap();
++        self.snapshot_work(activated_pid).into_iter().map(|work| work.pid).collect()
++    }
++
++    fn snapshot_work(&self, activated_pid: i32) -> Vec<RestoreWork> {
++        let mut guard = match self.entries.lock() {
++            Ok(guard) => guard,
++            Err(error) => {
++                // Never unwind through the Objective-C observer callback or
++                // dispatch from a poisoned snapshot. Retain native ownership.
++                for entry in error.into_inner().values() {
++                    if let Some(operation) = &entry.controlled { operation.quarantine(); }
++                }
++                return Vec::new();
++            }
++        };
+         // Reap expired entries first — keeps the dispatcher honest even
+         // if the janitor hasn't ticked yet.
+         let now = Instant::now();
+-        guard.retain(|_, e| e.deadline > now);
++        guard.retain(|_, e| e.controlled.is_some() || e.deadline > now);
+         guard
+             .values()
+             .filter(|e| {
+@@ -347,7 +369,16 @@
+                     None => activated_pid != e.restore_to,
+                 }
+             })
+-            .map(|e| e.restore_to)
++            .filter_map(|entry| {
++                let work = match &entry.controlled {
++                    Some(operation) => match operation.track_callback() {
++                        Ok(work) => Some(work),
++                        Err(_) => { operation.quarantine(); return None; }
++                    },
++                    None => None,
++                };
++                Some(RestoreWork { pid: entry.restore_to, operation: entry.controlled.clone(), _work: work })
++            })
+             .collect()
+     }
+ 
+@@ -361,7 +392,7 @@
+         let mut guard = self.entries.lock().unwrap();
+         let now = Instant::now();
+         let before = guard.len();
+-        guard.retain(|_, e| e.deadline > now);
++        guard.retain(|_, e| e.controlled.is_some() || e.deadline > now);
+         let after = guard.len();
+         let reaped = before - after;
+         if after == 0 && reaped > 0 {
+@@ -515,19 +546,25 @@
+         pid as i32
+     };
+ 
+-    let restore_pids = dispatcher.snapshot_matches(activated_pid);
+-    for pid in restore_pids {
+-        restore_focus(pid);
++    let restores = dispatcher.snapshot_work(activated_pid);
++    for restore in restores {
++        if let Some(operation) = &restore.operation {
++            let result = std::panic::catch_unwind(|| restore_focus(restore.pid));
++            if !matches!(result, Ok(true)) { operation.quarantine(); }
++        } else {
++            let _ = restore_focus(restore.pid);
++        }
++        // Registration drops only after the restoration call returns. Entry
++        // removal and callback matching were serialized by the same mutex.
+     }
+ }
+ 
+ /// Re-activate `pid` if it's still running. Safe to call from any
+ /// thread — Apple documents `activateWithOptions:` as thread-safe.
+-fn restore_focus(pid: i32) {
++fn restore_focus(pid: i32) -> bool {
+     unsafe {
+-        if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+-            let _ = app.activateWithOptions(NSApplicationActivationOptions(0));
+-        }
++        NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
++            .is_none_or(|app| app.activateWithOptions(NSApplicationActivationOptions(0)))
+     }
+ }
+ 
+@@ -639,6 +676,7 @@
+                     restore_to: 7,
+                     deadline: Instant::now() - Duration::from_secs(1),
+                     origin: "test.leak",
++                    controlled: None,
+                 },
+             );
+         }
+@@ -721,6 +759,53 @@
+         d.remove(h1);
+     }
+ 
++    #[tokio::test]
++    async fn controlled_callback_snapshot_survives_entry_removal_until_drain() {
++        use cua_driver_core::controlled::{scope, Gate};
++        use std::future::Future;
++        use std::task::{Context, Poll, Waker};
++        let gate = Gate::new();
++        let session = gate.session(None, Arc::new(|| true), 42, 7, None).unwrap();
++        let operation = session.new_operation().unwrap();
++        operation.begin().unwrap();
++        let d = Arc::new(Dispatcher::new());
++        let handle = scope(operation.clone(), async { d.add(Some(42), 7, "test.controlled") }).await;
++        d.entries.lock().unwrap().get_mut(&handle.0).unwrap().deadline = Instant::now() - Duration::from_secs(1);
++        assert_eq!(d.reap_expired(), 0, "deadline is not controlled terminal evidence");
++        let restores = d.snapshot_work(42);
++        assert_eq!(restores.len(), 1);
++        d.remove(handle);
++        assert!(d.snapshot_work(42).is_empty());
++        operation.cancel();
++        operation.finish();
++        let mut terminal = Box::pin(operation.terminal());
++        assert!(matches!(terminal.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Pending));
++        // No Cocoa call: dropping this simulated completed callback is the
++        // exact production registration release after restore_focus returns.
++        drop(restores);
++        operation.wait_callbacks().unwrap();
++        assert!(terminal.await.unwrap().cancelled);
++    }
++
++    #[tokio::test]
++    async fn controlled_poisoned_callback_snapshot_refuses_without_unwinding() {
++        use cua_driver_core::controlled::{scope, Gate};
++        let gate = Gate::new();
++        let session = gate.session(None, Arc::new(|| true), 42, 7, None).unwrap();
++        let operation = session.new_operation().unwrap();
++        operation.begin().unwrap();
++        let d = Arc::new(Dispatcher::new());
++        scope(operation.clone(), async { d.add(Some(42), 7, "test.poisoned") }).await;
++        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _guard = d.entries.lock().unwrap();
++            panic!("synthetic dispatcher poison");
++        })).is_err());
++        assert!(d.snapshot_work(42).is_empty());
++        operation.finish();
++        assert_eq!(operation.terminal().await, Err("quarantined"));
++        assert!(gate.is_quarantined());
++    }
++
+     /// Snapshot ordering doesn't matter, but the restore pid set
+     /// must contain every match. Multiple concurrent suppressions
+     /// targeting the same pid should both fire.
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+@@ -214,6 +214,9 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if let Some(operation) = cua_driver_core::controlled::current() {
++            return super::computer::click(self.state.clone(), args, operation).await;
++        }
+         use cua_driver_core::tool_args::ArgsExt;
+ 
+         // ── Window-less screen-absolute branch (scope="desktop") ──────
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+@@ -0,0 +1,247 @@
++//! Controlled-only branches of canonical observe/click, downstream of the
++//! unchanged registry authorization. One tracked blocking owner includes focus
++//! cleanup; no old timeout, overlay, screenshot, selection or pixel fallback.
++use super::ToolState;
++use crate::ax::{bindings, cache::CachedSnapshot};
++use cua_driver_core::{controlled::Operation, protocol::ToolResult};
++use serde_json::{json, Value};
++use std::sync::Arc;
++
++fn refusal(reason: &str) -> ToolResult {
++    ToolResult::error(reason).with_structured(json!({"code": reason}))
++}
++
++fn target_matches(args: &Value, operation: &Operation) -> bool {
++    args["pid"].as_i64() == Some(i64::from(operation.session.pid))
++        && args["window_id"].as_u64() == Some(u64::from(operation.session.window_id))
++        && operation.session.process_stamp.is_some()
++        && super::computer_process_stamp(operation.session.pid) == operation.session.process_stamp
++        && operation.checkpoint().is_ok()
++}
++
++fn with_focus_cleanup(operation: &Operation, call: impl FnOnce() -> ToolResult) -> ToolResult {
++    let setup = operation.primary(false, || {
++        let prior = crate::apps::frontmost_pid();
++        let snapshot = crate::window_change_detector::WindowChangeDetector::snapshot(prior);
++        let targeted = prior
++            .filter(|pid| *pid != operation.session.pid)
++            .map(|prior| {
++                crate::focus_steal::begin_suppression(
++                    Some(operation.session.pid),
++                    prior,
++                    "pi.computer",
++                )
++            });
++        (snapshot, targeted)
++    });
++    let Ok((snapshot, targeted)) = setup else {
++        return refusal("controlled_cancelled");
++    };
++    let result = call();
++    // Same bounded post-action settle as FocusGuard. This is behavior, NOT
++    // terminal evidence. Registered callbacks, not this sleep, prove drain.
++    if targeted.is_some() {
++        std::thread::sleep(std::time::Duration::from_millis(50));
++    }
++    drop(targeted);
++    let _ = snapshot.detect();
++    if operation.wait_callbacks().is_err() {
++        return refusal("controlled_quarantined");
++    }
++    result
++}
++
++pub(super) async fn observe(
++    state: Arc<ToolState>,
++    args: Value,
++    operation: Arc<Operation>,
++) -> ToolResult {
++    if !target_matches(&args, &operation)
++        || args["include_screenshot"] != false
++        || args
++            .get("screenshot_out_file")
++            .is_some_and(|value| !value.is_null())
++    {
++        return refusal("controlled_observation_refused");
++    }
++    let max_elements = args["max_elements"]
++        .as_u64()
++        .filter(|n| (1..=512).contains(n));
++    let max_depth = args["max_depth"].as_u64().filter(|n| (1..=32).contains(n));
++    let (Some(max_elements), Some(max_depth)) = (max_elements, max_depth) else {
++        return refusal("controlled_observation_bounds");
++    };
++    operation.reset_snapshot();
++    let worker = operation.clone();
++    match operation
++        .blocking(move || {
++            if !target_matches(&args, &worker) {
++                return refusal("controlled_target_stale");
++            }
++            let pid = worker.session.pid;
++            let window_id = worker.session.window_id;
++            with_focus_cleanup(&worker, || {
++                if !matches!(
++                    crate::windows::resolve_window_owner(pid, window_id),
++                    crate::windows::WindowOwner::SamePid
++                ) {
++                    return refusal("controlled_target_stale");
++                }
++                let tree = crate::ax::tree::walk_tree_bounded(
++                    pid,
++                    Some(window_id),
++                    None,
++                    max_elements as usize,
++                    max_depth as usize,
++                );
++                // Take ownership of every retained actionable node even on refusal.
++                let payload = CachedSnapshot::from_nodes(&tree.nodes);
++                if !tree
++                    .window_scope
++                    .as_ref()
++                    .is_some_and(|scope| scope.is_matched())
++                    || !target_matches(&args, &worker)
++                {
++                    return refusal("controlled_target_stale");
++                }
++                let published = worker.primary(false, || {
++                    state
++                        .element_cache
++                        .publish(pid, u64::from(window_id), payload)
++                });
++                let Ok(id) = published else {
++                    return refusal("controlled_cancelled");
++                };
++                let retirement_cache = state.element_cache.clone();
++                if worker
++                    .remember_snapshot(id, move || {
++                        retirement_cache.remove_snapshot(pid, u64::from(window_id), id)
++                    })
++                    .is_err()
++                {
++                    // Host lane is still exclusively held; no successor can have
++                    // replaced this isolated runtime's snapshot in the meantime.
++                    state
++                        .element_cache
++                        .remove_snapshot(pid, u64::from(window_id), id);
++                    return refusal("controlled_cancelled");
++                }
++                let elements =
++                    super::get_window_state::build_elements_array_with_token(&tree.nodes, Some(id));
++                ToolResult::text(tree.tree_markdown.clone()).with_structured(json!({
++                    "pid": pid, "window_id": window_id, "snapshot_id": format!("s{id:08x}"),
++                    "tree_markdown": tree.tree_markdown, "element_count": elements.len(),
++                    "total_element_count": elements.len(), "returned_element_count": elements.len(),
++                    "elements_complete": false, "truncated": tree.truncated, "elements": elements,
++                }))
++            })
++        })
++        .await
++    {
++        Ok(result) => result,
++        Err(_) => refusal("controlled_quarantined"),
++    }
++}
++
++fn advertised_enabled_press(enabled: Option<bool>, actions: &[String]) -> bool {
++    enabled == Some(true) && actions.iter().any(|action| action == "AXPress")
++}
++
++pub(super) async fn click(
++    state: Arc<ToolState>,
++    args: Value,
++    operation: Arc<Operation>,
++) -> ToolResult {
++    if !target_matches(&args, &operation)
++        || args["action"] != "press"
++        || args["delivery_mode"] != "background"
++        || ["x", "y", "modifiers", "button", "count", "element_index"]
++            .iter()
++            .any(|key| args.get(key).is_some())
++    {
++        return refusal("controlled_click_refused");
++    }
++    let Some(token) = args["element_token"].as_str().map(str::to_owned) else {
++        return refusal("controlled_token_required");
++    };
++    if operation.consume_token(&token).is_err() {
++        return refusal("stale_session_observation");
++    }
++    // Preserve per-PID exclusion, including while focus callbacks drain. The
++    // facade's host-wide lane is fail-fast; this is the existing resource lock.
++    let mutation = super::acquire_background_mutation(operation.session.pid).await;
++    if operation.checkpoint().is_err() {
++        return refusal("controlled_cancelled");
++    }
++    let worker = operation.clone();
++    match operation
++        .blocking(move || {
++            let _mutation = mutation;
++            if !target_matches(&args, &worker) {
++                return refusal("controlled_target_stale");
++            }
++            let pid = worker.session.pid;
++            let window_id = worker.session.window_id;
++            let element = match state.element_cache.resolve_element_args(
++                pid,
++                None,
++                Some(&token),
++                None,
++                Some(u64::from(window_id)),
++                "click",
++            ) {
++                Ok(cua_driver_core::element_token::ResolvedElement::Element {
++                    element, ..
++                }) => element,
++                _ => return refusal("stale_session_observation"),
++            };
++            with_focus_cleanup(&worker, || {
++                let facts = crate::ax::exact_target::gather_background_facts(
++                    pid,
++                    window_id,
++                    Some(element.as_ptr()),
++                );
++                let decision = cua_driver_core::background_input::decide_background_input(
++                    cua_driver_core::background_input::ExactWindowTarget { pid, window_id },
++                    &facts,
++                    cua_driver_core::background_input::BackgroundAction::AxSemantic,
++                );
++                if !decision.is_execute() || !target_matches(&args, &worker) {
++                    return refusal("controlled_target_unproven");
++                }
++                let element = element.as_ptr() as bindings::AXUIElementRef;
++                let enabled = unsafe { bindings::copy_bool_attr(element, "AXEnabled") };
++                let actions = unsafe { bindings::copy_action_names(element) };
++                if !advertised_enabled_press(enabled, &actions) {
++                    return refusal("controlled_press_unavailable");
++                }
++                // The AX binding performs the atomic primary-input admission.
++                // There is no selection/coordinate/foreground fallback on error.
++                let error = unsafe { bindings::perform_action(element, "AXPress") };
++                if error != bindings::kAXErrorSuccess {
++                    return refusal("controlled_press_unconfirmed");
++                }
++                ToolResult::text("AXPress dispatched; effect unverified").with_structured(json!({
++                    "path": "ax", "verified": false, "effect": "unverifiable",
++                }))
++            })
++        })
++        .await
++    {
++        Ok(result) => result,
++        Err(_) => refusal("controlled_quarantined"),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::advertised_enabled_press;
++    #[test]
++    fn controlled_press_requires_positive_live_evidence() {
++        assert!(advertised_enabled_press(Some(true), &["AXPress".into()]));
++        assert!(!advertised_enabled_press(None, &["AXPress".into()]));
++        assert!(!advertised_enabled_press(Some(false), &["AXPress".into()]));
++        assert!(!advertised_enabled_press(Some(true), &["AXSelect".into()]));
++        assert!(!advertised_enabled_press(Some(true), &[]));
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -173,6 +173,9 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if let Some(operation) = cua_driver_core::controlled::current() {
++            return super::computer::observe(self.state.clone(), args, operation).await;
++        }
+         use cua_driver_core::tool_args::ArgsExt;
+         let pid = match args.require_i32("pid") {
+             Ok(v) => v,
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+@@ -2,6 +2,7 @@
+ 
+ mod bring_to_front;
+ mod click;
++mod computer;
+ mod clipboard;
+ mod double_click;
+ mod drag;
+@@ -812,6 +813,23 @@
+             "message": message,
+         }
+     }))
++}
++
++/// Narrow local qualification composition: no overlay, browser, recording,
++/// permission UX, global hooks or administrative dispatch surface.
++pub fn register_computer(registry: &mut ToolRegistry) {
++    let state = Arc::new(ToolState::new(false, true, None));
++    cua_driver_core::element_cache::register_runtime_cache(&state.element_cache);
++    registry.register(Box::new(list_apps::ListAppsTool));
++    // Only its protected-resource fingerprint method is used by registry
++    // authorization. Controlled ingress refuses every tool but observe/click.
++    registry.register(Box::new(kill_app::KillAppTool));
++    registry.register(Box::new(get_window_state::GetWindowStateTool::new(state.clone())));
++    registry.register(Box::new(click::ClickTool::new(state)));
++}
++
++pub fn computer_process_stamp(pid: i32) -> Option<(u64, u64)> {
++    crate::ax::enablement::process_start_stamp(pid)
+ }
+ 
+ /// Register all macOS tools into the registry. `compat=true` swaps the

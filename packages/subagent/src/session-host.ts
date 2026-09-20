@@ -40,6 +40,8 @@ export interface ChildSessionCreateOptions extends ChildSessionIdentity {
 	prefix?: ChildRequestPrefix;
 	/** Live ancestry restriction; rechecked for every tool call, including nested delegation. */
 	toolAllowed?: (name: string) => boolean;
+	/** Trusted synchronous refresh, before control-plane observers see an authority mutation. */
+	subscribeAuthority?: (refresh: () => void) => () => void;
 	/** Storage ownership and historical session validation belong to the team store. */
 	storage: { kind: "memory" } | { kind: "file"; directory: string; sessionFile?: string };
 	getPermissions: () => ChildSessionPermissions;

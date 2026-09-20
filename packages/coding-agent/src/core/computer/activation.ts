@@ -1,0 +1,70 @@
+import { createRequire } from "node:module";
+import { isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { getPackageDir } from "../../config.ts";
+import type { ComputerSessionBinding } from "./binding.ts";
+
+export interface NativeComputerFeature {
+	readonly binding: ComputerSessionBinding;
+	/** Process/embedding-host lifetime, not a child/session close operation. */
+	close(): Promise<void>;
+}
+
+export interface NativeComputerOptions {
+	/** Explicit trusted host path. Never taken from model input or project discovery. */
+	manifestPath?: string;
+	/** Select the isolated DOM profile instead of native-window/pixel operations. */
+	browserBundlePath?: string;
+}
+
+/** The explicit allowlist overrides no-tools, while exclusion always wins (existing SDK policy). */
+export function shouldActivateComputer(options: {
+	computer?: boolean;
+	help?: boolean;
+	listModels?: string | boolean;
+	tools?: readonly string[];
+	excludeTools?: readonly string[];
+	noTools?: boolean;
+}): boolean {
+	if (!options.computer || options.help || options.listModels !== undefined) return false;
+	if (options.excludeTools?.includes("computer")) return false;
+	return options.tools !== undefined ? options.tools.includes("computer") : !options.noTools;
+}
+
+/**
+ * Explicit SDK/CLI activation of the separately installed Computer capability.
+ * Ordinary coding never calls this or reads native assets. The bridge itself is
+ * inert: native loading and desktop ownership remain lazy until tool execution.
+ */
+export function createNativeComputerFeature(options: NativeComputerOptions = {}): NativeComputerFeature {
+	if (options.manifestPath !== undefined && !isAbsolute(options.manifestPath)) {
+		throw new Error("Computer capability manifest must be an absolute trusted-host path");
+	}
+	if (options.browserBundlePath !== undefined && !isAbsolute(options.browserBundlePath)) {
+		throw new Error("Computer browser bundle must be an absolute trusted-host path");
+	}
+	const entry = join(getPackageDir(), "computer", "bridge.js");
+	let loaded: unknown;
+	try {
+		loaded = createRequire(pathToFileURL(entry))(entry);
+	} catch (error) {
+		throw new Error("Computer is unavailable: install the matching optional Computer assets for this runtime", {
+			cause: error,
+		});
+	}
+	if (
+		typeof loaded !== "object" ||
+		loaded === null ||
+		!("computerFeatureVersion" in loaded) ||
+		loaded.computerFeatureVersion !== 1 ||
+		!("createComputerFeature" in loaded) ||
+		typeof loaded.createComputerFeature !== "function"
+	) {
+		throw new Error("Computer assets do not match this host interface");
+	}
+	// An explicitly installed, trusted module, not a model-selected plugin/FFI.
+	const module = loaded as {
+		createComputerFeature(options: NativeComputerOptions): NativeComputerFeature;
+	};
+	return module.createComputerFeature(options);
+}

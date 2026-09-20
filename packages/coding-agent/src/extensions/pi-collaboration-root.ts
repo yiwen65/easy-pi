@@ -102,6 +102,7 @@ export function registerPiCollaborationRoot(
 					shellCommandPrefix: settings.getShellCommandPrefix(),
 				},
 				getTools: () => session.getActiveToolNames(),
+				getComputer: () => session.computer,
 				observeSession: (child, native) => monitor!.attach(child, native),
 				registerTools: (child, childPi, getSession) => {
 					registerPiCollaborationTools({

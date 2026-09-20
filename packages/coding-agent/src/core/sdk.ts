@@ -7,6 +7,7 @@ import { bindNativeSession } from "../extensions/native-session-binding.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import type { ComputerSessionBinding } from "./computer/binding.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -75,6 +76,8 @@ export interface CreateAgentSessionOptions {
 	excludeTools?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
+	/** Explicit session-owned Computer capability. Omitted by default; never restored from history. */
+	computer?: ComputerSessionBinding;
 
 	/**
 	 * Background bash tasks. `promotion` enables Kimi-style foreground promotion (60s default,
@@ -277,6 +280,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	).filter((name) => !excludedToolNameSet?.has(name));
 
 	let agent: Agent;
+	let session: AgentSession | undefined;
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
@@ -325,6 +329,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
+		onProviderContext: (model, context) => {
+			// Resolve the live binding after renew/reload; never revive an old capability from history.
+			session?.computer?.observeContext?.(
+				model.input.includes("image") && !settingsManager.getBlockImages(),
+				context.messages,
+			);
+		},
 		streamFn: async (model, context, options) => {
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
@@ -399,7 +410,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
-	const session = new AgentSession({
+	session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
@@ -407,6 +418,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
+		computer: options.computer,
 		modelRuntime,
 		initialActiveToolNames,
 		allowedToolNames,

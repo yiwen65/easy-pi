@@ -45,6 +45,12 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.ts";
+export {
+	createNativeComputerFeature,
+	type NativeComputerFeature,
+	type NativeComputerOptions,
+} from "./core/computer/activation.ts";
+export type { ComputerSessionBinding } from "./core/computer/binding.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {

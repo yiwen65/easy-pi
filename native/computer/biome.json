@@ -1,0 +1,19 @@
+{
+	"root": false,
+	"formatter": {
+		"indentStyle": "tab",
+		"indentWidth": 3,
+		"lineWidth": 120
+	},
+	"linter": {
+		"rules": {
+			"recommended": true,
+			"style": {
+				"noNonNullAssertion": "off"
+			}
+		}
+	},
+	"files": {
+		"includes": ["**/*.ts", "**/*.mjs", "**/*.json"]
+	}
+}

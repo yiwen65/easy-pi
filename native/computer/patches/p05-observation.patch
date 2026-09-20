@@ -1,0 +1,973 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
+@@ -1,6 +1,7 @@
+ //! macOS app enumeration via NSWorkspace and NSRunningApplication.
+ 
+ pub mod nsworkspace;
++mod plist_reader;
+ 
+ use anyhow::Context;
+ use serde::{Deserialize, Serialize};
+@@ -543,6 +544,10 @@
+ }
+ 
+ fn read_app_plist(plist_path: &std::path::Path) -> Option<AppInfo> {
++    plist_reader::read(plist_path, read_app_plist_legacy)
++}
++
++fn read_app_plist_legacy(plist_path: &std::path::Path) -> Option<AppInfo> {
+     let bundle_id_out = Command::new("plutil")
+         .args([
+             "-extract",
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/apps/plist_reader.rs b/libs/cua-driver/rust/crates/platform-macos/src/apps/plist_reader.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/plist_reader.rs
+@@ -0,0 +1,215 @@
++//! Bounded in-process plist projection with the unchanged legacy reader as a compatibility fallback.
++use super::AppInfo;
++use core_foundation::{
++    base::{CFType, TCFType},
++    data::CFData,
++    dictionary::CFDictionary,
++    propertylist::{create_with_data, kCFPropertyListImmutable, CFPropertyList},
++    string::CFString,
++};
++use std::io::Read;
++use std::path::Path;
++
++const MAX_PLIST_BYTES: u64 = 1024 * 1024;
++
++pub(super) fn read(path: &Path, legacy: impl FnOnce(&Path) -> Option<AppInfo>) -> Option<AppInfo> {
++    match read_native(path) {
++        Ok(value) => value,
++        // Preserve the established reader for large, unusual or unreadable
++        // files. No cached identity, skipped manifest check or focus change.
++        Err(()) => legacy(path),
++    }
++}
++
++fn read_native(path: &Path) -> Result<Option<AppInfo>, ()> {
++    path.to_str().ok_or(())?;
++    let file = std::fs::File::open(path).map_err(|_| ())?;
++    let metadata = file.metadata().map_err(|_| ())?;
++    if !metadata.is_file() || metadata.len() > MAX_PLIST_BYTES {
++        return Err(());
++    }
++    let mut bytes = Vec::new();
++    file.take(MAX_PLIST_BYTES + 1)
++        .read_to_end(&mut bytes)
++        .map_err(|_| ())?;
++    if bytes.len() > MAX_PLIST_BYTES as usize {
++        return Err(());
++    }
++    let (raw, _) =
++        create_with_data(CFData::from_buffer(&bytes), kCFPropertyListImmutable).map_err(|_| ())?;
++    // create_with_data returns a nonnull +1 CFPropertyList on success. This
++    // owning wrapper releases it on every exit, including failed downcasts.
++    let plist = unsafe { CFPropertyList::wrap_under_create_rule(raw) };
++    let dictionary = plist.downcast::<CFDictionary>().ok_or(())?;
++    let string = |name: &str| -> Result<Option<String>, ()> {
++        let key = CFString::new(name);
++        let Some(raw) = dictionary.find(key.as_CFTypeRef()) else {
++            return Ok(None);
++        };
++        // Values of a parsed property-list dictionary are valid CF objects;
++        // retain while testing the runtime type, rather than assuming strings.
++        let value = unsafe { CFType::wrap_under_get_rule(*raw) };
++        let string = value.downcast::<CFString>().ok_or(())?;
++        Ok(Some(string.to_string().trim().to_owned()))
++    };
++    let Some(bundle_id) = string("CFBundleIdentifier")?.filter(|value| !value.is_empty()) else {
++        return Ok(None);
++    };
++    let name = match string("CFBundleDisplayName")?.filter(|value| !value.is_empty()) {
++        Some(name) => name,
++        None => string("CFBundleName")?
++            .filter(|value| !value.is_empty())
++            .unwrap_or_else(|| {
++                path.parent()
++                    .and_then(Path::parent)
++                    .and_then(Path::file_stem)
++                    .and_then(|value| value.to_str())
++                    .unwrap_or("")
++                    .to_owned()
++            }),
++    };
++    if name.is_empty() {
++        return Ok(None);
++    }
++    Ok(Some(AppInfo {
++        name,
++        pid: 0,
++        bundle_id: Some(bundle_id),
++        running: false,
++        active: false,
++        launch_path: None,
++        kind: None,
++        last_used: None,
++    }))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::cell::Cell;
++    use std::fs;
++    use std::path::PathBuf;
++    use std::process::Command;
++
++    fn fixture(body: &str) -> (tempfile::TempDir, PathBuf) {
++        let directory = tempfile::tempdir().unwrap();
++        let path = directory
++            .path()
++            .join("Fallback Name.app/Contents/Info.plist");
++        fs::create_dir_all(path.parent().unwrap()).unwrap();
++        fs::write(&path, format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict>{body}</dict></plist>")).unwrap();
++        (directory, path)
++    }
++
++    fn equivalent(path: &Path, expected_fallbacks: usize) {
++        let reference = super::super::read_app_plist_legacy(path);
++        let calls = Cell::new(0);
++        let actual = read(path, |path| {
++            calls.set(calls.get() + 1);
++            super::super::read_app_plist_legacy(path)
++        });
++        assert_eq!(
++            serde_json::to_value(actual).unwrap(),
++            serde_json::to_value(reference).unwrap()
++        );
++        assert_eq!(
++            calls.get(),
++            expected_fallbacks,
++            "normal plist projection must not spawn legacy plutil readers"
++        );
++    }
++
++    #[test]
++    fn controlled_plist_xml_projection_preserves_legacy_fields_without_subprocesses() {
++        for body in [
++            "<key>CFBundleIdentifier</key><string> fixture.id </string><key>CFBundleDisplayName</key><string>  测试 &amp; App  </string><key>CFBundleName</key><string>Ignored</string>",
++            "<key>CFBundleIdentifier</key><string>fixture.id</string><key>CFBundleName</key><string> Short </string>",
++            "<key>CFBundleIdentifier</key><string>fixture.id</string><key>CFBundleDisplayName</key><string> </string><key>CFBundleName</key><string> </string>",
++            "<key>CFBundleIdentifier</key><string>fixture.id</string><key>CFBundleName</key><string>App</string><key>Unrelated</key><data>AQID</data>",
++            "<key>CFBundleIdentifier</key><string>fixture.id</string><key>Unrelated</key><date>2026-01-01T00:00:00Z</date>",
++            "<key>CFBundleIdentifier</key><string> </string>",
++            "<key>CFBundleName</key><string>No ID</string>",
++        ] {
++            let (_directory, path) = fixture(body);
++            equivalent(&path, 0);
++        }
++    }
++
++    #[test]
++    fn controlled_plist_binary_projection_preserves_legacy_fields_without_subprocesses() {
++        let (_directory, path) = fixture("<key>CFBundleIdentifier</key><string>fixture.binary</string><key>CFBundleDisplayName</key><string>Binary App</string>");
++        assert!(Command::new("/usr/bin/plutil")
++            .args(["-convert", "binary1"])
++            .arg(&path)
++            .status()
++            .unwrap()
++            .success());
++        equivalent(&path, 0);
++    }
++
++    #[test]
++    fn controlled_plist_unusual_field_types_keep_the_legacy_semantics() {
++        for body in [
++            "<key>CFBundleIdentifier</key><integer>42</integer><key>CFBundleName</key><string>Number ID</string>",
++            "<key>CFBundleIdentifier</key><string>fixture.bool</string><key>CFBundleDisplayName</key><true/>",
++            "<key>CFBundleIdentifier</key><string>fixture.dict</string><key>CFBundleDisplayName</key><dict/><key>CFBundleName</key><string>Fallback</string>",
++        ] {
++            let (_directory, path) = fixture(body);
++            equivalent(&path, 1);
++        }
++    }
++
++    #[test]
++    #[ignore = "explicit bounded private-file latency experiment, not desktop performance"]
++    fn controlled_plist_microbenchmark() {
++        assert_eq!(std::env::var("EPI_PLIST_BENCHMARK").as_deref(), Ok("1"));
++        let (_directory, path) = fixture("<key>CFBundleIdentifier</key><string>fixture.benchmark</string><key>CFBundleDisplayName</key><string>Benchmark App</string>");
++        for sample in 0..100 {
++            for native in if sample % 2 == 0 {
++                [false, true]
++            } else {
++                [true, false]
++            } {
++                let started = std::time::Instant::now();
++                let value = if native {
++                    read(&path, |_| panic!("unexpected legacy fallback"))
++                } else {
++                    super::super::read_app_plist_legacy(&path)
++                }
++                .unwrap();
++                let elapsed = started.elapsed().as_nanos() as u64;
++                assert_eq!(value.bundle_id.as_deref(), Some("fixture.benchmark"));
++                assert_eq!(value.name, "Benchmark App");
++                println!(
++                    "pi_plist_sample {}",
++                    serde_json::json!({"sample":sample,"native":native,"elapsedNs":elapsed})
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn controlled_plist_unreadable_malformed_oversized_and_non_utf8_use_legacy_once() {
++        use std::os::unix::ffi::OsStringExt;
++        let (_directory, path) = fixture("");
++        for bytes in [b"not a plist".to_vec(), vec![b'x'; 1024 * 1024 + 1]] {
++            fs::write(&path, bytes).unwrap();
++            let calls = Cell::new(0);
++            assert!(read(&path, |_| {
++                calls.set(calls.get() + 1);
++                None
++            })
++            .is_none());
++            assert_eq!(calls.get(), 1);
++        }
++        fs::remove_file(&path).unwrap();
++        equivalent(&path, 1);
++        let weird = path
++            .parent()
++            .unwrap()
++            .join(std::ffi::OsString::from_vec(vec![0xff]));
++        // APFS rejects creating this filename; the path argument itself still
++        // exercises the legacy UTF-8 admission rule without a filesystem write.
++        equivalent(&weird, 1);
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser.rs b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser.rs
+@@ -2,7 +2,10 @@
+ //! CfT bundle and private scratch parent, never tool arguments or an existing
+ //! profile. This is not yet an exact native-window/page binding.
+ pub mod session;
+-use super::{controlled_image::observe_images_below, controlled_process::SpawnedProcessGroup};
++use super::{
++    controlled_image::{observe_images_below, ImageProcess},
++    controlled_process::SpawnedProcessGroup,
++};
+ use cua_driver_core::controlled::{self, Operation, Session, SessionResource};
+ use std::ffi::OsString;
+ use std::fs::{self, DirBuilder, OpenOptions};
+@@ -104,16 +107,14 @@
+                     worker.checkpoint()?;
+                     match read_endpoint(&paths.profile) {
+                         Ok(Some(endpoint)) => {
+-                            let members = observe_images_below(&paths.image)?;
+-                            let root = members
+-                                .iter()
+-                                .find(|member| {
+-                                    member.pid == pid
+-                                        && member.executable == paths.image.join(EXECUTABLE)
+-                                })
+-                                .ok_or("browser_process_identity_unproved")?;
+-                            worker.checkpoint()?;
+-                            return Ok((endpoint, root.started));
++                            let stamp = wait_root_image(
++                                pid,
++                                &paths.image.join(EXECUTABLE),
++                                || observe_images_below(&paths.image),
++                                || worker.checkpoint(),
++                                deadline,
++                            )?;
++                            return Ok((endpoint, stamp));
+                         }
+                         Ok(None) if Instant::now() < deadline => {
+                             std::thread::sleep(Duration::from_millis(20))
+@@ -129,6 +130,40 @@
+             process_stamp,
+             endpoint,
+         })
++    }
++}
++
++fn wait_root_image(
++    pid: u32,
++    executable: &Path,
++    mut observe: impl FnMut() -> Result<Vec<ImageProcess>, &'static str>,
++    mut checkpoint: impl FnMut() -> Result<(), &'static str>,
++    deadline: Instant,
++) -> Result<(u64, u64), &'static str> {
++    loop {
++        checkpoint()?;
++        let members = match observe() {
++            // Startup itself changes the process catalog. Read again only
++            // within the existing readiness budget; never repeat spawn/input.
++            Err("image_catalog_changed") if Instant::now() < deadline => {
++                std::thread::sleep(
++                    Duration::from_millis(20)
++                        .min(deadline.saturating_duration_since(Instant::now())),
++                );
++                checkpoint()?;
++                if Instant::now() >= deadline {
++                    return Err("image_catalog_changed");
++                }
++                continue;
++            }
++            value => value?,
++        };
++        let root = members
++            .iter()
++            .find(|member| member.pid == pid && member.executable == executable)
++            .ok_or("browser_process_identity_unproved")?;
++        checkpoint()?;
++        return Ok(root.started);
+     }
+ }
+ 
+@@ -368,10 +403,35 @@
+                 // clone route; Crashpad may escape the group but uses this unique
+                 // copied image. Do not signal an unanchored helper PID. Await its
+                 // natural EOF exit; retain everything if convergence is unproved.
+-                wait_image_drain(
+-                    || observe_images_below(&paths.root).map(|members| members.is_empty()),
++                let mut last_observation = "not_observed";
++                let mut last_live_count = None;
++                let drain = wait_image_drain(
++                    || match observe_images_below(&paths.root) {
++                        Ok(members) => {
++                            last_observation = "stable_catalog";
++                            last_live_count = Some(members.len());
++                            Ok(members.is_empty())
++                        }
++                        Err(reason) => {
++                            last_observation = reason;
++                            last_live_count = None;
++                            Err(reason)
++                        }
++                    },
+                     Instant::now() + Duration::from_secs(5),
+-                )?;
++                );
++                if drain.is_err()
++                    && std::env::var_os("EPI_COMPUTER_DIAGNOSTICS").as_deref()
++                        == Some(std::ffi::OsStr::new("1"))
++                {
++                    eprintln!(
++                        "pi_computer_image_drain {}",
++                        serde_json::json!({
++                            "lastObservation":last_observation, "lastLiveCount":last_live_count
++                        })
++                    );
++                }
++                drain?;
+                 fs::remove_dir_all(&paths.root).map_err(|_| "browser_directory_cleanup_failed")?;
+             }
+             state.paths = None;
+@@ -385,4 +445,6 @@
+ }
+ 
+ #[cfg(test)]
++mod readiness_tests;
++#[cfg(test)]
+ mod tests;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser/readiness_tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser/readiness_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_browser/readiness_tests.rs
+@@ -0,0 +1,142 @@
++use super::*;
++
++fn member() -> ImageProcess {
++    ImageProcess {
++        pid: 42,
++        started: (100, 7),
++        executable: PathBuf::from("/owned/browser"),
++    }
++}
++
++#[test]
++fn controlled_browser_ready_waits_only_for_a_positive_stable_identity() {
++    let mut values = [
++        Err("image_catalog_changed"),
++        Err("image_catalog_changed"),
++        Ok(vec![member()]),
++    ]
++    .into_iter();
++    assert_eq!(
++        wait_root_image(
++            42,
++            Path::new("/owned/browser"),
++            || values.next().unwrap(),
++            || Ok(()),
++            Instant::now() + Duration::from_secs(1)
++        ),
++        Ok((100, 7))
++    );
++    assert!(values.next().is_none());
++}
++
++#[test]
++fn controlled_browser_ready_catalog_changes_do_not_outlive_the_existing_budget() {
++    let mut calls = 0;
++    assert_eq!(
++        wait_root_image(
++            42,
++            Path::new("/owned/browser"),
++            || {
++                calls += 1;
++                Err("image_catalog_changed")
++            },
++            || Ok(()),
++            Instant::now()
++        ),
++        Err("image_catalog_changed")
++    );
++    assert_eq!(calls, 1);
++}
++
++#[test]
++fn controlled_browser_ready_does_not_begin_another_read_after_the_pause_budget() {
++    let mut calls = 0;
++    assert_eq!(
++        wait_root_image(
++            42,
++            Path::new("/owned/browser"),
++            || {
++                calls += 1;
++                Err("image_catalog_changed")
++            },
++            || Ok(()),
++            Instant::now() + Duration::from_millis(5)
++        ),
++        Err("image_catalog_changed")
++    );
++    assert_eq!(calls, 1);
++}
++
++#[test]
++fn controlled_browser_ready_cancellation_stops_before_another_read() {
++    let mut calls = 0;
++    let mut checks = 0;
++    assert_eq!(
++        wait_root_image(
++            42,
++            Path::new("/owned/browser"),
++            || {
++                calls += 1;
++                Err("image_catalog_changed")
++            },
++            || {
++                checks += 1;
++                if checks == 1 {
++                    Ok(())
++                } else {
++                    Err("cancelled")
++                }
++            },
++            Instant::now() + Duration::from_secs(1)
++        ),
++        Err("cancelled")
++    );
++    assert_eq!(calls, 1);
++}
++
++#[test]
++fn controlled_browser_ready_never_accepts_unreadable_missing_or_wrong_image() {
++    for reason in [
++        "image_path_unavailable",
++        "image_catalog_unavailable",
++        "image_member_bounds",
++    ] {
++        let mut calls = 0;
++        assert_eq!(
++            wait_root_image(
++                42,
++                Path::new("/owned/browser"),
++                || {
++                    calls += 1;
++                    Err(reason)
++                },
++                || Ok(()),
++                Instant::now() + Duration::from_secs(1)
++            ),
++            Err(reason)
++        );
++        assert_eq!(calls, 1);
++    }
++    for members in [
++        vec![],
++        vec![ImageProcess {
++            pid: 43,
++            ..member()
++        }],
++        vec![ImageProcess {
++            executable: PathBuf::from("/other/browser"),
++            ..member()
++        }],
++    ] {
++        assert_eq!(
++            wait_root_image(
++                42,
++                Path::new("/owned/browser"),
++                || Ok(members.clone()),
++                || Ok(()),
++                Instant::now() + Duration::from_secs(1)
++            ),
++            Err("browser_process_identity_unproved")
++        );
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image.rs b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image.rs
+@@ -59,7 +59,10 @@
+             libc::proc_pidinfo(
+                 pid,
+                 libc::PROC_PIDTBSDINFO,
+-                0,
++                // XNU requires nonzero arg to include zombie BSD info. A
++                // listed, unreaped zombie otherwise returns ESRCH forever;
++                // it must be positively represented below, never skipped.
++                1,
+                 (&mut info as *mut libc::proc_bsdinfo).cast(),
+                 size,
+             )
+@@ -75,25 +78,7 @@
+         let executable = if info.pbi_status == libc::SZOMB {
+             None
+         } else {
+-            let mut bytes = [0u8; 4096];
+-            let count =
+-                unsafe { libc::proc_pidpath(pid, bytes.as_mut_ptr().cast(), bytes.len() as u32) };
+-            let end = bytes
+-                .iter()
+-                .position(|byte| *byte == 0)
+-                .ok_or("image_path_unavailable")?;
+-            if count <= 0
+-                || count as usize >= bytes.len()
+-                || end == 0
+-                || !(end..=end + 1).contains(&(count as usize))
+-            {
+-                return Err("image_path_unavailable");
+-            }
+-            let path = PathBuf::from(OsString::from_vec(bytes[..end].to_vec()));
+-            if !path.is_absolute() {
+-                return Err("image_path_unavailable");
+-            }
+-            Some(path)
++            Some(read_executable(pid)?)
+         };
+         if result
+             .insert(
+@@ -112,6 +97,37 @@
+         return Err("image_catalog_unavailable");
+     }
+     Ok(result)
++}
++
++fn read_executable(pid: i32) -> Result<PathBuf, &'static str> {
++    let mut bytes = [0u8; 4096];
++    let count = unsafe {
++        *libc::__error() = 0;
++        libc::proc_pidpath(pid, bytes.as_mut_ptr().cast(), bytes.len() as u32)
++    };
++    let errno = io::Error::last_os_error().raw_os_error();
++    if count <= 0 && errno == Some(libc::ESRCH) {
++        // Exit can occur after BSD identity was read. This catalog is now
++        // incomplete, not empty: callers may re-read within their existing
++        // budget and must still obtain two identical complete catalogs.
++        return Err("image_catalog_changed");
++    }
++    let end = bytes
++        .iter()
++        .position(|byte| *byte == 0)
++        .ok_or("image_path_unavailable")?;
++    if count <= 0
++        || count as usize >= bytes.len()
++        || end == 0
++        || !(end..=end + 1).contains(&(count as usize))
++    {
++        return Err("image_path_unavailable");
++    }
++    let path = PathBuf::from(OsString::from_vec(bytes[..end].to_vec()));
++    if !path.is_absolute() {
++        return Err("image_path_unavailable");
++    }
++    Ok(path)
+ }
+ 
+ fn stable_members(
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image/tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image/tests.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image/tests.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/browser/controlled_image/tests.rs
+@@ -6,6 +6,100 @@
+ use std::time::Duration;
+ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+ use tokio::net::{UnixListener, UnixStream};
++
++#[test]
++fn controlled_image_complete_catalog_attests_unreaped_zombie_without_hiding_live_members() {
++    struct Reap(std::process::Child);
++    impl Drop for Reap {
++        fn drop(&mut self) {
++            self.0.wait().expect("reap only the private exited child");
++        }
++    }
++    let child = Reap(Command::new("/usr/bin/true").spawn().unwrap());
++    let pid = child.0.id();
++    let mut exit = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
++    assert_eq!(
++        unsafe { libc::waitid(libc::P_PID, pid, &mut exit, libc::WEXITED | libc::WNOWAIT) },
++        0
++    );
++    assert_eq!(exit.si_pid, pid as i32);
++    // Keep the child unreaped throughout both complete catalogs. Waiting longer
++    // cannot fix a reader that omits the kernel's zombie-info request flag.
++    let deadline = std::time::Instant::now() + Duration::from_secs(1);
++    let (before, after) = loop {
++        let observed = catalog().and_then(|before| catalog().map(|after| (before, after)));
++        if let Ok((before, after)) = observed {
++            if before == after {
++                break (before, after);
++            }
++        }
++        assert!(
++            std::time::Instant::now() < deadline,
++            "unreaped zombie prevents a complete catalog"
++        );
++        std::thread::sleep(Duration::from_millis(10));
++    };
++    let zombie = before
++        .get(&pid)
++        .expect("zombie must remain represented, not skipped");
++    assert!(zombie.started.0 > 0);
++    assert_eq!(zombie.executable, None);
++    let own = before.get(&std::process::id()).unwrap();
++    let executable = std::env::current_exe().unwrap();
++    assert_eq!(own.executable.as_ref(), Some(&executable));
++    let members = stable_members(executable.parent().unwrap(), before, after).unwrap();
++    assert!(members
++        .iter()
++        .any(|row| row.pid == std::process::id() && row.executable == executable));
++    assert!(!members.iter().any(|row| row.pid == pid));
++}
++
++#[test]
++fn controlled_image_exit_between_identity_and_path_read_is_catalog_change() {
++    struct Reap(std::process::Child);
++    impl Drop for Reap {
++        fn drop(&mut self) {
++            self.0.stdin.take();
++            self.0.wait().expect("reap private process");
++        }
++    }
++    let mut child = Reap(
++        Command::new("/bin/cat")
++            .stdin(Stdio::piped())
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .spawn()
++            .unwrap(),
++    );
++    let pid = child.0.id();
++    assert!(read_executable(pid as i32).is_ok());
++    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
++    let size = std::mem::size_of_val(&info) as i32;
++    assert_eq!(
++        unsafe {
++            libc::proc_pidinfo(
++                pid as i32,
++                libc::PROC_PIDTBSDINFO,
++                1,
++                (&mut info as *mut libc::proc_bsdinfo).cast(),
++                size,
++            )
++        },
++        size
++    );
++    assert_eq!(info.pbi_pid, pid);
++    assert_ne!(info.pbi_status, libc::SZOMB);
++    // The exact transition that can occur between the catalog's identity read
++    // and executable read. EOF, not a guessed sleep or external process signal.
++    child.0.stdin.take();
++    let mut exit = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
++    assert_eq!(
++        unsafe { libc::waitid(libc::P_PID, pid, &mut exit, libc::WEXITED | libc::WNOWAIT) },
++        0
++    );
++    let result = read_executable(pid as i32);
++    assert_eq!(result, Err("image_catalog_changed"));
++}
+ 
+ fn entry(image: Option<&str>, generation: u64) -> Entry {
+     Entry {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+@@ -10,6 +10,7 @@
+ use observation::{Native, Reader};
+ use serde_json::{json, Value};
+ use std::sync::Arc;
++use std::time::Instant;
+ 
+ fn refusal(reason: &str) -> ToolResult {
+     ToolResult::error(reason).with_structured(json!({"code": reason}))
+@@ -26,7 +27,12 @@
+         && operation.checkpoint().is_ok()
+ }
+ 
+-fn with_focus_cleanup(operation: &Operation, call: impl FnOnce() -> ToolResult) -> ToolResult {
++fn with_focus_cleanup(
++    operation: &Operation,
++    kind: &'static str,
++    call: impl FnOnce() -> ToolResult,
++) -> ToolResult {
++    let started = Instant::now();
+     let Ok(target) = operation.session.native_window() else {
+         return refusal("unsupported_route");
+     };
+@@ -41,15 +47,40 @@
+     let Ok((snapshot, targeted)) = setup else {
+         return refusal("controlled_cancelled");
+     };
++    let ready = Instant::now();
+     let result = call();
++    let called = Instant::now();
+     // Same bounded post-action settle as FocusGuard. This is behavior, NOT
+     // terminal evidence. Registered callbacks, not this sleep, prove drain.
+     if targeted.is_some() {
+         std::thread::sleep(std::time::Duration::from_millis(50));
+     }
+     drop(targeted);
++    let settled = Instant::now();
+     let _ = snapshot.detect();
+-    if operation.wait_callbacks().is_err() {
++    let detected = Instant::now();
++    let callbacks = operation.wait_callbacks();
++    let drained = Instant::now();
++    if std::env::var_os("EPI_COMPUTER_TIMINGS").as_deref() == Some(std::ffi::OsStr::new("1")) {
++        let micros = |from: Instant, to: Instant| {
++            to.duration_since(from)
++                .as_micros()
++                .min(u128::from(u64::MAX)) as u64
++        };
++        // Diagnostic only: fixed phase names and monotonic durations. No tree,
++        // input text, application title, URL or screenshot content is logged.
++        eprintln!(
++            "pi_computer_phase {}",
++            json!({
++                "operationId": operation.id, "kind":kind,
++                "setupUs":micros(started,ready), "callUs":micros(ready,called),
++                "settleUs":micros(called,settled), "detectUs":micros(settled,detected),
++                "callbackDrainUs":micros(detected,drained), "totalUs":micros(started,drained),
++                "callbackDrainOk":callbacks.is_ok()
++            })
++        );
++    }
++    if callbacks.is_err() {
+         return refusal("controlled_quarantined");
+     }
+     result
+@@ -87,7 +118,7 @@
+             }
+             let pid = target.pid;
+             let window_id = target.window_id;
+-            with_focus_cleanup(&worker, || {
++            with_focus_cleanup(&worker, "observe", || {
+                 if !matches!(
+                     crate::windows::resolve_window_owner(pid, window_id),
+                     crate::windows::WindowOwner::SamePid
+@@ -240,81 +271,87 @@
+                 }) if element.as_ptr() != 0 => element,
+                 _ => return refusal("stale_session_observation"),
+             };
+-            with_focus_cleanup(&worker, || {
+-                let facts = crate::ax::exact_target::gather_background_facts(
+-                    pid,
+-                    window_id,
+-                    Some(element.as_ptr()),
+-                );
+-                let decision = cua_driver_core::background_input::decide_background_input(
+-                    cua_driver_core::background_input::ExactWindowTarget { pid, window_id },
+-                    &facts,
+-                    cua_driver_core::background_input::BackgroundAction::AxSemantic,
+-                );
+-                if !decision.is_execute() || !target_matches(&args, &worker) {
+-                    return refusal("controlled_target_unproven");
+-                }
+-                // A retained identity is not current membership/permission.
+-                // Re-read the complete exact-window hierarchy before every
+-                // mutation. P05 may optimize this only with differential proof.
+-                let native = Native { operation: &worker };
+-                let root = match native.exact_window() {
+-                    Ok(root) => root,
+-                    Err(code) => return refusal(code),
+-                };
+-                let scan = observation::scan(&native, root, 512, 32);
+-                if !scan.complete() {
+-                    return refusal(scan.failure.unwrap_or("condition_unknown"));
+-                }
+-                let Some(row) = scan
+-                    .rows
+-                    .iter()
+-                    .find(|row| native.same(&row.element, &element))
+-                else {
+-                    return refusal("stale_session_observation");
+-                };
+-                if row.web || !target_matches(&args, &worker) {
+-                    return refusal("controlled_target_unproven");
+-                }
+-                let ptr = element.as_ptr() as bindings::AXUIElementRef;
+-                // The binding atomically admits one input for this step. Never
+-                // use generic set_value's numeric/key/selection/JS fallbacks.
++            with_focus_cleanup(
++                &worker,
+                 match &mutation {
+-                    Mutation::Press => {
+-                        if !row.data.pressable() {
+-                            return refusal("controlled_press_unavailable");
++                    Mutation::Press => "press",
++                    Mutation::Fill(_) => "fill",
++                },
++                || {
++                    let facts = crate::ax::exact_target::gather_background_facts(
++                        pid,
++                        window_id,
++                        Some(element.as_ptr()),
++                    );
++                    let decision = cua_driver_core::background_input::decide_background_input(
++                        cua_driver_core::background_input::ExactWindowTarget { pid, window_id },
++                        &facts,
++                        cua_driver_core::background_input::BackgroundAction::AxSemantic,
++                    );
++                    if !decision.is_execute() || !target_matches(&args, &worker) {
++                        return refusal("controlled_target_unproven");
++                    }
++                    // A retained identity is not current membership/permission.
++                    // Re-read the complete exact-window hierarchy before every
++                    // mutation. P05 may optimize this only with differential proof.
++                    let native = Native { operation: &worker };
++                    let root = match native.exact_window() {
++                        Ok(root) => root,
++                        Err(code) => return refusal(code),
++                    };
++                    let scan = observation::scan(&native, root, 512, 32);
++                    if !scan.complete() {
++                        return refusal(scan.failure.unwrap_or("condition_unknown"));
++                    }
++                    let Some(row) = scan
++                        .rows
++                        .iter()
++                        .find(|row| native.same(&row.element, &element))
++                    else {
++                        return refusal("stale_session_observation");
++                    };
++                    if row.web || !target_matches(&args, &worker) {
++                        return refusal("controlled_target_unproven");
++                    }
++                    let ptr = element.as_ptr() as bindings::AXUIElementRef;
++                    // The binding atomically admits one input for this step. Never
++                    // use generic set_value's numeric/key/selection/JS fallbacks.
++                    match &mutation {
++                        Mutation::Press => {
++                            if !row.data.pressable() {
++                                return refusal("controlled_press_unavailable");
++                            }
++                            let error = unsafe { bindings::perform_action(ptr, "AXPress") };
++                            if error != bindings::kAXErrorSuccess {
++                                return refusal("controlled_press_unconfirmed");
++                            }
++                            ToolResult::text("AXPress dispatched; effect unverified")
++                                .with_structured(json!({
++                                    "path": "ax", "verified": false, "effect": "unverifiable",
++                                }))
+                         }
+-                        let error = unsafe { bindings::perform_action(ptr, "AXPress") };
+-                        if error != bindings::kAXErrorSuccess {
+-                            return refusal("controlled_press_unconfirmed");
++                        Mutation::Fill(value) => {
++                            if !row.data.fillable() {
++                                return refusal("controlled_fill_unavailable");
++                            }
++                            let error = unsafe { bindings::set_string_attr(ptr, "AXValue", value) };
++                            if error != bindings::kAXErrorSuccess {
++                                return refusal("controlled_fill_unconfirmed");
++                            }
++                            let verified = unsafe { observation::string_attr(ptr, "AXValue") }
++                                .ok()
++                                .flatten()
++                                .as_ref()
++                                == Some(value);
++                            ToolResult::text("AXValue dispatched; see readback evidence")
++                                .with_structured(json!({
++                                    "path": "ax", "verified": verified,
++                                    "effect": if verified { "confirmed" } else { "unverifiable" },
++                                }))
+                         }
+-                        ToolResult::text("AXPress dispatched; effect unverified").with_structured(
+-                            json!({
+-                                "path": "ax", "verified": false, "effect": "unverifiable",
+-                            }),
+-                        )
+                     }
+-                    Mutation::Fill(value) => {
+-                        if !row.data.fillable() {
+-                            return refusal("controlled_fill_unavailable");
+-                        }
+-                        let error = unsafe { bindings::set_string_attr(ptr, "AXValue", value) };
+-                        if error != bindings::kAXErrorSuccess {
+-                            return refusal("controlled_fill_unconfirmed");
+-                        }
+-                        let verified = unsafe { observation::string_attr(ptr, "AXValue") }
+-                            .ok()
+-                            .flatten()
+-                            .as_ref()
+-                            == Some(value);
+-                        ToolResult::text("AXValue dispatched; see readback evidence")
+-                            .with_structured(json!({
+-                                "path": "ax", "verified": verified,
+-                                "effect": if verified { "confirmed" } else { "unverifiable" },
+-                            }))
+-                    }
+-                }
+-            })
++                },
++            )
+         })
+         .await
+     {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs
+@@ -15,7 +15,7 @@
+         operation: &operation,
+     };
+     assert_eq!(native.exact_window().err(), Some("unsupported_route"));
+-    let result = with_focus_cleanup(&operation, || {
++    let result = with_focus_cleanup(&operation, "observe", || {
+         panic!("browser scope entered native focus route")
+     });
+     assert_eq!(result.is_error, Some(true));
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/list_apps.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/list_apps.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/list_apps.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/list_apps.rs
+@@ -50,9 +50,22 @@
+     }
+ 
+     async fn invoke(&self, _args: Value) -> ToolResult {
++        let started = std::time::Instant::now();
++        let operation = cua_driver_core::controlled::current();
+         let apps = tokio::task::spawn_blocking(crate::apps::list_all_apps)
+             .await
+             .unwrap_or_default();
++        if std::env::var_os("EPI_COMPUTER_TIMINGS").as_deref() == Some(std::ffi::OsStr::new("1")) {
++            if let Some(operation) = operation {
++                eprintln!(
++                    "pi_computer_metadata {}",
++                    serde_json::json!({
++                        "operationId":operation.id, "appCount":apps.len(),
++                        "elapsedUs":started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
++                    })
++                );
++            }
++        }
+         let text = crate::apps::format_app_list(&apps);
+         // Single flat array. Each entry is the unified shape — existing
+         // fields (`pid`, `name`, `bundle_id`, `running`, `active`) are

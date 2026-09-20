@@ -35,6 +35,9 @@ export interface Args {
 	excludeTools?: string[];
 	noTools?: boolean;
 	noBuiltinTools?: boolean;
+	computer?: boolean;
+	computerManifest?: string;
+	computerBrowser?: string;
 	extensions?: string[];
 	noExtensions?: boolean;
 	print?: boolean;
@@ -144,6 +147,25 @@ export function parseArgs(args: string[]): Args {
 				type: "error",
 				message: "--tool-profile has been removed; easy-pi uses the official tools.",
 			});
+		} else if (arg === "--computer") {
+			result.computer = true;
+		} else if (arg === "--computer-browser") {
+			const bundle = args[i + 1];
+			if (bundle === undefined || bundle.trim().length === 0 || bundle.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--computer-browser requires an absolute bundle path" });
+			} else {
+				result.computer = true;
+				result.computerBrowser = bundle;
+				i++;
+			}
+		} else if (arg === "--computer-manifest") {
+			const manifest = args[i + 1];
+			if (manifest === undefined || manifest.trim().length === 0 || manifest.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--computer-manifest requires an absolute path" });
+			} else {
+				result.computerManifest = manifest;
+				i++;
+			}
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
@@ -273,6 +295,9 @@ export function parseArgs(args: string[]): Args {
 		}
 	}
 
+	if (result.computerManifest !== undefined && !result.computer) {
+		result.diagnostics.push({ type: "error", message: "--computer-manifest requires --computer" });
+	}
 	if (result.jsonProfile !== undefined && result.mode !== "json") {
 		result.diagnostics.push({ type: "error", message: "--json-profile requires --mode json" });
 	}
@@ -330,6 +355,9 @@ ${chalk.bold("Options:")}
                                  Applies to built-in, extension, and custom tools
   --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
                                  Applies to built-in, extension, and custom tools
+  --computer                    Enable the optional native Computer tool for this GUI session
+  --computer-manifest <path>     Restrict Computer to a trusted absolute capability manifest
+  --computer-browser <bundle>    Enable isolated-browser Computer using a trusted CfT bundle instead
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)

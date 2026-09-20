@@ -23,6 +23,7 @@ import type {
 } from "@easy-pi/subagent/session-host";
 import webSearchExtension from "@easy-pi/web-search";
 import type { AgentSession } from "../core/agent-session.ts";
+import type { ComputerSessionBinding } from "../core/computer/binding.ts";
 import type { ExtensionAPI, InlineExtension } from "../core/extensions/types.ts";
 import type { ModelRuntime } from "../core/model-runtime.ts";
 import { DefaultResourceLoader } from "../core/resource-loader.ts";
@@ -88,6 +89,8 @@ export function createPiChildSessionHost(options: {
 	modelRuntime: ModelRuntime;
 	settings: Settings;
 	getTools?: () => string[];
+	/** Trusted live root capability, read only when creating a fresh child and its tool closures. */
+	getComputer?: () => ComputerSessionBinding | undefined;
 	observeSession?: (identity: Readonly<ChildSessionIdentity>, session: AgentSession) => () => void;
 	registerTools: (identity: Readonly<ChildSessionIdentity>, pi: ExtensionAPI, getSession: () => AgentSession) => void;
 	additionalExtensions?: (identity: Readonly<ChildSessionIdentity>) => InlineExtension[];
@@ -193,6 +196,7 @@ export function createPiChildSessionHost(options: {
 			request.signal?.throwIfAborted();
 			const settingsManager = SettingsManager.inMemory(structuredClone(options.settings));
 			let boundSession: AgentSession | undefined;
+			let refreshAuthority = () => {};
 			// Protocol delivery capture: set by the deliver_result tool during a turn, read at turn end.
 			let delivered: DelegationResult | undefined;
 			const loader = new DefaultResourceLoader({
@@ -233,6 +237,7 @@ export function createPiChildSessionHost(options: {
 										},
 									});
 									pi.on("tool_call", (event) => {
+										refreshAuthority();
 										// Host-owned protocol tool: availability is structural for every child session.
 										if (event.toolName === DELIVER_RESULT_TOOL_NAME) return;
 										if (request.toolAllowed && !request.toolAllowed(event.toolName))
@@ -255,34 +260,74 @@ export function createPiChildSessionHost(options: {
 			request.signal?.throwIfAborted();
 			if (loader.getExtensions().errors.length)
 				throw new CollaborationError("invalid_arguments", "Child extensions failed to load");
-			const { session } = await createAgentSession({
-				cwd,
-				agentDir: request.agentDir,
-				model,
-				thinkingLevel: request.model.thinkingLevel,
-				modelRuntime,
-				settingsManager,
-				sessionManager: manager,
-				resourceLoader: loader,
-				// The protocol tool is structural for every child; delegated tool names never include it.
-				tools: options.getTools
-					? [
-							DELIVER_RESULT_TOOL_NAME,
-							...options.getTools().filter((name) => !request.toolAllowed || request.toolAllowed(name)),
-						]
-					: undefined,
-			});
+			// The protocol tool is structural; delegated tool names never include it.
+			const tools = options.getTools
+				? [
+						DELIVER_RESULT_TOOL_NAME,
+						...options.getTools().filter((name) => !request.toolAllowed || request.toolAllowed(name)),
+					]
+				: undefined;
+			// Removed/undelegated Computer authority must not block ordinary child creation.
+			const parentComputer = options.getComputer?.();
+			const computer =
+				parentComputer &&
+				!parentComputer.revoked &&
+				parentComputer.tools.some(
+					(tool) =>
+						(!tools || tools.includes(tool.name)) && (!request.toolAllowed || request.toolAllowed(tool.name)),
+				)
+					? parentComputer.fork()
+					: undefined;
+			let session: AgentSession;
+			try {
+				({ session } = await createAgentSession({
+					cwd,
+					agentDir: request.agentDir,
+					model,
+					thinkingLevel: request.model.thinkingLevel,
+					modelRuntime,
+					settingsManager,
+					sessionManager: manager,
+					resourceLoader: loader,
+					computer,
+					tools,
+				}));
+			} catch (error) {
+				await computer?.close();
+				throw error;
+			}
 			boundSession = session;
 			const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
 			session.agent.shouldStopAfterTurn = async (context, signal) =>
 				delivered !== undefined || (await previousShouldStopAfterTurn?.(context, signal)) === true;
+			refreshAuthority = () => {
+				try {
+					if (
+						session.computer?.tools.some(
+							(tool) =>
+								(request.toolAllowed && !request.toolAllowed(tool.name)) ||
+								(options.getTools && !options.getTools().includes(tool.name)),
+						)
+					)
+						session.revokeComputer();
+				} catch {
+					// A closed controller or failed authority read denies, never restores, the capability.
+					session.revokeComputer();
+				}
+			};
+			const revokeComputer = () => session.revokeComputer();
+			let unsubscribeAuthority: (() => void) | undefined;
 			if (cacheAffinity && model.api === "openai-codex-responses") {
 				session.agent.cacheAffinityId = cacheAffinity.id;
 				session.agent.promptCacheKey = cacheAffinity.key;
 				session.agent.transport = "sse";
 			}
 			let extensionFailed = false;
+			let stopObserving: (() => void) | undefined;
 			try {
+				request.signal?.addEventListener("abort", revokeComputer, { once: true });
+				unsubscribeAuthority = request.subscribeAuthority?.(refreshAuthority);
+				refreshAuthority();
 				request.signal?.throwIfAborted();
 				if (session.thinkingLevel !== request.model.thinkingLevel)
 					throw new CollaborationError("invalid_arguments", "Requested child reasoning effort is unsupported");
@@ -294,16 +339,21 @@ export function createPiChildSessionHost(options: {
 				});
 				request.signal?.throwIfAborted();
 				if (extensionFailed) throw new CollaborationError("invalid_arguments", "Child extension startup failed");
+				refreshAuthority();
+				stopObserving = options.observeSession?.(identity, session);
 			} catch (error) {
+				session.revokeComputer();
+				unsubscribeAuthority?.();
 				try {
 					await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 				} finally {
-					session.dispose();
+					await session.shutdown();
 				}
 				throw error;
+			} finally {
+				request.signal?.removeEventListener("abort", revokeComputer);
 			}
 
-			const stopObserving = options.observeSession?.(identity, session);
 			let active: Promise<ChildTurnResult> | undefined;
 			let interrupted = false;
 			let closing: Promise<void> | undefined;
@@ -364,6 +414,7 @@ export function createPiChildSessionHost(options: {
 					if (active) throw new CollaborationError("busy", "Child session is already running");
 					interrupted = false;
 					delivered = undefined;
+					refreshAuthority();
 					session.setActiveToolsByName(
 						[DELIVER_RESULT_TOOL_NAME, ...(options.getTools?.() ?? session.getActiveToolNames())].filter(
 							(name, index, all) =>
@@ -442,16 +493,21 @@ export function createPiChildSessionHost(options: {
 					if (closing) return closing;
 					closed = true;
 					interrupted = true;
-					closing = (async () => {
+					closing = Promise.resolve().then(async () => {
 						try {
 							await session.abort();
 							await active;
 							await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 						} finally {
-							stopObserving?.();
-							session.dispose();
+							unsubscribeAuthority?.();
+							try {
+								stopObserving?.();
+							} finally {
+								await session.shutdown();
+							}
 						}
-					})();
+					});
+					session.revokeComputer();
 					return closing;
 				},
 			};

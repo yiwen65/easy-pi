@@ -10,6 +10,7 @@
 
 import type {
 	AgentMessage,
+	AgentTool,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ThinkingLevel,
@@ -476,6 +477,11 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * If omitted, the default execution mode applies.
 	 */
 	executionMode?: ToolExecutionMode;
+
+	/** Declarative execution contract used by durable drivers for dispatch gating. */
+	contract?: AgentTool["contract"];
+	/** Optional bounded scheduler resource used by host-coordinated execution. */
+	executionResource?: AgentTool["executionResource"];
 
 	/** Execute the tool. */
 	execute(

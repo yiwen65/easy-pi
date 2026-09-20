@@ -62,6 +62,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
 	customTools?: ToolDefinition[];
+	computer?: CreateAgentSessionOptions["computer"];
 	backgroundBash?: CreateAgentSessionOptions["backgroundBash"];
 }
 
@@ -217,6 +218,7 @@ export async function createAgentSessionFromServices(
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,
 		customTools: options.customTools,
+		computer: options.computer,
 		sessionStartEvent: options.sessionStartEvent,
 		backgroundBash: options.backgroundBash,
 	});

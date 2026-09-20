@@ -41,6 +41,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
+import { createNativeComputerFeature, shouldActivateComputer } from "./core/computer/activation.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
@@ -721,11 +722,18 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+	const computerFeature = shouldActivateComputer(parsed)
+		? createNativeComputerFeature({
+				...(parsed.computerManifest !== undefined ? { manifestPath: parsed.computerManifest } : {}),
+				...(parsed.computerBrowser !== undefined ? { browserBundlePath: parsed.computerBrowser } : {}),
+			})
+		: undefined;
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,
 		sessionManager,
 		sessionStartEvent,
+		computer,
 		projectTrustContext,
 	}) => {
 		const isInitialRuntime = sessionStartEvent === undefined;
@@ -836,6 +844,8 @@ export async function main(args: string[], options?: MainOptions) {
 			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
+			// Replacement supplies the only valid successor. Never resurrect a filtered/revoked binding.
+			computer: computer ?? (isInitialRuntime ? computerFeature?.binding : undefined),
 			backgroundBash: { promotion: appMode === "interactive" },
 		});
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
@@ -854,6 +864,7 @@ export async function main(args: string[], options?: MainOptions) {
 		cwd: sessionManager.getCwd(),
 		agentDir,
 		sessionManager,
+		closeComputerHost: computerFeature ? () => computerFeature.close() : undefined,
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
@@ -905,18 +916,21 @@ export async function main(args: string[], options?: MainOptions) {
 		if (runtime.diagnostics.some((diagnostic) => diagnostic.message.includes("Failed to load extension"))) {
 			console.error(chalk.yellow(EXTENSION_LOAD_FAILURE_HINT));
 		}
+		if (computerFeature) await runtime.dispose();
 		process.exit(1);
 	}
 	time("createAgentSession");
 
 	if (appMode !== "interactive" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
+		if (computerFeature) await runtime.dispose();
 		process.exit(1);
 	}
 
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
+		if (computerFeature) await runtime.dispose();
 		process.exit(1);
 	}
 
@@ -953,6 +967,7 @@ export async function main(args: string[], options?: MainOptions) {
 			// (Kitty keyboard protocol, device attributes, cell size) before restoring the terminal.
 			await new Promise((resolve) => setTimeout(resolve, 150));
 			interactiveMode.stop();
+			if (computerFeature) await runtime.dispose();
 			stopThemeWatcher();
 			printTimings();
 			if (process.stdout.writableLength > 0) {

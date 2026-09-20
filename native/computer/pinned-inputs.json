@@ -1,0 +1,26 @@
+{
+	"upstreamRef": "05f29785b508a4441ec3aa06c556a8e8b26c1d71",
+	"sdkVersion": "0.28.2",
+	"ubjsVersion": "0.31.0-3",
+	"abiVersion": "1.1.0",
+	"uniffiVersion": 30,
+	"nodeVersion": "24.15.0",
+	"platform": "darwin",
+	"platformFiles": {
+		"paths": ["package.json", "libcua_driver_sdk.dylib", "cua_driver_node_runtime.node"],
+		"sha256": "8019bb2373b167802e668764db6343675aa685a7b7a20f54b5bb2a7ef7d2d381"
+	},
+	"arch": "arm64",
+	"sdk": {
+		"paths": ["package.json", "dist/index.js", "dist/index.d.ts", "dist/native"],
+		"sha256": "e6ca8cb5ed3599224d186cc3a643e41cde7f945389b608ba2141c1ec9432db16"
+	},
+	"core": {
+		"paths": ["package.json", "dist/esm"],
+		"sha256": "8d04b227dea44d38ac73ec741511436a36630c3c674abcbac8b6e6a6a38f7ce7"
+	},
+	"node": {
+		"paths": ["package.json", "typescript/dist/resolve-lib.js"],
+		"sha256": "2567bb537519669651c38c8aa9e29cc3351b3f942d9bab1f4f3cb0a2e8df1dc8"
+	}
+}

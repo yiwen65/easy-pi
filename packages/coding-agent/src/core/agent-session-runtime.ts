@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import type { ComputerSessionBinding } from "./computer/binding.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -37,6 +38,8 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	agentDir: string;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
+	/** Fresh replacement capability; factories must forward it to createAgentSession. */
+	computer?: ComputerSessionBinding;
 	projectTrustContext?: ProjectTrustContext;
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
@@ -79,6 +82,8 @@ export class AgentSessionRuntime {
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
+	private _disposePromise?: Promise<void>;
+	private readonly closeComputerHost: (() => Promise<void>) | undefined;
 
 	constructor(
 		_session: AgentSession,
@@ -86,12 +91,14 @@ export class AgentSessionRuntime {
 		createRuntime: CreateAgentSessionRuntimeFactory,
 		_diagnostics: AgentSessionRuntimeDiagnostic[] = [],
 		_modelFallbackMessage?: string,
+		closeComputerHost?: () => Promise<void>,
 	) {
 		this._session = _session;
 		this._services = _services;
 		this.createRuntime = createRuntime;
 		this._diagnostics = _diagnostics;
 		this._modelFallbackMessage = _modelFallbackMessage;
+		this.closeComputerHost = closeComputerHost;
 	}
 
 	get services(): AgentSessionServices {
@@ -164,17 +171,34 @@ export class AgentSessionRuntime {
 		return { cancelled: result?.cancel === true };
 	}
 
-	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
-		// Settle any active response first so the aborted turn (including tool
-		// results) is persisted to the outgoing session before it is replaced.
-		await this.session.abort();
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason,
-			targetSessionFile,
-		});
-		this.beforeSessionInvalidate?.();
-		await this.session.shutdown();
+	private async teardownCurrent(
+		reason: SessionShutdownEvent["reason"],
+		targetSessionFile?: string,
+	): Promise<ComputerSessionBinding | undefined> {
+		const session = this.session;
+		const renewComputer = session.revokeComputerForReplacement();
+		try {
+			// Persist the aborted turn before replacement, without holding native authority.
+			await session.abort();
+			await emitSessionShutdownEvent(session.extensionRunner, {
+				type: "session_shutdown",
+				reason,
+				targetSessionFile,
+			});
+			this.beforeSessionInvalidate?.();
+		} finally {
+			await session.shutdown();
+		}
+		return renewComputer();
+	}
+
+	private async replace(options: Parameters<CreateAgentSessionRuntimeFactory>[0]): Promise<void> {
+		try {
+			this.apply(await this.createRuntime(options));
+		} catch (error) {
+			await options.computer?.close();
+			throw error;
+		}
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
@@ -209,16 +233,15 @@ export class AgentSessionRuntime {
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		await this.teardownCurrent("resume", sessionManager.getSessionFile());
-		this.apply(
-			await this.createRuntime({
-				cwd: sessionManager.getCwd(),
-				agentDir: this.services.agentDir,
-				sessionManager,
-				sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
-				projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
-			}),
-		);
+		const computer = await this.teardownCurrent("resume", sessionManager.getSessionFile());
+		await this.replace({
+			cwd: sessionManager.getCwd(),
+			agentDir: this.services.agentDir,
+			sessionManager,
+			computer,
+			sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
+			projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
+		});
 		await this.finishSessionReplacement(options?.withSession);
 		return { cancelled: false };
 	}
@@ -242,15 +265,14 @@ export class AgentSessionRuntime {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
 
-		await this.teardownCurrent("new", sessionManager.getSessionFile());
-		this.apply(
-			await this.createRuntime({
-				cwd: this.cwd,
-				agentDir: this.services.agentDir,
-				sessionManager,
-				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
-			}),
-		);
+		const computer = await this.teardownCurrent("new", sessionManager.getSessionFile());
+		await this.replace({
+			cwd: this.cwd,
+			agentDir: this.services.agentDir,
+			sessionManager,
+			computer,
+			sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+		});
 		if (options?.setup) {
 			await options.setup(this.session.sessionManager);
 			this.session.agent.state.messages = this.session.sessionManager.buildSessionContext().messages;
@@ -296,15 +318,14 @@ export class AgentSessionRuntime {
 			if (!targetLeafId) {
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
-				await this.teardownCurrent("fork", sessionManager.getSessionFile());
-				this.apply(
-					await this.createRuntime({
-						cwd: this.cwd,
-						agentDir: this.services.agentDir,
-						sessionManager,
-						sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
-					}),
-				);
+				const computer = await this.teardownCurrent("fork", sessionManager.getSessionFile());
+				await this.replace({
+					cwd: this.cwd,
+					agentDir: this.services.agentDir,
+					sessionManager,
+					computer,
+					sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
+				});
 				await this.finishSessionReplacement(options?.withSession);
 				return { cancelled: false, selectedText };
 			}
@@ -319,34 +340,36 @@ export class AgentSessionRuntime {
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
 			}
-			await this.teardownCurrent("fork", sessionManager.getSessionFile());
-			this.apply(
-				await this.createRuntime({
-					cwd: sessionManager.getCwd(),
-					agentDir: this.services.agentDir,
-					sessionManager,
-					sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
-				}),
-			);
+			const computer = await this.teardownCurrent("fork", sessionManager.getSessionFile());
+			await this.replace({
+				cwd: sessionManager.getCwd(),
+				agentDir: this.services.agentDir,
+				sessionManager,
+				computer,
+				sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
+			});
 			await this.finishSessionReplacement(options?.withSession);
 			return { cancelled: false, selectedText };
 		}
 
 		const sessionManager = this.session.sessionManager;
+		// Computer capabilities bind the outgoing identity before this shared manager changes.
+		// Keep the existing extension event order for sessions without Computer.
+		const hasComputer = this.session.computer !== undefined;
+		const computer = hasComputer ? await this.teardownCurrent("fork", sessionManager.getSessionFile()) : undefined;
 		if (!targetLeafId) {
-			sessionManager.newSession({ parentSession: this.session.sessionFile });
+			sessionManager.newSession({ parentSession: previousSessionFile });
 		} else {
 			sessionManager.createBranchedSession(targetLeafId);
 		}
-		await this.teardownCurrent("fork", sessionManager.getSessionFile());
-		this.apply(
-			await this.createRuntime({
-				cwd: this.cwd,
-				agentDir: this.services.agentDir,
-				sessionManager,
-				sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
-			}),
-		);
+		if (!hasComputer) await this.teardownCurrent("fork", sessionManager.getSessionFile());
+		await this.replace({
+			cwd: this.cwd,
+			agentDir: this.services.agentDir,
+			sessionManager,
+			computer,
+			sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
+		});
 		await this.finishSessionReplacement(options?.withSession);
 		return { cancelled: false, selectedText };
 	}
@@ -382,26 +405,39 @@ export class AgentSessionRuntime {
 
 		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		await this.teardownCurrent("resume", sessionManager.getSessionFile());
-		this.apply(
-			await this.createRuntime({
-				cwd: sessionManager.getCwd(),
-				agentDir: this.services.agentDir,
-				sessionManager,
-				sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
-			}),
-		);
+		const computer = await this.teardownCurrent("resume", sessionManager.getSessionFile());
+		await this.replace({
+			cwd: sessionManager.getCwd(),
+			agentDir: this.services.agentDir,
+			sessionManager,
+			computer,
+			sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
+		});
 		await this.finishSessionReplacement();
 		return { cancelled: false };
 	}
 
-	async dispose(): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
+	dispose(): Promise<void> {
+		if (this._disposePromise) return this._disposePromise;
+		const session = this.session;
+		this._disposePromise = Promise.resolve().then(async () => {
+			try {
+				await emitSessionShutdownEvent(session.extensionRunner, {
+					type: "session_shutdown",
+					reason: "quit",
+				});
+				this.beforeSessionInvalidate?.();
+			} finally {
+				try {
+					await session.shutdown();
+				} finally {
+					// Only final host disposal closes the shared native runtime.
+					await this.closeComputerHost?.();
+				}
+			}
 		});
-		this.beforeSessionInvalidate?.();
-		await this.session.shutdown();
+		session.revokeComputer();
+		return this._disposePromise;
 	}
 }
 
@@ -418,16 +454,31 @@ export async function createAgentSessionRuntime(
 		agentDir: string;
 		sessionManager: SessionManager;
 		sessionStartEvent?: SessionStartEvent;
+		computer?: ComputerSessionBinding;
+		/** Process/embedding-host resource; never called for session replacement. */
+		closeComputerHost?: () => Promise<void>;
 	},
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
-	const result = await createRuntime(options);
+	let result: CreateAgentSessionRuntimeResult;
+	const { closeComputerHost, ...factoryOptions } = options;
+	try {
+		result = await createRuntime(factoryOptions);
+	} catch (error) {
+		try {
+			await options.computer?.close();
+		} finally {
+			await closeComputerHost?.();
+		}
+		throw error;
+	}
 	return new AgentSessionRuntime(
 		result.session,
 		result.services,
 		createRuntime,
 		result.diagnostics,
 		result.modelFallbackMessage,
+		closeComputerHost,
 	);
 }
 
