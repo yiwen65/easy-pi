@@ -3,7 +3,7 @@
 - Created: 2026-09-18
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: blocked
+- Overall status: done
 - Source: /Users/w/Projects/easy-pi/docs/EASY_PI_COMPUTER_IMPLEMENTATION_PLAN.md；用户已确认执行契约。
 
 <!-- task-doc-section:background-goal -->
@@ -89,6 +89,7 @@
 - P03 subgraph: T-007 → T-017/T-018；T-017 → T-019；T-017/T-018/T-019 → T-020；T-018 → T-021 → T-022 → T-023 → T-020（真实挂起后的离线修复、重启后一次性恢复、新发现的TCC验证阻塞）；T-008 的 done 门禁包含 T-017–T-023 全部验收。T-022与实际GUI由coordinator串行执行，不与任何canonical lease owner并行。T-017 与 T-018 文件不重叠，原生生成/构建由单一 owner 串行；T-019 只在 T-017 接口冻结后开始。
 - Parallel batches: P00 的源码审计（T-001/T-002）只读，与 coordinator 的隔离基线（T-003）并行；P01 的 wrapper（T-004）与新增 Computer 模块（T-005）文件不重叠。P02 恢复时 coordinator 独占 T-014 依赖/构建准备，T-015 只读构建/加载安全审计和 T-016 独立快照回归可并行，证据目录不重叠。
 - P04 browser subgraph: T-026 → T-028 → T-027 → T-009；独立p04-browser stage保留已资格AppKit输入，由coordinator串行拥有源/构建/生成。T-028仅transport基础，不使browser或P04整体提前验收。
+- P06 host subgraph: 已封存native子集8314efe7/C145 → T-037 → T-035 → T-036 → T-011；T-037以已存在的固定产物为输入，coordinator串行修改SDK边界与共享最小context接线，避免native生成/alias消费者并发漂移。
 - Serialization constraints: 本文件及所有实施记录只由 coordinator 修改；集成测试 T-006 在两项 P01 实现完成后；不并行改共享构建输出、锁文件或用户已改文件。
 
 <!-- task-doc-section:task-list -->
@@ -246,8 +247,8 @@
 - Blocker: None for the measured P05 candidate. 固定focus等待仍保守保留；正式总体性能/p95、像素及打包归后续阶段，不纳入本完成声明。
 - Unblock condition: None. 旧D65/D70/D83终态未知事实不被新成功覆盖。
 
-### [ ] T-011 — P06 裁剪与类型化通路
-- Status: blocked
+### [x] T-011 — P06 裁剪与类型化通路
+- Status: done
 - Owner: coordinator
 - Objective: 裁剪实际生产依赖并优化结果/图像通路。
 - Inputs and prerequisites: 原生正确性与热路径基线。
@@ -258,27 +259,28 @@
 - Acceptance criteria: 不以未注册冒充未编入；不手改生成产物。
 - Verification method: feature tree、产物检查、图像变换、browser 回归。
 - Validation evidence: P06独立prepare通过：611 source/material inputs、81pins、897条P05证据封存，APFS复制target/npm后SDK node_modules绑定独立P06路径；P05源/产物不改。实际SDK feature/release依赖图与metadata、linked-libraries已采集（见p06/baseline-*）；类型化图像接口及三轮真实成功资格已完成限定验证（T-035），尚未实施裁剪。
-- Blocker: T-035正向窗口选择→输入资格等待短暂安静输入时段；discovery-live-quiet实际exit78，30次passive样本heldNonToggleInputObserved=true/counterChangeObserved=true。当前C144 clean，无新输入owner；原保护不删。T-036仍待surface冻结。
-- Unblock condition: 用户释放按键/按钮并提供约1分钟无键鼠活动窗口，fresh quiet/console/TCC/Stop/固定输入与canonical身份准入通过后继续，不需重启或恢复租约。
+- Validation evidence (final): T-035/T-036/T-037/T-038门禁完成；transport-hostfixed34路径/81pins/a37c8c29、真实depfile/生成/header/types/load及trimmed discovery/pixel/AX/browser邻接通过至C169。final-verification.json聚合源/产物/raw hashes、55包/version排除、库22976672B及完整check0/193+5skip/38/drift0。类型化图像/实际buffer生命周期证据保留，未宣称零拷贝或全进程无泄漏；详情docs/implementation/computer/p06-fast-build.md。首deadline刺激不足导致的失败资格单独保留，native30秒预算未改。
+- Blocker: None. P06原生与数据通路门禁验收；P07默认关闭的产品激活、独立安装包和P08正式性能仍未完成。
+- Unblock condition: None. 用户安静时段已结束；未来GUI仍需fresh guards，不假定持续独占输入。
 
-### [ ] T-012 — P07 懒激活与打包
-- Status: pending
-- Owner: unassigned
+### [x] T-012 — P07 懒激活与打包
+- Status: done
+- Owner: coordinator
 - Objective: 显式 GUI 阶段激活、上下文一致投影和可选原生产物。
 - Inputs and prerequisites: 原生裁剪与契约稳定。
 - Scope or files: 宿主激活、图像/上下文边界、现有 pack。
 - Expected output: 独立目录可用产物与用户说明。
-- Dependencies: T-011
-- Execution steps: 复用现有模式和压缩；不迁移全仓工具。
+- Dependencies: T-011, T-039, T-040, T-041
+- Execution steps: 按T-039→T-040→T-041串行完成显式CLI/SDK激活、可选sidecar/SDK离线打包、实际模式与模型图像/生命周期资格；复用现有模式/压缩，不迁移全仓工具。
 - Acceptance criteria: 普通 coding 零 native；Node/Bun 不混称通过。
 - Verification method: 模式/tool filters/视觉/compaction/独立安装测试。
-- Validation evidence: Not run.
+- Validation evidence: T-039/T-040/T-041均验收：显式CLI/SDK激活、final host close、独立Node资产/真实安装和mode/filter/TUI/RPC路径；实际安装AgentSession GUI至C170、gpt-6-astra low两请求图像点选至C172、native child至C173独立raw/oracle验证。实际compaction与非视觉模型/context gates7tests、两层types0；phase-final-check build/check0/1420无修复/204pass+5skip/38/drift0，全套test.sh仍相同历史9失败。Bun实际失败明确未支持，不把Node验收推广Bun。见p07-packaging.md/p07-qualification.md；P08性能未完成。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-013 — P08 平台验收与交接
-- Status: pending
-- Owner: unassigned
+### [x] T-013 — P08 平台验收与交接
+- Status: done
+- Owner: coordinator
 - Objective: 完整回归、配对性能测量与可恢复交接。
 - Inputs and prerequisites: 前序门禁及 GUI 授权和 fixture。
 - Scope or files: 实施记录、benchmark 与必要局部修复。
@@ -287,7 +289,7 @@
 - Execution steps: 按冻结任务集测量，记录全部失败/未知/中断。
 - Acceptance criteria: 未测平台不支持；性能结论有真实测量。
 - Verification method: 无密钥回归、获准 GUI、cancel stress、Node/Bun 分别验证。
-- Validation evidence: Not run.
+- Validation evidence: P07全套同历史9失败无新增，build/check0。P08正式30pairs/60arms全部成功：median32.6682092295s→19.086935771s，降低41.5734%（paired bootstrap95%为41.4091%–41.7560%），请求9→3，600terminal/120自然退出至C235；task194已成功结束，paired-form-verification独立通过。startup300pairs p95 312.333167ms→310.564209ms，回退95%区间[−3.3025%,+1.0336%]，上界<5%；每arm100真实observe micro/210terminal/零输入至C175。200次真实pre-cancel/ancestor-revoke拒绝、301terminal/零input至C236；安装产品browser真实八步/四terminal/九page events/自然关闭和私有目录清理至C237，final-gui-verification通过。无活跃GUI或power assertion。全部失败保留；不作task-p95/通用速度结论。最终交付归档b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb、14215文件及manifest逐hash/内部links核验；仓库外解压CLI/inert/真实no-host native/read-faux与另副本offline npm ci及相同smoke全部0，锁未变、无外链、无GUI/API。delivery-final-check完整0/1420无修复/204pass+5skip/controller38/drift0；final-native-types双层0、context7/7、desktop21+packager基础2通过/6材料门控skip（P07 packager8/8已资格）。支持表/rollback/handoff/最终矩阵齐备；d84c2af438仅106个Computer源路径/对应hunks，未纳入并发改动。T-013限定Node/macOS交付门禁通过。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -610,14 +612,14 @@
 - Blocker: None. 两已证局部修复和最终GUI邻接完成；历史现场errno缺失的归因限制保留。
 - Unblock condition: 已证原因修复及必要行政恢复前置全部通过后再新鲜GUI准入。
 
-### [ ] T-035 — P06受控图像字节、坐标与必要输入通路
-- Status: blocked
+### [x] T-035 — P06受控图像字节、坐标与必要输入通路
+- Status: done
 - Owner: coordinator
 - Objective: 在现有canonical授权/owned operation下补齐真实像素观察和有界类型化数据，保留失效/取消/资源回收语义。
 - Inputs and prerequisites: 已封存P05；独立P06 stage，当前截图实现与生成API实际审计。
 - Scope or files: P06 core内部结果/SDK Computer契约及platform截图和必要动作；genuine生成、optional TS边界与fixture。
 - Expected output: 单次必要编码的有界图像字节、明确geometry/DPI/crop映射、原生buffer回收和真实专用窗口像素证据。
-- Dependencies: T-010
+- Dependencies: T-010, T-037
 - Execution steps: 先审计原capture worker/timeout/fallback生命周期；不得直接继承未await的线程或shell fallback。类型化producer保留canonical准入，再生成并按纯坐标/内存/取消→真实fixture顺序验证；必要新动作逐副作用检查。
 - Acceptance criteria: 不把路径当视觉输入；图像不重复Base64/raw JSON，不返回个人桌面截图；未知几何/目标/ref拒绝，无私有字段后门或伪terminal。
 - Verification method: 纯像素尺寸/变换边界、buffer生命周期和取消barrier、生成/类型检查、获准exact-window GUI与独立图像oracle。
@@ -628,21 +630,101 @@
 - Validation evidence (keyboard): 新32Rust/81pins候选keyboard-final.patch=41f020d2deff619c9b7adbeb598f874b2f7d52f1b7780c41f6f4158c566b95ca，加入genuine startImageKey及13种固定非文本键。沿用canonical press_key/destructive=true、单次image ref、GenericKey唯一同PID目标、fresh完整目标/modal/画面及硬件检查；单primary down配对up为release义务，无modifier/chord/text/foreground/双transport fallback。contract50/core74/platform80+1ignore/SDK56及genuine生成/check/NAPI/header/strictTS/load通过；旧composition测试仍禁止press_key的预期随新增受控注册调整，继续拒绝generic hotkey/type_text且新增destructive断言。首次typecheck遗漏必需SDK路径的失败保留，正确参数重跑0。专用键盘fixture严格Swift6编译/Stop smoke、独立key oracle3tests及实际parent reporting3tests通过。live真实Tab/Return两对送达原窗口/counter0→2、无pointer或激活变化；ref重用、画面变化、same-PID sibling、modal及preabort拒绝，五轮keyboard-runs-verification独立131raw/13terminal/十自然0/EOF至C138。仅Tab/Return有实际送达资格，其余11键是编译/映射覆盖；取消后release为纯seam证明，未声称真实mid-key取消。keyboard-current-check完整0/193pass+5skip/controller38/drift0；原P04产品pins及main scroll实验patch保持69ef0c0b，未推广键盘构建。
 - Validation evidence (discovery candidate): 新37Rust/81pins候选23b1e498加入只读Discovery scope、genuine openDiscoverySession/startListWindows/startSelectWindow及一次性目录引用；选中会话仍继承父native授权/撤权，输入和内容观察不从metadata获得许可。目录最多256项，标题/名称/无损ID/进程启动身份有界校验，选择时tracked worker重验精确条目；未按相似标题自动替换。50/76/81+1ignore/59及genuine生成/type/load、独立patch正反字节验证、完整隔离check0/193+5skip/38/drift0通过。真实selection-stale首轮在discover返回discovery_metadata_unproved，尚未选中或输入；一terminal(false,false)、owner自然1/fixture0/EOF、clean C139。错误发生于platform row或SDK decode，原错误码未区分；已封存37源/SDK/raw至discovery-diagnostic-before，正在仅静态错误类别区分的诊断构建，不提前认定原因、不放宽准入。
 - Validation evidence (discovery current): 当前37Rust/81pins候选discovery-eligible.patch=8314efe72f71e14b438776acbed0293fefd187f82d925c8b6a49f5dc4f489e51，50/76/84+1ignore/59及生成/check/NAPI/header/type/load/独立patch正反字节验证通过。目录把单条候选不合格误当全目录失败：geometry聚合回归先在同类错误码失败后通过；其首次回归的缺分号编译失败不作before证据。geometry-only修正后又因某行进程身份无法证明拒绝，第二回归before101→afterpass；现只为identity/geometry/metadata预算均合格的条目发ref，其余明确omittedWindows计数，不当完整/空目录，更不改变browser helper drain的完整catalog门禁。原C139/C140/C141只读失败保留。C142旧probe仅probe_failure，未补造具体类别；C143诊断明确AppKit move ack后native仍返回WindowSelected，零输入。新独立read-only observer在同一run先读旧x1000再读新x1040，确认AppKit ack不等于WindowServer可见；只在新native geometry成立后旧ref被正确拒绝，C144。六轮独立verifier核对145raw/11terminal/12自然退出（五失败owner1、成功owner0；fixture均0），全部零input；仅最后stale-selection资格通过。三readiness纯测试和新parent reporting三tests通过，ready harness37Rust/81pins/19文件已冻结。正向select→capture→key未执行：fresh quiet实际78/held非toggle输入及counter变化，保留guard并等待用户安静时段。
-- Blocker: 正向GUI输入资格被硬件活动阻塞。首次discovery-live-quiet两项活动均true；离线准备结束后fresh discovery-ready-quiet仍exit78（held=false，但counterChangeObserved=true）。不是缺少模型或commit许可；新gpt-6-astra low/阶段commit授权已记录，目前不需真实provider调用。
-- Unblock condition: 用户释放按键/按钮，提供约1分钟安静时段；从expected C144重新核验quiet/console/固定输入/TCC/Stop，再运行run-discovery-ready.py live的新证据名。不得删除冲突检查或恢复clean marker。
+- Validation evidence (discovery positive): 用户确认安静时段后discovery-user-ready-quiet通过，discovery-ready-live-1完成目录→一次性引用精确选择→两尺寸截图→Tab/Return两对实际投递；catalog重用及image重用均拒绝，无pointer/激活变化。独立discovery-live-verification核对27raw/8terminal/两自然0/EOF至C145。已立即通知用户恢复键鼠，job-bound caffeinate随测试退出；不是用户持续安静承诺。此为native facade资格，Pi模型图像投影/宿主工具接线仍待。
+- Blocker: None. 之前两quiet拒绝保留为历史；正向限定资格已通过，coordinator继续宿主接线。
+- Unblock condition: None. 新gpt-6-astra low/阶段commit授权已记录，真实provider仅在实际需要时有界opt-in。
 
-### [ ] T-036 — P06原生快速构建实际裁剪
-- Status: pending
+### [x] T-036 — P06原生快速构建实际裁剪
+- Status: done
 - Owner: coordinator
 - Objective: 把不需的远程/展示/录制实现排出Computer发行构建，保持必要平台和授权核心。
 - Inputs and prerequisites: P06真实release闭包、T-035冻结的必要能力及P05保守回退源。
 - Scope or files: P06 Cargo features、SDK/platform/core模块边界及生成脚本，不修改P05或主仓库无关依赖。
 - Expected output: 可复查前后依赖/符号/产物大小与完整生成ABI，明确保留/排除表。
-- Dependencies: T-035
+- Dependencies: T-035, T-038
 - Execution steps: 按实际消费者隔离生产profile，先从构建图排除再删不需源；不以不注册工具当未编入，不重复实现授权或FFI框架。
 - Acceptance criteria: 实际fast图和产物排除非目标模块；授权/取消/browser/截图均通过邻接；未测平台明确不支持。
 - Verification method: locked/offline Cargo graph/build/test、符号和载入检查、genuine生成、T-035及既有browser/AppKit邻接。
-- Validation evidence: Not run.
+- Validation evidence: 新p06-trim独立stage核对628源/81pins，原p06不改。首五文件PiP feature候选：SDK默认platform关闭default features，pip-preview为可选依赖、实现模块条件编译，legacy platform默认保留；未编入时配置写请求先拒绝，不读取/写入PiP文件。locked/offline SDK graph不含pip-preview，SDK check0、no-default platform纯回归1/1、legacy platform check0且重新编译pip-preview；verify-pip核对五路径/628原源/81pins及日志0。cursor-overlay/regorus/SCK仍在实际图，未宣称排除它们；现有unsafe/dead_code warnings保留。尚未release/生成/载入/GUI资格，T-036继续串行隔离剩余legacy模块。
+- Validation evidence (initial trim): 进一步将browser native-TLS和clipboard-rs设为可选（legacy平台默认保留，Computer SDK不启用）。独立graph相对legacy排除20个包/version（含PiP、clipboard、TIFF及objc2 0.6链、native-tls/tokio-native-tls）；保留SCK、安全框架、cursor和rego。SDK59/59、platform84+1显式benchmark ignore、CDP35/35、legacy组合check均0。六文件candidate实际release构建0；Cargo artifact及active depfile证明PiP/clipboard实现未编译、controlled capture保留，原库27257440B→25392912B（仅文件大小，非运行性能）。该二进制/六源已封存initial-release，明确早于下一receiver改动。随后remote_receiver Rust-only模块按legacy-remote-receiver隔离，唯一CLI消费者显式开feature；SDK check0、原14fake receiver tests全部过、CLI check0，无删测试或重写授权。当前八文件源码正在qualify-initial.sh串行release回归/真实生成/check/NAPI/header/types，尚不预报其结果，不宣称cursor/recording/outgoing remote已排除。
+- Validation evidence (renderer): 初始八文件candidate已50/76/84+1ignore/59、genuine生成/check/NAPI/header/strict TS及无host load通过；81pins及patch4c8fbff8独立apply/byte/reverse通过，生成JS/声明逐hash与P06一致，未切产品pins。该版本封存initial-before-renderer。随后独立cursor-renderer/renderer features实际排除macOS AppKit overlay/shape及共享render_state/theme_artifact/session_badge字体实现；原无channel语义单列inactive visual adapter，只丢弃视觉cue且永不声称可见，不是input/terminal receipt，显式cursor工具仍按facility gate拒绝。session label纯函数移到共用小模块而非复制实现；metadata16tests及legacy renderer46tests通过，SDK59/platform85+1ignore/facility3/legacy CLI check通过。最新16源renderer-verification据Cargo features=[]和active depfile证明实际不编译两renderer且controlled capture仍在；实际graph较legacy排除33包/version，库24926928B，原P06/81pins不变。共享cursor配置/命令数据类型保留，不谎称整个cursor-overlay crate消失；recording及其余outgoing remote仍待，最新renderer版本未重新生成/GUI。
+- Validation evidence (final): transport-hostfixed候选全部genuine生成/types/load、双profile/active depfile证明通过，最终34路径/81pins/a37c8c29、55包/version排除、库22976672B。trimmed discovery六case与pixel三case独立235raw/45terminal/18自然0到C154，AX八步27raw/三terminal/两自然0到C155；13browser351raw/26自然0/精确oracle/目录清理到C169。旧deadline刺激4×7s小于30s预算，本轮28.621s完成触发测试失败到C167；静态预算回归先红后绿，只改新fixture为4×11s后prefix4/已投递unknown/deadline_expired且无尾部输入到C168，cancel到C169；原失败独立保留，不改native期限或重放。final-trim-verification0复核所有源/pins/raw与完整check0/193+5skip/38/drift0；load单进程与form单样本只作资格记录，正式性能仍归P08。
+- Blocker: None.
+- Unblock condition: None. 产品加载路径仍未promotion，P07继续显式激活/独立打包。
+
+### [x] T-037 — P06宿主目标、图像与输入桥接
+- Status: done
+- Owner: coordinator
+- Objective: 将已资格Discovery/Image/基本输入接入原ComputerHost、普通Agent loop与真实模型消息类型，保持引用与当前模型可见内容一致。
+- Inputs and prerequisites: T-035已封存的native子集37Rust/81pins/8314efe7及C145正向资格；此任务是T-035剩余host门禁，不依赖T-035整体done。Pi README、SDK、extensions、compaction、session-format已完整读取；实际ImageContent是data/mimeType，以当前源码/类型检查为准，不照抄文档中旧source例子。
+- Scope or files: native/computer/desktop；必要controlled adapter/tool复用接口；core/computer/binding.ts及sdk.ts最小可选context观察接线；定向tests。不改Agent loop、不默认激活、不改并发compaction/stats实现。
+- Expected output: lazy typed desktop binding、闭合模型参数、有限目录/语义结果和单次Base64图像内容；真实普通loop/faux投影与生命周期/失效回归。
+- Dependencies: T-010
+- Execution steps: 先复用controlled原生句柄/terminal边界，选中子会话由原runtime管理；图像只在content编码一次，details无bytes；在现有最终provider-context观察点同步失效不可见图片/refs，且异常先失效后处理；逐层单测/真实AgentSession验证后再做可选GUI接线，不提前进入默认激活/发行裁剪。
+- Acceptance criteria: 默认不加载native；只用已返回且当前可见的窗口/图像引用；跨选择/会话/压缩/图像过滤不得保留可用旧ref；native result与terminal/cleanup不混同，无新增内层scheduler或未知动作重放。
+- Verification method: 无GUI adapter barrier、genuine SDK strict类型检查、参数/投影/可见性测试、真实AgentSession+faux的图片内容与blockImages/extension过滤/renew回归；隔离完整check及相关原有tests。
+- Validation evidence: 已实现初版desktop contracts/view/projection/tool/binding及独立P06 loader，复用controlled runtime子句柄adoption和语义tool目标解析；sdk可选context hook读取当前session.computer。adoption31/31、纯schema/image/view13/13、genuine SDK构造器＋fake desktop4/4、真实AgentSession context3/3通过（visible/blockImages/transform omission），无GUI/真实provider。view只保存内容SHA256及临时grant，先失效再查实际模型消息，过滤/遗漏后不能从history复活；图像仅content一份Base64，details无bytes。发现host会抹去rejected result原因：新增native no-input refusal回归先1fail/3pass，再改为resolved typed failure后4/4，保留失败证据。严格P06边界及root配置integration types通过；首次将全coding-agent图套用extra-strict参数、integration遗漏已有highlight声明和shutdown返回类型错误均保留并分别纠正检查配置/测试。host-bridge-first-check完整0、193pass+5skip/controller38/drift0（早期快照，后续新增tool测试不在其中）；T-037仍待完整desktop普通loop、renew/取消/迟到child等组合验证及最新完整check，不声称整阶段通过。
+- Validation evidence (host gate): host-desktop-final-unit为19/19，含selected-child语义observe/plan、ref上下文失效和pending capture退休后不发布；adoption31/31，旧P04工具8/8。host-desktop-renew-loop两个真实AgentSession/faux文件5/5：完整discover→select→capture→key，blockImages时零native input、正常时一次；另证transform omission及reload只通知当前新binding。host-desktop-durable-types完成实际81pins校验、extra-strict边界及根编译契约两层0；默认13pass/6显式load-only skips。host-desktop-reviewed-check完整0（1409files无修复）、193pass+5skip/controller38/drift0。此验收限定宿主+fake desktop/genuine SDK类型，不冒充实际bridge GUI、真实provider或P07/P08；C145为独立native facade资格。
+- Blocker: None.
+- Unblock condition: None. Native输入资格前的用户安静时段已结束，后续GUI另做fresh准入。
+
+### [x] T-038 — Computer专用SDK入口与legacy transport编译隔离
+- Status: done
+- Owner: coordinator
+- Objective: 将CLI/MCP/HTTP/远程及private-worker transport实现移出Computer快速构建，同时保留实际共享的协议/会话元数据及canonical授权。
+- Inputs and prerequisites: T-035；p06-trim已验证的23源history/recording/renderer候选与独立源/产物快照；原P06/C145保持只读。
+- Scope or files: p06-trim SDK/core的transport与共享DTO边界、可信TS Computer入口及生成检查脚本；必要optional loader/typecheck适配。不改Agent loop、不手写生成FFI、不更改原P04或P06已资格pins。
+- Expected output: 独立快速入口与显式legacy对照feature；实际Cargo/depfile证明transport实现不编入，真实生成/types/no-host load保持Computer API可用。
+- Dependencies: T-035
+- Execution steps: 完整读取相关源码后分离真实共享类型/分类器与I/O实现；SDK只给Computer入口生成/导出受控面，legacy参考消费者显式启用对应feature；序列化源/生成/编译，逐层回归及closed-surface校验。不为保留旧TS总入口而增加假的transport实现。
+- Acceptance criteria: socket/listener/remote executor实现确实不编译；保留metadata不等于保留transport；Computer结果/终态、授权/撤权/browser/输入/截图不退化；不以未注册或linker裁掉来替代编译证明。
+- Verification method: scoped consumer discovery、双profile编译/必要纯tests、active Cargo depfile/feature graph、genuine generation/header/types/load及最小host兼容测试。实际GUI仍归T-036最终候选门禁。
+- Validation evidence: core shared server/daemon数据与可选server_transport/daemon_transport分离；SDK legacy-transports实际隔离embedded/worker/remote/remote_foreign/remote_mcp/service_session与backend分支，receiver外层独立gate；ActionCompletion唯一共享enum、legacy UniFFI constructors整impl gate。最终fast SDK59、core controlled78/authorization45/protocol9/metadata5/shared observation12、platform85+1ignore、completion1；legacy CLI/SDK test编译、remote fake20/receiver14/worker1/daemon相关9通过。MCP原18tests保留，legacy合计19含session邻接。active release features/depfiles证明上述transport实现未编入、authorization/capture保留。最终34源路径（31Rust+3TS）、81pins、22976672B；genuine生成/check/NAPI/header/Computer TS/无host实际load通过，真实generated transport constructors不存在。host首次strict发现缺两个escalation enum，补真实导出后host两层types0、genuine-value/fake desktop19/19。最终patcha37c8c29独立apply/byte/reverse通过，原628源/81pins/锁不变；transport-hostfixed-inputs.json与patch-verification.json封存。隔离transport-trim-current-check完整0（1410files无修复）/193pass+5skip/controller38/drift0。main新增实验p06-fast.patch及说明，P04/desktop原pins不变；不宣称GUI、整体P06或发行完成。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-039 — P07显式产品激活与宿主关闭接线
+- Status: done
+- Owner: coordinator
+- Objective: 普通coding保持零Computer schema/native；明确CLI标志或SDK调用才创建lazy Computer binding，并在最终退出await共享host关闭。
+- Inputs and prerequisites: T-011；当前args/main/runtime/services与已验证desktop binding；不覆盖并发修改。
+- Scope or files: coding-agent的Computer activation窄模块、args/main/runtime最小接线、SDK导出及定向tests；native/computer可选entry。
+- Expected output: 明确--computer激活、原tool filters优先级、一次sidecar/native加载、续代不复活旧授权、final host close；独立SDK入口。
+- Dependencies: T-011
+- Execution steps: 封存共享文件基线；factory使用现有ComputerHost/普通loop，main转发runtime replacement给出的computer而非重建旧authority；最终dispose专门关闭host但session/child close不关闭共享host。Sidecar只从受信安装位置或显式SDK host路径加载，模型不传native路径。
+- Acceptance criteria: --tools/exclude/noTools语义不变；普通coding和metadata命令不读native资产；GUI schema稳定；filter撤权后不因session切换重新开启；取消/最终close无伪终态。
+- Verification method: 纯flag/filter、factory barrier及真实AgentSession/faux/runtime replacement/close定向回归；隔离全check。真实SDK/独立包装归T-040/T-041。
+- Validation evidence: 新activation.ts及CLI --computer/--computer-browser/--computer-manifest，SDK公开factory；main只在显式且filter允许时加载安装目录computer/bridge.js，透传replacement computer，不在已撤权切换后重建binding。runtime最终dispose/初始factory失败await专有host close，replacement/child不关共享host。可选entry原生惰性、一个稳定desktop或isolated-browser工具；browser加入实际canonical view gate。activation/runtime/lifecycle/args等六文件165tests通过；新增空authority/profile参数回归1fail/5pass→6pass，修正parser空值拒绝及main仅undefined默认，不静默bounded→unrestricted。genuine双层types0、inert entry2、genuine-value/fake browser经实际AgentSession工具包装3通过。最初fake资产落在repo type:module作用域导致2fail，明确fixture CJS package后60通过；初次genuine类型发现ComputerHostLike无destroy，真实instanceOf收窄后通过。activation-reviewed-check完整0（1417files无修复）/204pass+5skip/controller38/drift0；本轮无GUI/模型，资产尚未打包，旧desktop pins未promotion。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-040 — P07可选原生产物与独立目录安装
+- Status: done
+- Owner: coordinator
+- Objective: 不依赖monorepo、Rust或运行时下载地交付固定macOS arm64/Node Computer资产，同时保持普通安装可省略native。
+- Inputs and prerequisites: T-039固定factory协议；transport-hostfixed已资格源码/产物和许可证。
+- Scope or files: native/computer entry/build/package脚本、必要loader/pins与产品构建资产边界、独立安装验证；不新增通用npm产品。
+- Expected output: 可选computer目录（bridge+真正SDK/NAPI/运行时/许可证/provenance），Node独立运行证据；Bun未资格时明确拒绝Computer而不影响普通coding。
+- Dependencies: T-039
+- Execution steps: sidecar编译复用现有业务/adapter，host模块和包依赖指向安装产品避免复制Agent/调度器或错误class身份；全部源类型仍由真实generated SDK校验。限定复制审查过的runtime闭包，固定hash/版本；在monorepo外离线装配并验证，不通过workspace symlink侥幸解析。
+- Acceptance criteria: 没有postinstall编译/下载；只显式启用才加载；native版本/架构错误明确；无P04/MCP/CLI静默fallback；核心授权/GUI守卫不改。
+- Verification method: bundle import graph与pins、许可证/文件完整性、隔离目录Node no-host load/类型/CLI模式smoke；Bun普通coding及明确unsupported边界独立验证。
+- Validation evidence: assets-v3共1365hash文件、1203source/license文件/262依赖记录；desktop现选qualified trim Computer入口，旧P04不改。packager8/8、trim desktop21/21与实际AgentSession faux5/5、两层types0；packaging-current-check完整0/1419files无修复/204pass+5skip/controller38/drift0。隔离build:offline0后12workspace包实际pack，仓库外npm ci --ignore-scripts实际135包/132external锁项不变，所有symlink仅指向安装内部；无资产metadata CLI/明确缺包错误、有资产惰性构造/child/close、产品host/scheduler身份、genuine无host载入和Node真实read/faux loop通过，v3全hash及三项复验0。Bun1.3.11单独测试：optional entry明确拒绝通过，但普通/专用Bun入口node:sqlite失败、binary build另在web-search解析失败，原始证据保留，Bun明确不支持而非冒报普通coding通过。v1 TypeBox graph失败及host-open计数、Bun collector错误保留；详情p07-packaging.md。无GUI/模型/lease恢复。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-041 — P07模式、上下文与真实图像闭环验收
+- Status: done
+- Owner: coordinator
+- Objective: 证明实际产品激活跨TUI/print/JSON/RPC/SDK/child生命周期和模型可见图像边界一致，交付可复现启停说明。
+- Inputs and prerequisites: T-039/T-040；fresh GUI准入及必要真实provider gpt-6-astra low显式opt-in授权。
+- Scope or files: 既有真实AgentSession/faux harness、模式/filter/compaction/子会话回归、独立安装fixture与有界真实model测试及说明。
+- Expected output: 无额外Agent loop的实际computer工具闭环；不可见/过滤/压缩/续代图像ref失效；完整mode与打包验证矩阵。
+- Dependencies: T-040
+- Execution steps: 先无GUI真实loop和模式测试；再fresh console/TCC/输入guard下专用fixture实际工具调用；核验实际provider配置后才有界gpt-6-astra low，模型输入仅专用fixture，不记录凭据。失败先收敛并保留事实。
+- Acceptance criteria: 不把fake desktop当GUI、不把faux当真实推理；tool-call/result配对及估算/compaction/provider视图一致；filter优先级与schema/cache稳定；关闭没有遗失owner。
+- Verification method: 指定tests/CLI stdin协议/TUI受控终端；独立原始图像/效果/terminal/退出oracle；隔离完整check、task validator。
+- Validation evidence: 安装产品print/JSON/RPC/stdinEOF、专有tmux TUI真实faux回复/正常关闭及filter6case通过，默认零native。实际SDK AgentSession/faux目录选择/两图/Tab+Return经28raw/六terminal/两自然0至C170；forked native child只读27raw/三terminal/两自然0至C173。真实gpt-6-astra low成功两请求，模型从唯一fixturePNG选(139,102)，独立canvas(128.578125,119.738095)红区一对down/up、无抢焦点；四terminal/两自然0/clean C172，10533 reported tokens。真实provider之前目录交换整体从标准context变换移除、保留capture配对；boundary核验一图hash及无catalog，凭据仅内存。首次GUI失败到C171零input、三terminal及两自然退出，原响应原因未捕获；两只读诊断transport失败与no-model HEAD对照定位harness routing缺口，再修实际child环境strip/空Bash数组（两私有tests），不是native产品修复或旧失败唯一归因。实际provider总5attempts/其中2success，pre-ready另一次零请求失败保留。新增真实manual compaction checkpoint/估算/provider同view/失效及nonvision/schema/callpair测试合计7；two-layer types0；phase-final-check build/check0/1420无修复/204+5skip/controller38/drift0，full test.sh与旧P03相同9失败。详见p07-qualification.md。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -654,7 +736,9 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
 
-- **当前状态（2026-09-20 C144后）**：Discovery目录与过期选择拒绝已得到限定真实证据；新37Rust/81pins/8314efe7、原生50/76/84+1ignore/59与genuine生成/type/load通过。六轮145raw/11terminal/12自然退出已独立复核，五旧失败不改写。正向窗口选择→截图→键盘尚未执行：首次quiet检测held及counter活动，离线准备后的新quiet仍counterChangeObserved=true/held=false/exit78；T-011/T-035 blocked等约1分钟安静时段。不需重启/lease恢复；没有活跃GUI或持续power assertion。新provider/commit/publishing权限已更新，不是阻塞原因。
+- **历史状态（2026-09-20 C169后；最新见Current continuation C173）**：P06/T-011及T-035–T-038门禁已done；transport-hostfixed34路径/81pins/a37c8c29、22976672B及trimmed GUI已验收。T-012进入in_progress/coordinator，继续显式激活/独立打包；P08/整体未交付。无活跃GUI/assertion，旧quiet承诺不延用；原deadline刺激失败和历史unknown保留。T-040后desktop pins已promotion至trim，旧P04保持历史；Node包装资格完成、Bun失败未支持，T-041继续。
+
+- **历史状态（2026-09-20 C144后）**：Discovery目录与过期选择拒绝已得到限定真实证据；新37Rust/81pins/8314efe7、原生50/76/84+1ignore/59与genuine生成/type/load通过。六轮145raw/11terminal/12自然退出已独立复核，五旧失败不改写。正向窗口选择→截图→键盘尚未执行：首次quiet检测held及counter活动，离线准备后的新quiet仍counterChangeObserved=true/held=false/exit78；T-011/T-035 blocked等约1分钟安静时段。不需重启/lease恢复；没有活跃GUI或持续power assertion。新provider/commit/publishing权限已更新，不是阻塞原因。
 
 - **历史状态（2026-09-20 C138后）**：键盘候选32Rust/81pins/41f020d2已取得五轮专用GUI资格，131raw/13terminal/十自然0独立复核至C138。最新完整check0/193pass+5skip/controller38/drift0；无活跃GUI或临时power assertion。T-035下一步由coordinator审计并实现必要应用/窗口发现与精确选择，随后host图像和T-036/P07/P08；没有真实模型请求/恢复lease/产品pins切换。旧候选保留keyboard-before。
 
@@ -957,11 +1041,52 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 
 - 2026-09-20: discovery-eligible-current-check完整0（1395files无修复）/193pass+5skip/controller38/drift0；readiness/reporting各3tests、输入37Rust/81pins/19harness再次核对通过。离线收尾后再做一次fresh passive检查discovery-ready-quiet，held已false但counterChangeObserved仍true、exit78，仍未启动正向GUI owner。保持T-011/T-035 blocked，等待约1分钟不操作键鼠的时段；准备仅提交本授权/状态文档，未将实验native代码或他人变更混入阶段commit。
 
+- 2026-09-20: 独立阶段commit e3afb6eec完成，仅本authority文档一文件；未暂存/提交未完成native候选或并发修改。此次授权已持久记录，最新37Rust/81pins/19harness及主实验patch字节核对再次通过，task validator通过。保持C144与输入活动阻塞；下一步仅请求约1分钟安静时段，无新GUI/真实provider/push。
+
+- 2026-09-20: 用户通过结构化问题确认“现在可测试”，提供约1分钟安静输入时段。T-011/T-035恢复in_progress/coordinator；立即执行新discovery-user-ready-quiet，只有通过才从expected C144进入discovery-ready-live-1。job-bound caffeinate -di -t90随测试退出，不改变持久设置；尚不预报结果，完成即通知用户恢复操作。
+
+- 2026-09-20: discovery-user-ready-quiet实际通过，随后的discovery-ready-live-1非空成功报告及独立verifier均0：目录引用精确选择后两真实图像、Tab/Return两对投递/counter0→2，catalog及image重用拒绝，27raw/8terminal/两自然0/EOF至C145。第一时间通知用户恢复键鼠，task70及其job-bound assertion自然结束。T-011/T-035保持in_progress/coordinator，输入活动阻塞已解除；下一步读取完整Pi文档后接宿主发现、图像与必要输入，不把native facade单独当全部Computer交付。
+
+- 2026-09-20: 完整阅读Pi README/SDK/extensions及相关compaction/session-format，复读当前host/adapter/tool/binding/sdk源码。新增T-037 in_progress，明确为T-035剩余host桥接门禁；已冻结native产物输入，不循环依赖T-035整体验收。当前SDK图片文档示例部分过时，生产按实际ImageContent(data/mimeType)与编译验证；复用final provider-context观察点，不新增Agent loop或全仓tool-search重构。下一步最小原生子句柄adoption、闭合desktop schema/投影与faux测试。
+
+- 2026-09-20: T-037初版宿主桥接已落盘，13纯tests/31adoption/4 genuine-value fake-desktop/3真实AgentSession context测试通过；原生37Rust/81pins未改。发现host redacts rejected result，故拒绝结果通过resolved typed union保持no-input paused与unknown区别，回归before失败/after通过。新增独立desktop loader只选择实验P06，不修改P04 loaders/pins。初次vitest从package cwd找不到外部测试，复用项目config指定include后3/3；初次strict配置错误拉入全仓、缺已有声明及fixture返回类型失败均保留，最终integration types0。T-037继续coordinator补生命周期/完整loop证据；无GUI/模型/push/新commit。
+
+- 2026-09-20: T-037宿主门禁验收done，19unit/5真实AgentSession faux/31adoption/旧P04工具8通过，实际generated strict及完整根图types0；完整isolated check0/193pass+5skip/controller38/drift0。新增operation generation防止clear/cancel之后迟到capture重新授予view，定向回归通过。未将mock PNG header视为真实像素证明。T-035限定图像/输入+host门禁done，T-036进入in_progress/coordinator：先在新独立trim源中审计实际Cargo闭包，不修改已pin的37Rust/native SDK。T-011/P06整体和P07/P08未完成，真实bridge GUI/模型仍待后续资格。
+
+- 2026-09-20: 独立阶段提交7f34ca673仅view.ts及七回归两文件，完整check/19unit/5faux证据均已核验，未提交其他未完成host/native或并发修改。T-036独立prepare628源/81pins通过；首PiP五文件候选已SDK graph真实排除依赖、locked check0、platform no-default回归1/1、legacy platform check0，独立verify-pip确认原P06与81pins未漂移。仍有cursor/remote/recording实现，未取得release/生成/GUI，不提前标裁剪done。下一步coordinator继续当前trim stage，source/build writer保持单一；无GUI/真实provider。
+
+- 2026-09-20: T-036初始六文件trim独立graph已排除20包/version，SDK59/platform84+1ignore/CDP35及legacy check通过；实际release库减少1864528B，active Cargo depfile证PiP/clipboard实现不编译、capture保留。不是性能或整阶段完成；初始库封存后才继续remote_receiver feature，14原回归及CLI/SDK check通过。当前task101串行运行八文件candidate的release回归及generation/NAPI/header/type门禁；继续保持原p06资格产物/主P04 pins不动。
+
+- 2026-09-20: T-036初始八文件candidate已完整原生50/76/84+1ignore/59、生成/check/NAPI/header/TS和无host实际load全部通过；patch4c8fbff8/81pins及正反字节验证通过、生成outputs与P06一致。后续renderer拆分16源已59/85+1ignore、metadata16/legacy46/facility3及CLI检查通过；active Cargo depfiles证明AppKit+共享renderer实际不编译，保留受控capture；graph排除33包/version、原库27.257MB→24.927MB，仅体积事实。原initial SDK封存，当前renderer source/lib也封存renderer-candidate-source；下一步仍由coordinator在同trim stage处理recording实际实现，不重写授权、不把无recording注册当完成。无GUI/模型/新commit。
+
+- 2026-09-20: 录制21源候选已core无recording工具70/legacy71、controlled77、授权40、SDK59/platform85+1ignore、legacy CLI及SDK test编译通过；active depfile证recording/replay/FFmpeg/installer/cursor-sampler及macOS视频backend不编入，SCK still capture和授权三模块保留，库24314480B。随后独立history23源候选已工具71/legacy72、controlled78、授权40、SDK59/platform85+1ignore、私有MemoryKeyProvider回环1/1、CLI编译通过；active depfile证core及platform history不编译，实际graph累计排除55包/version、库24241696B。两候选源/库分别封存recording-candidate-source/history-candidate-source；安全框架因health_report代码签名诊断仍有真实消费者而保留。新增T-038 in_progress作为T-036依赖，继续真实transport代码/共享DTO分离；未提前标P06完成，未做GUI/真实provider或改变产品pins。
+
+- 2026-09-20: T-038继续实际transport隔离，core/SDK双profile及定向邻接通过，MCP shared12/legacy19、SDK controlled59、core controlled78/授权45、platform85+1ignore、legacy remote fake20/worker1及CLI检查通过。原始分区脚本两次边界断言失败发生于写源前，修正唯一匹配/实际47个variant-arm后执行；原测试未删除。server_transport新增unused ResponseBody import已限制为test-only，legacy重查只剩继承warnings。首轮生成/check/NAPI/header/Computer TS通过；task120正串行最终receiver外层gate、completion纯测试、重建/生成。未访问GUI/marker/模型，主产品pins未切换。
+
+- 2026-09-20: T-038验收done（无GUI编译/生成/宿主兼容子集）。最终transport-hostfixed34路径/81pins/patcha37c8c29、库22976672B，active depfile证transport实际不编译，genuine生成/check/NAPI/header/TS/load及negative constructors通过。首次host类型缺两枚举先失败，补真实导出后两层types0/19tests；旧首版pins及入口归档，不把首版测试成功当类型通过。独立patch严格正反字节验证0，原P06/锁不变；main新增实验p06-fast.patch/md，完整隔离check0/1410files无修复/193pass+5skip/controller38/drift0。T-036继续准备fresh GUI邻接，未切产品pins/启动GUI/调用模型。
+
+- 2026-09-20: 阶段提交eb70233adecf14c563f759d56072c1cdeebcf7ca仅p06-fast.patch/md两新文件；不含共享变更或产品pins。fresh console/boot/quiet与专用smoke后，trimmed discovery正向及五邻接全部通过C146–C151，两个独立verifier合计156raw/32terminal/12自然0，Tab/Return两真实pair，其余零input拒绝。随后trimmed click双尺寸/一次scroll-down及modal拒绝通过C152–C154，独立79raw/13terminal/六自然0，像素/实际viewport oracle通过；task130的末尾ls未匹配导致组合命令1，但GUI子命令记录0及独立验证通过，不重跑该动作。各job-bound caffeinate随命令结束，未清锁/重放/真实模型。T-036继续browser/AX表单及实际host桥接邻接；新semantic runner复用前发现旧空异常/无结果假成功模式，两父脚本各2fail/1pass→3pass后才准备GUI，旧脚本/raw保留。
+
+- 2026-09-20: trimmed AX八步通过C155并独立27raw/三terminal/两自然0。browser前11case通过C156–C166；旧deadline4×7s刺激仅保证28s，本轮28.621s完成而oracle期待超时，父脚本失败并clean C167（四terminal/两自然0），取消尾case未启动。原失败已独立hash/receipt复核；预算回归before1fail/1pass→2pass，仅新fixture11s保持单CDP<20s，fresh新profile deadline返回prefix4/第5步unknown/无尾部到C168，cancel零input到C169。最终13browser351raw/26自然0独立verifier通过，未改native预算/产物、恢复marker或重放。
+- 2026-09-20: final-trim-verification0汇总34源/81pins/55包version排除/22976672B、生成/header/types/load/host19与GUI/raw证据；主树完整check0（1410files无修复）/193+5skip/38/drift0仍适用未变产品源。新增P06证据报告并同步导航；T-036/T-011 done。T-012进入in_progress/coordinator，继续P07而非停止于原生里程碑。真实provider/独立安装包/P08正式性能尚未验收。
+
+- 2026-09-20: T-039限定产品接线验收done。P07基线保存shared文件，activation-shared-delta仅本轮flags/main replacement/最终close/SDK exports/typecheck分层，没有覆盖并发内容。首轮fixture模块类型及genuine Like/destroy类型失败均保留并修正；审查又发现空manifest可能被main truthiness丢弃，回归先失败后修正parser及definedness，未进行任何GUI。最终full check0/1417files无修复/204pass+5skip/controller38/drift0，native边界/root types0、entry惯性2/browser上下文3通过。T-040进入in_progress/coordinator：可选bridge共置安装目录并外部引用产品host/binding/包，避免复制Agent或scheduler/error类；下一步固定trim pins、离线资产/许可证与独立目录验证。T-041/P08仍待。
+
+- 2026-09-20: T-040 Node可选打包子集done：assets-v3实际1365文件/完整license与source，8packaging/21desktop/5faux/two-layer types及完整check0/1419/204+5skip/38/drift0；仓库外实际npm ci、无外部symlink、metadata/default coding、lazy host身份和genuine无host载入通过。首次TypeBox bundle、host-open计数和Bun collector失败均保留。Bun1.3.11明确拒绝Computer通过，但普通启动node:sqlite及binary web-search解析实际失败，Bun不支持，不修改范围外代码或谎称普通coding通过。T-041进入in_progress/coordinator：下一步模式/context及安装产品GUI/必要gpt-6-astra low闭环；last C169，无新GUI/模型。
+
+- 2026-09-20: T-041/T-012 done：安装Node各模式/filter/TUI真实faux、GUI实际AgentSession及native child通过，最后C173；gpt-6-astra low两请求从限定截图自主选红区(139,102)，独立实际down/up/oracle/四terminal/两自然0验证。所有catalog仅本地faux可见，真实provider收到一图及配对capture交换；凭据/代理值不记录。旧三provider失败尝试/pre-ready脚本失败保留，no-model HEAD对照和子进程两tests后只改harness网络接线，不恢复marker/重放输入。新增compaction真实checkpoint和nonvision/schema/callpair gates通过；新完整build/check0/1420无修复、204+5skip/38/drift0，全套test.sh仍相同历史9失败无新增。T-013进入in_progress/coordinator：下一步先冻结正式bench manifest与阈值，再做至少30配对/相关100micro、支持表和最终交接；不停止于P07。
+
+- 2026-09-20: T-013继续in_progress/coordinator。冻结P08两个测量contract（50e0fff5/a3b43cad），startup300pairs通过5%p95回退门槛上置信界；两真实观察micro各100样本/105terminal全过、clean C175。task194正在跑30完整form配对，仅该任务持有/创建GUI owner，禁止另启canonical native实验；每arm fresh quiet/console/TCC/marker、任一失败停止。首次两pair已成功到C179，后续状态必须读后台task和raw progress，不把该历史C值当当前可用lease。无新真实API，P08不提前done。
+
+- 2026-09-20: T-013/P08最终验收done：task194完成全部30pairs/60arms，独立verifier600terminal/120自然退出至C235；median32.6682s→19.0869s，41.5734%降低，95%区间41.4091%–41.7560%。真实200次cancel/revoke拒绝零input至C236；安装browser真实DOM八步/四terminal/九oracle events及清理至C237。final-gui-verification通过，无新恢复、未知动作重放或真实provider请求。
+- 2026-09-20: 干净交付采用assets-v3，不拷临时probe/benchmark模块。初次迁移助手Python3.9不支持tar extraction filter，保留后增加归档成员/原source hash验证；第二次npm把/dev/null同时作user/global config而拒绝，分离配置路径后通过。失败日志/助手/早期归档均保留，没有产品修复或GUI重跑。最终docs归档后再次从仓库外解压验证14215hash/8内部links，CLI/inert/真实native-load/read-faux与另副本offline npm ci全0，锁未变、payload未被测试污染；使用已hydrated缓存，不声称冷缓存离线安装。最终归档SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb。
+- 2026-09-20: delivery-final-check完整check0/1420无修复/204pass+5skip/controller38/drift0，native双层types0/context7/7/desktop21+packager基础2pass/6材料门控skip；P07完整packager8/8和全套同历史9失败证据保持。审查并核对106 staged路径与已验证快照，5混合文件只选Computer hunks；原patch的空白context行保留以维持hash，非patch whitespace检查0。源码提交d84c2af438完成，未暂存stats/compaction/branding等无关改动。补齐最终矩阵/平台/rollback/handoff，authority更新为全部done；LEARNS未追加此次一次性助手兼容性错误，保留既有并发内容。未push或发布，无活跃GUI/assertion。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: blocked
-- Evidence: T-001—T-010、T-014—T-034 done；T-011/T-035 blocked/coordinator，T-036/T-012/T-013 pending。最新discovery-runs-verification.json核对145raw/11terminal/12自然退出至C144；discovery-eligible-patch-verification.json与原生50/76/84+1ignore/59、生成/type/load通过。最终discovery-eligible-current-check完整0（1395files无修复）/193pass+5skip/controller38/drift0。旧失败/unknown保留，不代表总体交付。
-- Current continuation: 当前stage为discovery-eligible-*37Rust/81pins/8314efe7；新run-discovery-ready.py/probe-discovery-settled.mjs及discovery_ready_inputs.py使用19项固定harness，readiness与reporting各3tests通过。latest clean C144；用户安静时段确认后先fresh quiet/console/TCC/Stop，再从C144运行正向live，独立复核后继续host图像/T-036/P07/P08。原候选及失败分别封存于discovery-before、discovery-diagnostic-before、discovery-filtered-before、discovery-eligible-before；main新增同hash p06-discovery.patch及资格限制，产品P04 pins未切换。当前无GUI/assertion；上一功能fixture提交为17f8ff50a，授权及本状态文档准备单独阶段提交，不纳入未完成native候选或并发修改。真实模型调用/push仍零，这只是事实而非禁令。
+- Result: passed
+- Evidence: T-001—T-041全部done，P00–P08限定Node24.15.0/macOS26.5.1 arm64交付完成。实际原生/安装/真实vision/compaction与P08性能、cancel/revoke和browser门禁均有独立证据。最新delivery-final-check完整0（1420文件无修复）/204pass+5skip/controller38/drift0；两层native类型0、context7/7、desktop21/21。完整无密钥套件仍同历史九失败，不是全仓绿灯；Bun未支持。最终交付迁移、离线重装、hash/internal-link与真实no-host/smoke通过，见p08/delivery-verification.json。
+- Current delivery: .artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz，40449085B，SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb；manifest SHA256 7ddfbf6edaf09e894c9bf9c7220d18545f90fd5058c97b5841fde7394c55072c，14215文件/8内部links。仓库外验证位置/private/tmp/epi-computer-delivery-h859lqzg/node24.15.0-darwin-arm64；另reinstall目录offline npm ci使用此前hydrated缓存，原交付payload未变。所有测量及GUI任务已结束，最后clean C237，无活跃GUI/assertion，不是未来准入承诺。源码提交d84c2af438e31eb4720c2d3782199cfdebbba14d；工作树无关改动完整保留，构建来源如实标记既有dirty snapshot，不冒称clean commit可复现。真实provider仍5attempts/2success，未push/publication。
 - Historical evidence: T-030 done：native两修复before101/after4pass、49/43/66及生成/全部离线check通过，probe幂等回归before2fail/after2pass；fixed-2 fresh owner21507/Chrome21547/window150完成真实prepare→terminal→close→destroy、两自然0/EOF、私有files清理、C27。独立prepare-qualified-verification核对通过。完整browser观察/输入/计划仍待，P04–P08未交付。以下历史：D25诊断给出10窗口/唯一几何114及resource0:image_catalog_changed，两个原因已被先红后绿4case修复；platform49/SDK43/core66/生成/check/stage/header/nohost/full isolated check均0，193pass+5skip/controller38/drift0，四Rust patch655ba915。三个新的native只读image目录快照均0live，无lease/signal/delete；D25行政恢复尚未批准/执行，真实修复GUI尚待。D24已按一次授权在新boot同inode恢复C24，历史D24不补造terminal。以下历史：T-030已完成诊断/恢复准备：opt-in两文件diag patchdd84611e，diagnostic1+2/platform45/SDK43/core66、生成/check/N-API/header/nohost/隔离全check均0，193pass+5skip/controller38/drift0；旧16原生产物归档，605源边界/原失败raw核对0。私有D24恢复20/20，不代表canonical执行；等待用户手动重启，尚无confirmed-boot.txt/恢复archive或新GUI。真实失败原因仍未唯一证明，未声称行为修复。此前browser SDK prepare facade/registry/pool/初始绑定的platform45/SDK43/core66/生成及--check/N-API/header/strictTS/nohost load全部通过，七Rust增量patch1d0ebe4c/605源；新isolated check0及193pass/5skip/controller38/drift0。但prepare-live-2实际CfT启动后browser_window_ambiguous，资源close Quarantined，无clean host receipt；Node自然1/fixture自然0/EOF，无forced、无page输入，同inodeD24未清除，私有profile保留。T-029已修正严格TCC形态判断，9/9及fresh93502两服务完整Allowed通过。根因诊断/恢复门禁归T-030。以下历史：最新launcher内部装配platform42/SDK41/core66/fmt和isolated check全0（193pass/5skip、controller38、drift0），三文件incremental patch59cd9c41/602源边界核对；未注册/未公开ABI/未执行真实浏览器，详见launcher-report.md。最新授权允许必要权限/任意版本自主选择；官方CfT153.0.8010.52的供应商签名失败事实保留，经明确授权后完整官方归档/346文件/5links内容校验0，content-manifest81c3f5a8、未执行浏览器。此前T-027 image事实子集5/五轮5/platform33/SDK41/core66及fmt全0，incremental patch24584ae5/600源与历史输入核对0；browser-image-observer-check完整0/1376files无修复、193pass/5skip、38/38、drift0。Chrome153只私有复制验证，未执行或创建profile；外部code-sign clone/helper生命周期尚未覆盖，观察事实不作terminal/ownership。此前T-027 process-group子集process11/五轮10/platform28（含11 process）/SDK41/core66及fmt全0，natural-exit EPERM回归before101/after0，incremental process.patch bd351bd1及历史输入核对0；browser-process-check完整0/1376files无修复、193pass/5skip、38/38、drift0。仅group proof，不含escaped Chrome helpers；无Chrome/profile/GUI/public ABI/产品切换。此前T-027 distinct scope子集core66/registry70/authorization40/manifest15/SDK41/platform17及fmt通过，incremental scope.patch41e97239/历史输入核对0；browser-scope-check完整0/1376files无修复、193pass/5skip、38/38、drift0，无profile/GUI/public ABI/产品切换，T-027仍未验收。此前T-027异步生命周期子集core56/CDP33（19重叠）/SDK40/platform16通过，foreign pool/首失败握手两回归before101/after0，incremental patch27a67104及历史输入核对0；browser-lifecycle-check完整0/1376files无修复、193pass/5skip、38/38、drift0。T-027整体仍未验收，无profile/GUI/ABI/产物切换。此前T-028独立transport40/CDP25/SDK33/platform16通过、两回归before101/after0、patch9b6df0b6 apply/hash/reverse及历史输入核对0；browser-transport-check完整0（1376files无修复）、193pass/5skip、38/38、drift0，未切换产品pins或运行browser GUI。此前真实八步表单/十AppKit场景通过；T-026两回归before101/after0、SDK33/33，生成/header/strict types/load-only通过；tool8/8、真实AgentSession/faux4/4。modal-check完整npm check0（1376files，只格式化任务pin JSON已审查回写）、193pass/5skip、controller38/38，检查期live drift0。最后C23同inode，native terminal/close/destroy/自然exit0/EOF，未强制清理。T-024提交8779ac9ff仅三AI测试，无新提交；完整suite未重跑，历史9失败不是当前全绿声明。
-- Limitations: 已验收AppKit/browser有限段不代表更广输入/像素/生产打包资格；9→3与11→5仅faux请求数，P05五配对32.37%仅组件性能；P06–P08仍未验收。P03仅driver-owned drain、非外部effect完成，旧owner56354终态仍未知。可选P04 bridge未默认激活，普通coding零native加载；不清未知marker、不重放未知动作。真实模型现获准gpt-6-astra low有界opt-in（保留此前qd/kmodel_latest high批准），目前零调用；允许阶段commit，所引publishing/push禁止条款已取消。共享树无关变更保留，Computer整体实现未完成；P06图像fixture/oracle五文件已提交0d696a1f3，键盘fixture/oracle三文件已提交17f8ff50a；其余本任务与并发修改仍保留。
+- Limitations: P08表单41.57%是确定AX/faux任务、不是通用GUI/真实模型网络收益或正式task-p95；startup为暖文件缓存的process-cold --version。Bun/其他平台未支持，11键仅映射/编译覆盖；browser DOM非trusted keyboard，不含个人profile/subframe。driver-owned drain非外部effect完成/rollback，旧owner56354及历史隔离终态未知保留；无自动清锁/未知输入重放。真实provider共5attempts/2成功，凭据未落盘。全套九历史失败保留，不声称全仓全绿；无冷缓存/字节可复现构建/零拷贝/全局无泄漏声明。交付是本地未发布产物，源码/证据和回滚材料保留；共享并发改动不纳入Computer提交。
