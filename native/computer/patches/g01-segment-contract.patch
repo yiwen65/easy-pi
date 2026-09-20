@@ -1,0 +1,539 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+@@ -6,6 +6,7 @@
+ mod keyboard;
+ mod plan;
+ mod plan_native;
++pub mod segment;
+ use crate::runtime::{DriverRuntime, RuntimeSession};
+ use crate::ConfiguredDriverOptions;
+ use cua_driver_contract::{ActionResult, WindowStateOutput};
+@@ -54,6 +55,14 @@
+     pub operation_id: String,
+     pub cancelled: bool,
+     pub input_committed: bool,
++}
++
++/// Pure protocol validation also exercises the genuine FFI codecs without
++/// acquiring a desktop owner. Execution calls the same Rust validator directly;
++/// the product hot path does not add a separate validation round-trip.
++#[uniffi::export]
++pub fn validate_computer_segment(segment: segment::ComputerSegment) -> Result<(), ComputerError> {
++    segment::validate(&segment).map_err(refused)
+ }
+
+ type Closing = watch::Sender<Option<Result<(), ComputerError>>>;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs
+@@ -0,0 +1,484 @@
++//! General Computer wire contract. Validation is pure; this module never posts
++//! input or infers business success from an event/terminal receipt.
++use super::{ComputerCondition, ComputerDispatch};
++use cua_driver_contract::ActionResult;
++use std::collections::BTreeSet;
++
++pub const MAX_SEGMENT_ACTIONS: usize = 64;
++pub const MAX_SEGMENT_TEXT_BYTES: usize = 16 * 1024;
++pub const MAX_SEGMENT_DURATION_MS: u32 = 30_000;
++
++#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
++pub struct ComputerLocator {
++    pub role: Option<String>,
++    pub label: Option<String>,
++    pub identifier: Option<String>,
++    pub within: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, uniffi::Record)]
++pub struct ComputerPoint {
++    pub image_ref: String,
++    pub x: f64,
++    pub y: f64,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
++pub enum ComputerElementAddress {
++    Reference { reference: String },
++    Locator { locator: ComputerLocator },
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, uniffi::Enum)]
++pub enum ComputerModifier {
++    Command,
++    Control,
++    Option,
++    Shift,
++    Function,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, uniffi::Enum)]
++pub enum ComputerMouseButton {
++    Left,
++    Right,
++    Middle,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
++pub enum ComputerScrollUnit {
++    Line,
++    Pixel,
++}
++
++#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
++pub enum ComputerWindowAction {
++    Activate,
++    Minimize,
++    Restore,
++    Close,
++    SetBounds {
++        x: f64,
++        y: f64,
++        width: f64,
++        height: f64,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
++pub enum ComputerInput {
++    Focus {
++        target: ComputerElementAddress,
++    },
++    Fill {
++        target: ComputerElementAddress,
++        text: String,
++    },
++    TypeText {
++        text: String,
++    },
++    Key {
++        key: String,
++        modifiers: Vec<ComputerModifier>,
++    },
++    KeyDown {
++        key: String,
++    },
++    KeyUp {
++        key: String,
++    },
++    PointerMove {
++        point: ComputerPoint,
++    },
++    ButtonDown {
++        button: ComputerMouseButton,
++    },
++    ButtonUp {
++        button: ComputerMouseButton,
++    },
++    Click {
++        point: ComputerPoint,
++        button: ComputerMouseButton,
++        count: u8,
++    },
++    Scroll {
++        point: ComputerPoint,
++        delta_x: f64,
++        delta_y: f64,
++        unit: ComputerScrollUnit,
++    },
++    Drag {
++        from: ComputerPoint,
++        to: ComputerPoint,
++        duration_ms: u32,
++    },
++    Window {
++        action: ComputerWindowAction,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
++pub enum ComputerPostcondition {
++    Value {
++        target: ComputerElementAddress,
++        value: String,
++    },
++    Present {
++        locator: ComputerLocator,
++        present: bool,
++    },
++    WindowFocused,
++    WindowBounds {
++        x: f64,
++        y: f64,
++        width: f64,
++        height: f64,
++    },
++    /// Requires a fresh model-visible image and a decision by the existing
++    /// Agent loop. Native delivery alone cannot satisfy this condition.
++    Visual {
++        description: String,
++    },
++}
++
++#[derive(Debug, Clone, PartialEq, uniffi::Record)]
++pub struct ComputerSegment {
++    pub observation_ref: String,
++    pub actions: Vec<ComputerInput>,
++    pub postcondition: ComputerPostcondition,
++    /// Trusted execution limit. The model-facing default does not expose it.
++    pub max_duration_ms: u32,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
++pub enum ComputerSegmentStatus {
++    Confirmed,
++    NeedsObservation,
++    Paused,
++    Cancelled,
++    OutcomeUnknown,
++}
++
++#[derive(Debug, Clone, uniffi::Record)]
++pub struct ComputerInputResult {
++    pub index: u32,
++    pub dispatch: ComputerDispatch,
++    pub action: Option<ActionResult>,
++    pub code: Option<String>,
++}
++
++#[derive(Debug, Clone, uniffi::Record)]
++pub struct ComputerSegmentResult {
++    pub status: ComputerSegmentStatus,
++    pub actions: Vec<ComputerInputResult>,
++    pub condition: ComputerCondition,
++    pub first_unfinished_action: Option<u32>,
++    pub recovery_attempts: u8,
++    pub elapsed_ms: u64,
++}
++
++fn reference(value: &str) -> bool {
++    !value.is_empty() && value.len() <= 128
++}
++fn key_name(value: &str) -> bool {
++    !value.is_empty()
++        && value.len() <= 32
++        && value.is_ascii()
++        && !value.bytes().any(|b| b.is_ascii_control())
++}
++fn locator(value: &ComputerLocator) -> bool {
++    let bounded = |field: &Option<String>, limit| {
++        field
++            .as_ref()
++            .is_none_or(|s| !s.is_empty() && s.len() <= limit)
++    };
++    (value.role.is_some() || value.label.is_some() || value.identifier.is_some())
++        && bounded(&value.role, 64)
++        && bounded(&value.label, 256)
++        && bounded(&value.identifier, 256)
++        && bounded(&value.within, 128)
++}
++fn address(value: &ComputerElementAddress) -> bool {
++    match value {
++        ComputerElementAddress::Reference { reference: value } => reference(value),
++        ComputerElementAddress::Locator { locator: value } => locator(value),
++    }
++}
++fn point(value: &ComputerPoint) -> bool {
++    reference(&value.image_ref)
++        && [value.x, value.y]
++            .iter()
++            .all(|n| n.is_finite() && (0.0..2048.0).contains(n))
++}
++fn bounds(x: f64, y: f64, width: f64, height: f64) -> bool {
++    [x, y]
++        .iter()
++        .all(|n| n.is_finite() && n.abs() <= 1_000_000.0)
++        && [width, height]
++            .iter()
++            .all(|n| n.is_finite() && (1.0..=32768.0).contains(n))
++}
++
++/// Validate shape/budgets and paired holds before any native input. Targets,
++/// app capability and observed postconditions remain runtime facts, not claims
++/// established by this validator. All ordinary holds finish within the segment;
++/// abnormal exits still need the executor's native release obligations.
++pub fn validate(segment: &ComputerSegment) -> Result<(), &'static str> {
++    if !reference(&segment.observation_ref)
++        || segment.actions.is_empty()
++        || segment.actions.len() > MAX_SEGMENT_ACTIONS
++        || segment.max_duration_ms == 0
++        || segment.max_duration_ms > MAX_SEGMENT_DURATION_MS
++    {
++        return Err("invalid_segment");
++    }
++    let mut text_bytes = 0usize;
++    let mut keys = BTreeSet::new();
++    let mut buttons = BTreeSet::new();
++    let mut scheduled_ms = 0u32;
++    for action in &segment.actions {
++        let valid = match action {
++            ComputerInput::Focus { target } => address(target),
++            ComputerInput::Fill { target, text } => {
++                text_bytes += text.len();
++                address(target)
++            }
++            ComputerInput::TypeText { text } => {
++                text_bytes += text.len();
++                true
++            }
++            ComputerInput::Key { key, modifiers } => {
++                key_name(key)
++                    && !keys.contains(&key.to_ascii_lowercase())
++                    && modifiers.len() <= 5
++                    && modifiers.iter().copied().collect::<BTreeSet<_>>().len() == modifiers.len()
++            }
++            ComputerInput::KeyDown { key } => {
++                key_name(key) && keys.insert(key.to_ascii_lowercase())
++            }
++            ComputerInput::KeyUp { key } => key_name(key) && keys.remove(&key.to_ascii_lowercase()),
++            ComputerInput::PointerMove { point: value } => point(value),
++            ComputerInput::ButtonDown { button } => buttons.insert(*button),
++            ComputerInput::ButtonUp { button } => buttons.remove(button),
++            ComputerInput::Click {
++                point: value,
++                button,
++                count,
++            } => point(value) && !buttons.contains(button) && (1..=2).contains(count),
++            ComputerInput::Scroll {
++                point: value,
++                delta_x,
++                delta_y,
++                ..
++            } => {
++                point(value)
++                    && [delta_x, delta_y]
++                        .iter()
++                        .all(|n| n.is_finite() && n.abs() <= 4096.0)
++                    && (*delta_x != 0.0 || *delta_y != 0.0)
++            }
++            ComputerInput::Drag {
++                from,
++                to,
++                duration_ms,
++            } => {
++                scheduled_ms = scheduled_ms.saturating_add(*duration_ms);
++                point(from) && point(to) && buttons.is_empty() && (1..=5000).contains(duration_ms)
++            }
++            ComputerInput::Window { action } => {
++                keys.is_empty()
++                    && buttons.is_empty()
++                    && match action {
++                        ComputerWindowAction::SetBounds {
++                            x,
++                            y,
++                            width,
++                            height,
++                        } => bounds(*x, *y, *width, *height),
++                        _ => true,
++                    }
++            }
++        };
++        if !valid || text_bytes > MAX_SEGMENT_TEXT_BYTES || scheduled_ms > segment.max_duration_ms {
++            return Err("invalid_segment");
++        }
++    }
++    if !keys.is_empty() || !buttons.is_empty() {
++        return Err("unreleased_input");
++    }
++    let valid = match &segment.postcondition {
++        ComputerPostcondition::Value { target, value } => {
++            text_bytes += value.len();
++            address(target)
++        }
++        ComputerPostcondition::Present { locator: value, .. } => locator(value),
++        ComputerPostcondition::WindowFocused => true,
++        ComputerPostcondition::WindowBounds {
++            x,
++            y,
++            width,
++            height,
++        } => bounds(*x, *y, *width, *height),
++        ComputerPostcondition::Visual { description } => {
++            !description.is_empty() && description.len() <= 1024
++        }
++    };
++    if valid && text_bytes <= MAX_SEGMENT_TEXT_BYTES {
++        Ok(())
++    } else {
++        Err("invalid_segment")
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn segment(actions: Vec<ComputerInput>) -> ComputerSegment {
++        ComputerSegment {
++            observation_ref: "frame-1".into(),
++            actions,
++            postcondition: ComputerPostcondition::Visual {
++                description: "Expected task result".into(),
++            },
++            max_duration_ms: 30_000,
++        }
++    }
++    fn p() -> ComputerPoint {
++        ComputerPoint {
++            image_ref: "frame-1".into(),
++            x: 0.0,
++            y: 1.0,
++        }
++    }
++    #[test]
++    fn controlled_segment_preserves_unicode_and_protocol_looking_text() {
++        let text = "你好🦀e\u{301}\n</tool_call>";
++        let input = segment(vec![ComputerInput::TypeText { text: text.into() }]);
++        assert_eq!(validate(&input), Ok(()));
++        assert_eq!(
++            input.actions[0],
++            ComputerInput::TypeText { text: text.into() }
++        );
++    }
++    #[test]
++    fn controlled_segment_known_actions_are_not_limited_to_eight() {
++        let input = segment(vec![ComputerInput::PointerMove { point: p() }; 64]);
++        assert_eq!(validate(&input), Ok(()));
++        let mut overflow = input;
++        overflow
++            .actions
++            .push(ComputerInput::PointerMove { point: p() });
++        assert_eq!(validate(&overflow), Err("invalid_segment"));
++    }
++    #[test]
++    fn controlled_segment_rejects_unpaired_duplicate_and_route_changing_holds() {
++        for actions in [
++            vec![ComputerInput::KeyDown {
++                key: "Shift".into(),
++            }],
++            vec![ComputerInput::KeyUp {
++                key: "Shift".into(),
++            }],
++            vec![
++                ComputerInput::KeyDown {
++                    key: "Shift".into(),
++                },
++                ComputerInput::KeyDown {
++                    key: "shift".into(),
++                },
++            ],
++            vec![ComputerInput::ButtonDown {
++                button: ComputerMouseButton::Left,
++            }],
++            vec![
++                ComputerInput::KeyDown {
++                    key: "Shift".into(),
++                },
++                ComputerInput::Window {
++                    action: ComputerWindowAction::Activate,
++                },
++                ComputerInput::KeyUp {
++                    key: "Shift".into(),
++                },
++            ],
++        ] {
++            assert!(validate(&segment(actions)).is_err());
++        }
++        assert_eq!(
++            validate(&segment(vec![
++                ComputerInput::KeyDown {
++                    key: "Shift".into()
++                },
++                ComputerInput::PointerMove { point: p() },
++                ComputerInput::KeyUp {
++                    key: "shift".into()
++                }
++            ])),
++            Ok(())
++        );
++    }
++    #[test]
++    fn controlled_segment_checks_both_drag_frames_and_finite_coordinates() {
++        for x in [f64::NAN, f64::INFINITY, -1.0, 2048.0] {
++            let mut to = p();
++            to.x = x;
++            assert!(validate(&segment(vec![ComputerInput::Drag {
++                from: p(),
++                to,
++                duration_ms: 100
++            }]))
++            .is_err());
++        }
++        let mut to = p();
++        to.image_ref.clear();
++        assert!(validate(&segment(vec![ComputerInput::Drag {
++            from: p(),
++            to,
++            duration_ms: 100
++        }]))
++        .is_err());
++    }
++    #[test]
++    fn controlled_segment_budgets_total_utf8_and_scheduled_time() {
++        assert!(validate(&segment(vec![ComputerInput::TypeText {
++            text: "界".repeat(6000)
++        }]))
++        .is_err());
++        let mut input = segment(vec![ComputerInput::Drag {
++            from: p(),
++            to: p(),
++            duration_ms: 200,
++        }]);
++        input.max_duration_ms = 100;
++        assert!(validate(&input).is_err());
++        input.max_duration_ms = 30_001;
++        assert!(validate(&input).is_err());
++    }
++    #[test]
++    fn controlled_segment_requires_a_locator_predicate_not_only_a_container() {
++        let target = ComputerElementAddress::Locator {
++            locator: ComputerLocator {
++                role: None,
++                label: None,
++                identifier: None,
++                within: Some("parent".into()),
++            },
++        };
++        assert!(validate(&segment(vec![ComputerInput::Focus { target }])).is_err());
++    }
++    #[test]
++    fn controlled_segment_rejects_duplicate_modifiers_and_zero_wheel() {
++        assert!(validate(&segment(vec![ComputerInput::Key {
++            key: "a".into(),
++            modifiers: vec![ComputerModifier::Command, ComputerModifier::Command]
++        }]))
++        .is_err());
++        assert!(validate(&segment(vec![ComputerInput::Scroll {
++            point: p(),
++            delta_x: 0.0,
++            delta_y: 0.0,
++            unit: ComputerScrollUnit::Line
++        }]))
++        .is_err());
++    }
++}
+diff --git a/libs/cua-driver/typescript/src/computer.ts b/libs/cua-driver/typescript/src/computer.ts
+--- a/libs/cua-driver/typescript/src/computer.ts
++++ b/libs/cua-driver/typescript/src/computer.ts
+@@ -29,6 +29,20 @@
+   ComputerStep,
+   ComputerStepResult,
+   ComputerTerminal,
++  ComputerElementAddress,
++  ComputerInput,
++  ComputerInputResult,
++  ComputerLocator,
++  ComputerModifier,
++  ComputerMouseButton,
++  ComputerPoint,
++  ComputerPostcondition,
++  ComputerScrollUnit,
++  ComputerSegment,
++  ComputerSegmentResult,
++  ComputerSegmentStatus,
++  ComputerWindowAction,
++  validateComputerSegment,
+   ConfiguredDriverOptions,
+   RuntimeAuthorizationOptions,
+   ScrollDirection,
