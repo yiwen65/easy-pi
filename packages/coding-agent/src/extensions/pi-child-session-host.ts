@@ -255,23 +255,25 @@ export function createPiChildSessionHost(options: {
 			request.signal?.throwIfAborted();
 			if (loader.getExtensions().errors.length)
 				throw new CollaborationError("invalid_arguments", "Child extensions failed to load");
-			const { session } = await createAgentSession({
-				cwd,
-				agentDir: request.agentDir,
-				model,
-				thinkingLevel: request.model.thinkingLevel,
-				modelRuntime,
-				settingsManager,
-				sessionManager: manager,
-				resourceLoader: loader,
-				// The protocol tool is structural for every child; delegated tool names never include it.
-				tools: options.getTools
-					? [
-							DELIVER_RESULT_TOOL_NAME,
-							...options.getTools().filter((name) => !request.toolAllowed || request.toolAllowed(name)),
-						]
-					: undefined,
-			});
+			// The protocol tool is structural; delegated tool names never include it.
+			const tools = options.getTools
+				? [
+						DELIVER_RESULT_TOOL_NAME,
+						...options.getTools().filter((name) => !request.toolAllowed || request.toolAllowed(name)),
+					]
+				: undefined;
+			let session: AgentSession;
+			({ session } = await createAgentSession({
+					cwd,
+					agentDir: request.agentDir,
+					model,
+					thinkingLevel: request.model.thinkingLevel,
+					modelRuntime,
+					settingsManager,
+					sessionManager: manager,
+					resourceLoader: loader,
+					tools,
+				}));
 			boundSession = session;
 			const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
 			session.agent.shouldStopAfterTurn = async (context, signal) =>
@@ -282,6 +284,7 @@ export function createPiChildSessionHost(options: {
 				session.agent.transport = "sse";
 			}
 			let extensionFailed = false;
+			let stopObserving: (() => void) | undefined;
 			try {
 				request.signal?.throwIfAborted();
 				if (session.thinkingLevel !== request.model.thinkingLevel)
@@ -294,16 +297,15 @@ export function createPiChildSessionHost(options: {
 				});
 				request.signal?.throwIfAborted();
 				if (extensionFailed) throw new CollaborationError("invalid_arguments", "Child extension startup failed");
+				stopObserving = options.observeSession?.(identity, session);
 			} catch (error) {
 				try {
 					await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 				} finally {
-					session.dispose();
+					await session.shutdown();
 				}
 				throw error;
 			}
-
-			const stopObserving = options.observeSession?.(identity, session);
 			let active: Promise<ChildTurnResult> | undefined;
 			let interrupted = false;
 			let closing: Promise<void> | undefined;
@@ -442,16 +444,19 @@ export function createPiChildSessionHost(options: {
 					if (closing) return closing;
 					closed = true;
 					interrupted = true;
-					closing = (async () => {
+					closing = Promise.resolve().then(async () => {
 						try {
 							await session.abort();
 							await active;
 							await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 						} finally {
-							stopObserving?.();
-							session.dispose();
+							try {
+								stopObserving?.();
+							} finally {
+								await session.shutdown();
+							}
 						}
-					})();
+					});
 					return closing;
 				},
 			};

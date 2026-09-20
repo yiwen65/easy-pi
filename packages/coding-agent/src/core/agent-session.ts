@@ -1159,30 +1159,9 @@ export class AgentSession {
 	/** Awaitable shutdown report for the resources owned by this session. */
 	async shutdown(): Promise<SessionShutdownReport> {
 		if (this._shutdownPromise) return this._shutdownPromise;
-		this._shutdownPromise = (async () => {
-			if (!this._disposed) {
-				this._disposed = true;
-				this._lifecycleGeneration++;
-				try {
-					this.abortRetry();
-					this.abortCompaction();
-					this.abortBranchSummary();
-					this.abortBash();
-					this.agent.abort();
-				} catch {
-					// Shutdown must continue even if an abort hook throws.
-				}
-
-				this._extensionRunner.invalidate(
-					"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-				);
-				this._disconnectFromAgent();
-				this._eventListeners = [];
-				for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
-				this._backgroundTaskNotifications.dispose();
-			}
-
-			await this.abort();
+		// Reserve before abort callbacks can reenter shutdown().
+		this._shutdownPromise = Promise.resolve().then(async () => {
+			const stopped = await Promise.allSettled([this.abort()]);
 			let backgroundReport:
 				| { complete: boolean; failed: string[]; timedOut: string[]; remaining: string[] }
 				| undefined;
@@ -1192,19 +1171,40 @@ export class AgentSession {
 				await this._backgroundTaskManager?.cleanup();
 			}
 			cleanupSessionResources(this.sessionId);
+			for (const result of stopped) {
+				if (result.status === "rejected") throw result.reason;
+			}
 			return {
 				complete: backgroundReport?.complete ?? true,
 				failedResources: backgroundReport?.failed ?? [],
 				timedOutResources: backgroundReport?.timedOut ?? [],
 				remainingResources: backgroundReport?.remaining ?? [],
 			};
-		})();
+		});
+		this._disposed = true;
+		this._lifecycleGeneration++;
+		try {
+			this.abortRetry();
+			this.abortCompaction();
+			this.abortBranchSummary();
+			this.abortBash();
+			this.agent.abort();
+		} catch {
+			// Shutdown must continue even if an abort hook throws.
+		}
+		this._extensionRunner.invalidate(
+			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
+		);
+		this._disconnectFromAgent();
+		this._eventListeners = [];
+		for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
+		this._backgroundTaskNotifications.dispose();
 		return this._shutdownPromise;
 	}
 
-	/** Begin shutdown without changing the synchronous public disposal contract. */
+	/** Begin shutdown; owners needing a drain acknowledgement must await shutdown() instead. */
 	dispose(): void {
-		void this.shutdown();
+		void this.shutdown().catch(() => undefined);
 	}
 
 	// =========================================================================
@@ -2933,10 +2933,12 @@ export class AgentSession {
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
 			...registeredTools,
-			...this._customTools.map((definition) => ({
-				definition,
-				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
-			})),
+			...this._customTools.map(
+				(definition) => ({
+					definition,
+					sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
+				}),
+			),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())
@@ -3147,6 +3149,7 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		if (this._disposed) throw new Error("AgentSession is disposed");
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
@@ -3155,6 +3158,7 @@ export class AgentSession {
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
 		await this._resourceLoader.reload();
+		if (this._disposed) throw new Error("AgentSession is disposed");
 		const activeToolNames = this.getActiveToolNames();
 		this._buildRuntime({
 			activeToolNames,
