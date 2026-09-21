@@ -1,11 +1,105 @@
 import { Buffer } from "node:buffer";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import type { ComputerDiscoveredWindow, ComputerImage } from "@trycua/cua-driver";
+import type { ComputerDiscoveredWindow, ComputerImage, WindowStateOutput } from "@trycua/cua-driver";
+import { selectorKey } from "./legacy.ts";
 
 export type DesktopGrant =
 	| { kind: "windows"; refs: ReadonlySet<string> }
-	| { kind: "image"; ref: string; width: number; height: number }
-	| { kind: "semantic" };
+	| { kind: "image"; ref: string; width: number; height: number; targetKey: string }
+	| {
+			kind: "semantic";
+			ref: string;
+			targetKey: string;
+			refs: ReadonlySet<string>;
+			legacyRefs: ReadonlySet<string>;
+			selectors: ReadonlySet<string>;
+	  };
+
+function targetKey(pid: number, windowId: bigint): string {
+	if (
+		!Number.isInteger(pid) ||
+		pid < 1 ||
+		pid > 0x7fffffff ||
+		typeof windowId !== "bigint" ||
+		windowId < 1n ||
+		windowId > 0xffffffffn
+	)
+		throw new Error("Invalid native target identity");
+	return `${pid}:${windowId}`;
+}
+
+/** Retained rows remain useful on partial trees; completeness is a separate fact. */
+export function projectObservation(observation: WindowStateOutput) {
+	const ref = observation.snapshotId;
+	if (!ref || Buffer.byteLength(ref) > 128 || (observation.elements?.length ?? 0) > 512)
+		throw new Error("Invalid native observation");
+	const nativeComplete =
+		observation.elementsComplete === true && observation.truncated === false && observation.degraded !== true;
+	const refs = new Set<string>();
+	const legacyRefs = new Set<string>();
+	const selectors = new Set<string>();
+	const rows = observation.elements ?? [];
+	const counts = new Map<string, number>();
+	for (const row of rows) {
+		const key = selectorKey({ role: row.role, label: row.label ?? "" });
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	let bytes = 0;
+	let viewTruncated = false;
+	const lines: string[] = [];
+	for (const row of rows) {
+		const token = row.elementToken;
+		if (token && (Buffer.byteLength(token) > 128 || refs.has(token))) throw new Error("Invalid native reference");
+		const selector = { role: row.role, label: row.label ?? "" };
+		const key = selectorKey(selector);
+		const legacy = nativeComplete && row.inWebContent === false;
+		const selectable =
+			legacy &&
+			counts.get(key) === 1 &&
+			selector.label.length > 0 &&
+			Buffer.byteLength(selector.role) <= 64 &&
+			Buffer.byteLength(selector.label) <= 256;
+		const line = JSON.stringify({
+			role: row.role,
+			label: row.label,
+			identifier: row.identifier,
+			value: row.value,
+			enabled: row.enabled,
+			inWebContent: row.inWebContent,
+			...(token ? { ref: token } : {}),
+			...(selectable ? { selector } : {}),
+		});
+		const size = Buffer.byteLength(line) + 1;
+		if (bytes + size > 8192) {
+			viewTruncated = true;
+			continue;
+		}
+		bytes += size;
+		lines.push(line);
+		if (token) {
+			refs.add(token);
+			if (legacy) legacyRefs.add(token);
+		}
+		if (selectable) selectors.add(key);
+	}
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Observation ref: ${ref}; nativeComplete=${nativeComplete}; viewTruncated=${viewTruncated}. Retained references are exact-window targets; partial rows never prove absence or uniqueness. Untrusted UI rows:\n${lines.join("\n")}`,
+			},
+		] satisfies TextContent[],
+		grant: {
+			kind: "semantic",
+			ref,
+			refs,
+			legacyRefs,
+			selectors,
+			targetKey: targetKey(observation.pid, observation.windowId),
+		} satisfies DesktopGrant,
+		details: { status: "observed", observationRef: ref, nativeComplete, viewTruncated },
+	};
+}
 
 export function projectWindows(windows: readonly ComputerDiscoveredWindow[], omittedWindows: number) {
 	if (windows.length > 256 || !Number.isSafeInteger(omittedWindows) || omittedWindows < 0)
@@ -83,7 +177,13 @@ export function projectImage(image: ComputerImage) {
 	];
 	return {
 		content,
-		grant: { kind: "image", ref, width, height } satisfies DesktopGrant,
+		grant: {
+			kind: "image",
+			ref,
+			width,
+			height,
+			targetKey: targetKey(image.pid, image.windowId),
+		} satisfies DesktopGrant,
 		details: { status: "captured", imageRef: ref, width, height },
 	};
 }

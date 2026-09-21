@@ -100,6 +100,7 @@ async function fixture() {
 					);
 				},
 				startClick: forbidden,
+				startSegment: forbidden,
 				startPrepare: forbidden,
 				startNavigate: forbidden,
 				startCapture: forbidden,

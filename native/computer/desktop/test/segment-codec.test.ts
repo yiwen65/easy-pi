@@ -1,17 +1,11 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
-import { isAbsolute, join } from "node:path";
 import test from "node:test";
-import type * as CuaSdk from "@trycua/cua-driver";
 import { encodeComputerSegment } from "../segment-codec.ts";
 import { parseComputerSegmentInput } from "../segment-contracts.ts";
+import { candidateSdk } from "./sdk.ts";
 
-const sdkDirectory = process.env.CUA_DRIVER_TYPESCRIPT_DIR;
-const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true" && sdkDirectory !== undefined;
-function sdk(): typeof CuaSdk {
-	assert(sdkDirectory && isAbsolute(sdkDirectory), "Explicit absolute SDK directory required");
-	return createRequire(import.meta.url)(join(sdkDirectory, "dist/computer.js")) as typeof CuaSdk;
-}
+const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
+const sdk = candidateSdk;
 const point = { ref: "image-one", x: 1.25, y: 30.5 };
 const target = { selector: { role: "AXTextField", label: "Name", identifier: "name", within: "form" } };
 const request = (actions: unknown[], expected: unknown = { kind: "visual", description: "Expected result" }) =>
@@ -42,7 +36,7 @@ test(
 			...["activate", "minimize", "restore", "close"].map((action) => ({ op: "window", action })),
 			{ op: "window", action: "set_bounds", x: -100, y: 40, width: 700, height: 500 },
 		]);
-		const encoded = encodeComputerSegment(api, parsed);
+		const encoded = encodeComputerSegment(api, parsed, "trusted-test-intent");
 		assert.equal(encoded.actions.length, 20);
 		assert.equal(encoded.observationRef, parsed.ref);
 		assert.equal(encoded.maxDurationMs, 30_000);
@@ -70,14 +64,18 @@ test("genuine segment postcondition codecs preserve explicit expected state", { 
 		{ kind: "window_bounds", x: -40, y: 20, width: 500, height: 400 },
 		{ kind: "visual", description: "A visible success notification" },
 	]) {
-		const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }], expected));
+		const encoded = encodeComputerSegment(
+			api,
+			request([{ op: "type_text", text: "x" }], expected),
+			"trusted-test-intent",
+		);
 		assert.doesNotThrow(() => api.validateComputerSegment(encoded));
 	}
 });
 
 test("genuine result codec preserves actual routes without claiming business success", { skip: !enabled }, () => {
 	const api = sdk();
-	const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]));
+	const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]), "trusted-test-intent");
 	for (const route of [
 		api.ActionRoute.Accessibility,
 		api.ActionRoute.SyntheticEvents,
@@ -118,7 +116,7 @@ test("genuine result codec preserves actual routes without claiming business suc
 
 test("genuine result codec rejects contradictory delivery, prefix and recovery facts", { skip: !enabled }, () => {
 	const api = sdk();
-	const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]));
+	const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]), "trusted-test-intent");
 	const row = api.ComputerInputResult.create({
 		index: 0,
 		dispatch: api.ComputerDispatch.NotDispatched,
@@ -153,7 +151,7 @@ test(
 	{ skip: !enabled },
 	() => {
 		const api = sdk();
-		const valid = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]));
+		const valid = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]), "trusted-test-intent");
 		for (const invalid of [
 			{ ...valid, maxDurationMs: 30_001 },
 			{ ...valid, actions: [] },

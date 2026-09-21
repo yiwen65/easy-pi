@@ -43,7 +43,7 @@ test("image projection has one flat encoded image and no duplicate bytes in deta
 		data: Buffer.from(input.png).toString("base64"),
 	});
 	assert.deepEqual(output.details, { status: "captured", imageRef: "opaque", width: 2, height: 3 });
-	assert.deepEqual(output.grant, { kind: "image", ref: "opaque", width: 2, height: 3 });
+	assert.deepEqual(output.grant, { kind: "image", ref: "opaque", targetKey: "1:1", width: 2, height: 3 });
 });
 
 test("malformed headers and out-of-budget dimensions or carriers are rejected", () => {

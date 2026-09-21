@@ -80,6 +80,7 @@ test("all object levels are closed and trusted budgets cannot be model supplied"
 		"max_duration_ms",
 		"recoveryBudget",
 		"recoveryAttempts",
+		"intentRef",
 	])
 		rejects({ request: { ...input.request, [field]: 2 } });
 	for (const step of [

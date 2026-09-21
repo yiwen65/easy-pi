@@ -10,8 +10,8 @@ import {
 	type NativeOperation,
 	type NativeSession,
 } from "../../controlled/adapter.ts";
-import { loadDesktopSdk } from "../loader.ts";
 import { createDesktopTool } from "../tool.ts";
+import { candidateSdk } from "./sdk.ts";
 
 const allowed = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
 if (allowed) {
@@ -19,7 +19,7 @@ if (allowed) {
 	assert.equal(process.env.ALLOW_REAL_APIS, "false");
 	assert.ok(process.env.CUA_DRIVER_TYPESCRIPT_DIR);
 }
-const sdk = allowed ? loadDesktopSdk(process.env.CUA_DRIVER_TYPESCRIPT_DIR!) : undefined;
+const sdk = allowed ? candidateSdk() : undefined;
 
 function fixture(refuse = false) {
 	assert.ok(sdk);
@@ -133,6 +133,7 @@ function fixture(refuse = false) {
 					startImageKey: action,
 					startImageScroll: action,
 					startClick: forbidden,
+					startSegment: forbidden,
 					startObserve() {
 						assert.equal(serial, 2, "semantic observation must use the selected child");
 						finish(

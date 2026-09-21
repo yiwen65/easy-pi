@@ -104,6 +104,7 @@ export const ComputerSegmentInputSchema = Type.Object(
 		request: Type.Object(
 			{
 				op: Type.Literal("segment"),
+				previousEffect: Type.Optional(Type.Literal("observed")),
 				ref: reference,
 				actions: Type.Array(action, { minItems: 1, maxItems: 64 }),
 				expected: Type.Union([

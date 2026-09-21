@@ -21,7 +21,11 @@ export type ComputerSegmentApi = Pick<
 >;
 
 /** Encode an already parsed model request; no SDK load, dispatch or extra FFI call. */
-export function encodeComputerSegment(api: ComputerSegmentApi, request: Request): CuaSdk.ComputerSegment {
+export function encodeComputerSegment(
+	api: ComputerSegmentApi,
+	request: Request,
+	intentRef: string,
+): CuaSdk.ComputerSegment {
 	const address = (target: Address): CuaSdk.ComputerElementAddress =>
 		"ref" in target
 			? new api.ComputerElementAddress.Reference({ reference: target.ref })
@@ -137,5 +141,11 @@ export function encodeComputerSegment(api: ComputerSegmentApi, request: Request)
 			postcondition = new api.ComputerPostcondition.Visual({ description: expected.description });
 			break;
 	}
-	return api.ComputerSegment.create({ observationRef: request.ref, actions, postcondition, maxDurationMs: 30_000 });
+	return api.ComputerSegment.create({
+		observationRef: request.ref,
+		intentRef,
+		actions,
+		postcondition,
+		maxDurationMs: 30_000,
+	});
 }
