@@ -13,13 +13,16 @@ export function watchRenderer(
 				| { status: "failed"; code: string },
 		): void;
 	},
-): () => void {
+): { refresh(): void; dispose(): void } {
 	let timer: ReturnType<typeof setInterval> | undefined;
+	let disposed = false;
 	const dispose = () => {
+		disposed = true;
 		if (timer) clearInterval(timer);
 		timer = undefined;
 	};
 	const poll = () => {
+		if (disposed) return;
 		try {
 			const status = host.rendererStatus();
 			if (api.ComputerRendererStatus.EmergencyStopped.instanceOf(status)) {
@@ -44,5 +47,5 @@ export function watchRenderer(
 		timer = setInterval(poll, 100);
 		timer.unref();
 	}
-	return dispose;
+	return { refresh: poll, dispose };
 }

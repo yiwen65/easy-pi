@@ -39,7 +39,7 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 	const manifestPath = options.manifestPath;
 	const chord = options.emergencyChord === undefined ? undefined : parseEmergencyChord(options.emergencyChord);
 	const stop = new ComputerStopSignal();
-	let stopWatching: (() => void) | undefined;
+	let rendererWatch: ReturnType<typeof watchRenderer> | undefined;
 	const browserBundlePath = options.browserBundlePath;
 	let browserDirectory: string | undefined;
 	const directory = join(dirname(fileURLToPath(import.meta.url)), "sdk");
@@ -100,12 +100,13 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 				stop.update({ status: "failed", code: "renderer_creation_failed" });
 				throw error;
 			}
-			stopWatching = watchRenderer(sdk, native, stop);
+			rendererWatch = watchRenderer(sdk, native, stop);
 			return new ControlledComputerRuntime(
 				{
 					host: native,
+					onTerminal: () => rendererWatch?.refresh(),
 					destroy: () => {
-						stopWatching?.();
+						rendererWatch?.dispose();
 						if (!sdk.ComputerHost.instanceOf(native)) throw new Error("Computer native identity mismatch");
 						native.uniffiDestroy();
 					},
@@ -126,7 +127,7 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 		),
 		close() {
 			if (closing) return closing;
-			stopWatching?.();
+			rendererWatch?.dispose();
 			let resolve!: () => void;
 			let reject!: (error: unknown) => void;
 			// Publish before synchronous revoke callbacks can reenter. No timer/retry.

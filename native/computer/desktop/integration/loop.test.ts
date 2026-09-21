@@ -130,6 +130,7 @@ describe.skipIf(!allowed)("desktop binding through actual AgentSession with faux
 						startNavigate: forbidden,
 						startObserve: forbidden,
 						startPlan: forbidden,
+						startSegment: forbidden,
 						startPrepare: forbidden,
 					};
 				},

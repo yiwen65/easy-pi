@@ -62,14 +62,18 @@ test(
 				},
 			);
 			assert.deepEqual(health, { status: "ready", pid: 123, windowId: 456 });
-			current = state;
 			t.mock.timers.tick(100);
+			assert.equal(calls, 2);
+			current = state;
+			stopWatching.refresh(); // native terminal must not await the 100ms timer
 			assert.deepEqual(health, expected);
 			const count = calls;
 			t.mock.timers.tick(1000);
 			assert.equal(calls, count);
-			stopWatching();
-			stopWatching();
+			stopWatching.dispose();
+			stopWatching.dispose();
+			stopWatching.refresh();
+			assert.equal(calls, count);
 		}
 		let calls = 0;
 		const dispose = watchRenderer(
@@ -82,7 +86,8 @@ test(
 			},
 			{ stopped: false, update() {} },
 		);
-		dispose();
+		dispose.dispose();
+		dispose.refresh();
 		t.mock.timers.tick(1000);
 		assert.equal(calls, 1);
 		let failure: unknown;

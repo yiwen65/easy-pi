@@ -14,6 +14,8 @@ export type NativeReceipt = Awaited<ReturnType<NativeOperation["terminal"]>>;
 export type OwnedNativeHost = {
 	host: NativeHost;
 	destroy: () => void;
+	/** Refresh trusted native health before publishing a genuine terminal to the host loop. */
+	onTerminal?: () => void;
 };
 
 export type ComputerTarget = {
@@ -127,6 +129,15 @@ export class ControlledComputerRuntime implements ComputerNativeRuntime<Controll
 			this.owned?.host.revoke();
 		} catch {
 			// Preserve the first failure and every owned handle, not a fictitious drain.
+		}
+	}
+
+	/** Health is not terminal proof; observe it before an awaiting Agent can continue. */
+	observeTerminal(): void {
+		try {
+			this.owned?.onTerminal?.();
+		} catch (error) {
+			this.quarantine(error);
 		}
 	}
 
@@ -309,6 +320,7 @@ export class ControlledComputerSession implements ComputerNativeSession {
 				this.pending.delete(pending);
 				native = undefined;
 			}
+			if (value !== undefined) this.runtime.observeTerminal();
 			receipt.resolve(value);
 		};
 		// Register before allocation/start or any injected callback. No generated waiter gets a signal.

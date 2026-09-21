@@ -44,6 +44,8 @@ try {
 				join(directory, "binding.ts"),
 				join(directory, "entry.ts"),
 				join(directory, "test/entry.test.ts"),
+				// Real AgentSession tests use repository-wide compiler settings below.
+				join(directory, "test/segment-agent.test.ts"),
 				join(directory, "integration/**"),
 			],
 		},
