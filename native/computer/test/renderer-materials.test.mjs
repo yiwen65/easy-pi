@@ -21,13 +21,14 @@ test("renderer material schema requires matched executable, authored source, bui
 			buildPath: "build.json",
 			licensePath: "LICENSE",
 			compiler: "fixture",
-			lifetimeProtocol: 2,
+			lifetimeProtocol: 3,
 			datagramProtocol: 1,
 		};
 		const manifest = { files, renderer, computerFeatureVersion: 2 };
 		assert.equal(inspectRendererMaterials(root, manifest).helper, join(root, "helper"));
 		for (const change of [
 			{ lifetimeProtocol: 1 },
+			{ lifetimeProtocol: 2 },
 			{ sourcePaths: [] },
 			{ compiler: "" },
 			{ sha256: "0".repeat(64) },

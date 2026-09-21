@@ -1,0 +1,4 @@
+/build/
+/computer-renderer
+*.o
+*.swiftmodule

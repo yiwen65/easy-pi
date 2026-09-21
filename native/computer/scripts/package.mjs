@@ -44,7 +44,7 @@ export function inspectRendererMaterials(materials, manifest) {
 	const renderer = manifest.renderer;
 	if (
 		!renderer ||
-		renderer.lifetimeProtocol !== 2 ||
+		renderer.lifetimeProtocol !== 3 ||
 		renderer.datagramProtocol !== 1 ||
 		manifest.computerFeatureVersion !== 2 ||
 		typeof renderer.sha256 !== "string" ||
@@ -54,7 +54,7 @@ export function inspectRendererMaterials(materials, manifest) {
 		typeof renderer.compiler !== "string" ||
 		!renderer.compiler.trim()
 	)
-		throw new Error("Missing matched renderer v2 build materials");
+		throw new Error("Missing matched renderer v3 build materials");
 	for (const path of [renderer.helperPath, renderer.buildPath, renderer.licensePath, ...renderer.sourcePaths]) {
 		const file = materialPath(materials, path);
 		const stat = lstatSync(file);

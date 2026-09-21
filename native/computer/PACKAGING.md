@@ -3,7 +3,7 @@
 ## Renderer/emergency foundation (host interface 2)
 
 The current bridge requires the genuine `ComputerHost.createWithRenderer(options,
-new ComputerRendererConfig.Required(...))` API and lifetime protocol v2. It never
+new ComputerRendererConfig.Required(...))` API and lifetime protocol v3. It never
 falls back to diagnostic-disabled rendering. **Root production pins remain the
 historical P06 set. They do not qualify this new bridge.** A coordinator must
 qualify and promote the matching SDK, N-API, helper and source materials before
@@ -22,7 +22,7 @@ The materials manifest additionally requires:
     "buildPath": "sources/renderer/build-provenance.json",
     "licensePath": "licenses/renderer.txt",
     "compiler": "<actual Swift compiler version>",
-    "lifetimeProtocol": 2,
+    "lifetimeProtocol": 3,
     "datagramProtocol": 1
   }
 }
@@ -71,7 +71,7 @@ compaction. Existing fulfilled results remain fulfilled; no input is replayed.
 Polling starts only after lazy native creation, is unref'ed at 100ms, stops on a
 fatal state or feature close, and ends before facade destruction. A status read
 or timer is never input-release, terminal, process-reap or main-thread-liveness
-proof. Stopped bindings cannot renew; no reload/restart/lease recovery is added.
+proof. Protocol 3 adds actual GUI-main-loop heartbeats at 250 ms; a missing heartbeat for one second revokes the native host with `renderer_heartbeat_timeout`. The timeout does not prove operation drain or child reap. Stopped bindings cannot renew; no reload/restart/lease recovery is added.
 
 The remaining sections describe the historical installation layout and workflow;
 their prior qualification does not establish interface-2 acceptance.
