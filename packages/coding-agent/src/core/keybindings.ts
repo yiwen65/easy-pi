@@ -11,6 +11,7 @@ import { join } from "path";
 import { getAgentDir } from "../config.ts";
 
 export interface AppKeybindings {
+	"app.computer.emergencyStop": true;
 	"app.interrupt": true;
 	"app.clear": true;
 	"app.exit": true;
@@ -71,6 +72,10 @@ declare module "@earendil-works/pi-tui" {
 
 export const KEYBINDINGS = {
 	...TUI_KEYBINDINGS,
+	"app.computer.emergencyStop": {
+		defaultKeys: "ctrl+alt+escape",
+		description: "Stop native Computer (host lifetime)",
+	},
 	"app.interrupt": { defaultKeys: "escape", description: "Cancel or abort" },
 	"app.clear": { defaultKeys: "ctrl+c", description: "Clear editor" },
 	"app.exit": { defaultKeys: "ctrl+d", description: "Exit when editor is empty" },
@@ -300,6 +305,13 @@ function isLegacyKeybindingName(key: string): key is keyof typeof KEYBINDING_NAM
 function toKeybindingsConfig(value: Record<string, unknown>): KeybindingsConfig {
 	const config: KeybindingsConfig = {};
 	for (const [key, binding] of Object.entries(value)) {
+		if (
+			key === "app.computer.emergencyStop" &&
+			!(typeof binding === "string" && binding.length > 0) &&
+			!(Array.isArray(binding) && binding.length === 1 && typeof binding[0] === "string" && binding[0].length > 0)
+		) {
+			throw new Error("Computer emergency stop requires exactly one nonempty binding");
+		}
 		if (typeof binding === "string") {
 			config[key] = binding as KeyId;
 			continue;

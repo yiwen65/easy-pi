@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
 	copyFileSync,
 	existsSync,
 	lstatSync,
@@ -37,6 +38,34 @@ const materialPath = (directory, path) => {
 	}
 	return current;
 };
+
+/** Reviewed build materials, not a runtime/model-selected helper path. */
+export function inspectRendererMaterials(materials, manifest) {
+	const renderer = manifest.renderer;
+	if (
+		!renderer ||
+		renderer.lifetimeProtocol !== 2 ||
+		renderer.datagramProtocol !== 1 ||
+		manifest.computerFeatureVersion !== 2 ||
+		typeof renderer.sha256 !== "string" ||
+		!/^[a-f0-9]{64}$/.test(renderer.sha256) ||
+		!Array.isArray(renderer.sourcePaths) ||
+		renderer.sourcePaths.length === 0 ||
+		typeof renderer.compiler !== "string" ||
+		!renderer.compiler.trim()
+	)
+		throw new Error("Missing matched renderer v2 build materials");
+	for (const path of [renderer.helperPath, renderer.buildPath, renderer.licensePath, ...renderer.sourcePaths]) {
+		const file = materialPath(materials, path);
+		const stat = lstatSync(file);
+		if (!stat.isFile() || stat.size > 64 * 1024 * 1024 || sha(file) !== manifest.files?.[path])
+			throw new Error(`Computer renderer material drift: ${path}`);
+	}
+	const helper = materialPath(materials, renderer.helperPath);
+	if (sha(helper) !== renderer.sha256 || !(lstatSync(helper).mode & 0o111))
+		throw new Error("Computer renderer helper hash/executable mismatch");
+	return { ...renderer, helper };
+}
 
 /** Build-time only. No native import, Rust compilation, network, npm scripts or installation hooks. */
 export async function packageComputer({ sdkDirectory, materialsDirectory, outputDirectory }) {
@@ -75,6 +104,7 @@ export async function packageComputer({ sdkDirectory, materialsDirectory, output
 		if (!stat.isFile() || stat.size > 64 * 1024 * 1024) throw new Error("Invalid Computer material file");
 		if (sha(file) !== digest) throw new Error(`Computer material drift: ${path}`);
 	}
+	const renderer = inspectRendererMaterials(materials, sourceManifest);
 
 	mkdirSync(dirname(outputDirectory), { recursive: true });
 	mkdirSync(outputDirectory);
@@ -109,6 +139,10 @@ export async function packageComputer({ sdkDirectory, materialsDirectory, output
 	}
 	copy(join(materials, "manifest.json"), "materials/manifest.json");
 	copy(join(root, "LICENSE"), "LICENSE.easy-pi");
+	copy(renderer.helper, "renderer/computer-renderer");
+	chmodSync(join(outputDirectory, "renderer/computer-renderer"), 0o755);
+	if (files["renderer/computer-renderer"] !== renderer.sha256)
+		throw new Error("Computer renderer changed during copy");
 	const hostModules = new Map([
 		[join(root, "packages/coding-agent/src/core/computer/host.ts"), "../dist/core/computer/host.js"],
 		[join(root, "packages/coding-agent/src/core/computer/binding.ts"), "../dist/core/computer/binding.js"],
@@ -123,6 +157,7 @@ export async function packageComputer({ sdkDirectory, materialsDirectory, output
 		target: "node24",
 		packages: "external",
 		metafile: true,
+		define: { COMPUTER_RENDERER_SHA256: JSON.stringify(renderer.sha256) },
 		plugins: [
 			{
 				name: "computer-installed-host-identity",
@@ -164,7 +199,8 @@ export async function packageComputer({ sdkDirectory, materialsDirectory, output
 	);
 	for (const path of ["bridge.js", "package.json"]) files[path] = sha(join(outputDirectory, path));
 	const manifest = {
-		computerFeatureVersion: 1,
+		computerFeatureVersion: 2,
+		renderer: { ...sourceManifest.renderer, installedPath: "renderer/computer-renderer" },
 		productVersion: product.version,
 		productRevision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
 		workingTreeSources: true,

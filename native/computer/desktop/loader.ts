@@ -35,7 +35,10 @@ export function loadDesktopSdk(sdkDirectory: string): typeof CuaSdk {
 	const { entry } = inspectDesktopSdk(sdkDirectory);
 	const sdk = createRequire(pathToFileURL(entry))(entry) as typeof CuaSdk;
 	if (
-		typeof sdk.ComputerHost?.create !== "function" ||
+		typeof sdk.ComputerHost?.createWithRenderer !== "function" ||
+		typeof sdk.ComputerHost.prototype.rendererStatus !== "function" ||
+		typeof sdk.ComputerRendererConfig?.Required !== "function" ||
+		typeof sdk.ComputerRendererStatus?.EmergencyStopped !== "function" ||
 		typeof sdk.ComputerHost.prototype.openDiscoverySession !== "function" ||
 		typeof sdk.ComputerOperation?.prototype.startListWindows !== "function" ||
 		typeof sdk.ComputerOperation.prototype.startSelectWindow !== "function" ||

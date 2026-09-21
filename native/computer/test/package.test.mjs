@@ -87,7 +87,7 @@ test("qualified bundle preserves runtime pins and external product identity", { 
 	try {
 		const outputDirectory = join(temporary, "computer");
 		const manifest = await packageComputer({ sdkDirectory, materialsDirectory, outputDirectory });
-		assert.equal(manifest.computerFeatureVersion, 1);
+		assert.equal(manifest.computerFeatureVersion, 2);
 		assert.deepEqual(manifest.externalHostModules, [
 			"../dist/core/computer/host.js",
 			"../dist/core/computer/binding.js",

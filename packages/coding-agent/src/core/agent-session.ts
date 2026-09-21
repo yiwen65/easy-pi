@@ -403,6 +403,8 @@ export class AgentSession {
 	private _customTools: ToolDefinition[];
 	private _computer?: ComputerSessionBinding;
 	private _computerGeneration = 0;
+	private _unsubscribeComputerStop?: () => void;
+	private _computerStopped = false;
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
@@ -490,6 +492,27 @@ export class AgentSession {
 		this._hfHost?.syncFromEntries(branchEntries);
 		const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
 		this.agent.state.messages = restoredProjection ?? buildSessionContext(branchEntries).messages;
+		this._subscribeComputerStop();
+	}
+
+	private _subscribeComputerStop(): void {
+		this._unsubscribeComputerStop?.();
+		const computer = this._computer;
+		this._unsubscribeComputerStop = computer?.subscribeStop?.(() => {
+			if (this._disposed || this._computer !== computer || this._computerStopped) return;
+			this._computerStopped = true;
+			this._lifecycleGeneration++;
+			try {
+				this.revokeComputer();
+			} finally {
+				// Interrupt the original loop even if the binding's revoke hook fails.
+				this.agent.abort();
+				this.abortRetry();
+				this.abortCompaction();
+				this.abortBranchSummary();
+				this.setActiveToolsByName(this.getActiveToolNames());
+			}
+		});
 	}
 
 	private _restoreSessionMessages(): void {
@@ -526,7 +549,14 @@ export class AgentSession {
 		// Capture before native revoke/cancel callbacks can synchronously narrow authority again.
 		const generation = this._computerGeneration + 1;
 		this.revokeComputer();
-		return () => (renewComputer && generation === this._computerGeneration ? computer.renew() : undefined);
+		return () =>
+			renewComputer &&
+			!this._computerStopped &&
+			computer.rendererHealth?.status !== "emergency_stopped" &&
+			computer.rendererHealth?.status !== "failed" &&
+			generation === this._computerGeneration
+				? computer.renew()
+				: undefined;
 	}
 
 	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
@@ -1043,6 +1073,7 @@ export class AgentSession {
 	};
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
+		if (this._computerStopped) return false;
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) return false;
 
@@ -1212,6 +1243,8 @@ export class AgentSession {
 			};
 		});
 		this._disposed = true;
+		this._unsubscribeComputerStop?.();
+		this._unsubscribeComputerStop = undefined;
 		this._lifecycleGeneration++;
 		// Replacement may already have closed the gate. Its duplicate shutdown is not a new denial.
 		if (!computer?.revoked) this.revokeComputer();
@@ -1455,6 +1488,7 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (this._computerStopped) throw new Error("Computer stopped; create an explicitly new session/feature");
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
@@ -1462,7 +1496,7 @@ export class AgentSession {
 		try {
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
+			while (!this._computerStopped && (await this._handlePostAgentRun()) && !this._computerStopped) {
 				// continue() snapshots agent.state, which already contains any projection
 				// activated after the preceding agent-core loop ended.
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
@@ -1476,6 +1510,7 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
+		if (this._computerStopped) return false;
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
@@ -3206,6 +3241,7 @@ export class AgentSession {
 		await this._resourceLoader.reload();
 		if (this._disposed) throw new Error("AgentSession is disposed");
 		this._computer = renewComputer() ?? computer;
+		this._subscribeComputerStop();
 		const activeToolNames = this.getActiveToolNames();
 		this._buildRuntime({
 			activeToolNames,
@@ -3654,6 +3690,7 @@ export class AgentSession {
 				await computer.close();
 				if (this._disposed) throw new Error("AgentSession is disposed");
 				this._computer = renewComputer() ?? computer;
+				this._subscribeComputerStop();
 				this._refreshToolRegistry();
 			}
 

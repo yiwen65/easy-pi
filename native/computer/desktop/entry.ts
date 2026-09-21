@@ -6,15 +6,19 @@ import type {
 	NativeComputerFeature,
 	NativeComputerOptions,
 } from "../../../packages/coding-agent/src/core/computer/activation.ts";
+import { ComputerStopSignal, withComputerStop } from "../../../packages/coding-agent/src/core/computer/binding.ts";
 import { ComputerHost } from "../../../packages/coding-agent/src/core/computer/host.ts";
 import { createContextBrowserBinding } from "../browser/context-binding.ts";
 import { ControlledComputerRuntime, type ControlledComputerSession } from "../controlled/adapter.ts";
 import { createDesktopBinding } from "./binding.ts";
+import { parseEmergencyChord } from "./emergency-config.ts";
 import { loadDesktopSdk } from "./loader.ts";
 import pins from "./pinned-inputs.json" with { type: "json" };
+import { watchRenderer } from "./renderer-health.ts";
+import { inspectRendererHelper, installedRendererSha256 } from "./renderer-helper.ts";
 
 /** Fixed host-side interface, independent from the genuine generated native ABI. */
-export const computerFeatureVersion = 1;
+export const computerFeatureVersion = 2;
 
 /** Built into the optional installation's computer/bridge.js; import is native-inert. */
 export function createComputerFeature(options: NativeComputerOptions = {}): NativeComputerFeature {
@@ -33,6 +37,9 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 		throw new Error("Computer browser bundle must be an absolute trusted-host path");
 	}
 	const manifestPath = options.manifestPath;
+	const chord = options.emergencyChord === undefined ? undefined : parseEmergencyChord(options.emergencyChord);
+	const stop = new ComputerStopSignal();
+	let stopWatching: (() => void) | undefined;
 	const browserBundlePath = options.browserBundlePath;
 	let browserDirectory: string | undefined;
 	const directory = join(dirname(fileURLToPath(import.meta.url)), "sdk");
@@ -45,31 +52,60 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 			return api;
 		} catch (error) {
 			failure = { error }; // No implicit reload/retry after a failed native import.
+			stop.update({ status: "failed", code: "native_sdk_unavailable" });
 			throw error;
 		}
 	};
 	const host = new ComputerHost<ControlledComputerSession>({
 		desktopId: "native-computer-desktop",
 		createRuntime: () => {
+			let helperPath: string;
+			try {
+				helperPath = inspectRendererHelper(dirname(directory), installedRendererSha256);
+			} catch (error) {
+				stop.update({ status: "failed", code: "renderer_helper_unavailable" });
+				throw error;
+			}
 			const sdk = getApi();
 			// Allocate before native ownership; retain this root on any unproved close.
 			if (browserBundlePath) browserDirectory = mkdtempSync(join(tmpdir(), "epi-computer-browser-"));
 			const mode = manifestPath ? sdk.SessionPermissionMode.Bounded : sdk.SessionPermissionMode.Unrestricted;
-			const native = sdk.ComputerHost.create({
-				claudeCodeCompatibility: false,
-				authorization: {
-					allowedModes: [mode],
-					compatibilityMode: mode,
-					compatibilityCapabilityManifestPath: manifestPath,
-					unrestrictedAcknowledged: manifestPath === undefined,
-					maxSessionTtlSeconds: 3600n,
-					maxIdleTtlSeconds: 600n,
-				},
-			});
+			let native: ReturnType<typeof sdk.ComputerHost.createWithRenderer>;
+			try {
+				native = sdk.ComputerHost.createWithRenderer(
+					{
+						claudeCodeCompatibility: false,
+						authorization: {
+							allowedModes: [mode],
+							compatibilityMode: mode,
+							...(manifestPath ? { compatibilityCapabilityManifestPath: manifestPath } : {}),
+							unrestrictedAcknowledged: manifestPath === undefined,
+							maxSessionTtlSeconds: 3600n,
+							maxIdleTtlSeconds: 600n,
+						},
+					},
+					new sdk.ComputerRendererConfig.Required({
+						helperPath,
+						...(chord
+							? {
+									emergencyChord: {
+										key: chord.key,
+										modifiers: chord.modifiers.map((modifier) => sdk.ComputerModifier[modifier]),
+									},
+								}
+							: {}),
+					}),
+				);
+			} catch (error) {
+				stop.update({ status: "failed", code: "renderer_creation_failed" });
+				throw error;
+			}
+			stopWatching = watchRenderer(sdk, native, stop);
 			return new ControlledComputerRuntime(
 				{
 					host: native,
 					destroy: () => {
+						stopWatching?.();
 						if (!sdk.ComputerHost.instanceOf(native)) throw new Error("Computer native identity mismatch");
 						native.uniffiDestroy();
 					},
@@ -84,9 +120,13 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 	const session = host.openSession();
 	let closing: Promise<void> | undefined;
 	return {
-		binding: browserBundlePath ? createContextBrowserBinding(session, getApi) : createDesktopBinding(session, getApi),
+		binding: withComputerStop(
+			browserBundlePath ? createContextBrowserBinding(session, getApi) : createDesktopBinding(session, getApi),
+			stop,
+		),
 		close() {
 			if (closing) return closing;
+			stopWatching?.();
 			let resolve!: () => void;
 			let reject!: (error: unknown) => void;
 			// Publish before synchronous revoke callbacks can reenter. No timer/retry.

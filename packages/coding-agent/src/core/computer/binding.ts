@@ -5,6 +5,10 @@ import type { ComputerNativeSession, ComputerSession } from "./host.ts";
 
 /** Explicit SDK injection. No default tools, native import, discovery, or persistent authority. */
 export interface ComputerSessionBinding {
+	/** Independent renderer availability, never input/result/terminal proof. */
+	readonly rendererHealth?: ComputerRendererHealth;
+	/** Synchronous latched notification; late subscribers receive the existing stop. */
+	subscribeStop?(listener: (reason: ComputerStopReason) => void): () => void;
 	readonly scheduler: ResourceScheduler;
 	readonly tools: readonly ToolDefinition[];
 	readonly revoked: boolean;
@@ -15,6 +19,86 @@ export interface ComputerSessionBinding {
 	cancel(): void;
 	revoke(): void;
 	close(): Promise<void>;
+}
+
+export type ComputerStopReason =
+	| { readonly status: "emergency_stopped" }
+	| { readonly status: "failed"; readonly code: string };
+export type ComputerRendererHealth =
+	| { readonly status: "not_started" }
+	| { readonly status: "ready"; readonly pid: number; readonly windowId: number }
+	| ComputerStopReason;
+
+/** One host-lifetime latch shared by every renewed/forked binding. */
+export class ComputerStopSignal {
+	private value: ComputerRendererHealth = Object.freeze({ status: "not_started" });
+	private readonly listeners = new Set<(reason: ComputerStopReason) => void>();
+	get health(): ComputerRendererHealth {
+		return this.value;
+	}
+	get stopped(): boolean {
+		return this.value.status === "failed" || this.value.status === "emergency_stopped";
+	}
+	update(health: ComputerRendererHealth): void {
+		if (this.stopped) return;
+		this.value = Object.freeze({ ...health });
+		if (health.status !== "failed" && health.status !== "emergency_stopped") return;
+		const listeners = [...this.listeners];
+		this.listeners.clear();
+		for (const listener of listeners) {
+			try {
+				listener(health);
+			} catch {
+				/* One observer cannot prevent revocation of others. */
+			}
+		}
+	}
+	subscribe(listener: (reason: ComputerStopReason) => void): () => void {
+		if (this.value.status === "failed" || this.value.status === "emergency_stopped") {
+			listener(this.value);
+			return () => {};
+		}
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+}
+
+/** Preserve the delegate's authority clearing and native result/terminal ownership. */
+export function withComputerStop(binding: ComputerSessionBinding, stop: ComputerStopSignal): ComputerSessionBinding {
+	const unsubscribe = stop.subscribe(() => binding.revoke());
+	return {
+		...binding,
+		tools: Object.freeze(
+			binding.tools.map((tool) => ({
+				...tool,
+				execute(...args: Parameters<typeof tool.execute>) {
+					if (stop.stopped) return Promise.reject(new Error("Computer stopped; create an explicitly new feature"));
+					return tool.execute(...args);
+				},
+			})),
+		),
+		get revoked() {
+			return stop.stopped || binding.revoked;
+		},
+		get rendererHealth() {
+			return stop.health;
+		},
+		subscribeStop: (listener) => stop.subscribe(listener),
+		fork() {
+			if (stop.stopped) throw new Error("Computer stopped; create an explicitly new feature");
+			return withComputerStop(binding.fork(), stop);
+		},
+		renew() {
+			if (stop.stopped) throw new Error("Computer stopped; create an explicitly new feature");
+			return withComputerStop(binding.renew(), stop);
+		},
+		close() {
+			unsubscribe();
+			return binding.close();
+		},
+	};
 }
 
 /** Rebuild tool closures for every capability; a child never inherits its parent's live handle. */

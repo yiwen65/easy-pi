@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getPackageDir } from "../../config.ts";
+import { KeybindingsManager } from "../keybindings.ts";
 import type { ComputerSessionBinding } from "./binding.ts";
 
 export interface NativeComputerFeature {
@@ -11,6 +12,8 @@ export interface NativeComputerFeature {
 }
 
 export interface NativeComputerOptions {
+	/** One trusted app-format physical key chord; fixed until a new feature/host is created. */
+	emergencyChord?: string | readonly string[];
 	/** Explicit trusted host path. Never taken from model input or project discovery. */
 	manifestPath?: string;
 	/** Select the isolated DOM profile instead of native-window/pixel operations. */
@@ -56,7 +59,7 @@ export function createNativeComputerFeature(options: NativeComputerOptions = {})
 		typeof loaded !== "object" ||
 		loaded === null ||
 		!("computerFeatureVersion" in loaded) ||
-		loaded.computerFeatureVersion !== 1 ||
+		loaded.computerFeatureVersion !== 2 ||
 		!("createComputerFeature" in loaded) ||
 		typeof loaded.createComputerFeature !== "function"
 	) {
@@ -66,5 +69,9 @@ export function createNativeComputerFeature(options: NativeComputerOptions = {})
 	const module = loaded as {
 		createComputerFeature(options: NativeComputerOptions): NativeComputerFeature;
 	};
-	return module.createComputerFeature(options);
+	const emergencyChord =
+		options.emergencyChord !== undefined
+			? options.emergencyChord
+			: KeybindingsManager.create().getKeys("app.computer.emergencyStop");
+	return module.createComputerFeature({ ...options, emergencyChord });
 }

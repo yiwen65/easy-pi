@@ -1,5 +1,81 @@
 # Optional Computer assets
 
+## Renderer/emergency foundation (host interface 2)
+
+The current bridge requires the genuine `ComputerHost.createWithRenderer(options,
+new ComputerRendererConfig.Required(...))` API and lifetime protocol v2. It never
+falls back to diagnostic-disabled rendering. **Root production pins remain the
+historical P06 set. They do not qualify this new bridge.** A coordinator must
+qualify and promote the matching SDK, N-API, helper and source materials before
+building/installing a usable interface-2 product. Historical packages/materials
+remain separate; interface-1 assets are refused by this host.
+
+The materials manifest additionally requires:
+
+```json
+{
+  "computerFeatureVersion": 2,
+  "renderer": {
+    "helperPath": "renderer/computer-renderer",
+    "sha256": "<actual qualified helper SHA-256>",
+    "sourcePaths": ["sources/renderer/main.swift"],
+    "buildPath": "sources/renderer/build-provenance.json",
+    "licensePath": "licenses/renderer.txt",
+    "compiler": "<actual Swift compiler version>",
+    "lifetimeProtocol": 2,
+    "datagramProtocol": 1
+  }
+}
+```
+
+Every listed path must be a regular, non-symlink file in the materials directory,
+with its actual SHA-256 in the existing `files` map. `sourcePaths` must include
+all authored helper sources and its build script; `buildPath` records the actual
+build command, compiler/SDK/target, source hashes and matching output hash.
+`licensePath` contains the helper's applicable license/attribution. The existing
+`patchSha256`, `librarySha256`, `nodeRuntimeSha256`, `compiler`, source and license
+requirements remain in force. No placeholder hash is accepted as qualification.
+
+Packaging copies the executable to `computer/renderer/computer-renderer` with
+mode 0755, retains provenance/licenses in `materials/`, lists both in the output
+manifest, and embeds the verified helper hash in `bridge.js`. First native work
+verifies this fixed relative location before ownership. Missing bytes, changed
+bytes, non-executable files and internal helper/directory symlinks refuse.
+Canonical ancestor aliases such as `/tmp` → `/private/tmp` are allowed, so moving
+the complete installation is supported. Hashes protect against accidental drift,
+not a malicious host modifying the bridge or a concurrent privileged file swap.
+There are no runtime builds, downloads, helper-path options or model-selected
+paths/chords.
+
+`NativeComputerOptions.emergencyChord?: string | readonly string[]` accepts one
+trusted app-format chord (for example `super+shift+a`). When omitted,
+`createNativeComputerFeature()` resolves `app.computer.emergencyStop` from the
+existing user `keybindings.json`; its registered default is `ctrl+alt+escape`.
+An empty, multiple, unsupported or modifier-only configuration refuses. Modifiers
+map `ctrl`/`alt`/`shift`/`super` to native Control/Option/Shift/Command; Fn is not
+supported. Letters/digits, unshifted US punctuation, arrows, navigation keys and
+F1–F12 name **physical macOS key positions**, not layout-dependent text. `delete`
+maps to forward delete; `backspace` maps to the physical backward-delete key.
+The native global listen-only monitor observes the chord while another app is
+foreground. Actual installed foreground/keyboard-layout qualification remains a
+GUI gate. Configuration is captured for the host lifetime: `/reload` cannot
+remap an existing native helper; create an explicitly new feature/host.
+
+Each binding exposes `rendererHealth` (`not_started`, `ready` with `pid/windowId`,
+`emergency_stopped`, or `failed` with `code`) separately from tool input/effect
+and terminal facts. Optional `subscribeStop(listener)` synchronously supplies
+latched emergency/fatal stops, returns an unsubscribe function, and is shared
+across forks/renewals. Stops clear delegated view authority, revoke JS access and
+abort the original AgentSession loop, including model-only streams and pending
+compaction. Existing fulfilled results remain fulfilled; no input is replayed.
+Polling starts only after lazy native creation, is unref'ed at 100ms, stops on a
+fatal state or feature close, and ends before facade destruction. A status read
+or timer is never input-release, terminal, process-reap or main-thread-liveness
+proof. Stopped bindings cannot renew; no reload/restart/lease recovery is added.
+
+The remaining sections describe the historical installation layout and workflow;
+their prior qualification does not establish interface-2 acceptance.
+
 Computer is opt-in. Its qualified native build targets **Node 24.15.0, macOS arm64**. Other runtimes/platforms are rejected, not redirected to MCP, a CLI, global input or a foreground fallback. Ordinary Node coding does not need these assets.
 
 ## Build the asset directory

@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../../src/cli/args.ts";
+import { ENV_AGENT_DIR } from "../../src/config.ts";
 import { createNativeComputerFeature, shouldActivateComputer } from "../../src/core/computer/activation.ts";
+import { KeybindingsManager } from "../../src/core/keybindings.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -24,6 +26,22 @@ function assets(source?: string): string {
 }
 
 describe("explicit Computer activation", () => {
+	it("resolves the trusted application emergency binding without dropping secondary keys", () => {
+		const directory = assets(
+			"exports.computerFeatureVersion = 2; exports.createComputerFeature = options => { throw Error(JSON.stringify(options)); };",
+		);
+		vi.stubEnv(ENV_AGENT_DIR, directory);
+		writeFileSync(
+			join(directory, "keybindings.json"),
+			JSON.stringify({ "app.computer.emergencyStop": "super+shift+a" }),
+		);
+		expect(KeybindingsManager.create(directory).getKeys("app.computer.emergencyStop")).toEqual(["super+shift+a"]);
+		expect(() => createNativeComputerFeature()).toThrow(JSON.stringify({ emergencyChord: ["super+shift+a"] }));
+		for (const binding of [[], ["ctrl+a", "ctrl+b"], ["ctrl+a", "ctrl+a"], "", null]) {
+			writeFileSync(join(directory, "keybindings.json"), JSON.stringify({ "app.computer.emergencyStop": binding }));
+			expect(() => KeybindingsManager.create(directory)).toThrow("exactly one");
+		}
+	});
 	it("parses only explicit opt-in and leaves ordinary arguments unchanged", () => {
 		expect(parseArgs(["hello"]).computer).toBeUndefined();
 		const args = parseArgs(["--computer", "--computer-manifest", "/trusted/capabilities.yaml", "hello"]);
@@ -89,11 +107,16 @@ describe("explicit Computer activation", () => {
 
 	it("passes only explicit host options to the versioned factory and rejects relative manifests", () => {
 		const directory = assets(
-			"exports.computerFeatureVersion = 1; exports.createComputerFeature = options => { throw Error(JSON.stringify(options)); };",
+			"exports.computerFeatureVersion = 2; exports.createComputerFeature = options => { throw Error(JSON.stringify(options)); };",
 		);
 		expect(() => createNativeComputerFeature({ manifestPath: "project/policy.yaml" })).toThrow("absolute");
 		expect(() => createNativeComputerFeature({ browserBundlePath: "project/CfT.app" })).toThrow("absolute");
 		const manifestPath = join(directory, "policy.yaml");
-		expect(() => createNativeComputerFeature({ manifestPath })).toThrow(JSON.stringify({ manifestPath }));
+		expect(() => createNativeComputerFeature({ manifestPath })).toThrow(
+			JSON.stringify({ manifestPath, emergencyChord: ["ctrl+alt+escape"] }),
+		);
+		expect(() => createNativeComputerFeature({ emergencyChord: "super+shift+a" })).toThrow(
+			JSON.stringify({ emergencyChord: "super+shift+a" }),
+		);
 	});
 });
