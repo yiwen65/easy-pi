@@ -36,7 +36,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		name: "computer",
 		label: "Computer",
 		description:
-			"Discover windows, select one returned ref, then observe semantic elements or capture an image. " +
+			"Discover windows (optional literal, case-insensitive app/title filters), select one returned ref, then observe semantic elements or capture an image. " +
 			"Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
 			"Segment support requires the qualified native candidate; legacy execute/click/scroll/key routes remain available. " +
 			"Segments may automatically foreground the selected window with agent priority, without blocking physical input. " +
@@ -284,7 +284,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					return { content, details };
 				}
 				if (request.op === "discover" && api.ComputerResult.Windows.instanceOf(result)) {
-					const projection = projectWindows(result.inner.windows, result.inner.omittedWindows);
+					const projection = projectWindows(result.inner.windows, result.inner.omittedWindows, request);
 					if (canPublish()) view.publish(id, projection.content, { ...projection.grant, revision: ++revision });
 					return { content: projection.content, details: projection.details };
 				}

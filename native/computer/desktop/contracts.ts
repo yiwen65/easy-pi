@@ -12,7 +12,14 @@ export const DesktopInputSchema = Type.Object(
 		request: Type.Union([
 			ComputerSegmentInputSchema.properties.request,
 			ControlledComputerInputSchema.properties.request,
-			Type.Object({ op: StringEnum(["discover"] as const) }, { additionalProperties: false }),
+			Type.Object(
+				{
+					op: StringEnum(["discover"] as const),
+					app: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+					title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+				},
+				{ additionalProperties: false },
+			),
 			Type.Object({ op: StringEnum(["select"] as const), ref }, { additionalProperties: false }),
 			Type.Object(
 				{ op: StringEnum(["capture"] as const), maxDimension: Type.Integer({ minimum: 1, maximum: 2048 }) },
@@ -63,6 +70,12 @@ export type DesktopInput = Static<typeof DesktopInputSchema>;
 export function parseDesktopInput(input: unknown): DesktopInput {
 	if (!Value.Check(DesktopInputSchema, input)) throw new Error("Invalid computer request");
 	const request = input.request;
+	if (request.op === "discover") {
+		for (const filter of [request.app, request.title]) {
+			if (filter !== undefined && (Buffer.byteLength(filter) > 256 || /[\uD800-\uDFFF]/u.test(filter)))
+				throw new Error("Invalid computer discovery filter");
+		}
+	}
 	if (request.op === "segment") return parseComputerSegmentInput(input);
 	if (request.op === "observe" || request.op === "execute") return parseControlledComputerInput(input);
 	if ("ref" in request && Buffer.byteLength(request.ref) > 128) throw new Error("Invalid computer reference");

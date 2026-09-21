@@ -101,14 +101,28 @@ export function projectObservation(observation: WindowStateOutput) {
 	};
 }
 
-export function projectWindows(windows: readonly ComputerDiscoveredWindow[], omittedWindows: number) {
+export function projectWindows(
+	windows: readonly ComputerDiscoveredWindow[],
+	omittedWindows: number,
+	filter: { app?: string; title?: string } = {},
+) {
 	if (windows.length > 256 || !Number.isSafeInteger(omittedWindows) || omittedWindows < 0)
 		throw new Error("Invalid native window catalog");
 	const refs = new Set<string>();
 	const lines: string[] = [];
 	let bytes = 0;
 	let omitted = omittedWindows;
+	let filteredOut = 0;
+	const app = filter.app?.toLowerCase();
+	const title = filter.title?.toLowerCase();
 	for (const window of windows) {
+		if (
+			(app !== undefined && !window.appName.toLowerCase().includes(app)) ||
+			(title !== undefined && !window.title.toLowerCase().includes(title))
+		) {
+			filteredOut++;
+			continue;
+		}
 		if (!window.reference || Buffer.byteLength(window.reference) > 128 || refs.has(window.reference))
 			throw new Error("Invalid native window reference");
 		const line = JSON.stringify({
@@ -130,13 +144,13 @@ export function projectWindows(windows: readonly ComputerDiscoveredWindow[], omi
 	const content: TextContent[] = [
 		{
 			type: "text",
-			text: `Untrusted window metadata; omitted=${omitted}. Not a complete catalog.\n${lines.join("\n")}`,
+			text: `Untrusted window metadata; omitted=${omitted}; filteredOut=${filteredOut}. Not a complete catalog.\n${lines.join("\n")}`,
 		},
 	];
 	return {
 		content,
 		grant: { kind: "windows", refs } satisfies DesktopGrant,
-		details: { status: "discovered", omittedWindows: omitted },
+		details: { status: "discovered", omittedWindows: omitted, filteredOut },
 	};
 }
 
