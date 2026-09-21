@@ -1,0 +1,99 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer.rs
+@@ -28,6 +28,25 @@
+         && target.process_stamp.is_some()
+         && super::computer_process_stamp(target.pid) == target.process_stamp
+         && operation.checkpoint().is_ok()
++}
++
++/// ScreenCaptureKit's exact-window still capture does not activate windows or
++/// enable AX. Keep cancellation and registered callback drain, but do not arm a
++/// focus-restoration lease or poll unrelated windows for a discarded result.
++/// AX observation is deliberately not routed here: first Chromium enablement
++/// writes accessibility attributes and needs its own readiness analysis.
++fn with_capture_cleanup(operation: &Operation, call: impl FnOnce() -> ToolResult) -> ToolResult {
++    if operation.session.native_window().is_err() {
++        return refusal("unsupported_route");
++    }
++    if operation.checkpoint().is_err() {
++        return refusal("controlled_cancelled");
++    }
++    let result = call();
++    if operation.wait_callbacks().is_err() {
++        return refusal("controlled_quarantined");
++    }
++    result
+ }
+
+ fn with_focus_cleanup(
+@@ -200,7 +219,7 @@
+     let worker = operation.clone();
+     match operation.blocking(move || {
+         if !target_matches(&args, &worker) { return refusal("controlled_target_stale"); }
+-        with_focus_cleanup(&worker, "capture", || {
++        with_capture_cleanup(&worker, || {
+             let image = match crate::capture::controlled::capture(&worker, maximum as u32) {
+                 Ok(image) => image,
+                 Err(reason) => return refusal(reason),
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/scope_tests.rs
+@@ -23,6 +23,57 @@
+         result.structured_content.unwrap()["code"],
+         "unsupported_route"
+     );
++    let result = with_capture_cleanup(&operation, || {
++        panic!("browser scope entered native capture route")
++    });
++    assert_eq!(result.structured_content.unwrap()["code"], "unsupported_route");
+     operation.finish();
+     assert!(!operation.terminal().await.unwrap().input_committed);
+ }
++
++#[tokio::test]
++async fn controlled_capture_cleanup_preserves_result_without_input() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 42, 7, Some((1, 0))).unwrap();
++    let operation = session.new_operation().unwrap();
++    operation.begin().unwrap();
++    let calls = std::cell::Cell::new(0);
++    let result = with_capture_cleanup(&operation, || {
++        calls.set(calls.get() + 1);
++        ToolResult::text("capture result").with_structured(json!({"capture":true}))
++    });
++    assert_eq!(calls.get(), 1);
++    assert_eq!(result.structured_content.unwrap()["capture"], true);
++    operation.finish();
++    assert!(!operation.terminal().await.unwrap().input_committed);
++}
++
++#[tokio::test]
++async fn controlled_capture_cleanup_precancel_never_calls_capture() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 42, 7, Some((1, 0))).unwrap();
++    let operation = session.new_operation().unwrap();
++    operation.begin().unwrap();
++    operation.cancel();
++    let result = with_capture_cleanup(&operation, || panic!("capture after cancellation"));
++    assert_eq!(result.structured_content.unwrap()["code"], "controlled_cancelled");
++    operation.finish();
++    let terminal = operation.terminal().await.unwrap();
++    assert!(terminal.cancelled);
++    assert!(!terminal.input_committed);
++}
++
++#[tokio::test]
++async fn controlled_capture_cleanup_reports_quarantine_instead_of_result() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 42, 7, Some((1, 0))).unwrap();
++    let operation = session.new_operation().unwrap();
++    operation.begin().unwrap();
++    let result = with_capture_cleanup(&operation, || {
++        operation.quarantine();
++        ToolResult::text("must not publish successful capture")
++    });
++    assert_eq!(result.structured_content.unwrap()["code"], "controlled_quarantined");
++    operation.finish();
++    assert!(operation.terminal().await.is_err());
++}

@@ -924,7 +924,7 @@ T-001–T-041保留历史限定交付；新增T-042–T-056位于本节末，状
 - Execution steps: 保留已缓存的首次ABI校验；审计TTL及重复canonical查询；对只读和已证无焦点副作用路径去通用等待；采用段级观察和失效触发的局部重验；调整旧global HID拒绝的策略接口但在对应输入路由验证前不推广。
 - Acceptance criteria: 每项删减有测量/反例或明确失去消费者的证据；不运行tccd collector作生产步骤；cancel/revoke、输入释放、资源ledger和未知终态规则不被省略。
 - Verification method: before/after调用计数与状态机测试，迟到窗口/用户切焦点/权限变化回归；locked/offline native tests及隔离root check。
-- Validation evidence: Not run.
+- Validation evidence: capture-only子集已实现并实测：不再为无输入SCK截图建立focus/window-detect scope，保留tracked blocking/cancel/callback drain及原identity/geometry/PNG校验；AX首次enablement/readiness和全部mutation cleanup不变。platform88pass+1既有benchmark ignore/SDK70、genuine生成/check/stage/TS全0；两Rust增量dd58f482严格apply/byte/reverse、旧636源/81pins不变。A/B/B/A四fresh进程每arm20测量samples，截图median1148.9486ms→57.5714ms；68terminal/八自然退出、独立像素/几何/无输入/后台focus/stale/cancel通过至C246。首harness用旧fixture缺appActive字段失败保留，换已资格fixture并加准入前证据检查、两纯tests后重跑；原C242无输入/两自然退出，不计合格样本。隔离g01c全check0（1424无修复）/204pass+5skip/controller38/drift0。详见general/capture-verification.json及g01-capture-cleanup.md。仅组件诊断，不是正式p95或完整T-044；观察热路径/TTL策略及其对抗门禁仍待coordinator继续。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -1155,7 +1155,7 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 - AppKit renderer有主线程/不可返回入口；采用受拥有helper并单独资格。绘制延迟、自身overlay污染截图/模态和进程遗留必须测试，不能只打开旧Cargo feature。
 - 非幂等动作的“没有看见变化”不等于没生效；有界恢复只能利用明确状态前进，禁止以超时、旧截图、字符串长度差推导可安全重输/重提。
 - 原生生成与平台源码耦合，共享worktree仍有其他工作。单writer、独立stage、精确hunk提交及来源hash是交付可追溯性要求，不应变成每次用户动作的繁重取证。
-- G00新基线最后clean C241，只代表当轮126terminal/八自然退出；当前没有新通用输入GUI资格。未来操作需fresh准入，不能用历史clean/quiet暗示当前桌面可用；旧未知终态和失败材料必须保留。
+- 当前截图cleanup组件验证最后clean C246，四合格轮68terminal/八自然退出；G00 C241仍是原基线。当前没有新通用输入GUI资格。未来操作需fresh准入，不能用历史clean/quiet暗示当前桌面可用；旧未知终态和失败材料必须保留。
 
 ### 历史P00–P08风险记录（不表示当前仍处于这些阶段）
 
@@ -1517,6 +1517,8 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 - 2026-09-21: T-043协议子集提交264917341，仅六个Computer路径；parent复测parser12/12、native codec3/3，补丁正反字节验证通过。初始patch空白context触发git diff --check，保留原件后规范空行并重新验证，最终9c995632；无native字节变化/GUI/产品pins推广。用户continue后继续T-043实际route/结果一致性，修正当前段中遗留plan/all-pending文字，历史日志保持。没有客观阻塞，不把中间提交当通用化完成。
 
 - 2026-09-21: T-043 done：结果契约及真实FFI验证完成，70 native/5 codec/严格类型及生成全0，隔离g01r全check与既有host/controller通过。纯validator不创建owner、不作为terminal证明。T-044进入in_progress/coordinator，先从无输入capture和observe的通用window检测等待区分readiness/保护范围，再以定向生命周期回归与真实分项测量验证；旧mutation cleanup不无证据一并删除。
+
+- 2026-09-21: T-044 capture-only候选独立验证通过：旧窗口检测约1.02s且结果未消费，改为保留cancel/回调收敛的SCK只读scope。platform88+1ignore/SDK70及完整生成一致性通过；修正新harness错选无focus字段的旧fixture后，A/B/B/A四轮独立验证68terminal/八自然退出至C246，20samples/arm median1148.95→57.57ms。原失败/raw/C242及输入保留，不清锁/重放/称全任务加速。两路径patchdd58f482及当前库已封存；T-044仍in_progress/coordinator，下一步AX enablement与只读扫描分离、必要检查频率和TTL策略。无真实API/产品pin promotion。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
