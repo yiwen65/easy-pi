@@ -75,6 +75,79 @@ test("genuine segment postcondition codecs preserve explicit expected state", { 
 	}
 });
 
+test("genuine result codec preserves actual routes without claiming business success", { skip: !enabled }, () => {
+	const api = sdk();
+	const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]));
+	for (const route of [
+		api.ActionRoute.Accessibility,
+		api.ActionRoute.SyntheticEvents,
+		api.ActionRoute.GlobalInput,
+		api.ActionRoute.SystemApi,
+		api.ActionRoute.Dom,
+		api.ActionRoute.TrustedInput,
+	]) {
+		const result = api.ComputerSegmentResult.create({
+			status: api.ComputerSegmentStatus.NeedsObservation,
+			actions: [
+				api.ComputerInputResult.create({
+					index: 0,
+					dispatch: api.ComputerDispatch.Dispatched,
+					action: {
+						effect: api.ActionEffect.Unverifiable,
+						route,
+						delivery: { mode: api.ActionDeliveryMode.Foreground, deliveredCount: 2 },
+					},
+				}),
+			],
+			condition: api.ComputerCondition.Unknown,
+			recoveryAttempts: 0,
+			elapsedMs: 10n,
+		});
+		assert.doesNotThrow(() => api.validateComputerSegmentResult(encoded, result));
+		assert.throws(
+			() =>
+				api.validateComputerSegmentResult(encoded, {
+					...result,
+					status: api.ComputerSegmentStatus.Confirmed,
+					condition: api.ComputerCondition.Satisfied,
+				}),
+			(error: unknown) => api.ComputerError.Refused.instanceOf(error),
+		);
+	}
+});
+
+test("genuine result codec rejects contradictory delivery, prefix and recovery facts", { skip: !enabled }, () => {
+	const api = sdk();
+	const encoded = encodeComputerSegment(api, request([{ op: "type_text", text: "x" }]));
+	const row = api.ComputerInputResult.create({
+		index: 0,
+		dispatch: api.ComputerDispatch.NotDispatched,
+	});
+	const result = api.ComputerSegmentResult.create({
+		status: api.ComputerSegmentStatus.Paused,
+		actions: [row],
+		condition: api.ComputerCondition.Unknown,
+		firstUnfinishedAction: 0,
+		recoveryAttempts: 0,
+		elapsedMs: 0n,
+	});
+	assert.doesNotThrow(() => api.validateComputerSegmentResult(encoded, result));
+	for (const invalid of [
+		{ ...result, recoveryAttempts: 3 },
+		{ ...result, firstUnfinishedAction: 1 },
+		{ ...result, actions: [{ ...row, index: 1 }] },
+		{ ...result, actions: [row, row] },
+		{ ...result, status: api.ComputerSegmentStatus.OutcomeUnknown },
+		{ ...result, actions: [{ ...row, dispatch: api.ComputerDispatch.Dispatched }] },
+		{ ...result, actions: [{ ...row, code: "private input text" }] },
+	]) {
+		assert.throws(
+			() => api.validateComputerSegmentResult(encoded, invalid),
+			(error: unknown) => api.ComputerError.Refused.instanceOf(error),
+		);
+	}
+});
+
 test(
 	"native validation rejects direct-SDK invalid data even when the model parser is bypassed",
 	{ skip: !enabled },

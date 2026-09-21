@@ -9,7 +9,7 @@ diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/c
  use crate::runtime::{DriverRuntime, RuntimeSession};
  use crate::ConfiguredDriverOptions;
  use cua_driver_contract::{ActionResult, WindowStateOutput};
-@@ -54,6 +55,14 @@
+@@ -54,6 +55,23 @@
      pub operation_id: String,
      pub cancelled: bool,
      pub input_committed: bool,
@@ -21,6 +21,15 @@ diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/c
 +#[uniffi::export]
 +pub fn validate_computer_segment(segment: segment::ComputerSegment) -> Result<(), ComputerError> {
 +    segment::validate(&segment).map_err(refused)
++}
++
++/// Pure result consistency check; this is not an execution or terminal receipt.
++#[uniffi::export]
++pub fn validate_computer_segment_result(
++    segment: segment::ComputerSegment,
++    result: segment::ComputerSegmentResult,
++) -> Result<(), ComputerError> {
++    segment::validate_result(&segment, &result).map_err(refused)
  }
 
  type Closing = watch::Sender<Option<Result<(), ComputerError>>>;
@@ -28,16 +37,17 @@ diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs 
 new file mode 100644
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,720 @@
 +//! General Computer wire contract. Validation is pure; this module never posts
 +//! input or infers business success from an event/terminal receipt.
 +use super::{ComputerCondition, ComputerDispatch};
-+use cua_driver_contract::ActionResult;
++use cua_driver_contract::{ActionDeliveryMode, ActionEffect, ActionResult, ActionRoute};
 +use std::collections::BTreeSet;
 +
 +pub const MAX_SEGMENT_ACTIONS: usize = 64;
 +pub const MAX_SEGMENT_TEXT_BYTES: usize = 16 * 1024;
 +pub const MAX_SEGMENT_DURATION_MS: u32 = 30_000;
++pub const MAX_SEGMENT_RECOVERY_ATTEMPTS: u8 = 2;
 +
 +#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 +pub struct ComputerLocator {
@@ -361,6 +371,119 @@ new file mode 100644
 +    }
 +}
 +
++/// Check result facts independently of native terminal proof. `actions` is a
++/// contiguous attempted prefix, not a count of verified business effects.
++/// `first_unfinished_action` is the first action whose complete delivery is not
++/// established (or the next unattempted index); a satisfied condition can still
++/// make remaining actions unnecessary. No result grants permission to replay.
++pub fn validate_result(
++    segment: &ComputerSegment,
++    result: &ComputerSegmentResult,
++) -> Result<(), &'static str> {
++    validate(segment)?;
++    let invalid = || Err("invalid_segment_result");
++    if result.actions.len() > segment.actions.len()
++        || result.recovery_attempts > MAX_SEGMENT_RECOVERY_ATTEMPTS
++    {
++        return invalid();
++    }
++    let mut unfinished = None;
++    for (index, row) in result.actions.iter().enumerate() {
++        if row.index as usize != index
++            || unfinished.is_some()
++            || row.code.as_ref().is_some_and(|code| {
++                code.is_empty()
++                    || code.len() > 128
++                    || !code
++                        .bytes()
++                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
++            })
++        {
++            return invalid();
++        }
++        if let Some(action) = &row.action {
++            if action.validate_invariants().is_err() {
++                return invalid();
++            }
++            if let Some(delivery) = &action.delivery {
++                // A claimed actual global route cannot also claim background
++                // delivery. Semantic/system routes may legitimately use either.
++                if action.route == ActionRoute::GlobalInput
++                    && delivery.mode != ActionDeliveryMode::Foreground
++                {
++                    return invalid();
++                }
++            }
++        }
++        match row.dispatch {
++            ComputerDispatch::NotDispatched => {
++                if row
++                    .action
++                    .as_ref()
++                    .is_some_and(|a| a.effect != ActionEffect::Refused)
++                {
++                    return invalid();
++                }
++                unfinished = Some(row.index);
++            }
++            ComputerDispatch::Unknown => {
++                if row.action.as_ref().is_some_and(|a| {
++                    matches!(a.effect, ActionEffect::Confirmed | ActionEffect::Refused)
++                }) {
++                    return invalid();
++                }
++                unfinished = Some(row.index);
++            }
++            ComputerDispatch::Dispatched => {
++                let Some(action) = &row.action else {
++                    return invalid();
++                };
++                let Some(delivery) = &action.delivery else {
++                    return invalid();
++                };
++                if action.effect == ActionEffect::Refused
++                    || delivery.mode == ActionDeliveryMode::Unknown
++                    || delivery.delivered_count == Some(0)
++                {
++                    return invalid();
++                }
++                if action.effect == ActionEffect::Partial {
++                    unfinished = Some(row.index);
++                }
++            }
++        }
++    }
++    if unfinished.is_none() && result.actions.len() < segment.actions.len() {
++        unfinished = Some(result.actions.len() as u32);
++    }
++    if result.first_unfinished_action != unfinished {
++        return invalid();
++    }
++    let valid = match result.status {
++        ComputerSegmentStatus::Confirmed => {
++            result.condition == ComputerCondition::Satisfied
++                && !matches!(segment.postcondition, ComputerPostcondition::Visual { .. })
++        }
++        ComputerSegmentStatus::NeedsObservation => result.condition == ComputerCondition::Unknown,
++        ComputerSegmentStatus::Paused => result.condition != ComputerCondition::Satisfied,
++        ComputerSegmentStatus::OutcomeUnknown => {
++            result.condition == ComputerCondition::Unknown
++                && result
++                    .actions
++                    .iter()
++                    .any(|row| row.dispatch != ComputerDispatch::NotDispatched)
++        }
++        // Cancellation may race a successful condition check. Preserve both
++        // facts; do not relabel a known successful business effect as unknown.
++        ComputerSegmentStatus::Cancelled => true,
++    };
++    if valid {
++        Ok(())
++    } else {
++        invalid()
++    }
++}
++
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
@@ -380,6 +503,128 @@ new file mode 100644
 +            x: 0.0,
 +            y: 1.0,
 +        }
++    }
++    fn delivered(index: u32) -> ComputerInputResult {
++        ComputerInputResult {
++            index,
++            dispatch: ComputerDispatch::Dispatched,
++            action: Some(ActionResult {
++                effect: ActionEffect::Unverifiable,
++                route: ActionRoute::SyntheticEvents,
++                delivery: Some(cua_driver_contract::ActionDelivery {
++                    mode: ActionDeliveryMode::Background,
++                    delivered_count: Some(2),
++                }),
++                evidence: None,
++                escalation: None,
++            }),
++            code: None,
++        }
++    }
++    fn result() -> ComputerSegmentResult {
++        ComputerSegmentResult {
++            status: ComputerSegmentStatus::NeedsObservation,
++            actions: vec![delivered(0)],
++            condition: ComputerCondition::Unknown,
++            first_unfinished_action: None,
++            recovery_attempts: 0,
++            elapsed_ms: 12,
++        }
++    }
++    #[test]
++    fn controlled_segment_result_does_not_confuse_delivery_with_confirmation() {
++        let mut input = segment(vec![ComputerInput::TypeText { text: "x".into() }]);
++        let mut output = result();
++        assert_eq!(validate_result(&input, &output), Ok(()));
++        output.status = ComputerSegmentStatus::Confirmed;
++        assert!(validate_result(&input, &output).is_err());
++        output.condition = ComputerCondition::Satisfied;
++        // Native code cannot claim semantic confirmation of a visual prompt.
++        assert!(validate_result(&input, &output).is_err());
++        input.postcondition = ComputerPostcondition::WindowFocused;
++        assert_eq!(validate_result(&input, &output), Ok(()));
++        output.status = ComputerSegmentStatus::Cancelled;
++        assert_eq!(validate_result(&input, &output), Ok(()));
++        // A condition already satisfied can avoid all unnecessary input.
++        output.status = ComputerSegmentStatus::Confirmed;
++        output.actions.clear();
++        output.first_unfinished_action = Some(0);
++        assert_eq!(validate_result(&input, &output), Ok(()));
++    }
++    #[test]
++    fn controlled_segment_result_enforces_prefix_and_unfinished_position() {
++        let input = segment(vec![ComputerInput::PointerMove { point: p() }; 2]);
++        let mut output = result();
++        assert!(validate_result(&input, &output).is_err());
++        output.first_unfinished_action = Some(1);
++        assert_eq!(validate_result(&input, &output), Ok(()));
++        output.actions[0].index = 1;
++        assert!(validate_result(&input, &output).is_err());
++        output.actions[0].index = 0;
++        output.actions[0].dispatch = ComputerDispatch::Unknown;
++        output.first_unfinished_action = Some(0);
++        assert_eq!(validate_result(&input, &output), Ok(()));
++        output.actions.push(delivered(1));
++        assert!(validate_result(&input, &output).is_err());
++        output.actions = vec![delivered(0), delivered(1), delivered(2)];
++        assert!(validate_result(&input, &output).is_err());
++    }
++    #[test]
++    fn controlled_segment_result_rejects_false_route_and_effect_facts() {
++        let input = segment(vec![ComputerInput::TypeText { text: "x".into() }]);
++        for fault in 0..8 {
++            let mut output = result();
++            let row = &mut output.actions[0];
++            match fault {
++                0 => row.action = None,
++                1 => row.dispatch = ComputerDispatch::NotDispatched,
++                2 => row.action.as_mut().unwrap().effect = ActionEffect::Confirmed,
++                3 => row.action.as_mut().unwrap().effect = ActionEffect::Refused,
++                4 => row.action.as_mut().unwrap().route = ActionRoute::GlobalInput,
++                5 => row.action.as_mut().unwrap().delivery = None,
++                6 => {
++                    row.action
++                        .as_mut()
++                        .unwrap()
++                        .delivery
++                        .as_mut()
++                        .unwrap()
++                        .delivered_count = Some(0)
++                }
++                7 => {
++                    row.action.as_mut().unwrap().delivery.as_mut().unwrap().mode =
++                        ActionDeliveryMode::Unknown
++                }
++                _ => unreachable!(),
++            }
++            assert!(validate_result(&input, &output).is_err(), "fault {fault}");
++        }
++        let mut output = result();
++        let action = output.actions[0].action.as_mut().unwrap();
++        action.route = ActionRoute::GlobalInput;
++        action.delivery.as_mut().unwrap().mode = ActionDeliveryMode::Foreground;
++        assert_eq!(validate_result(&input, &output), Ok(()));
++    }
++    #[test]
++    fn controlled_segment_result_bounds_recovery_and_static_codes() {
++        let input = segment(vec![ComputerInput::TypeText { text: "x".into() }]);
++        let mut output = result();
++        output.recovery_attempts = 2;
++        output.actions[0].code = Some("target_stale_2".into());
++        assert_eq!(validate_result(&input, &output), Ok(()));
++        output.recovery_attempts = 3;
++        assert!(validate_result(&input, &output).is_err());
++        output.recovery_attempts = 0;
++        for code in ["", "private input text", "<tool>"] {
++            output.actions[0].code = Some(code.into());
++            assert!(validate_result(&input, &output).is_err());
++        }
++        output.actions.clear();
++        output.first_unfinished_action = Some(0);
++        output.status = ComputerSegmentStatus::OutcomeUnknown;
++        assert!(validate_result(&input, &output).is_err());
++        output.status = ComputerSegmentStatus::Paused;
++        assert_eq!(validate_result(&input, &output), Ok(()));
 +    }
 +    #[test]
 +    fn controlled_segment_preserves_unicode_and_protocol_looking_text() {
@@ -516,7 +761,7 @@ new file mode 100644
 diff --git a/libs/cua-driver/typescript/src/computer.ts b/libs/cua-driver/typescript/src/computer.ts
 --- a/libs/cua-driver/typescript/src/computer.ts
 +++ b/libs/cua-driver/typescript/src/computer.ts
-@@ -29,6 +29,20 @@
+@@ -29,6 +29,21 @@
    ComputerStep,
    ComputerStepResult,
    ComputerTerminal,
@@ -534,6 +779,7 @@ diff --git a/libs/cua-driver/typescript/src/computer.ts b/libs/cua-driver/typesc
 +  ComputerSegmentStatus,
 +  ComputerWindowAction,
 +  validateComputerSegment,
++  validateComputerSegmentResult,
    ConfiguredDriverOptions,
    RuntimeAuthorizationOptions,
    ScrollDirection,

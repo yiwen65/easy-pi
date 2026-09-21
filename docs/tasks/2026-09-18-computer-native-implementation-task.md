@@ -3,8 +3,9 @@
 - Created: 2026-09-18
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: done
-- Source: /Users/w/Projects/easy-pi/docs/EASY_PI_COMPUTER_IMPLEMENTATION_PLAN.md；用户已确认执行契约。
+- Overall status: in_progress
+- Source: /Users/w/Projects/easy-pi/docs/EASY_PI_COMPUTER_IMPLEMENTATION_PLAN.md；P00–P08限定交付已完成；2026-09-20用户确认通用Computer修订需求并要求“制定实现方案并更新 task 文档”。
+- Current scope: G00–G07通用化执行；T-042/T-043 done，T-044 in_progress/coordinator，其余按依赖推进。用户于方案后明确完全授权并要求自主完成及验证，不停在计划/失败尝试。
 
 <!-- task-doc-section:background-goal -->
 ## Background and goal
@@ -13,8 +14,28 @@
 
 本文件是唯一任务状态源；`docs/implementation/computer/progress.md` 是本文件的阶段导航与证据索引，不另行维护竞争任务列表。
 
+**当前目标升级**：从已交付的限定Computer首版升级为共享桌面的通用操作能力。结构化定位优先、截图兜底，按后续动作的信息依赖分段执行，在依赖边界确认实际状态，并从当前已生效状态有界自动恢复。优先后台、不抢系统光标和焦点；必要时自动前台接管，代理任务优先，但不屏蔽物理键鼠。增加完整文本/键鼠/窗口操作和实时虚拟鼠标，直接使用现有应用与登录态。速度与便利性优先，实测后冻结性能指标。
+
+**完成语义**：T-001–T-041的done只保留P00–P08当时的限定验收，不代表新目标完成。通用化须T-042–T-056的真实应用、恢复、并发输入、渲染和独立安装门禁全部满足；不再以接口齐全或专用表单通过替代通用交付。
+
 <!-- task-doc-section:scope-non-goals -->
 ## Scope and non-goals
+
+### 当前已确认契约（2026-09-20，通用化规划优先于历史范围）
+
+- **最新执行授权**：用户在方案完成后明确“You have full authorization to use all available tools and permissions”，要求自主执行到交付验证完成，必要时使用子代理、修复失败和尝试替代路线，仅客观不可避免阻碍才停止。Mode现为execute；允许本方案必要源码/构建/安装/GUI/真实应用测试和阶段提交。新实际操作仍遵守已确认的不屏蔽物理输入、未知效果不盲重放、OS权限正常流程、凭据不落盘与保留并发工作/历史证据。不是对无关个人内容、公开发布或清未知lease的任务需要证明。
+- 上一轮仅规划，确实未实施/运行；其检查结果保留，不作为本轮native资格。
+- 实施目标平台为当前macOS arm64/Node；通用指输入和应用覆盖，不是所有OS、所有应用100%兼容。首验环境沿用Node24.15.0/macOS26.5.1；其他版本在实际资格后再声明。
+- 使用共享桌面、现有应用/文档/浏览器登录态；现有浏览器没有可用DOM通道时必须走AX/像素/前台路径，不能要求用户搬到空白profile才算支持。旧isolated CfT路线可以保留为可选能力，不是默认替代方案。
+- 后台路径以不抢系统光标/焦点、不因其他窗口的无关用户输入全面停工为验收目标；无法后台完成时自动前台兜底，代理任务优先、允许打断用户。**不屏蔽物理输入**，不承诺前台兜底或同文档并发编辑零干扰，始终提供紧急停止。
+- 完整能力：中英文/Unicode文本、组合快捷键、按住与释放、鼠标移动/左右键/双击/拖拽/双轴滚动、应用与窗口定位/切换/移动调整等日常操作；虚拟鼠标在目标窗口实时叠加指针及动作反馈，不截获用户事件。
+- 结构化定位优先，必要时截图兜底；按信息依赖而非固定动作数量分段，在关键依赖节点/段末确认。失败后自动重观察、重定位、切换已允许路径；已投递结果不明先核对，不盲目整段/整任务重试。恢复是有限状态处理，不新增隐藏Agent loop。
+- 沿用已授予的系统级操作权限，默认Full Access不要求额外能力清单、逐动作确认或重复授权。删除无价值检查/重复工作/无依据等待；保留目标准确性、内存与输入释放、取消及资源收敛所必需的机制。OS要求的权限仍走系统机制，不以修改TCC数据库/禁用系统保护替代能力实现。
+- **明确排除**：轨迹录制/可视化回放/按历史轨迹重新执行系统、独立虚拟桌面/虚拟机、物理输入屏蔽、另一个通用npm产品或Agent运行时、无关仓库重构、公开发布。必要的瞬态操作状态、错误/性能测试证据不扩展成录制产品。
+- 后续验证使用真实应用中的可重复测试内容；支持现有登录态不等于读取/导出凭据，也不自动执行无关删除、付费或对外提交。必要真实provider沿用gpt-6-astra/low、有界定向opt-in，不改变凭据不落盘约定。本轮不调用。
+- 保留P00–P08源码、补丁、失败raw、unknown事实和本地交付归档；新实现另建pi内stage，不覆写已资格产物，不复用旧quiet/TCC/C237作为新准入证据。参考clone只读，并发修改不覆盖。
+
+### 历史P00–P08授权与事件（不覆盖上述当前契约）
 
 - **最新授权更新（2026-09-20，优先于以下历史限制）**：用户明确取消所引“No real model calls, publishing/push or additional commits since0d696a1f3”约束，允许任务必要的真实provider测试使用`gpt-6-astra`、推理强度`low`，允许阶段性commit，取消所引publishing/push禁止条款。旧qd/kmodel_latest high批准保留，但后续必要真实验证优先采用本次指定模型；调用前核验实际provider/model配置，不猜endpoint或静默换模型。常规回归继续无真实API；真实测试必须显式opt-in、有界、定向，凭据不打印/持久化。历史“零调用/未push/HEAD”是当时事实，不再作为禁止推进条件。外部发布如实际需要仍按仓库发布流程、明确目标和验证结果执行，不自动推送无关并发修改。
 
@@ -44,6 +65,26 @@
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
 
+### 通用化规划时的源码事实（2026-09-20，只读核对，不是新运行资格）
+
+`N/`是Cua Rust crates相对源码路径缩写：下表只读核对的位置为pi内`.artifacts/computer/p06-trim/upstream/libs/cua-driver/rust/crates/`；后续实施任务的写入落点统一为拟新建的`.artifacts/computer/general/upstream/libs/cua-driver/rust/crates/`独立副本，不能修改已资格的p06-trim。两者均不是外部Cua参考clone。方法存在不等于已满足受控终态或新场景资格。
+
+| ID | Confirmed fact | Evidence |
+| --- | --- | --- |
+| F-022 | 规划开始时HEAD为5283ad93407c6f67bd1889dfbc6314964a964499，task无未提交差异、暂存区为空；其他并发脏文件保留 | 本轮git log/status/diff只读结果；源码集成提交d84c2af438 |
+| F-023 | Desktop模型协议只有discover/select/capture/click/单行scroll/13个固定key，加1–8步Fill/Press/AssertValue；禁止chord/foreground/replay写在工具描述中 | native/computer/desktop/{contracts,tool}.ts；controlled/{contracts,tool}.ts |
+| F-024 | 图像引用每次consume；像素输入会重拍整图比较，tracking后再次重拍；硬件held/counter变化导致user_input_conflict；外层还扫描完整AX树 | desktop/view.ts；N/platform-macos/src/input/controlled.rs、input/controlled/keyboard.rs、tools/computer.rs |
+| F-025 | selector每步重新observe；Fill(selector)再assert_value完整observe；观察、capture、mutation均进入with_focus_cleanup，包括50ms settle、snapshot.detect及callback drain | N/cua-driver-sdk/src/computer/{plan,plan_native}.rs；N/platform-macos/src/tools/computer.rs；没有声称上述每项都是可删开销 |
+| F-026 | 默认manifest未提供已选Unrestricted，工具contract approval=never；SDK树hash在首次lazy getApi加载检查，而不是逐动作人审或每次重新import | desktop/entry.ts、desktop/loader.ts；controlled/tool.ts；core/computer/activation.ts |
+| F-027 | 产品desktop和isolated-browser是二选一binding；browser工具只prepare新profile，没有现有应用到DOM/像素的统一切换 | desktop/entry.ts；browser/tool.ts；N/cua-driver-sdk/src/computer/browser.rs |
+| F-028 | 受控Rust边界没有通用文本/chord/拖拽；保留的legacy工具有AXSelectedText、Unicode键事件、foreground以及hotkey实现，但仍含逐字符延时、通用spawn_blocking和独立fallback语义，不能直接注册当已资格输入 | N/platform-macos/src/tools/{type_text,hotkey}.rs；input/controlled/keyboard.rs；新接线需验证副作用和release |
+| F-029 | fast profile实际选inactive_overlay；legacy renderer入口要求OS主线程且不正常返回，animate_cursor_to等待arrival，直接接入会与Node宿主/速度目标冲突 | native/computer/patches/p06-fast.md；N/platform-macos/src/cursor/{mod,inactive_overlay}.rs；overlay.rs的animate_cursor_to/run_on_main_thread |
+| F-030 | 现有ComputerHost可复用single-flight、共享scheduler、result/terminal分离、撤权及quarantine；不是要重新写生命周期运行时 | packages/coding-agent/src/core/computer/{host,activation}.ts |
+| F-031 | P08实测表单median32.6682s→19.0869s，candidate observe median1122.464ms；只覆盖旧确定AX任务，不能代替新通路预算 | docs/implementation/computer/benchmark-summary.md；历史完整套件仍九失败 |
+| F-032 | 用户已结构化确认：自动前台兜底、代理优先、不屏蔽物理输入、现有应用/登录态、桌面实时虚拟鼠标、完整输入+真实任务、实测定指标；新增结构化/截图/分段确认/有界恢复，明确删去回放 | 本轮需求确认会话及最后“确认并继续” |
+
+### 历史P00–P08事实
+
 | ID | Confirmed fact | Evidence |
 | --- | --- | --- |
 | F-001 | pi HEAD 与方案一致，分支 my-pi，有 22 个已修改/删除路径 | P00 开始前 git status --short / rev-parse HEAD |
@@ -71,11 +112,36 @@
 <!-- task-doc-section:assumptions-questions -->
 ## Assumptions and open questions
 
+### 通用化：需求已确认，技术待证项不伪装成现成能力
+
+- 额外产品需求假设：无。既有已确认选择见Scope。以下是实现内需验证的技术分支，不再为既定Full Access或前台优先反复索要同意。
+- A-01：不同应用、同PID多窗口对后台Unicode/chord/拖拽的接收方式不同。先建立逐动作路由矩阵；不能可靠定向的动作走已批准的前台路径，不能用“任意用户活动”统一拒绝，也不能声称PID投递天然窗口隔离。T-042/T-046–T-048负责证实。
+- A-02：现有浏览器未必暴露可绑定DOM通道。优先AX/像素满足现有登录态；仅对明确可用连接启用DOM，借用窗口只detach观察/连接，不kill用户进程或删除profile。是否值得新增专用DOM接入桥由实测决定，不作为通用输入的前置阻塞。T-045负责。
+- A-03：AX通知/页面事件可能缺失或延迟，不能把未收到事件当作UI未变化。事件标记失效+目标局部读取，证据不足再截屏；对absence/uniqueness只在声明的完整局部范围内下结论。T-045/T-049负责。
+- A-04：现有AppKit renderer不能直接占用Node主线程。方案采用仅渲染的受拥有helper承载AppKit主循环，复用可用绘制/坐标逻辑；不运行Agent或输入执行器。其可退出性、截图排除和包体成本在T-051验证，失败不假报已渲染。
+- A-05：性能数值和恢复预算按用户选择在实测后冻结：T-042先冻结旧可比通路与任务集；新输入首次可用时补齐基线，必须先冻结再优化/正式采样。最终T-054不允许见结果再放宽阈值。
+- A-06：前台接管不屏蔽物理输入，因此并发修饰键/用户切焦点可能改变结果；保留实际目标和结果核对，不无界抢焦点或自动补按用户键。目标只承诺明确后台路径的非抢占，前台结果与用户冲突需如实报告。
+
+### 历史实现前提
+
 - 实现前提：可选SDK输入由可信宿主提供、加载进程未预载/篡改模块、无loader hooks、文件加载期间稳定。hash是drift检查，不是恶意宿主或并发写入下的安全隔离；真实probe用独立最小环境进程，但不是OS sandbox。
 - 已验证固定Rust1.97.1和三个白名单包可取得，SDK release编译及无driver加载通过。本轮专用窗口GUI及必要SDK附带metadata/焦点行为已获授权；用户已确认此前授权条目不是这份调试版，更正后同一debug身份新进程两项true；权限目标不匹配是本次已纠正的阻塞，不把此前entitlement warning、cache标签或后台进程年龄当作已证明根因。每个未来行动进程仍需自己的预检和归属；P02两行动进程与限定控制面/fixture已实测。后续模型授权见Scope；SDK settlement不等于OS终态。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
+
+### 通用化总门禁
+
+- AC-G1：完整输入原语有真正应用投递和结果证据，Unicode不吞字、不因legacy字符串清洗改变用户文本；修饰键/鼠标按住在取消/异常后释放，不能只有映射/编译通过。
+- AC-G2：能直接操作既有应用和登录浏览器，不强制新profile、浏览器重启或逐任务配置manifest。结构化与图像路径可在同一Computer binding/普通Agent loop切换，用户不手工编排后端。
+- AC-G3：后台路线在用户操作另一个窗口时实际继续，无系统光标移动/焦点抢占；不支持后台的动作自动前台兜底并标明实际route，不因用户忙而等待安静时段；不屏蔽物理输入。准确性需要停止时给具体冲突，而不是泛化全局busy。
+- AC-G4：按信息依赖分段；确认actual postcondition而非SDK返回；目标消失、导航、弹窗、布局变化会在依赖边界停下取新证据，不把旧坐标跨变化复用。有限恢复不重复已提交/删除/输入，不新建第二Agent loop，不自动清dirty lease。
+- AC-G5：真正可见的虚拟鼠标/点击/拖拽反馈，跨窗口位置/DPI正确，点击穿透，不被当作操作目标或污染模型截图；渲染不阻塞输入，host关闭后无遗留helper/窗口。
+- AC-G6：真实安装产品通过下方WF矩阵，包括用户并发、现有浏览器、非AX表面、失败恢复与紧急停止；pure/faux用于确定性回归，不能替代真实应用验收。
+- AC-G7：按冻结条件报告原生分项与完整任务p50/p95、成功率、错误性质、模型请求数及CPU/内存；旧通路不产生超过已冻结噪声/回退预算的退化，不删失败/事后改门槛。可选渲染开关的性能差分另列。
+- AC-G8：最终按同一源码/ABI/pins制作匹配产品和资产，在仓库外实际安装/迁移，验证CLI/SDK、子代理、压缩、过滤和最终close。普通coding保持native/renderer零激活；历史九失败单独比较，不假报全仓全绿。
+
+### 历史P00–P08门禁
 
 - P00：ref 与脏基线可复查；记录 build:offline/check/test.sh 实际命令、退出码与失败；至少一个真实 AgentSession + faux provider 入口通过。
 - P01：默认不开 Computer；有界协议与 fake observe→execute→result 通过真实 loop；注册、custom tool、双向转换、snapshot 及最终 contract/resource 消费得到测试证明。
@@ -85,6 +151,16 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
+### 通用化依赖与批次
+
+- G00 T-042（基线/可行性）→ G01 T-043（契约）、T-044（精简策略）→ G02 T-045（定位/既有应用）→ T-046（文本/键盘）→ T-047（鼠标/窗口）→ T-048（后台/前台路由）→ G03 T-049（依赖分段/确认）→ T-050（恢复）→ G05 T-052（产品闭环）→ G06 T-053（真实工作流）→ T-054（正式性能）→ G07 T-055（独立交付）→ T-056（最终验收）。
+- G04 T-051（虚拟鼠标）依赖T-043/T-048，汇入T-052；逻辑上可与T-049/T-050的纯TS测试准备分开，但实际native源、Cargo feature、ABI生成、helper构建由同一owner串行；没有共享输出的并行构建。
+- T-042/T-043已done；T-044由coordinator继续，T-045–T-056按依赖pending。已使用两个真实Codex编码子代理（只读native审计、限定TS契约实现），均已收回并复核；不是产品GUI推理请求。
+- writer约束：coordinator独占本文件和最终集成；native source/patch/锁/生成/pins只有一个owner；共享AgentSession/main/sdk若再次改变先保存每个Computer hunk的前后来源，不能整文件覆盖并发修改。既有成功stage及归档只读，新输出使用独立general目录。
+- 调度约束：所有合成输入仍经同一现有外层desktop scheduler；用户并发能力不等于放开多Agent互相穿插按键。native内部不再次acquire同一外层lease，恢复不能递归调用模型工具造成死锁。
+
+### 历史依赖与批次
+
 - Dependency graph: T-001/T-002/T-003 → T-004/T-005 → T-006；T-006 → T-014/T-015/T-016；T-006/T-014/T-015 → T-007 → T-008 → T-009 → T-010 → T-011 → T-012 → T-013。T-016 独立复核共享树最新基线。
 - P03 subgraph: T-007 → T-017/T-018；T-017 → T-019；T-017/T-018/T-019 → T-020；T-018 → T-021 → T-022 → T-023 → T-020（真实挂起后的离线修复、重启后一次性恢复、新发现的TCC验证阻塞）；T-008 的 done 门禁包含 T-017–T-023 全部验收。T-022与实际GUI由coordinator串行执行，不与任何canonical lease owner并行。T-017 与 T-018 文件不重叠，原生生成/构建由单一 owner 串行；T-019 只在 T-017 接口冻结后开始。
 - Parallel batches: P00 的源码审计（T-001/T-002）只读，与 coordinator 的隔离基线（T-003）并行；P01 的 wrapper（T-004）与新增 Computer 模块（T-005）文件不重叠。P02 恢复时 coordinator 独占 T-014 依赖/构建准备，T-015 只读构建/加载安全审计和 T-016 独立快照回归可并行，证据目录不重叠。
@@ -92,8 +168,87 @@
 - P06 host subgraph: 已封存native子集8314efe7/C145 → T-037 → T-035 → T-036 → T-011；T-037以已存在的固定产物为输入，coordinator串行修改SDK边界与共享最小context接线，避免native生成/alias消费者并发漂移。
 - Serialization constraints: 本文件及所有实施记录只由 coordinator 修改；集成测试 T-006 在两项 P01 实现完成后；不并行改共享构建输出、锁文件或用户已改文件。
 
+## 通用化实现方案（G00–G07，拟实施）
+
+### 1. 复用边界与最小改造
+
+保持`core/computer/host.ts`、既有Agent loop、ResourceScheduler和UniFFI/N-API；以`desktop/`为统一工具入口扩展，不再把desktop和DOM当作不能互通的两个产品。Rust负责类型化动作、实际投递、取消/释放和有限状态确认；TS只负责模型协议、当前可见视图、结果投影和生命周期接线。需要模型重新判断图像/下一阶段目标时返回普通tool result，由原Agent loop继续，不在native或helper里调用模型。
+
+输入实现优先借用已存在的Cua AX、键码、坐标、滚动和窗口操作原语。**不能直接注册全部legacy工具**：先把会派生任务的路径纳入现有operation所有权，移除其隐含重试/重复投递和通用daemon预算假设，再生成真正绑定。原始通用工具仅是可复用来源，不是取消/正确性证明。新增模块只用于当前缺失的职责（例如segment/confirmation/recovery），不另造任务平台、权限框架或日志产品。
+
+### 2. 统一目标与结构化/截图定位
+
+- 以会话内目标句柄关联应用PID/start、窗口、结构控件或图像区域、观察版本及坐标变换；模型使用公开ref/定位条件，不自行传dylib、进程生命周期或浏览器profile路径。
+- 查找依次使用当前目标局部AX/可用DOM语义（标识、角色、名称及必要的容器关系），有歧义再缩小范围或截图，不因整棵树不完整就拒绝一个已能准确定位的控件。不把截断/遗漏当不存在证明。
+- 局部正向句柄可短期复用；窗口移动、导航、控件销毁、模态和目标变化使相关证据失效。事件用于提示变化，不单独证明未变化。跨依赖边界重新定位；需要新像素判断时返回当前截图而非套旧坐标。
+- 用同一窗口截图/局部区域作为无AX、Canvas、复杂控件与子框架的兜底。模型已有可用定位依据时不重复请求图像；不可见/被压缩/被过滤的截图不能继续作为模型坐标依据。native依据当前结构自动重新定位是新证据，不是复活历史图片。
+- 既有登录浏览器先作为普通用户窗口操作。已存在并可精确绑定的DOM连接可加速；没有连接时自动走AX/截图，不重启浏览器开启调试、不复制cookies/profile、不以新CfT窗口冒充原窗口。借用应用/连接与自有CfT资源明确分离：关闭前者只释放本工具句柄，不终止用户应用。
+
+### 3. 输入原语与前后台路由
+
+- 文本区分`插入`与`替换字段值`，防止append重试变重复文本。优先单次AX/可用DOM插入，接收语义不可靠时转Unicode键事件；终端不能靠AXValue变化声称pty收到输入。中文/emoji/组合字符、多行与长文本按实际接收值验证，不能凭字符长度推算准确提交前缀。
+- 补齐通用key/chord、key/button down/up、move、左右/双击、drag、带数量的双轴scroll，以及窗口激活/移动调整等。明确键盘布局、修饰键、DPI/多显示器坐标和操作段内目标。
+- native维护**仅代理自身按下的状态**及释放义务，跨动作持有时必须有最大持有预算；cancel、异常、目标切换、session revoke/close均先释放。不能全局release用户按住的键，也不能用JS定时器成功返回代替native释放回执。
+- 路由按动作与目标能力选择：准确的结构化后台 → 可用的定向事件后台 → 前台接管。不把失败的未知副作用原样再投一次；先确认零生效或定位剩余状态，再转下一条路。
+- 前台模式由宿主已批准策略自动选择，不等待用户空闲、不逐次弹审批。每段持有一次前台控制，避免每个按键前后切换；全局HID只能发往已核对的实际前台目标。若用户中途切换导致目标不再成立，释放本段输入后返回具体状态，而不是把事件发送给另一个应用。
+- 用户优先级是允许代理主动接管，不是屏蔽物理输入。复用legacy foreground helper前必须审计其event tap/suppression、光标移动及恢复行为，去除普通物理事件拦截。可行时段末恢复原焦点，但不得覆盖用户在执行中明确选择的新窗口；无法可靠区分时不声称自动恢复不干扰。
+
+### 4. 信息依赖动作段与状态确认
+
+建议的协议职责为`目标 + 已知步骤 + 本段预期条件 + 有界预算`，具体字段/生成类型在T-043冻结，不把这里的名称当已有API。
+
+例：**定位两个字段 → 一段内填写 → 提交 → 检查成功标识/校验错误**；若下一步必须等待新页面控件才可决定，则在此返回新状态，由原loop继续下一段。已知的按下/移动/释放可以组合；硬性的内存/工作量上限仍存在，但不能把“每8步”当业务确认规则。不得通过把整任务塞进长段来绕过新信息依赖。
+
+- 低层投递仍逐primitive响应取消并保持目标有效；它与业务确认分开。字段便宜的局部读回可保留，但不触发每步完整AX遍历/截图/LLM往返。
+- 段末和显式依赖点优先用目标局部读回、窗口/页面身份变化、应用可验证状态确认；结构信息不足才截图。`API成功`、`事件发出`、`原生terminal`、`业务成功`分别投影，不能互相替代。
+- 结果至少能区分执行过的步骤、已验证的条件、首次未完成位置、已投递但效果不明的动作和需要的新观察。不要把旧completedSteps直接当“业务确认前缀”。
+- 等待预期条件用有限的事件等待/局部轮询，出现目标状态即可继续；纯观察与不会变焦点的已证路径不支付通用秒级窗口检测。没有通知时允许短轮询，但超时是未知/未满足，不是成功或自动重复提交依据。
+
+### 5. 有界恢复，而非录制重放
+
+| 当前事实 | 自动处理 | 不允许的处理 |
+| --- | --- | --- |
+| 确定未投递、目标缺失/过期/歧义 | 在当前窗口重新观察、重定位，必要时截图/切换可用路由 | 原ref指向别的相似控件还当同一目标 |
+| 已投递，预期状态已满足 | 标记本段条件成立，从下一依赖点继续 | 因旧回执丢失再点提交/再输整段 |
+| 已投递，确定未生效或剩余状态可准确识别 | 在剩余尝试/时间预算内只执行必要剩余动作 | 仅凭截图没变化或文本长度差就断定零副作用 |
+| 部分完成或效果无法证明 | 返回已知事实与新观察，允许原loop重规划；仍不能确定的非幂等动作停止并报告 | 整段从头重试、自动Undo、删除再新建来伪装恢复 |
+| cancel/revoke、native未收敛、OS权限缺失 | 释放自身输入、停止新动作，报告实际状态；权限缺失走正常系统流程 | 清dirty marker、换新owner覆盖未知、静默重启用户应用 |
+
+native只做有限的已知策略重定位/再确认，不做隐藏语义规划。恢复计数和时间预算跨内部route切换共用，不因新operation或新截图重置；同一失败状态无进展不能空转。需要模型判断时携带剩余预算回到原loop，SDK直调也受相同上限约束。具体预算在基线后冻结。
+
+### 6. 精简检查与耗时路径
+
+| 环节 | 方案处理 | 保留/删除依据 |
+| --- | --- | --- |
+| 默认Full Access和用户许可 | 不增加第二套Computer人审；能力manifest仅显式bounded embedding保留，不成为默认任务前置 | 当前已Unrestricted/approval=never，不能虚构删提示的收益 |
+| 安装来源、ABI/架构、SDK hash | 保留安装/首次加载的必要检查及进程内缓存，不进入逐动作热路；准确版本限制可在兼容资格后放宽 | 防止错库/错ABI直接崩溃；当前并非每步重新hash |
+| TCC/系统权限 | 启用时正常检查/申请，运行中依OS错误和需要的失效检查；不每步跑日志归属采集 | 旧fixture的tccd取证不是产品协议；不能把缺权限变为假成功 |
+| 人为session/idle TTL | 审计entry的3600s/600s授权TTL，Full Access尽量随真实session生命周期，不因思考/用户任务时长反复失效 | 与每段deadline、输入最大持有预算分开，后者用于有限工作/释放 |
+| 全局HID held/counter | 去掉其对可准确后台路由的无差别否决，改为动作相关目标/修饰键冲突处理 | 支持用户在别处活动；不通过屏蔽物理输入达成 |
+| 全树扫描、整图hash、重复查询 | 局部验证和版本失效合并到依赖边界；结构可准确绑定时不要求像素逐帧完全一致 | 仍覆盖目标变化、模态/几何失效；不能仅删检查后沿用旧引用 |
+| focus/window检测与动画等待 | 纯读不付副作用检测；段级观察窗口变化，事件/有界轮询替代无依据固定sleep；渲染不等arrival | 用晚弹窗/用户切焦点/首字符丢失对照验证，不能只把常量改0 |
+| schema、坐标、输入释放、terminal、scope生命周期 | 保留最小必要实现，合并确有重复的层 | 与准确性、native安全、可停止性直接有关，不能按“校验”名字批量删除 |
+
+每项记录源位置、实际调用次数、分项耗时、保留/移位/删除理由和反例测试。先测量再优化，不把所有开销归给FFI、权限或hash，也不恢复被裁剪的全部legacy设施。
+
+### 7. 实时虚拟鼠标
+
+新增仅渲染的macOS helper承载AppKit主循环，采用非激活、点击穿透的目标窗口叠加层；父native host拥有其进程、消息通道和退出。优先复用现有cursor的几何/绘制逻辑，不把`run_on_main_thread()`塞入Node，也不重新开启daemon/MCP/录制/PiP。
+
+输入路径只发布紧凑的目标/位置/按下释放/点击反馈状态，合并过时move、限制队列，不等待路径动画到达才投递；点击反馈应表示实际dispatch，而不是预告即当成功。renderer启动/显示失败独立报告，不重放输入，也不能在最终验收中把无图形的no-op算通过。
+
+隐藏/裁剪至目标窗口可见区域，处理窗口移动、多个显示器/DPI和切换；不通过移动系统光标画“虚拟”光标。把本工具拥有的overlay ID从发现/模态判定和模型截图中排除，不能排除任意外部窗口来绕过准确性检查。只有最新会话/operation的瞬态状态，不记录视频/可回放轨迹。
+
+### 8. 产品接线和交付
+
+CLI/SDK仍一个显式Computer能力；提供统一auto策略，不让用户在desktop/DOM/foreground之间手工编排。原tools/exclude/no-tools、root/child/reload/compaction消费当前binding的行为继续；更新工具描述，不再宣称“无foreground/chord”，但必须说明未知效果、实际route和上下文失效。
+
+正常coding不加载native/renderer，第一次Computer动作才启动所需资源；helper只随匹配Computer资产发布，运行时无Rust构建/在线native下载。最终Node独立目录安装、source/license/pins/生成ABI和helper闭包一起验收；Bun仍独立报告，不用通用化任务顺带修无关仓库问题。
+
 <!-- task-doc-section:task-list -->
 ## Task list
+
+T-001–T-041保留历史限定交付；新增T-042–T-056位于本节末，状态以各任务字段为准。
 
 ### [x] T-001 — P00 easy-pi 工具与生命周期路径审计
 - Status: done
@@ -728,13 +883,281 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-042 — G00 新基线、能力盘点与测量契约
+- Status: done
+- Owner: coordinator
+- Objective: 在改变当前行为前建立通用化的可比基线、真实应用任务集和逐路由可行性清单。
+- Inputs and prerequisites: T-013旧交付；当前确认契约；转入execute后方可开始。
+- Scope or files: 新pi内general stage/证据；本authority；现有native源码、打包资产和对应测试只读基线。
+- Expected output: 源/产物/环境清单、WF任务输入、现有路径分项计时、检查分类表、后续预算冻结规则。
+- Dependencies: T-013
+- Execution steps: 封存新起点和dirty hunk；先审计legacy输入的投递/派生任务/抑制行为；用已可证明terminal的路径测现有observe/capture/form/加载；缺失能力标absent，不记零耗时；固定应用/窗口/测试内容与独立结果oracle。
+- Acceptance criteria: 不改旧成功产物；区分产品成本与GUI harness取证成本；先有基线才选优化，不把现成legacy方法当新平台资格。
+- Verification method: 输入hash/来源核对；隔离build/check及必要基线回归；固定环境重复测量；审阅新任务和预算契约。
+- Validation evidence: general/baseline-sources.json封存636 native源/1927主树文件/81pins，独立APFS stage不改p06-trim；g00-contract.md冻结WF应用和旧可比通路目标、新通路补充冻结规则。真实100observe＋三fresh form独立verify通过：observe median1113.245979ms/p951149.507125ms，form median18959.595833ms，126terminal/八自然退出/无抢焦点至C241。新isolated build/check0（1420无修复）/204pass+5skip/controller38/drift0；full suite1为旧九失败＋长快照路径导致一条render字符串换行断言，保留原失败；短g00同源码定向28/28且check0，不称全套绿。实际Codex gpt-6-astra/low只读审查完成，coordinator复读gate/TLS/AX/keyboard/foreground关键源后采纳最小controlled分支路线；没有新输入实现资格。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-043 — G01 统一目标、完整动作与分段结果契约
+- Status: done
+- Owner: coordinator
+- Objective: 冻结统一Computer协议和真实native类型，容纳结构/像素定位、完整输入、依赖边界与恢复事实。
+- Inputs and prerequisites: T-042能力和调用链盘点；现有host/loop不重写。
+- Scope or files: native/computer/desktop/{contracts,tool,projection,view}.ts；controlled适配层；N/cua-driver-sdk/src/computer及contract的拟新增类型/测试。
+- Expected output: typed动作/目标/条件/实际route/效果结果，执行与确认计数分离，新的genuine UniFFI绑定及协议测试。
+- Dependencies: T-042
+- Execution steps: 明确插入与替换、key/button状态、drag/scroll量、窗口动作和依赖边界；分开dispatch/terminal/condition；规定预算、操作身份及UI文本不授予指令权；保持closed参数而非任意脚本/JSON直通；对direct SDK和模型调用使用同一语义。
+- Acceptance criteria: 不以既有8步上限定义业务分段；仍有内存/步骤/按住时间边界；新类型真实生成，类型/codec拒绝含混目标、坏坐标和结果自相矛盾。
+- Verification method: 协议/codec单测、真实生成及--check、C header、native strict与root graph类型检查、现有host回归。
+- Validation evidence: 协议子集已提交264917341：closed TS schema/parser/真实生成codec及三authored native路径补丁；parser12/12、genuine no-host codec3/3、SDK controlled66/66（含新七项）、生成/check/stage/header/strict TS及隔离g01 check0/204pass+5skip/controller38/drift0。补丁9c995632严格apply/byte/reverse通过；仅规范空白context行，原bcc8f4c证据保留。旧636源/81pins未变，无产品pin promotion。后续结果契约补齐：复用ActionResult.route/delivery.mode，不新增重复枚举；拒绝投递/效果/路由矛盾、非连续前缀、错误unfinished位置、恢复超过两次及native视觉假确认。SDK70/70（含11segment）、genuine codec5/5、strict types和全部生成/check/stage/header通过；g01r全check0（1424无修复）/204pass+5skip/controller38/drift0。最终累计补丁410fe49e严格apply/byte/reverse通过，证据segment-result-inputs.json；旧输入不变。只验收契约，执行器/64步预算接线、释放和业务确认属于后续任务，不冒称已实现。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-044 — G01 Full Access精简与操作生命周期策略
+- Status: in_progress
+- Owner: coordinator
+- Objective: 把确无必要的授权/检查开销移出正常操作路径，而不牺牲正确目标和可停止性。
+- Inputs and prerequisites: T-043契约；T-042检查分类与实测。
+- Scope or files: desktop/entry.ts、loader.ts；N/cua-driver-core受控scope/授权适配与operation；platform-macos tools/computer.rs和focus/window检测；对应回归。
+- Expected output: 按安装/启用/目标切换/段/primitive分层的必要检查，Full Access无重复人审和人为过期阻塞。
+- Dependencies: T-043
+- Execution steps: 保留已缓存的首次ABI校验；审计TTL及重复canonical查询；对只读和已证无焦点副作用路径去通用等待；采用段级观察和失效触发的局部重验；调整旧global HID拒绝的策略接口但在对应输入路由验证前不推广。
+- Acceptance criteria: 每项删减有测量/反例或明确失去消费者的证据；不运行tccd collector作生产步骤；cancel/revoke、输入释放、资源ledger和未知终态规则不被省略。
+- Verification method: before/after调用计数与状态机测试，迟到窗口/用户切焦点/权限变化回归；locked/offline native tests及隔离root check。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-045 — G02 结构化定位、现有应用与截图统一通路
+- Status: pending
+- Owner: unassigned
+- Objective: 让既有窗口、登录浏览器及无AX表面在同一目标/观察协议下可操作，不强制新profile。
+- Inputs and prerequisites: T-043目标契约、T-044生命周期策略。
+- Scope or files: desktop/binding/tool/view；browser adapter/context-binding；N/platform-macos tools/computer/observation.rs、AX/窗口/截图与browser绑定；SDK Computer session。
+- Expected output: 局部结构查找/作用域、可失效目标句柄、准确图像坐标和owned/borrowed资源边界。
+- Dependencies: T-044
+- Execution steps: 扩展稳定标识/角色/名称/容器查询及局部完整性；正确处理预期弹窗、菜单、标签页和新窗口；统一AX与像素fallback；对已有可绑定DOM连接仅借用，不强制调试开关/重启；无DOM则照常用现有窗口；统一观察失效和模型可见证据。
+- Acceptance criteria: 部分树不妨碍已准确定位的控件，但不能证明局部外不存在；导航/布局变化不套旧坐标；close不kill借用进程或删用户profile；不能以新CfT替代现有浏览器任务。
+- Verification method: stale/歧义/局部树/同PID多窗口/导航/模态测试；纯几何与实际截图oracle；真实已开应用和登录态保留检查；无DOM分支必须通过。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-046 — G02 任意文本、快捷键与按键释放
+- Status: pending
+- Owner: unassigned
+- Objective: 补齐可靠的文本/键盘原语，包括后台候选通路和取消后的自有按键释放。
+- Inputs and prerequisites: T-045目标绑定；T-043原生动作契约；legacy type_text/hotkey只作参考实现。
+- Scope or files: N/platform-macos input/controlled与keyboard/ax_actions可复用原语；SDK Computer键盘/text实现；native adapter/protocol tests。
+- Expected output: Unicode插入/替换、键布局映射、chord/key down/up、有界持有状态、真实partial/unknown结果。
+- Dependencies: T-045
+- Execution steps: 优先单次语义输入，再按已知接收能力选择键事件；消除不必要的逐字符延时/协议尾文本清洗；把工作纳入operation及自身pressed-state；区分事件数量与实际内容；新增通路先测未优化基线再冻结指标。
+- Acceptance criteria: 中英文/emoji/组合字符/多行不吞字或重复；终端和Web不靠AX自回声假确认；cancel/异常/revoke后释放自身键，不能改变用户物理held状态；剩余11个固定键也需实际投递覆盖。
+- Verification method: 布局/Unicode/长文本与partial回归；down后cancel/panic barrier；真实编辑器、原生文本框、终端和浏览器输入接收验证；genuine生成/类型/native tests。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-047 — G02 完整鼠标、拖拽与窗口操作
+- Status: pending
+- Owner: unassigned
+- Objective: 补齐指针移动、左右/双击、持有/拖拽、带量双轴滚动和日常窗口操作。
+- Inputs and prerequisites: T-045几何和target；T-046自有pressed-state与修饰键基础。
+- Scope or files: N/platform-macos input/controlled、mouse/interactive与窗口工具的可复用原语；SDK Computer pointer/window动作；native/computer tests/fixtures。
+- Expected output: 受拥有的连续pointer动作、窗口动作、实际route/投递事实及异常release。
+- Dependencies: T-046
+- Execution steps: 把单次左键/一行wheel限制升级为类型化按钮/次数/距离；允许同段move/down/drag/up；窗口切换与目标重定位明确分界；不全屏warp模拟虚拟光标；逐primitive支持取消、持有预算和自己button释放；测未优化新通路基线。
+- Acceptance criteria: 1×/2×与多显示器变换正确，drag跨窗口时目标和焦点切换明确；后台候选不能移动系统光标；中断不留button pressed；右键菜单/双击打开/实际viewport位移都有独立效果证明。
+- Verification method: 纯坐标/buttons/double-click时序测试；cancel-at-down/move/up barrier；真实文件管理器、编辑器选区/拖拽与窗口调整；旧pixel/ref回归重新分类而非删掉。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-048 — G02 后台优先与自动前台兜底
+- Status: pending
+- Owner: unassigned
+- Objective: 根据动作实际能力选择后台或前台，满足用户在其他窗口活动时可后台继续及代理优先自动接管。
+- Inputs and prerequisites: T-046/T-047可用原语及T-045目标/失效边界。
+- Scope or files: N/platform-macos受控路由、focus/skylight辅助；SDK Computer策略；native adapter结果投影和对应测试。
+- Expected output: 单一auto路由策略、实际mode/原因返回、有限前台段与焦点恢复规则。
+- Dependencies: T-046, T-047
+- Execution steps: 逐动作选择准确语义/定向后台再前台；移除无关全局HID活动对后台的否决；审查并去除foreground helper物理事件拦截；已投递未知先确认，不能双transport重复post；段级接管而非每键front/restore；不等待quiet、不新增人审。
+- Acceptance criteria: 用户另窗连续输入时后台任务实际完成且焦点/系统光标不变；确需前台时自动执行并如实标注；物理输入始终可用；目标被用户切走不向错窗口发事件，不无界重抢或伪装静默。
+- Verification method: route选择/无重复post/焦点代际单测；真实并发输入、同PID多窗口、后台不接收与前台兜底对照；审查event tap/输入抑制路径；取消和宿主退出回归。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-049 — G03 信息依赖分段与业务状态确认
+- Status: pending
+- Owner: unassigned
+- Objective: 将当前逐step完整观察/断言改为依赖驱动的短动作段，准确区分投递和业务成功。
+- Inputs and prerequisites: T-045局部观察/版本与T-048路由。
+- Scope or files: N/cua-driver-sdk/src/computer/plan.rs、plan_native.rs及拟新增segment/confirmation实现；controlled/desktop协议投影与integration tests。
+- Expected output: 段末/关键条件确认、依赖未满足时返回新观察、区分executed和verified的结果。
+- Dependencies: T-045, T-048
+- Execution steps: 已知目标操作可合并；下一步依赖新页面/弹窗时停止并取证；优先局部状态/事件，有界轮询补缺，截图仅信息不足时；移除多余Fill后的全树再读和每个assert重复观察；保持低层取消/对象存活检查。
+- Acceptance criteria: 不用fixed-N决定业务确认；不会为了少轮次跨未知UI继续执行；API/terminal成功不能冒充condition satisfied；观察/模型请求数有可复查变化，不能只修改描述。
+- Verification method: 真实AgentSession/faux分段轨迹断言（测试证据，不是回放产品）；同目标多字段、导航/弹窗边界、晚状态变化和伪成功回归；真实提交/结果显示oracle。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-050 — G03 根据当前状态有界恢复
+- Status: pending
+- Owner: unassigned
+- Objective: 在原loop内自动处理可恢复失效，避免新定位或前台fallback重复已经生效的动作。
+- Inputs and prerequisites: T-049执行/条件/未知状态语义及T-048路由。
+- Scope or files: SDK Computer有限恢复状态；desktop工具错误/观察返回；必要binding/session级剩余预算；新恢复单测和真实loop测试。
+- Expected output: 共用尝试/时间预算、无进展检测、准确剩余动作与失败结果。
+- Dependencies: T-049
+- Execution steps: 按实现方案恢复表区分未投递/已满足/确定剩余/未知；仅确定状态下补做；须模型判断时返回普通tool result；预算跨截图/route/operation消耗，不递归调用持lease的computer工具；cancel/revoke/quarantine终止恢复。
+- Acceptance criteria: 失去回复但已经提交的案例不二次提交；partial文本不整段再打；无变化状态不空转；SDK直调同样有界；不自动Undo/清锁/重启用户应用。
+- Verification method: 故障注入先复现无恢复/潜在重复，再验证正确分类；丢reply、部分输入、状态已满足、无进展、预算耗尽、取消/祖先撤权及busy/unknown terminal；真实应用恢复案例。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-051 — G04 非阻塞实时虚拟鼠标
+- Status: pending
+- Owner: unassigned
+- Objective: 在目标窗口上实际渲染独立指针与动作反馈，不占用Node主线程或拖慢输入。
+- Inputs and prerequisites: T-043动作状态协议与T-048实际route/目标事件。
+- Scope or files: pi内native helper源码/构建；N/platform-macos cursor可复用绘制逻辑及host资源接线；packager helper输入描述；图像/窗口测试。
+- Expected output: 仅渲染的owned AppKit helper、非阻塞有界状态通道、可靠显示/关闭状态。
+- Dependencies: T-043, T-048
+- Execution steps: helper主线程运行可停止UI循环；非激活click-through叠加；不等待arrival、不积压旧move；按actual dispatch显示反馈；排除自身overlay对截图/模态判断的影响；session撤权和host close收敛进程/管道/窗口。
+- Acceptance criteria: 真正可见而非inactive no-op；多DPI/窗口移动/遮挡正确；用户点击穿透且系统光标不动；renderer缺失/卡顿不引发输入重试；没有录制/回放、daemon或第二执行器。
+- Verification method: helper无GUI协议/生命周期测试；实际像素/屏幕观察与click-through效果；renderer卡死/退出故障注入；有无渲染性能对照；自然退出/资源清理与打包闭包检查。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-052 — G05 CLI/SDK/子代理统一闭环与紧急停止
+- Status: pending
+- Owner: unassigned
+- Objective: 让新增能力通过真实easy-pi统一工具默认auto执行，保留普通coding惰性和所有生命周期语义。
+- Inputs and prerequisites: T-050恢复与T-051渲染完成；真实生成ABI稳定。
+- Scope or files: core/computer/activation/binding、必要args/main/SDK窄接线；native/computer/desktop entry/tool/projection/view；现有keybindings/stop扩展入口及定向tests。
+- Expected output: 无需手工切profile的CLI/SDK入口、当前context一致的refs、配置化紧急停止及清晰mode/结果。
+- Dependencies: T-050, T-051
+- Execution steps: 统一desktop/可用DOM/前台选择；首次动作才加载资源；actual route/mode可见；保留filters/reload/child/compaction失效；紧急停止通过宿主控制面和可配置只监听快捷键触发取消，不在光标层截获普通点击，不硬编码TUI键检查。
+- Acceptance criteria: 真正AgentSession运行而非独立demo；no-tools/exclude不复活能力；共享host只最终关闭；前台抢走焦点后仍可紧急停止；普通coding零native/renderer启动。
+- Verification method: 既有Computer/child/runtime/compaction回归，加新真实loop/faux与mode tests；监听不吞用户事件/停机释放测试；两层native类型和隔离完整check。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-053 — G06 真实应用与用户并发资格
+- Status: pending
+- Owner: coordinator
+- Objective: 按固定WF矩阵证明通用能力，而不以fixture或映射测试替代。
+- Inputs and prerequisites: T-052完整产品；T-042冻结任务/内容；每个新行动进程实际系统资格。
+- Scope or files: 实际安装产品、真实应用内可重复测试内容、无敏感值的独立oracle与必要相邻回归；本task证据。
+- Expected output: 逐应用/动作/路由支持矩阵，WF成功/失败、用户并发、渲染与取消真实证据。
+- Dependencies: T-052
+- Execution steps: 按WF-01–WF-08串行真实GUI；真实登录态只证明原窗口持续使用，不导出cookies/密码；分别记录后台/前台；模型规划用现有faux先固定，再以必要的批准模型有限验证视觉和跨应用选择；任何未知terminal停止该实验，不启动替代owner。
+- Acceptance criteria: 每个核心能力至少在真实应用投递；有结构化失败到截图及后台失败到前台的实际案例；支持表不得只写“通用”掩盖失败；不操作无关个人内容。
+- Verification method: 独立最终文档/文件/页面状态及输入计数，当前焦点/系统光标/物理事件可用性记录，native result+terminal+资源关闭，逐case新证据复核。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-054 — G06 正式速度、资源与正确性差分
+- Status: pending
+- Owner: coordinator
+- Objective: 用冻结指标验收速度/便利性提升，防止以降低正确性或隐藏等待换快。
+- Inputs and prerequisites: T-053功能资格；T-042及新通路补充冻结基线和预算。
+- Scope or files: general benchmark输入/原始数据/统计；必要单点优化与对应回归；不改历史P08数据。
+- Expected output: 原生与整体p50/p95、调用次数、成功率/错误类型、CPU/RSS、渲染差分和默认coding启动回退判定。
+- Dependencies: T-053
+- Execution steps: 控制同应用/任务/电源/缓存条件；旧可比任务配对，新能力对照同功能未优化通路；测模型/应用等待与工具成本分离；任何优化后重跑受影响WF/native回归，不事后放宽阈值或剔除失败。
+- Acceptance criteria: 达到冻结门槛且错误性质/成功率不退化；不能将旧41.57%沿用为新收益；样本不足不作稳定p95声明；不因光标动画阻塞输入。
+- Verification method: 关键micro至少100样本；完整任务至少30组配对，正式task p95需至少100次/arm并标明区间；保留全部失败，独立原始数据统计复核。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-055 — G07 匹配原生产物、renderer与独立安装
+- Status: pending
+- Owner: coordinator
+- Objective: 交付包含新ABI、统一bridge和渲染helper的完整匹配产品，不依赖monorepo或运行时构建。
+- Inputs and prerequisites: T-054测量后冻结的最终源与二进制；T-051 helper。
+- Scope or files: native/computer/scripts/package.mjs、pins/typecheck、native/computer/patches及helper源码、source/license材料、产品asset布局及独立安装测试；后续交付说明。
+- Expected output: 新Computer资产与产品归档、manifest/source provenance、独立安装/迁移证明。
+- Dependencies: T-054
+- Execution steps: 单owner重新生成/check/N-API/header并核对最终bytes；新增native变更保存为pi-owned源码或严格apply/byte-compare/reverse通过的补丁，锁/生成来源一起交付，不仅留在本机stage；只加入必要渲染依赖，不恢复全部legacy features；统一bridge接口版本；发布形态的Node本地交付包包含匹配assets，启用不再要求手工拼包；仓库外npm ignore-scripts实际安装和relocation smoke，分离ready payload与probe。
+- Acceptance criteria: 运行无Rust/native下载；所有helper/库都在闭包内且无仓库外symlink；普通coding无额外激活；现有登录应用退出产品后保持；旧P08归档不覆盖。
+- Verification method: package反例测试、严格native/root types、真实load-only、CLI/SDK与实际renderer smoke、文件hash/链接/材料验证；Bun单独记录未支持而不混称通过。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-056 — G07 全目标复核、回退与交接
+- Status: pending
+- Owner: coordinator
+- Objective: 对全部确认需求逐项验收并交付，避免再次把限定阶段完成当通用能力完成。
+- Inputs and prerequisites: T-055；T-042–T-054所有能力和性能门禁。
+- Scope or files: 本authority；后续support/test-matrix/benchmark/rollback/handoff；仅Computer源码/hunks的提交与证据。
+- Expected output: 可追溯完整验收矩阵、实际安装使用方式、精确支持/不支持表、回退步骤与最终状态。
+- Dependencies: T-055
+- Execution steps: 复核原始证据与source一致性；运行最后隔离无密钥build/check/test.sh；对照历史九失败；验证退出/禁用/回退时不清unknown、不关闭借用应用；只提交Computer-owned改动，更新真实完成状态。
+- Acceptance criteria: AC-G1–G8逐项有证；未实现或失败的核心需求不得标done；scope exclusions不是吞掉能力缺口的理由；无公共发布或无关修改。
+- Verification method: 定向回归和隔离完整套件、差异/失败集合比较、打包后独立复验、任务文档validator和人工证据复核。
+- Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
+
+### 通用化验收场景（G00固定具体应用/内容，G06执行）
+
+| ID | 真实应用任务 | 独立验收事实 |
+| --- | --- | --- |
+| WF-01 | 原生文本编辑器及一个实际可用的Electron编辑器：中英文/Unicode插入、选区替换、快捷键保存 | 读实际保存内容对照完整目标文本；不接受只看AX回声/字符计数；覆盖长文本和部分投递 |
+| WF-02 | 已打开的终端：通过GUI输入无破坏测试命令并执行 | 终端实际输出或测试文件证明命令进入pty；不得通过bash工具替代键盘完成任务 |
+| WF-03 | 现有浏览器窗口/资料：搜索或本地表单、标签导航、Canvas/iframe交互 | 原PID/profile持续使用、原登录态保留；无DOM通道也完成对应任务；业务结果/提交次数独立确认，不读取或导出凭据 |
+| WF-04 | 文件管理器：测试目录中重命名、右键菜单、双击、拖拽及滚动 | 最终文件/窗口/viewport状态；指针按钮序列和release正确；不用shell重命名替代被测GUI操作 |
+| WF-05 | 浏览器取测试内容→编辑器编辑保存→文件管理器定位→终端验证 | 完整多应用结果、每个信息依赖段的确认、无重复输入/提交；不是四个不相连的工具调用 |
+| WF-06 | 用户在窗口A持续输入/移动鼠标，代理操作窗口B；另设同PID多窗口与需前台的应用 | 至少AX后台与一条定向像素/事件后台在用户活动下通过；后台系统光标/焦点不变；前台兜底自动发生且标注，不吞物理输入；不能全走前台后称后台达标 |
+| WF-07 | 可控布局变化、控件替换、意外弹窗、确认延迟、丢回复但已提交、部分文本输入 | 自动重定位/截图/路由恢复成功；已提交动作只一次；未知/预算耗尽不重试到成功为止；故障刺激和实际效果独立保存 |
+| WF-08 | 虚拟鼠标显示、多DPI/目标移动、拖拽或chord中紧急停止、helper失效、产品退出 | 实际像素/位置反馈、点击穿透、截图无自叠加污染；停止后自身按键/按钮释放、无后续新输入、helper/host真实收敛；用户应用继续存在 |
+
+- 实际任务入口必须是安装产品的CLI/SDK/原AgentSession；独立oracle可读取专用测试内容/结果验证，但不能代替GUI执行动作。
+- 权限/静态准入、raw native、faux和真实模型证据分开。常规tests明确禁真实API；必要vision/跨应用模型测试仅批准模型、显式opt-in、有界请求/费用，不全套e2e，不持久化凭据或非任务桌面内容。
+- 并发/取消先用无sleep确定性barrier，再做真实应用交付；timeout只代表未达条件/工作预算到期，不能替代terminal。未知原生终态后只保留证据和诊断，不自动恢复lease。
+- 文本/键盘、鼠标、路由、定位、segment/confirmation、recovery、renderer分别增加定向回归，再合并实际loop；测试过滤结果须核对实际非零case数量，native opt-in不能全部skip后报通过。
+
+### 验证入口（实际执行结果见任务字段与日志）
+
+- 文档结构：`python3 /Users/w/.epi/agent/skills/wjskill-plan-and-execute-tasks/scripts/task_document.py validate --path docs/tasks/2026-09-18-computer-native-implementation-task.md`。
+- coding-agent：从包目录按实际新test文件运行root vitest CLI，复用`test/suite/harness.ts`/faux；现有Computer、child、runtime、compaction/controller回归保持。
+- native：新隔离stage固定Rust1.97.1及锁，分别运行core/platform/SDK的具体回归与实际生成/check/header；禁止共享Cargo调用恢复legacy feature闭包，禁止无审查全量GUI loader测试。
+- bridge：`node native/computer/desktop/typecheck.mjs "$SDK_TS"`；`node --test native/computer/desktop/test/*.test.ts native/computer/test/package.test.mjs`，完整材料gate使用`PI_COMPUTER_PACKAGE_SDK`/`PI_COMPUTER_PACKAGE_MATERIALS`；真实loop使用现有desktop integration vitest config。新helper/contract用对应的新增定向入口，不编造已注册验证ID。
+- 全仓write-mode `npm run check`、`npm run build:offline`、`./test.sh`只在hash校验的隔离快照执行，不写共享worktree；九历史失败按名称比较，不掩盖新增失败。
+- 性能：同条件重复测量、失败不剔除；input/capture/AX/DOM/焦点等待/renderer/FFI/模型/应用等待分别统计；固定预算后正式A/B；首次部署/SDK加载与热动作分开，不能用faux推断真实模型推理速度。
+- 交付：新归档解压到仓库外，hash和内部symlink校验；真实ignore-scripts安装、缺资产错误、默认零native、所有模式及最终close；独立测试副本不能污染ready payload。
+
+### 历史P00–P08验证计划
 
 P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚本，在隔离快照执行并保存完整日志与退出码。定向测试使用复用 test.sh 隔离环境的明确入口，而非伪造 test.sh 参数。普通检查保持REAL_APIS=false；必要真实模型测试按最新批准使用gpt-6-astra low（此前qd/kmodel_latest high批准保留），有界定向显式opt-in；截至本次授权更新仍零调用。GUI范围遵循最新授权，并须先通过console/宿主/权限/fixture前提；锁屏期间不启动GUI。具体文件及后续命令随源码审计落入 test-matrix，不先猜测。
 
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
+
+### 通用化当前风险
+
+- 当前为execute，T-042/T-043 done、T-044 in_progress/coordinator，T-045–T-056 pending；没有新的产品偏好待确认。技术风险由对应任务验证，不用“平台可能不支持”提前缩成fixture-only交付。
+- 任意应用后台输入不是macOS天然保证；尤其同PID多窗口、Web AX回声、输入法与用户修饰键。后台不成立时走已批准前台；前台也不能确定结果时如实停止，不重复副作用。
+- 去固定等待、整图相等和整树检查必须有替代的目标/状态证据；只把guard删除可能更快，但不能证明准确性。反过来，继续要求所有用户停止键鼠会直接违背已确认的后台目标。
+- 现有浏览器通常不能假定DOM接入；不能靠关闭/重启个人浏览器、复制profile或另开空白CfT满足“使用现有登录态”。DOM为有条件加速，AX/像素/前台是必须交付的兼容路线。
+- AppKit renderer有主线程/不可返回入口；采用受拥有helper并单独资格。绘制延迟、自身overlay污染截图/模态和进程遗留必须测试，不能只打开旧Cargo feature。
+- 非幂等动作的“没有看见变化”不等于没生效；有界恢复只能利用明确状态前进，禁止以超时、旧截图、字符串长度差推导可安全重输/重提。
+- 原生生成与平台源码耦合，共享worktree仍有其他工作。单writer、独立stage、精确hunk提交及来源hash是交付可追溯性要求，不应变成每次用户动作的繁重取证。
+- G00新基线最后clean C241，只代表当轮126terminal/八自然退出；当前没有新通用输入GUI资格。未来操作需fresh准入，不能用历史clean/quiet暗示当前桌面可用；旧未知终态和失败材料必须保留。
+
+### 历史P00–P08风险记录（不表示当前仍处于这些阶段）
 
 - **历史状态（2026-09-20 C169后；最新见Current continuation C173）**：P06/T-011及T-035–T-038门禁已done；transport-hostfixed34路径/81pins/a37c8c29、22976672B及trimmed GUI已验收。T-012进入in_progress/coordinator，继续显式激活/独立打包；P08/整体未交付。无活跃GUI/assertion，旧quiet承诺不延用；原deadline刺激失败和历史unknown保留。T-040后desktop pins已promotion至trim，旧P04保持历史；Node包装资格完成、Bun失败未支持，T-041继续。
 
@@ -1082,11 +1505,25 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 - 2026-09-20: 干净交付采用assets-v3，不拷临时probe/benchmark模块。初次迁移助手Python3.9不支持tar extraction filter，保留后增加归档成员/原source hash验证；第二次npm把/dev/null同时作user/global config而拒绝，分离配置路径后通过。失败日志/助手/早期归档均保留，没有产品修复或GUI重跑。最终docs归档后再次从仓库外解压验证14215hash/8内部links，CLI/inert/真实native-load/read-faux与另副本offline npm ci全0，锁未变、payload未被测试污染；使用已hydrated缓存，不声称冷缓存离线安装。最终归档SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb。
 - 2026-09-20: delivery-final-check完整check0/1420无修复/204pass+5skip/controller38/drift0，native双层types0/context7/7/desktop21+packager基础2pass/6材料门控skip；P07完整packager8/8和全套同历史9失败证据保持。审查并核对106 staged路径与已验证快照，5混合文件只选Computer hunks；原patch的空白context行保留以维持hash，非patch whitespace检查0。源码提交d84c2af438完成，未暂存stats/compaction/branding等无关改动。补齐最终矩阵/平台/rollback/handoff，authority更新为全部done；LEARNS未追加此次一次性助手兼容性错误，保留既有并发内容。未push或发布，无活跃GUI/assertion。
 
+- 2026-09-20: 用户明确将目标升级为通用输入/真实应用、后台优先且自动前台兜底、代理优先但不屏蔽物理输入、现有登录态、实时虚拟鼠标；追加结构化定位/截图兜底/按信息依赖分段确认/有界自动恢复，并删除轨迹回放。最终结构化摘要已确认。随后要求制定实现方案和更新task，故本轮Mode改为plan，新增目标pending，不由历史standing权限直接启动实现。
+- 2026-09-20: 本轮只读核对HEAD5283ad934、共享脏树、现有TS host/entry/tool/view及pi内native源：确认13键/8步协议、全局HID拒绝、重复完整观察、首次加载缓存、默认Unrestricted、isolated profile和renderer实际裁剪等差距。legacy文本/chord可复用但不是受控终态资格，renderer原入口阻塞主线程。只更新本文件，新增G00–G07方案、T-042–T-056依赖/门禁、WF-01–WF-08验收和精简分类；原T-001–T-041状态、原始历史日志/产物不覆盖。未执行GUI/native load/构建/安装/真实provider或子代理。
+
+- 2026-09-20: 规划验证通过：task_document.py validate与task范围git diff --check均0；独立文本比较确认41项历史任务及原执行日志逐字未变，新增15项均pending/Not run，Mode=plan/Result=partial一致；暂存区为空，Computer产品文件无新增diff。本轮仅修改本authority文档，不运行不能验证文档的build/GUI/真实API测试。
+
+- 2026-09-20: 用户在规划交付后明确完全授权并要求自主实现至目标达成；Mode切execute，T-042进入in_progress/coordinator。先冻结新源码/产物/工作树基线和实际环境，随后按依赖实施；当前没有新GUI或清锁行为。
+
+- 2026-09-20: T-042 done：独立general stage/来源/已安装应用盘点/新基线完成；真实100观察和三表单独立126terminal/八自然退出至C241，无新恢复。build/check0与定向回归通过；长快照路径下新增一项UI换行断言失败保留，短路径同源码定向28/28，不修无关产品或宣称全套全绿。Seedmux无桥配置，替代使用实际只读Codex exec（gpt-6-astra/low/read-only/ephemeral），其审查已收回并核对核心源码；未派实现worker。g00-contract冻结旧AX任务至少50%降时/observe目标median250ms-p95500ms及新能力后续基线规则；这是目标非已取得收益。T-043进入in_progress/coordinator，下一步真实类型化segment契约/codec与compound input预算，产品默认入口尚未改变。
+
+- 2026-09-21: T-043协议子集提交264917341，仅六个Computer路径；parent复测parser12/12、native codec3/3，补丁正反字节验证通过。初始patch空白context触发git diff --check，保留原件后规范空行并重新验证，最终9c995632；无native字节变化/GUI/产品pins推广。用户continue后继续T-043实际route/结果一致性，修正当前段中遗留plan/all-pending文字，历史日志保持。没有客观阻塞，不把中间提交当通用化完成。
+
+- 2026-09-21: T-043 done：结果契约及真实FFI验证完成，70 native/5 codec/严格类型及生成全0，隔离g01r全check与既有host/controller通过。纯validator不创建owner、不作为terminal证明。T-044进入in_progress/coordinator，先从无输入capture和observe的通用window检测等待区分readiness/保护范围，再以定向生命周期回归与真实分项测量验证；旧mutation cleanup不无证据一并删除。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: passed
-- Evidence: T-001—T-041全部done，P00–P08限定Node24.15.0/macOS26.5.1 arm64交付完成。实际原生/安装/真实vision/compaction与P08性能、cancel/revoke和browser门禁均有独立证据。最新delivery-final-check完整0（1420文件无修复）/204pass+5skip/controller38/drift0；两层native类型0、context7/7、desktop21/21。完整无密钥套件仍同历史九失败，不是全仓绿灯；Bun未支持。最终交付迁移、离线重装、hash/internal-link与真实no-host/smoke通过，见p08/delivery-verification.json。
-- Current delivery: .artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz，40449085B，SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb；manifest SHA256 7ddfbf6edaf09e894c9bf9c7220d18545f90fd5058c97b5841fde7394c55072c，14215文件/8内部links。仓库外验证位置/private/tmp/epi-computer-delivery-h859lqzg/node24.15.0-darwin-arm64；另reinstall目录offline npm ci使用此前hydrated缓存，原交付payload未变。所有测量及GUI任务已结束，最后clean C237，无活跃GUI/assertion，不是未来准入承诺。源码提交d84c2af438e31eb4720c2d3782199cfdebbba14d；工作树无关改动完整保留，构建来源如实标记既有dirty snapshot，不冒称clean commit可复现。真实provider仍5attempts/2success，未push/publication。
+- Result: partial
+- Planning validation: 通用化需求和依赖已确认，Mode=execute；T-042/T-043 done、T-044 in_progress、T-045–T-056 pending。规划/协议子集完成不等于运行验收通过。
+- Evidence: T-001—T-041全部done仅表示历史P00–P08限定Node24.15.0/macOS26.5.1 arm64交付完成；新增G00基线和G01协议契约T-043通过，T-044精简实现进行中；通用化目标未交付。实际原生/安装/真实vision/compaction与P08性能、cancel/revoke和browser门禁均有独立证据。最新delivery-final-check完整0（1420文件无修复）/204pass+5skip/controller38/drift0；两层native类型0、context7/7、desktop21/21。完整无密钥套件仍同历史九失败，不是全仓绿灯；Bun未支持。最终交付迁移、离线重装、hash/internal-link与真实no-host/smoke通过，见p08/delivery-verification.json。
+- Historical delivery: .artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz，40449085B，SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb；manifest SHA256 7ddfbf6edaf09e894c9bf9c7220d18545f90fd5058c97b5841fde7394c55072c，14215文件/8内部links。仓库外验证位置/private/tmp/epi-computer-delivery-h859lqzg/node24.15.0-darwin-arm64；另reinstall目录offline npm ci使用此前hydrated缓存，原交付payload未变。所有测量及GUI任务已结束，最后clean C237，无活跃GUI/assertion，不是未来准入承诺。源码提交d84c2af438e31eb4720c2d3782199cfdebbba14d；工作树无关改动完整保留，构建来源如实标记既有dirty snapshot，不冒称clean commit可复现。真实provider仍5attempts/2success，未push/publication。
 - Historical evidence: T-030 done：native两修复before101/after4pass、49/43/66及生成/全部离线check通过，probe幂等回归before2fail/after2pass；fixed-2 fresh owner21507/Chrome21547/window150完成真实prepare→terminal→close→destroy、两自然0/EOF、私有files清理、C27。独立prepare-qualified-verification核对通过。完整browser观察/输入/计划仍待，P04–P08未交付。以下历史：D25诊断给出10窗口/唯一几何114及resource0:image_catalog_changed，两个原因已被先红后绿4case修复；platform49/SDK43/core66/生成/check/stage/header/nohost/full isolated check均0，193pass+5skip/controller38/drift0，四Rust patch655ba915。三个新的native只读image目录快照均0live，无lease/signal/delete；D25行政恢复尚未批准/执行，真实修复GUI尚待。D24已按一次授权在新boot同inode恢复C24，历史D24不补造terminal。以下历史：T-030已完成诊断/恢复准备：opt-in两文件diag patchdd84611e，diagnostic1+2/platform45/SDK43/core66、生成/check/N-API/header/nohost/隔离全check均0，193pass+5skip/controller38/drift0；旧16原生产物归档，605源边界/原失败raw核对0。私有D24恢复20/20，不代表canonical执行；等待用户手动重启，尚无confirmed-boot.txt/恢复archive或新GUI。真实失败原因仍未唯一证明，未声称行为修复。此前browser SDK prepare facade/registry/pool/初始绑定的platform45/SDK43/core66/生成及--check/N-API/header/strictTS/nohost load全部通过，七Rust增量patch1d0ebe4c/605源；新isolated check0及193pass/5skip/controller38/drift0。但prepare-live-2实际CfT启动后browser_window_ambiguous，资源close Quarantined，无clean host receipt；Node自然1/fixture自然0/EOF，无forced、无page输入，同inodeD24未清除，私有profile保留。T-029已修正严格TCC形态判断，9/9及fresh93502两服务完整Allowed通过。根因诊断/恢复门禁归T-030。以下历史：最新launcher内部装配platform42/SDK41/core66/fmt和isolated check全0（193pass/5skip、controller38、drift0），三文件incremental patch59cd9c41/602源边界核对；未注册/未公开ABI/未执行真实浏览器，详见launcher-report.md。最新授权允许必要权限/任意版本自主选择；官方CfT153.0.8010.52的供应商签名失败事实保留，经明确授权后完整官方归档/346文件/5links内容校验0，content-manifest81c3f5a8、未执行浏览器。此前T-027 image事实子集5/五轮5/platform33/SDK41/core66及fmt全0，incremental patch24584ae5/600源与历史输入核对0；browser-image-observer-check完整0/1376files无修复、193pass/5skip、38/38、drift0。Chrome153只私有复制验证，未执行或创建profile；外部code-sign clone/helper生命周期尚未覆盖，观察事实不作terminal/ownership。此前T-027 process-group子集process11/五轮10/platform28（含11 process）/SDK41/core66及fmt全0，natural-exit EPERM回归before101/after0，incremental process.patch bd351bd1及历史输入核对0；browser-process-check完整0/1376files无修复、193pass/5skip、38/38、drift0。仅group proof，不含escaped Chrome helpers；无Chrome/profile/GUI/public ABI/产品切换。此前T-027 distinct scope子集core66/registry70/authorization40/manifest15/SDK41/platform17及fmt通过，incremental scope.patch41e97239/历史输入核对0；browser-scope-check完整0/1376files无修复、193pass/5skip、38/38、drift0，无profile/GUI/public ABI/产品切换，T-027仍未验收。此前T-027异步生命周期子集core56/CDP33（19重叠）/SDK40/platform16通过，foreign pool/首失败握手两回归before101/after0，incremental patch27a67104及历史输入核对0；browser-lifecycle-check完整0/1376files无修复、193pass/5skip、38/38、drift0。T-027整体仍未验收，无profile/GUI/ABI/产物切换。此前T-028独立transport40/CDP25/SDK33/platform16通过、两回归before101/after0、patch9b6df0b6 apply/hash/reverse及历史输入核对0；browser-transport-check完整0（1376files无修复）、193pass/5skip、38/38、drift0，未切换产品pins或运行browser GUI。此前真实八步表单/十AppKit场景通过；T-026两回归before101/after0、SDK33/33，生成/header/strict types/load-only通过；tool8/8、真实AgentSession/faux4/4。modal-check完整npm check0（1376files，只格式化任务pin JSON已审查回写）、193pass/5skip、controller38/38，检查期live drift0。最后C23同inode，native terminal/close/destroy/自然exit0/EOF，未强制清理。T-024提交8779ac9ff仅三AI测试，无新提交；完整suite未重跑，历史9失败不是当前全绿声明。
 - Limitations: P08表单41.57%是确定AX/faux任务、不是通用GUI/真实模型网络收益或正式task-p95；startup为暖文件缓存的process-cold --version。Bun/其他平台未支持，11键仅映射/编译覆盖；browser DOM非trusted keyboard，不含个人profile/subframe。driver-owned drain非外部effect完成/rollback，旧owner56354及历史隔离终态未知保留；无自动清锁/未知输入重放。真实provider共5attempts/2成功，凭据未落盘。全套九历史失败保留，不声称全仓全绿；无冷缓存/字节可复现构建/零拷贝/全局无泄漏声明。交付是本地未发布产物，源码/证据和回滚材料保留；共享并发改动不纳入Computer提交。
