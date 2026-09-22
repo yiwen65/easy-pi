@@ -33,8 +33,8 @@ describe("shouldRunFirstTimeSetup", () => {
 		}
 	});
 
-	it("returns false for the rebranded easy-pi distribution", () => {
-		expect(shouldRunFirstTimeSetup(settingsPath)).toBe(false);
+	it("returns true for the official easy-pi distribution", () => {
+		expect(shouldRunFirstTimeSetup(settingsPath)).toBe(true);
 	});
 
 	it("returns false when experimental features are disabled", () => {

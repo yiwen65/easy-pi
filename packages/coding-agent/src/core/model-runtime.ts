@@ -180,13 +180,12 @@ export class ModelRuntime implements Models {
 				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
 				: new InMemoryCodingAgentModelsStore());
 		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
+		// The remote catalog defaults to the upstream pi.dev endpoint; easy-pi does
+		// not operate its own catalog server, but operators can point elsewhere.
+		const catalogBaseUrl = options.catalogBaseUrl ?? (process.env.EASY_PI_CATALOG_URL?.trim() || undefined);
 		const providers = builtinProviderCatalog
 			.builtinProviders()
-			.map((provider) =>
-				provider.id === "radius"
-					? provider
-					: withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt),
-			);
+			.map((provider) => withRemoteCatalog(provider, catalogBaseUrl, builtinModelDataGeneratedAt));
 		const runtime = new ModelRuntime(
 			credentials,
 			config,

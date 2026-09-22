@@ -61,7 +61,7 @@ describe("version checks", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("uses the configured Easy Pi version API with a pi user agent", async () => {
+	it("uses the configured Easy Pi version API with an easy-pi user agent", async () => {
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 
@@ -70,7 +70,7 @@ describe("version checks", () => {
 			easyPiUpdateUrl,
 			expect.objectContaining({
 				headers: expect.objectContaining({
-					"User-Agent": expect.stringMatching(/^pi\/1\.2\.3 /),
+					"User-Agent": expect.stringMatching(/^easy-pi\/1\.2\.3 /),
 					accept: "application/json",
 				}),
 			}),

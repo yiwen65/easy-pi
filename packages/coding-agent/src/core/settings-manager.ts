@@ -120,7 +120,6 @@ export interface Settings {
 	backgroundBashMaxLogBytes?: number; // Per-task output log budget in bytes; default: 67108864 (64MB); 0 = unlimited
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
-	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
 	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
 	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
@@ -1046,16 +1045,6 @@ export class SettingsManager {
 	setCollapseChangelog(collapse: boolean): void {
 		this.globalSettings.collapseChangelog = collapse;
 		this.markModified("collapseChangelog");
-		this.save();
-	}
-
-	getEnableInstallTelemetry(): boolean {
-		return this.settings.enableInstallTelemetry ?? true;
-	}
-
-	setEnableInstallTelemetry(enabled: boolean): void {
-		this.globalSettings.enableInstallTelemetry = enabled;
-		this.markModified("enableInstallTelemetry");
 		this.save();
 	}
 
