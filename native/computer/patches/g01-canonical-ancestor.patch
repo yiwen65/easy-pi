@@ -1,0 +1,292 @@
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/session_authorization.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/session_authorization.rs
+@@ -189,6 +189,9 @@
+     last_authorized_dispatch: Option<Arc<Mutex<Instant>>>,
+     idle_expired: Option<Arc<AtomicBool>>,
+     revoked: Arc<AtomicBool>,
++    // Native Computer ancestry is immutable and retains revocation even when
++    // an ancestor's registry entry or foreign facade has been retired.
++    parent: Option<Arc<EffectiveAuthorizationContext>>,
+ }
+ 
+ impl EffectiveAuthorizationContext {
+@@ -242,6 +245,10 @@
+ 
+     pub fn is_revoked(&self) -> bool {
+         self.revoked.load(Ordering::Acquire)
++            || self
++                .parent
++                .as_ref()
++                .is_some_and(|parent| parent.is_revoked())
+     }
+ 
+     #[doc(hidden)]
+@@ -269,7 +276,12 @@
+     }
+ 
+     pub fn is_expired(&self) -> bool {
+-        if self.revoked.load(Ordering::Acquire) {
++        if self.revoked.load(Ordering::Acquire)
++            || self
++                .parent
++                .as_ref()
++                .is_some_and(|parent| parent.is_expired())
++        {
+             return true;
+         }
+         if self
+@@ -296,7 +308,7 @@
+     }
+ 
+     fn commit_context_dispatch(&self) -> Result<(), String> {
+-        if self.revoked.load(Ordering::Acquire) {
++        if self.is_revoked() {
+             return Err("authorization context has been revoked".to_owned());
+         }
+         let (Some(idle_ttl), Some(last), Some(expired)) = (
+@@ -558,6 +570,7 @@
+             last_authorized_dispatch: None,
+             idle_expired: None,
+             revoked: Arc::new(AtomicBool::new(false)),
++            parent: None,
+         }))
+     }
+ 
+@@ -567,7 +580,7 @@
+         connection: &AuthenticatedActionConnection,
+         request: DelegatedSessionRequest,
+     ) -> Result<(), SessionAuthorizationError> {
+-        self.bind_session(host, connection, request, false)
++        self.bind_session(host, connection, request, false, None)
+     }
+ 
+     /// Controlled Full Access sessions live until explicit native revocation or
+@@ -578,10 +591,11 @@
+         host: &TrustedHostLease,
+         connection: &AuthenticatedActionConnection,
+         request: DelegatedSessionRequest,
++        parent: Option<Arc<EffectiveAuthorizationContext>>,
+     ) -> Result<(), SessionAuthorizationError> {
+         let owned_lifetime =
+             request.mode == PermissionMode::Unrestricted && request.capability_manifest.is_none();
+-        self.bind_session(host, connection, request, owned_lifetime)
++        self.bind_session(host, connection, request, owned_lifetime, parent)
+     }
+ 
+     fn bind_session(
+@@ -590,6 +604,7 @@
+         connection: &AuthenticatedActionConnection,
+         request: DelegatedSessionRequest,
+         owned_lifetime: bool,
++        parent: Option<Arc<EffectiveAuthorizationContext>>,
+     ) -> Result<(), SessionAuthorizationError> {
+         if !self.ceiling.delegation_enabled {
+             return Err(SessionAuthorizationError::DelegationDisabled);
+@@ -633,6 +648,19 @@
+             return Err(SessionAuthorizationError::InvalidManifest);
+         }
+         let mut state = self.state.lock().unwrap();
++        if let Some(parent) = &parent {
++            if parent.daemon_generation != self.daemon_generation {
++                return Err(SessionAuthorizationError::GenerationMismatch);
++            }
++            if parent.is_expired()
++                || !state
++                    .by_connection
++                    .values()
++                    .any(|context| Arc::ptr_eq(context, parent))
++            {
++                return Err(SessionAuthorizationError::Expired);
++            }
++        }
+         state.by_connection.retain(|_, context| {
+             let retain = !context.is_expired();
+             if !retain {
+@@ -666,6 +694,7 @@
+                 .then(|| Arc::new(Mutex::new(Instant::now()))),
+             idle_expired: (!owned_lifetime).then(|| Arc::new(AtomicBool::new(false))),
+             revoked: Arc::new(AtomicBool::new(false)),
++            parent,
+         });
+         state.by_connection.insert(connection.id, context);
+         Ok(())
+@@ -878,6 +907,73 @@
+     }
+ 
+     #[test]
++    fn controlled_lifetime_old_timestamps_preserve_only_full_access() {
++        for (computer, mode, with_manifest) in [
++            (true, PermissionMode::Unrestricted, false),
++            (false, PermissionMode::Unrestricted, false),
++            (true, PermissionMode::Unrestricted, true),
++            (true, PermissionMode::Standard, false),
++            (true, PermissionMode::Bounded, true),
++        ] {
++            for absolute in [true, false] {
++                let registry = SessionAuthorizationRegistry::delegated_for_test(
++                    SessionModeCeiling::delegated([mode], true),
++                );
++                let (host, connection) = registry.trusted_pair_for_test(None);
++                let mut input = request(mode);
++                if with_manifest {
++                    input.capability_manifest = Some(manifest_with_allowed_tool("click"));
++                }
++                if computer {
++                    registry
++                        .bind_computer_session(&host, &connection, input, None)
++                        .unwrap();
++                } else {
++                    registry
++                        .bind_delegated_session(&host, &connection, input)
++                        .unwrap();
++                }
++                // Move only existing timers into the past. Owned contexts have
++                // no timer to age; this never introduces a test-only exemption.
++                {
++                    let mut state = registry.state.lock().unwrap();
++                    let context =
++                        Arc::get_mut(state.by_connection.get_mut(&connection.id).unwrap()).unwrap();
++                    let old = Instant::now() - Duration::from_secs(7200);
++                    if absolute {
++                        if let Some(expires) = &mut context.expires_at {
++                            *expires = old;
++                        }
++                    } else if let Some(last) = &context.last_authorized_dispatch {
++                        *last.lock().unwrap() = old;
++                    }
++                }
++                let context = registry.state.lock().unwrap().by_connection[&connection.id].clone();
++                let owned = computer && mode == PermissionMode::Unrestricted && !with_manifest;
++                assert_eq!(!context.is_expired(), owned);
++                assert_eq!(context.commit_authorized_dispatch().is_ok(), owned);
++                assert_eq!(
++                    registry
++                        .resolve_delegated(&connection, "public-a", "transport-a")
++                        .is_ok(),
++                    owned
++                );
++                if owned {
++                    assert!(crate::authorization::authorize_tool_call_with_context(
++                        "click",
++                        &serde_json::json!({}),
++                        &context,
++                    )
++                    .is_ok());
++                    registry.revoke_host(&host);
++                    assert!(context.is_revoked());
++                    assert!(context.commit_authorized_dispatch().is_err());
++                }
++            }
++        }
++    }
++
++    #[test]
+     fn controlled_full_access_lifetime_is_owned_not_a_large_ttl() {
+         let registry = SessionAuthorizationRegistry::delegated_for_test(
+             SessionModeCeiling::delegated([PermissionMode::Unrestricted], true),
+@@ -887,7 +983,7 @@
+         input.ttl = Duration::from_millis(1);
+         input.idle_ttl = input.ttl;
+         registry
+-            .bind_computer_session(&host, &connection, input)
++            .bind_computer_session(&host, &connection, input, None)
+             .unwrap();
+         let context = registry
+             .resolve_delegated(&connection, "public-a", "transport-a")
+@@ -917,7 +1013,7 @@
+             }
+             if computer {
+                 registry
+-                    .bind_computer_session(&host, &connection, input)
++                    .bind_computer_session(&host, &connection, input, None)
+                     .unwrap();
+             } else {
+                 registry
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/runtime.rs
+@@ -711,8 +711,12 @@
+         let transport_session = request.transport_session.clone();
+         let (host, connection) = self.authorization_registry.trusted_in_process_binding();
+         if self.computer_sessions.is_some() {
+-            self.authorization_registry
+-                .bind_computer_session(&host, &connection, request)?;
++            self.authorization_registry.bind_computer_session(
++                &host,
++                &connection,
++                request,
++                parent.map(|parent| parent.context.clone()),
++            )?;
+         } else {
+             self.authorization_registry
+                 .bind_delegated_session(&host, &connection, request)?;
+@@ -1349,6 +1353,70 @@
+     }
+ 
+     #[tokio::test]
++    async fn controlled_full_access_parent_revocation_reaches_canonical_dispatch() {
++        let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++        let ceiling = SessionModeCeiling::for_trusted_sessions(
++            [PermissionMode::Unrestricted],
++            true,
++            Duration::from_secs(3600),
++            Duration::from_secs(600),
++        )
++        .unwrap();
++        let runtime = DriverRuntime::create_computer(RuntimeOptions::embedded_with_ceiling(
++            false,
++            ceiling,
++            PermissionMode::Unrestricted,
++            None,
++        ))
++        .unwrap();
++        let request = |name: &str| DelegatedSessionRequest {
++            public_session: name.into(),
++            transport_session: format!("transport-{name}"),
++            mode: PermissionMode::Unrestricted,
++            ttl: Duration::from_secs(3600),
++            idle_ttl: Duration::from_secs(600),
++            capability_manifest: None,
++        };
++        let parent = runtime
++            .create_computer_session(request("parent"), None)
++            .unwrap();
++        let child = runtime
++            .create_computer_session(request("child"), Some(&parent))
++            .unwrap();
++        let grandchild = runtime
++            .create_computer_session(request("grandchild"), Some(&child))
++            .unwrap();
++        let sibling = runtime
++            .create_computer_session(request("independent"), None)
++            .unwrap();
++        grandchild.context.commit_authorized_dispatch().unwrap();
++        parent.computer_revoke();
++        assert!(
++            grandchild.context.commit_authorized_dispatch().is_err(),
++            "canonical dispatch must reject an ancestor revoked outside the facade gate"
++        );
++        assert!(!child.computer_authority_live());
++        assert!(!grandchild.computer_authority_live());
++        assert!(
++            cua_driver_core::authorization::authorize_tool_call_with_context(
++                "click",
++                &serde_json::json!({}),
++                &grandchild.context,
++            )
++            .is_err()
++        );
++        assert!(runtime
++            .authorization_registry
++            .resolve_delegated(&grandchild.connection, "grandchild", "transport-grandchild",)
++            .is_err());
++        assert!(sibling.computer_authority_live());
++        assert!(runtime
++            .create_computer_session(request("late"), Some(&child))
++            .is_err());
++        runtime.computer_shutdown().await.unwrap();
++    }
++
++    #[tokio::test]
+     async fn shutdown_joins_lifecycle_maintenance() {
+         let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
+         let runtime = DriverRuntime::create(standard_options()).unwrap();
