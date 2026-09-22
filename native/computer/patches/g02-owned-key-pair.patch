@@ -1,0 +1,611 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
+@@ -638,8 +638,8 @@
+     make_exact_window_key_impl(target_pid, target_wid, None)
+ }
+
+-/// The segment route admits every WindowServer mutation separately, never
+-/// hides the three native calls inside a single compound primary admission.
++/// The segment route separately admits fronting and the first make-key record.
++/// Its matching record is synchronous owned cleanup, not another primary.
+ pub fn make_exact_window_key_controlled(
+     target_pid: libc::pid_t,
+     target_wid: u32,
+@@ -669,28 +669,50 @@
+     let Some(post) = post_event_record_to_fn() else {
+         return false;
+     };
++    let target = match operation {
++        Some(operation) => match operation.session.native_window() {
++            Ok(target) if target.pid == target_pid && target.window_id == target_wid => {
++                Some(target)
++            }
++            _ => {
++                operation.quarantine();
++                return false;
++            }
++        },
++        None => None,
++    };
++    // Independent identity reads: never gate cleanup on Context.live,
++    // checkpoint, focus, cancellation or a newly resolved PSN. Unknown/gone
++    // windows refuse before the pair, or quarantine an already-owned completion;
++    // private SPI routing is not proof of physical-device ownership or
++    // window-incarnation stability.
++    let identity = || {
++        target.is_none_or(|target| {
++            key_pair::same_identity(
++                target,
++                crate::tools::computer_process_stamp(target.pid),
++                crate::windows::resolve_window_owner(target.pid, target.window_id),
++            )
++        })
++    };
++    if !identity() {
++        return false;
++    }
+     let mut target_psn = [0u8; 8];
+     if !get_process_psn_for_window(target_wid, target_pid, &mut target_psn) {
+         return false;
+     }
+
+-    // kCPSUserGenerated = 0x200. Unlike kCPSNoWindows, this permits AppKit to
+-    // establish the requested native key window before it validates NSMenu.
+-    if !key_window_call(operation, || unsafe {
+-        set_front(target_psn.as_ptr() as *const c_void, target_wid, 0x200)
+-    }) {
+-        return false;
+-    }
+-    for event_kind in [0x01, 0x02] {
+-        let record = make_key_window_record(target_wid, event_kind);
+-        if !key_window_call(operation, || unsafe {
+-            post(target_psn.as_ptr() as *const c_void, record.as_ptr())
+-        }) {
+-            return false;
+-        }
+-    }
+-    true
+-}
++    key_pair::sequence(
++        operation,
++        target_wid,
++        || unsafe { set_front(target_psn.as_ptr() as *const c_void, target_wid, 0x200) },
++        |record| unsafe { post(target_psn.as_ptr() as *const c_void, record.as_ptr()) },
++        identity,
++    )
++}
++
++mod key_pair;
+
+ /// Tool-agnostic foreground-assist: briefly front `window_id`, wait for the
+ /// activation to actually land, run `body` (which posts the synthetic input),
+@@ -932,7 +954,7 @@
+     use super::{make_key_window_record, preserves_exact_existing_focus};
+
+     #[tokio::test]
+-    async fn controlled_exact_window_key_counts_each_call_and_stops_after_cancel() {
++    async fn controlled_key_window_primary_helper_counts_admissions_and_stops_after_cancel() {
+         use cua_driver_core::controlled::Gate;
+         use std::sync::Arc;
+         let gate = Gate::new();
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/key_pair.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/key_pair.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/key_pair.rs
+@@ -0,0 +1,107 @@
++use super::{key_window_call, make_key_window_record};
++use cua_driver_core::controlled::Operation;
++
++pub(super) fn same_identity(
++    captured: cua_driver_core::controlled::NativeWindowTarget,
++    stamp: Option<(u64, u64)>,
++    owner: crate::windows::WindowOwner,
++) -> bool {
++    captured.process_stamp.is_some()
++        && captured.process_stamp == stamp
++        && matches!(owner, crate::windows::WindowOwner::SamePid)
++}
++
++pub(super) fn sequence(
++    operation: Option<&Operation>,
++    window_id: u32,
++    front: impl FnOnce() -> i32,
++    post: impl Fn(&[u8; 0xF8]) -> i32,
++    identity: impl Fn() -> bool,
++) -> bool {
++    // The uncontrolled route retains its original status/early-return behavior.
++    if let Some(operation) = operation {
++        // Both bytes and the post closure's destination are prepared before
++        // admission. No allocation or destination lookup is needed to arm.
++        let first = make_key_window_record(window_id, 0x01);
++        let matching = make_key_window_record(window_id, 0x02);
++        let mut completion = Completion {
++            operation,
++            armed: false,
++            pending: Some(|| identity() && post(&matching) == 0),
++        };
++        if !identity() {
++            return false;
++        }
++        match operation.segment_primary(front) {
++            Ok(0) => {}
++            Ok(_) | Err(_) => return false,
++        }
++        // No pair is owned yet. Ordinary target loss or front-request failure
++        // is a refused/unknown effect, not an undrained cleanup obligation.
++        if !identity() {
++            return false;
++        }
++        // Two primaries: front request and first record. Matching cleanup is
++        // excluded from segment_action_inputs (and its delivered_count view).
++        let first_ok = match operation.segment_primary(|| {
++            completion.armed = true;
++            post(&first)
++        }) {
++            Ok(0) => true,
++            Ok(_) => {
++                // Nonzero is not proof that nothing reached WindowServer.
++                operation.quarantine();
++                false
++            }
++            Err(_) => return false,
++        };
++        let completed = completion.run();
++        return first_ok && completed;
++    }
++    if !key_window_call(operation, front) {
++        return false;
++    }
++    for kind in [0x01, 0x02] {
++        let record = make_key_window_record(window_id, kind);
++        if !key_window_call(operation, || post(&record)) {
++            return false;
++        }
++    }
++    true
++}
++
++/// Stack-owned by the existing tracked worker. Take before invoking so an
++/// ambiguous failure or unwind cannot cause a second matching post.
++struct Completion<'a, F: FnOnce() -> bool> {
++    operation: &'a Operation,
++    armed: bool,
++    pending: Option<F>,
++}
++
++impl<F: FnOnce() -> bool> Completion<'_, F> {
++    fn run(&mut self) -> bool {
++        if !self.armed {
++            return true;
++        }
++        let Some(complete) = self.pending.take() else {
++            return true;
++        };
++        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(complete)).unwrap_or(false);
++        if !ok {
++            self.operation.quarantine();
++        }
++        ok
++    }
++}
++
++impl<F: FnOnce() -> bool> Drop for Completion<'_, F> {
++    fn drop(&mut self) {
++        if self.armed && std::thread::panicking() {
++            self.operation.quarantine();
++        }
++        self.run();
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/key_pair/tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/key_pair/tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/key_pair/tests.rs
+@@ -0,0 +1,403 @@
++use super::*;
++use cua_driver_core::controlled::{Gate, Session};
++use std::cell::{Cell, RefCell};
++use std::future::Future;
++use std::sync::{mpsc, Arc, Mutex};
++use std::task::{Context, Poll, Waker};
++use std::time::Duration;
++
++fn fixture(limit: u32) -> (Arc<Gate>, Arc<Session>, Arc<Operation>) {
++    fixture_timeout(limit, Duration::from_secs(30))
++}
++
++fn fixture_timeout(limit: u32, timeout: Duration) -> (Arc<Gate>, Arc<Session>, Arc<Operation>) {
++    let gate = Gate::new();
++    let parent = gate
++        .session(None, Arc::new(|| true), 101, 42, Some((1, 2)))
++        .unwrap();
++    let child = gate
++        .session(
++            Some(parent.clone()),
++            Arc::new(|| true),
++            101,
++            42,
++            Some((1, 2)),
++        )
++        .unwrap();
++    let op = child.new_operation().unwrap();
++    op.configure_segment(vec![limit], timeout).unwrap();
++    op.begin().unwrap();
++    op.begin_segment_action(0).unwrap();
++    (gate, parent, op)
++}
++
++#[test]
++fn controlled_key_pair_cancel_after_first_entry() {
++    interrupted(false);
++}
++
++#[test]
++fn controlled_key_pair_ancestor_revoke_after_first_entry() {
++    interrupted(true);
++}
++
++fn interrupted(revoke: bool) {
++    let (_, parent, op) = fixture(3);
++    let (entered_tx, entered_rx) = mpsc::channel();
++    let (resume_tx, resume_rx) = mpsc::channel();
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let captured = records.clone();
++    let worker = op.clone();
++    let work = op.track().unwrap();
++    let thread = std::thread::spawn(move || {
++        let _work = work;
++        sequence(
++            Some(&worker),
++            42,
++            || 0,
++            |record| {
++                captured.lock().unwrap().push(record[8]);
++                if record[8] == 1 {
++                    entered_tx.send(()).unwrap();
++                    resume_rx.recv().unwrap();
++                }
++                0
++            },
++            || true,
++        )
++    });
++    entered_rx.recv().unwrap();
++    if revoke {
++        parent.revoke();
++    } else {
++        op.cancel();
++    }
++    resume_tx.send(()).unwrap();
++    let result = thread.join().unwrap();
++    op.finish();
++    assert!(op.segment_primary(|| panic!("later primary")).is_err());
++    assert_eq!(
++        *records.lock().unwrap(),
++        vec![1, 2],
++        "admitted first record must be matched; sequence={result}"
++    );
++    assert!(op.is_proven_terminal());
++    assert_eq!(op.segment_action_inputs(), 2);
++}
++
++#[test]
++fn controlled_key_pair_pre_first_rejection_never_arms() {
++    for before_front in [true, false] {
++        let (gate, _, op) = fixture(3);
++        if before_front {
++            op.cancel();
++        }
++        assert!(!sequence(
++            Some(&op),
++            42,
++            || {
++                op.cancel();
++                0
++            },
++            |_| panic!("no record may enter"),
++            || true
++        ));
++        assert_eq!(op.segment_action_inputs(), u32::from(!before_front));
++        assert!(!gate.is_quarantined());
++        op.finish();
++        assert!(op.is_proven_terminal());
++    }
++}
++
++#[test]
++fn controlled_key_pair_normal_and_exhausted_budget_complete_once() {
++    for limit in [2, 3] {
++        let (gate, _, op) = fixture(limit);
++        let records = RefCell::new(Vec::new());
++        assert!(sequence(
++            Some(&op),
++            42,
++            || 0,
++            |record| {
++                records.borrow_mut().push(*record);
++                0
++            },
++            || true
++        ));
++        assert_eq!(
++            *records.borrow(),
++            vec![make_key_window_record(42, 1), make_key_window_record(42, 2)]
++        );
++        assert_eq!(op.segment_action_inputs(), 2);
++        if limit == 2 {
++            assert!(op.segment_primary(|| panic!("budget exhausted")).is_err());
++        }
++        assert!(!gate.is_quarantined());
++        op.finish();
++        assert!(op.is_proven_terminal());
++    }
++}
++
++#[test]
++fn controlled_key_pair_deadline_after_first_entry_still_completes() {
++    let (_, _, op) = fixture_timeout(3, Duration::from_secs(1));
++    let (entered_tx, entered_rx) = mpsc::channel();
++    let (resume_tx, resume_rx) = mpsc::channel();
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let captured = records.clone();
++    let worker = op.clone();
++    let work = op.track().unwrap();
++    let thread = std::thread::spawn(move || {
++        let _work = work;
++        sequence(
++            Some(&worker),
++            42,
++            || 0,
++            |record| {
++                captured.lock().unwrap().push(record[8]);
++                if record[8] == 1 {
++                    entered_tx.send(()).unwrap();
++                    resume_rx.recv().unwrap();
++                }
++                0
++            },
++            || true,
++        )
++    });
++    entered_rx.recv().unwrap();
++    // Observe the real configured deadline, never sleep to schedule a race.
++    while !op.deadline_expired() {
++        std::thread::yield_now();
++    }
++    assert!(op.is_cancelled());
++    assert!(!op.is_proven_terminal());
++    resume_tx.send(()).unwrap();
++    assert!(thread.join().unwrap());
++    assert!(op.segment_primary(|| panic!("after deadline")).is_err());
++    assert_eq!(*records.lock().unwrap(), vec![1, 2]);
++    op.finish();
++    assert!(op.is_proven_terminal());
++}
++
++#[test]
++fn controlled_key_pair_native_failures_quarantine_without_retry() {
++    for failed in [1, 2] {
++        let (gate, _, op) = fixture(3);
++        let records = RefCell::new(Vec::new());
++        assert!(!sequence(
++            Some(&op),
++            42,
++            || 0,
++            |record| {
++                records.borrow_mut().push(record[8]);
++                if failed == record[8] {
++                    -1
++                } else {
++                    0
++                }
++            },
++            || true
++        ));
++        assert_eq!(*records.borrow(), vec![1, 2]);
++        assert!(gate.is_quarantined());
++        assert!(op.segment_primary(|| panic!("after failure")).is_err());
++        op.finish();
++        assert!(!op.is_proven_terminal());
++    }
++}
++
++#[test]
++fn controlled_key_pair_unwind_consumes_matching_obligation() {
++    for panic_kind in [1, 2] {
++        let (gate, _, op) = fixture(3);
++        let records = RefCell::new(Vec::new());
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _work = op.track().unwrap();
++            sequence(
++                Some(&op),
++                42,
++                || 0,
++                |record| {
++                    records.borrow_mut().push(record[8]);
++                    assert_ne!(record[8], panic_kind, "native callback panic");
++                    0
++                },
++                || true,
++            )
++        }));
++        assert_eq!(outcome.is_err(), panic_kind == 1);
++        if let Ok(result) = outcome {
++            assert!(!result);
++        }
++        assert_eq!(*records.borrow(), vec![1, 2]);
++        assert!(gate.is_quarantined());
++        op.finish();
++        assert!(!op.is_proven_terminal());
++    }
++}
++
++#[test]
++fn controlled_key_pair_stale_identity_never_retargets() {
++    use crate::windows::WindowOwner;
++    for (stamp, owner) in [
++        (None, WindowOwner::SamePid),
++        (Some((9, 9)), WindowOwner::SamePid),
++        (Some((1, 2)), WindowOwner::Unknown),
++        (
++            Some((1, 2)),
++            WindowOwner::ForeignPid {
++                owner_pid: 202,
++                owner_app_name: "private mock".into(),
++            },
++        ),
++    ] {
++        let (gate, _, op) = fixture(3);
++        let target = op.session.native_window().unwrap();
++        let entered = Cell::new(false);
++        let records = RefCell::new(Vec::new());
++        assert!(!sequence(
++            Some(&op),
++            42,
++            || 0,
++            |record| {
++                entered.set(true);
++                records.borrow_mut().push(*record);
++                0
++            },
++            || !entered.get() || same_identity(target, stamp, owner.clone())
++        ));
++        assert_eq!(*records.borrow(), vec![make_key_window_record(42, 1)]);
++        assert!(gate.is_quarantined());
++        op.finish();
++        assert!(!op.is_proven_terminal());
++    }
++}
++
++#[test]
++fn controlled_key_pair_unknown_identity_before_first_emits_nothing() {
++    let (gate, _, op) = fixture(3);
++    assert!(!sequence(
++        Some(&op),
++        42,
++        || panic!("front"),
++        |_| panic!("record"),
++        || false
++    ));
++    assert_eq!(op.segment_action_inputs(), 0);
++    assert!(!gate.is_quarantined());
++    op.finish();
++    assert!(op.is_proven_terminal());
++}
++
++#[tokio::test]
++async fn controlled_key_pair_blocked_cleanup_outlives_dropped_waiter() {
++    let (gate, _, op) = fixture(3);
++    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
++    let entered_tx = RefCell::new(Some(entered_tx));
++    let (resume_tx, resume_rx) = mpsc::channel();
++    let records = Arc::new(Mutex::new(Vec::new()));
++    let captured = records.clone();
++    let worker = op.clone();
++    let waiter = tokio::spawn(async move {
++        let native = worker.clone();
++        worker
++            .blocking(move || {
++                sequence(
++                    Some(&native),
++                    42,
++                    || 0,
++                    |record| {
++                        captured.lock().unwrap().push(record[8]);
++                        if record[8] == 2 {
++                            entered_tx.borrow_mut().take().unwrap().send(()).unwrap();
++                            resume_rx.recv().unwrap();
++                        }
++                        0
++                    },
++                    || true,
++                )
++            })
++            .await
++    });
++    entered_rx.await.unwrap();
++    op.cancel();
++    op.finish();
++    let mut terminal = Box::pin(op.terminal());
++    assert!(matches!(
++        terminal
++            .as_mut()
++            .poll(&mut Context::from_waker(Waker::noop())),
++        Poll::Pending
++    ));
++    drop(terminal);
++    waiter.abort();
++    assert!(waiter.await.unwrap_err().is_cancelled());
++    assert!(!op.is_proven_terminal());
++    let mut next_waiter = Box::pin(op.terminal());
++    assert!(matches!(
++        next_waiter
++            .as_mut()
++            .poll(&mut Context::from_waker(Waker::noop())),
++        Poll::Pending
++    ));
++    resume_tx.send(()).unwrap();
++    let terminal = next_waiter.await.unwrap();
++    assert!(terminal.cancelled && terminal.input_committed);
++    assert_eq!(*records.lock().unwrap(), vec![1, 2]);
++    assert!(!gate.is_quarantined());
++}
++
++fn unarmed_refusal(phase: u8) {
++    let (gate, _, op) = fixture(3);
++    let fronted = Cell::new(false);
++    let records = RefCell::new(Vec::new());
++    assert!(!sequence(
++        Some(&op),
++        42,
++        || { fronted.set(true); if phase == 1 { -1 } else { 0 } },
++        |record| { records.borrow_mut().push(record[8]); 0 },
++        || phase != 0 && (phase != 2 || !fronted.get()),
++    ));
++    op.finish();
++    assert!(records.borrow().is_empty(), "no first record may target stale identity");
++    assert!(!gate.is_quarantined(), "no owned pair exists before first-record admission");
++    assert!(op.is_proven_terminal());
++    assert_eq!(op.segment_action_inputs(), u32::from(phase != 0));
++}
++
++#[test]
++fn controlled_key_pair_unarmed_initial_identity_refusal_is_terminal() { unarmed_refusal(0); }
++#[test]
++fn controlled_key_pair_unarmed_front_failure_is_terminal() { unarmed_refusal(1); }
++#[test]
++fn controlled_key_pair_unarmed_identity_change_after_front_is_terminal() { unarmed_refusal(2); }
++
++#[test]
++fn uncontrolled_key_pair_retains_native_failure_early_return() {
++    for failed in [0, 1, 2, 3] {
++        let records = RefCell::new(Vec::new());
++        let result = sequence(
++            None,
++            42,
++            || if failed == 0 { -1 } else { 0 },
++            |record| {
++                records.borrow_mut().push(record[8]);
++                if failed == record[8] {
++                    -1
++                } else {
++                    0
++                }
++            },
++            || panic!("uncontrolled route must not read identity"),
++        );
++        assert_eq!(result, failed == 3);
++        assert_eq!(
++            *records.borrow(),
++            match failed {
++                0 => vec![],
++                1 => vec![1],
++                _ => vec![1, 2],
++            }
++        );
++    }
++}
