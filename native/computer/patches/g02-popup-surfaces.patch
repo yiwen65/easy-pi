@@ -1,0 +1,611 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/windows.rs b/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/windows.rs
+@@ -73,6 +73,60 @@
+     enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::ZeroOnly)
+ }
+
++/// General discovery and exact point lookup retain Space metadata on every layer.
++pub(crate) fn general_windows_with_space_snapshot() -> WindowEnumeration {
++    enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::General)
++}
++
++pub(crate) fn general_window_in(windows: &[WindowInfo], pid: i32, id: u32) -> Option<&WindowInfo> {
++    let mut matching = windows.iter().filter(|w| w.pid == pid && w.window_id == id);
++    let window = matching.next()?;
++    if matching.next().is_some() || general_window_metadata(window).is_err() {
++        return None;
++    }
++    Some(window)
++}
++
++pub(crate) fn general_point_window_in(
++    windows: &[WindowInfo],
++    pid: i32,
++    id: u32,
++    expected: [f64; 4],
++) -> Result<&WindowInfo, &'static str> {
++    let window = general_window_in(windows, pid, id).ok_or("controlled_target_stale")?;
++    let bounds = &window.bounds;
++    if [bounds.x, bounds.y, bounds.width, bounds.height] != expected {
++        return Err("stale_image_geometry");
++    }
++    Ok(window)
++}
++
++fn general_application_identity(pid: i32, app_name: &str, bundle_id: Option<&str>) -> bool {
++    pid > 0 && !app_name.trim().is_empty()
++        && bundle_id.is_some_and(|id| !id.trim().is_empty() && id.len() <= 256)
++}
++
++pub(crate) fn general_window_metadata(window: &WindowInfo) -> Result<(), &'static str> {
++    if window.pid <= 0 || window.window_id == 0 || window.app_name.trim().is_empty() {
++        return Err("discovery_window_identity_unproved");
++    }
++    if window.title.len() > 2048 || window.app_name.len() > 256 {
++        return Err("discovery_metadata_limit_exceeded");
++    }
++    if ![window.bounds.x, window.bounds.y, window.bounds.width, window.bounds.height]
++        .iter().all(|v| v.is_finite())
++        || window.bounds.width <= 0.0 || window.bounds.height <= 0.0
++    {
++        return Err("discovery_window_geometry_unproved");
++    }
++    // Preserve normal-window catalog behavior. Accessory surfaces must be
++    // visible and cannot be known to belong only to another Space.
++    if window.layer != 0 && (!window.is_on_screen || window.on_current_space == Some(false)) {
++        return Err("discovery_window_identity_unproved");
++    }
++    Ok(())
++}
++
+ /// Enumerate only on-screen windows.
+ pub fn visible_windows() -> Vec<WindowInfo> {
+     visible_windows_with_space_snapshot().windows
+@@ -105,6 +159,17 @@
+     ZeroOnly,
+     /// Every layer, accessory windows included.
+     AnyLayer,
++    General,
++}
++
++fn admits_window(layers: LayerFilter, layer: i32, on_screen: Option<bool>, owned_renderer: bool) -> bool {
++    // Known hidden accessory surfaces are outside General's candidate scope,
++    // before its catalog budget. Unknown visibility stays countable by row
++    // validation; legacy enumeration and ownership scans retain hidden windows.
++    if layers == LayerFilter::General && layer != 0 && on_screen == Some(false) {
++        return false;
++    }
++    !owned_renderer && (layer == 0 || layers != LayerFilter::ZeroOnly)
+ }
+
+ fn enumerate_windows(options: u32, layers: LayerFilter) -> WindowEnumeration {
+@@ -118,7 +183,7 @@
+     };
+     use std::os::raw::c_void;
+
+-    let space_query = (layers == LayerFilter::ZeroOnly)
++    let space_query = (layers != LayerFilter::AnyLayer)
+         .then(crate::input::skylight::SpaceQuery::new)
+         .flatten();
+     let current_space_id = space_query
+@@ -177,33 +242,38 @@
+                 .unwrap_or_default()
+         };
+
+-        let get_bool = |key: &str| -> bool {
++        let get_bool = |key: &str| -> Option<bool> {
+             let k = CFString::new(key);
+             dict.find(k.as_concrete_TypeRef() as *const c_void)
+-                .map(|v| unsafe {
++                .and_then(|v| unsafe {
+                     let v = *v;
+                     if CFGetTypeID(v) == CFBoolean::type_id() {
+-                        bool::from(CFBoolean::wrap_under_get_rule(v as _))
++                        Some(bool::from(CFBoolean::wrap_under_get_rule(v as _)))
+                     } else {
+-                        false
++                        None
+                     }
+                 })
+-                .unwrap_or(false)
+         };
+
+         let window_id = get_num("kCGWindowNumber") as u32;
+         let pid = get_num("kCGWindowOwnerPID") as i32;
+-        if crate::computer_renderer::is_owned_window(pid, window_id) {
+-            continue;
+-        }
+-        let app_name = get_str("kCGWindowOwnerName");
++        let mut app_name = get_str("kCGWindowOwnerName");
+         let title = get_str("kCGWindowName");
+         let layer = get_num("kCGWindowLayer") as i32;
+         let is_on_screen = get_bool("kCGWindowIsOnscreen");
+
+-        // Only include layer-0 windows, unless the caller asked for every layer.
+-        if layer != 0 && layers == LayerFilter::ZeroOnly {
++        // Apply enumeration scope before collecting or validating candidates.
++        if !admits_window(layers, layer, is_on_screen, crate::computer_renderer::is_owned_window(pid, window_id)) {
+             continue;
++        }
++        // New accessory candidates need an application identity, not merely
++        // a named WindowServer/system process. Keep unproved rows countable
++        // as omissions; neither discovery nor point lookup can select them.
++        if layers == LayerFilter::General && layer != 0
++            && !general_application_identity(pid, &app_name,
++                crate::apps::bundle_id_for_pid(pid).as_deref())
++        {
++            app_name.clear();
+         }
+
+         // Parse bounds dict.
+@@ -248,14 +318,14 @@
+             bounds,
+             layer,
+             z_index,
+-            is_on_screen,
++            is_on_screen: is_on_screen.unwrap_or(false),
+             current_space_id: None,
+             on_current_space: None,
+             space_ids: None,
+         });
+     }
+
+-    if layers == LayerFilter::ZeroOnly {
++    if layers != LayerFilter::AnyLayer {
+         let Some(query) = &space_query else {
+             return WindowEnumeration {
+                 windows: results,
+@@ -445,7 +515,7 @@
+             )));
+     }
+
+-    fn window(window_id: u32, pid: i32, app_name: &str) -> WindowInfo {
++    pub(super) fn window(window_id: u32, pid: i32, app_name: &str) -> WindowInfo {
+         WindowInfo {
+             window_id,
+             pid,
+@@ -523,3 +593,6 @@
+         assert_eq!(resolve_window_owner_in(&[], 900, 42), WindowOwner::Unknown);
+     }
+ }
++
++#[cfg(test)]
++pub(crate) mod popup_tests;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/windows/popup_tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/windows/popup_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/windows/popup_tests.rs
+@@ -0,0 +1,219 @@
++use super::*;
++
++#[test]
++fn popup_system_rows_need_application_identity() {
++    for bundle in [None, Some(""), Some(" ")] {
++        assert!(!general_application_identity(42, "Window Server", bundle));
++    }
++    assert!(!general_application_identity(
++        0,
++        "Fixture",
++        Some("org.example.Fixture")
++    ));
++    assert!(!general_application_identity(
++        42,
++        "",
++        Some("org.example.Fixture")
++    ));
++    assert!(!general_application_identity(
++        42,
++        "Fixture",
++        Some(&"x".repeat(257))
++    ));
++    assert!(general_application_identity(
++        42,
++        "Fixture",
++        Some("org.example.Fixture")
++    ));
++}
++
++#[test]
++fn popup_point_lookup_rejects_stale_geometry_and_parent_identity() {
++    let mut w = tests::window(9, 42, "Fixture");
++    w.layer = 101;
++    let expected = [w.bounds.x, w.bounds.y, w.bounds.width, w.bounds.height];
++    let windows = [w];
++    assert!(general_point_window_in(&windows, 42, 9, expected).is_ok());
++    for index in 0..4 {
++        let mut stale = expected;
++        stale[index] += 1.;
++        assert_eq!(
++            general_point_window_in(&windows, 42, 9, stale).unwrap_err(),
++            "stale_image_geometry"
++        );
++    }
++    for (pid, id) in [(43, 9), (42, 7)] {
++        assert_eq!(
++            general_point_window_in(&windows, pid, id, expected).unwrap_err(),
++            "controlled_target_stale"
++        );
++    }
++}
++
++#[test]
++fn popup_general_layer101_is_admitted_but_legacy_stays_zero() {
++    assert!(admits_window(LayerFilter::ZeroOnly, 0, Some(true), false));
++    assert!(!admits_window(
++        LayerFilter::ZeroOnly,
++        101,
++        Some(true),
++        false
++    ));
++    assert!(admits_window(LayerFilter::General, 101, Some(true), false));
++}
++
++#[test]
++fn popup_general_has_no_arbitrary_layer_cap_and_excludes_owned_renderer() {
++    for layer in [i32::MIN, -1, 0, 101, 102, i32::MAX] {
++        assert!(!admits_window(
++            LayerFilter::General,
++            layer,
++            Some(true),
++            true
++        ));
++        assert!(admits_window(
++            LayerFilter::General,
++            layer,
++            Some(true),
++            false
++        ));
++        assert!(admits_window(
++            LayerFilter::AnyLayer,
++            layer,
++            Some(true),
++            false
++        ));
++        assert_eq!(
++            admits_window(LayerFilter::ZeroOnly, layer, Some(true), false),
++            layer == 0
++        );
++    }
++}
++
++#[test]
++fn popup_general_point_and_catalog_receive_the_same_exact_surface() {
++    let parent = tests::window(7, 42, "Fixture");
++    let mut popup = tests::window(9, 42, "Fixture");
++    popup.layer = 101;
++    popup.bounds = WindowBounds {
++        x: 886.,
++        y: 655.,
++        width: 259.,
++        height: 437.,
++    };
++    let windows: Vec<_> = [parent, popup]
++        .into_iter()
++        .filter(|w| admits_window(LayerFilter::General, w.layer, Some(true), false))
++        .collect();
++    let found =
++        general_window_in(&windows, 42, 9).expect("eligible popup omitted before point lookup");
++    assert_eq!(found.bounds.width, 259.);
++    assert_eq!(found.bounds.x, 886.);
++    assert!(general_window_in(&windows, 43, 9).is_none());
++    assert!(general_window_in(&windows, 42, 8).is_none());
++    assert!(general_window_in(&[found.clone(), found.clone()], 42, 9).is_none());
++}
++
++#[test]
++fn popup_metadata_rejects_invalid_identity_geometry_visibility_and_space() {
++    let mut w = tests::window(9, 42, "Fixture");
++    w.layer = 101;
++    for field in 0..4 {
++        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
++            let mut invalid = w.clone();
++            match field {
++                0 => invalid.bounds.x = value,
++                1 => invalid.bounds.y = value,
++                2 => invalid.bounds.width = value,
++                _ => invalid.bounds.height = value,
++            }
++            assert!(general_window_metadata(&invalid).is_err());
++            assert!(general_window_in(&[invalid], 42, 9).is_none());
++        }
++    }
++    for value in [0., -1.] {
++        let mut invalid = w.clone();
++        invalid.bounds.width = value;
++        assert!(general_window_metadata(&invalid).is_err());
++        invalid = w.clone();
++        invalid.bounds.height = value;
++        assert!(general_window_metadata(&invalid).is_err());
++    }
++    for field in 0..7 {
++        let mut invalid = w.clone();
++        match field {
++            0 => invalid.pid = 0,
++            1 => invalid.window_id = 0,
++            2 => invalid.app_name = " ".into(),
++            3 => invalid.is_on_screen = false,
++            4 => invalid.on_current_space = Some(false),
++            5 => invalid.app_name = "x".repeat(257),
++            _ => invalid.title = "x".repeat(2049),
++        }
++        assert!(general_window_metadata(&invalid).is_err());
++    }
++    for space in [None, Some(true)] {
++        w.on_current_space = space;
++        assert!(general_window_metadata(&w).is_ok());
++    }
++    w.layer = 0;
++    w.is_on_screen = false;
++    w.on_current_space = Some(false);
++    assert!(
++        general_window_metadata(&w).is_ok(),
++        "legacy off-screen catalog remains available"
++    );
++}
++
++pub(crate) fn popup_budget_candidates() -> Vec<WindowInfo> {
++    (1..=315)
++        .map(|id| {
++            let mut w = tests::window(id, 42, "Fixture");
++            w.layer = if id <= 217 { 0 } else { 101 };
++            w.is_on_screen = id > 217 && id <= 241;
++            w
++        })
++        .filter(|w| admits_window(LayerFilter::General, w.layer, Some(w.is_on_screen), false))
++        .collect()
++}
++
++#[test]
++fn popup_eligibility_precedes_catalog_budget() {
++    let candidates = popup_budget_candidates();
++    assert_eq!(
++        candidates.len(),
++        241,
++        "217 normal + 24 visible accessories; 74 hidden accessories excluded before catalog budget"
++    );
++    assert_eq!(candidates.iter().filter(|w| w.layer == 0).count(), 217);
++    assert_eq!(candidates.iter().filter(|w| w.layer != 0).count(), 24);
++}
++
++#[test]
++fn popup_hidden_accessory_excluded_only_from_general() {
++    for visibility in [None, Some(false), Some(true)] {
++        for layer in [i32::MIN, -1, 0, 101, 102, i32::MAX] {
++            assert_eq!(
++                admits_window(LayerFilter::General, layer, visibility, false),
++                layer == 0 || visibility != Some(false)
++            );
++            assert!(admits_window(
++                LayerFilter::AnyLayer,
++                layer,
++                visibility,
++                false
++            ));
++            assert_eq!(
++                admits_window(LayerFilter::ZeroOnly, layer, visibility, false),
++                layer == 0
++            );
++            for mode in [
++                LayerFilter::ZeroOnly,
++                LayerFilter::General,
++                LayerFilter::AnyLayer,
++            ] {
++                assert!(!admits_window(mode, layer, visibility, true));
++            }
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs
+@@ -8,24 +8,9 @@
+ }
+
+ fn row(window: &crate::windows::WindowInfo, stamp: (u64, u64)) -> Result<Value, &'static str> {
+-    if window.pid <= 0 || window.window_id == 0 || stamp.0 == 0 {
++    crate::windows::general_window_metadata(window)?;
++    if stamp.0 == 0 {
+         return Err("discovery_window_identity_unproved");
+-    }
+-    if window.title.len() > 2048 || window.app_name.len() > 256 {
+-        return Err("discovery_metadata_limit_exceeded");
+-    }
+-    if ![
+-        window.bounds.x,
+-        window.bounds.y,
+-        window.bounds.width,
+-        window.bounds.height,
+-    ]
+-    .iter()
+-    .all(|v| v.is_finite())
+-        || window.bounds.width <= 0.0
+-        || window.bounds.height <= 0.0
+-    {
+-        return Err("discovery_window_geometry_unproved");
+     }
+     let mut value = super::list_windows::window_record_json(window);
+     value["computer_process_stamp"] = json!([stamp.0, stamp.1]);
+@@ -71,7 +56,7 @@
+     let worker = operation.clone();
+     match operation.blocking(move || {
+         if worker.checkpoint().is_err() { return refuse("controlled_cancelled"); }
+-        let enumeration=crate::windows::all_windows_with_space_snapshot();
++        let enumeration=crate::windows::general_windows_with_space_snapshot();
+         let focus = crate::ax::general_surface::foreground_identity();
+         let (mut rows,omitted) = match catalog_rows(enumeration.windows,super::computer_process_stamp,||worker.checkpoint()) {
+             Ok(rows)=>rows,Err(reason)=>return refuse(reason),
+@@ -103,22 +88,32 @@
+     if super::computer_process_stamp(pid) != Some(stamp) {
+         return Err("discovery_target_stale");
+     }
+-    let matching: Vec<_> = crate::windows::all_windows_with_space_snapshot()
+-        .windows
+-        .into_iter()
+-        .filter(|current| u64::from(current.window_id) == window.window_id && current.pid == pid)
+-        .collect();
+-    if matching.len() != 1 {
++    revalidate_in(window, stamp, &crate::windows::general_windows_with_space_snapshot().windows,
++        super::computer_process_stamp)
++}
++
++fn revalidate_in(
++    window: &cua_driver_contract::WindowInfo,
++    stamp: (u64, u64),
++    windows: &[crate::windows::WindowInfo],
++    mut process_stamp: impl FnMut(i32) -> Option<(u64, u64)>,
++) -> Result<(), &'static str> {
++    let pid = window.pid.and_then(|pid| i32::try_from(pid).ok())
++        .filter(|pid| *pid > 0).ok_or("discovery_target_stale")?;
++    if stamp.0 == 0 || process_stamp(pid) != Some(stamp) {
+         return Err("discovery_target_stale");
+     }
+-    let current = &matching[0];
++    let id = u32::try_from(window.window_id).map_err(|_| "discovery_target_stale")?;
++    let current = crate::windows::general_window_in(windows, pid, id)
++        .ok_or("discovery_target_stale")?;
+     if current.title != window.title
+         || current.app_name != window.app_name
++        || Some(current.layer) != window.layer
+         || current.bounds.x != window.bounds.x
+         || current.bounds.y != window.bounds.y
+         || current.bounds.width != window.bounds.width
+         || current.bounds.height != window.bounds.height
+-        || super::computer_process_stamp(pid) != Some(stamp)
++        || process_stamp(pid) != Some(stamp)
+     {
+         return Err("discovery_target_stale");
+     }
+@@ -128,7 +123,7 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    fn window(id: u32, width: f64) -> crate::windows::WindowInfo {
++    pub(super) fn window(id: u32, width: f64) -> crate::windows::WindowInfo {
+         crate::windows::WindowInfo {
+             window_id: id,
+             pid: 42,
+@@ -219,3 +214,6 @@
+         assert!(!op.terminal().await.unwrap().input_committed);
+     }
+ }
++
++#[cfg(test)]
++mod popup_tests;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery/popup_tests.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery/popup_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery/popup_tests.rs
+@@ -0,0 +1,87 @@
++use super::*;
++
++#[test]
++fn popup_discovery_reselection_rejects_stale_geometry_identity_and_birth() {
++    let mut popup = tests::window(9, 259.);
++    popup.layer = 101;
++    popup.bounds.x = 886.;
++    popup.bounds.y = 655.;
++    popup.bounds.height = 437.;
++    let (rows, omitted) = catalog_rows(vec![popup.clone()], |_| Some((100, 2)), || Ok(())).unwrap();
++    assert_eq!(omitted, 0);
++    let selected: cua_driver_contract::WindowInfo =
++        serde_json::from_value(rows[0].clone()).unwrap();
++    assert_eq!(
++        revalidate_in(&selected, (100, 2), &[popup.clone()], |_| Some((100, 2))),
++        Ok(())
++    );
++    for field in 0..11 {
++        let mut changed = popup.clone();
++        match field {
++            0 => changed.pid += 1,
++            1 => changed.window_id += 1,
++            2 => changed.bounds.x += 1.,
++            3 => changed.bounds.y += 1.,
++            4 => changed.bounds.width += 1.,
++            5 => changed.bounds.height += 1.,
++            6 => changed.title.push('x'),
++            7 => changed.app_name.push('x'),
++            8 => changed.is_on_screen = false,
++            9 => changed.on_current_space = Some(false),
++            _ => changed.layer = 102,
++        }
++        assert_eq!(
++            revalidate_in(&selected, (100, 2), &[changed], |_| Some((100, 2))),
++            Err("discovery_target_stale")
++        );
++    }
++    assert_eq!(
++        revalidate_in(&selected, (100, 2), &[], |_| Some((100, 2))),
++        Err("discovery_target_stale")
++    );
++    assert_eq!(
++        revalidate_in(&selected, (100, 2), &[popup.clone()], |_| Some((101, 2))),
++        Err("discovery_target_stale")
++    );
++    let mut calls = 0;
++    assert_eq!(
++        revalidate_in(&selected, (100, 2), &[popup], |_| {
++            calls += 1;
++            Some((if calls == 1 { 100 } else { 101 }, 2))
++        }),
++        Err("discovery_target_stale")
++    );
++}
++
++#[test]
++fn popup_unproved_rows_are_omitted_without_erasing_eligible_popup() {
++    let mut popup = tests::window(9, 259.);
++    popup.layer = 101;
++    let mut system = popup.clone();
++    system.window_id = 10;
++    system.app_name.clear();
++    let mut hidden = popup.clone();
++    hidden.window_id = 11;
++    hidden.is_on_screen = false;
++    let (rows, omitted) =
++        catalog_rows(vec![system, hidden, popup], |_| Some((100, 2)), || Ok(())).unwrap();
++    assert_eq!(omitted, 2);
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0]["window_id"], 9);
++}
++
++#[test]
++fn popup_eligible_candidates_fit_unchanged_catalog_budget() {
++    let candidates = crate::windows::popup_tests::popup_budget_candidates();
++    let result = catalog_rows(candidates, |_| Some((100, 2)), || Ok(()));
++    assert!(
++        result.is_ok(),
++        "eligible candidate catalog refused: {result:?}"
++    );
++    let (rows, omitted) = result.unwrap();
++    assert_eq!(rows.len(), 241);
++    assert_eq!(omitted, 0);
++    assert!(rows
++        .iter()
++        .any(|row| row["window_id"] == 218 && row["layer"] == 101));
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -181,16 +181,11 @@
+             return Err("stale_image_observation");
+         }
+         let g = image.geometry();
+-        let bounds = crate::windows::all_windows()
+-            .into_iter()
+-            .find(|window| window.pid == target.pid && window.window_id == target.window_id)
+-            .ok_or("controlled_target_stale")?
+-            .bounds;
+-        if [bounds.x, bounds.y, bounds.width, bounds.height]
+-            != [g.desktop_x, g.desktop_y, g.window_width, g.window_height]
+-        {
+-            return Err("stale_image_geometry");
+-        }
++        let windows = crate::windows::general_windows_with_space_snapshot();
++        crate::windows::general_point_window_in(
++            &windows.windows, target.pid, target.window_id,
++            [g.desktop_x, g.desktop_y, g.window_width, g.window_height],
++        )?;
+         // Image addresses name pixels. Use the addressed pixel's center,
+         // including fractional model coordinates within the final edge pixel.
+         let (x, y) = g.desktop_pixel_center(point.x as u32, point.y as u32)?;
