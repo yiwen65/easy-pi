@@ -1413,33 +1413,24 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 				ctx.ui.notify(`Subagent ${action} denied`, "warning");
 				return;
 			}
-			ctx.ui.setStatus("subagent-operator", sanitizeTuiText(`subagent ${action} ${shortRunId(runId)}…`));
-			try {
-				let details: SubagentDagRunDetails;
-				if (action === "resume") {
-					details = await dagOrchestrator.resume({
-						runId,
-						onProgress: (progress) =>
-							ctx.ui.setStatus("subagent-operator", sanitizeTuiText(dagProgressText(progress))),
-					});
-				} else if (action === "pause") {
-					if (!dagOrchestrator.pause) throw new Error("Pause is unavailable in this embedding");
-					details = await dagOrchestrator.pause({ runId });
-				} else if (action === "cancel") {
-					if (!dagOrchestrator.cancel) throw new Error("Cancel is unavailable in this embedding");
-					details = await dagOrchestrator.cancel({ runId });
-				} else if (action === "release") {
-					if (!dagOrchestrator.releaseCandidate)
-						throw new Error("Candidate release is unavailable in this embedding");
-					details = await dagOrchestrator.releaseCandidate({ runId });
-				} else {
-					if (!dagOrchestrator.gc) throw new Error("Resource GC is unavailable in this embedding");
-					details = await dagOrchestrator.gc({ runId });
-				}
-				ctx.ui.notify(`Subagent ${runId}: ${action} completed (${details.status})`, "info");
-			} finally {
-				ctx.ui.setStatus("subagent-operator", undefined);
+			let details: SubagentDagRunDetails;
+			if (action === "resume") {
+				details = await dagOrchestrator.resume({ runId });
+			} else if (action === "pause") {
+				if (!dagOrchestrator.pause) throw new Error("Pause is unavailable in this embedding");
+				details = await dagOrchestrator.pause({ runId });
+			} else if (action === "cancel") {
+				if (!dagOrchestrator.cancel) throw new Error("Cancel is unavailable in this embedding");
+				details = await dagOrchestrator.cancel({ runId });
+			} else if (action === "release") {
+				if (!dagOrchestrator.releaseCandidate)
+					throw new Error("Candidate release is unavailable in this embedding");
+				details = await dagOrchestrator.releaseCandidate({ runId });
+			} else {
+				if (!dagOrchestrator.gc) throw new Error("Resource GC is unavailable in this embedding");
+				details = await dagOrchestrator.gc({ runId });
 			}
+			ctx.ui.notify(`Subagent ${runId}: ${action} completed (${details.status})`, "info");
 		};
 
 		const openDashboard = async (ctx: ExtensionCommandContext): Promise<void> => {
@@ -1522,7 +1513,6 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 					if (parsed.action === "list") await openDashboard(ctx);
 					else await performCommand(parsed.action, parsed.runId!, ctx);
 				} catch (error) {
-					ctx.ui.setStatus("subagent-operator", undefined);
 					ctx.ui.notify(boundedText(error instanceof Error ? error.message : String(error), 500), "error");
 				}
 			},
@@ -1627,9 +1617,6 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 			async execute(toolCallId, rawParams, signal, onUpdate, ctx): Promise<AgentToolResult<SubagentToolDetails>> {
 				assertSubagentToolRequestSize(rawParams);
 				const params = parseSubagentToolRequest(rawParams, parameters);
-				const setStatus = (text: string | undefined): void =>
-					ctx.ui?.setStatus("subagent", text === undefined ? undefined : sanitizeTuiText(text));
-				setStatus("subagent: preparing");
 				try {
 					const inheritedChildModel = parentModelSelection(ctx as ExtensionCommandContext);
 					const childModel = options.childModel ?? inheritedChildModel;
@@ -1675,7 +1662,6 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 						signal,
 						onProgress: (progress) => {
 							const text = dagProgressText(progress);
-							setStatus(text);
 							onUpdate?.({
 								content: [{ type: "text", text }],
 								details: progress.details,
@@ -1726,8 +1712,6 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 						);
 					}
 					throw error;
-				} finally {
-					setStatus(undefined);
 				}
 			},
 			renderCall(args, theme) {

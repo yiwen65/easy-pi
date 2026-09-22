@@ -309,8 +309,7 @@ describe("createSubagentExtension", () => {
 		});
 		expect(result?.content[0]?.type === "text" ? result.content[0].text : "").toContain("trust=unvalidated");
 		expect(result?.usage?.totalTokens).toBe(9);
-		expect(statuses).toEqual(expect.arrayContaining([expect.stringContaining("dag-run"), undefined]));
-		expect(statuses.at(-1)).toBeUndefined();
+		expect(statuses).toEqual([]);
 		expect(notifications).toContain(
 			"Subagent dag-run: candidate ready at refs/heads/pi/subagent/integration/dag-run",
 		);
@@ -1077,7 +1076,8 @@ describe("createSubagentExtension", () => {
 		expect(cancel).toHaveBeenCalledOnce();
 		expect(releaseCandidate).toHaveBeenCalledOnce();
 		expect(gc).toHaveBeenCalledOnce();
-		expect(statuses.at(-1)).toBeUndefined();
+		// Operator actions write no footer status line either.
+		expect(statuses).toEqual([]);
 		await command?.handler("inspect dag-run", context);
 		await command?.handler("diff dag-run", context);
 		expect(diffCandidate).toHaveBeenCalledOnce();
