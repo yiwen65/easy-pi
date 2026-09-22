@@ -1,0 +1,828 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+@@ -12,6 +12,7 @@
+ };
+ use tokio::sync::watch;
+
++mod drag_dependency;
+ mod image_reference;
+ mod resources;
+ mod scope;
+@@ -188,6 +189,7 @@
+
+ #[derive(Default)]
+ struct State {
++    drag_destination: Option<Arc<Session>>,
+     started: bool,
+     cancelled: bool,
+     producer_done: bool,
+@@ -246,7 +248,7 @@
+     ) -> Result<(), &'static str> {
+         let closed = self.session.gate.guard();
+         let mut state = self.state();
+-        if *closed || !self.session.live() || state.cancelled || state.producer_done {
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
+             return Err("cancelled");
+         }
+         if state.started
+@@ -269,7 +271,7 @@
+     pub fn begin_step(&self, index: u32) -> Result<(), &'static str> {
+         let closed = self.session.gate.guard();
+         let mut state = self.state();
+-        if *closed || !self.session.live() || state.cancelled || state.producer_done {
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
+             return Err("cancelled");
+         }
+         if !state.started
+@@ -301,7 +303,7 @@
+         if state.started {
+             return Err("already_started");
+         }
+-        if *closed || !self.session.live() || state.cancelled || state.producer_done {
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
+             state.cancelled = true;
+             state.producer_done = true;
+             self.session.gate.notify();
+@@ -353,7 +355,7 @@
+             && !state.quarantine
+             && !self.session.gate.is_quarantined()
+         {
+-            let live = self.session.live();
++            let live = self.dependencies_live(state);
+             let cancelled = closed || !live || state.cancelled;
+             if !self.session.gate.is_quarantined() {
+                 state.terminal = Some(Terminal {
+@@ -368,7 +370,7 @@
+         let closed = self.session.gate.guard();
+         let state = self.state();
+         if *closed
+-            || !self.session.live()
++            || !self.dependencies_live(&state)
+             || state.cancelled
+             || state.producer_done
+             || state.quarantine
+@@ -411,7 +413,7 @@
+             let closed = self.session.gate.guard();
+             let mut state = self.state();
+             if *closed
+-                || !self.session.live()
++                || !self.dependencies_live(&state)
+                 || state.cancelled
+                 || state.producer_done
+                 || state.quarantine
+@@ -461,7 +463,7 @@
+         let closed = self.session.gate.guard();
+         let state = self.state();
+         if *closed
+-            || !self.session.live()
++            || !self.dependencies_live(&state)
+             || state.cancelled
+             || state.producer_done
+             || state.quarantine
+@@ -476,7 +478,7 @@
+         let closed = self.session.gate.guard();
+         let state = self.state();
+         if *closed
+-            || !self.session.live()
++            || !self.dependencies_live(&state)
+             || state.cancelled
+             || state.producer_done
+             || state.quarantine
+@@ -578,7 +580,8 @@
+
+     pub fn is_cancelled(&self) -> bool {
+         let closed = self.session.gate.guard();
+-        *closed || !self.session.live() || self.state().cancelled
++        let state = self.state();
++        *closed || !self.dependencies_live(&state) || state.cancelled
+     }
+
+     pub async fn cancelled(&self) {
+@@ -628,7 +631,7 @@
+                 if self.session.gate.is_quarantined() {
+                     return Err("quarantined");
+                 }
+-                if !state.started && (*closed || !self.session.live()) {
++                if !state.started && (*closed || !self.dependencies_live(&state)) {
+                     state.cancelled = true;
+                     state.producer_done = true;
+                 }
+@@ -754,3 +757,5 @@
+ mod pointer_tests;
+ #[cfg(test)]
+ mod tests;
++#[cfg(test)]
++mod dependency_tests;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs
+@@ -0,0 +1,64 @@
++//! One additional immutable capability for a dedicated cross-window drag.
++//! This binds lifetime only; it neither changes window scope nor authorizes input.
++use super::{Operation, Session, State};
++use std::sync::Arc;
++
++impl Operation {
++    /// Bind before configuration/start, under the SDK operation registry lock.
++    /// The common gate orders this with endpoint/ancestor revocation.
++    pub fn bind_drag_destination(&self, destination: Arc<Session>) -> Result<(), &'static str> {
++        if !Arc::ptr_eq(&self.session.gate, &destination.gate) {
++            return Err("foreign_drag_destination");
++        }
++        let closed = self.session.gate.guard();
++        let mut state = self.state();
++        if *closed
++            || !self.dependencies_live(&state)
++            || !destination.live()
++            || state.cancelled
++            || state.producer_done
++            || state.quarantine
++        {
++            return Err("cancelled");
++        }
++        if state.started
++            || state.active != 0
++            || state.drag_destination.is_some()
++            || state.plan_steps.is_some()
++            || state.segment_limits.is_some()
++        {
++            return Err("drag_destination_already_bound_or_started");
++        }
++        let source = self.session.native_window()?;
++        let target = destination.native_window()?;
++        if source.process_stamp.is_none()
++            || target.process_stamp.is_none()
++            || source.window_id == target.window_id
++            || (source.pid == target.pid && source.process_stamp != target.process_stamp)
++        {
++            return Err("invalid_drag_destination");
++        }
++        state.drag_destination = Some(destination);
++        Ok(())
++    }
++
++    /// Called with the common gate AND this operation's state already held.
++    pub(super) fn dependencies_live(&self, state: &State) -> bool {
++        self.session.live()
++            && state
++                .drag_destination
++                .as_ref()
++                .is_none_or(|session| session.live())
++    }
++
++    /// Revoke/close must drain a dependent operation before retiring either
++    /// subtree's resources. A dependency is not a fabricated parent relation.
++    pub fn depends_on_subtree(&self, ancestor: &Arc<Session>) -> bool {
++        self.session.descends_from(ancestor)
++            || self
++                .state()
++                .drag_destination
++                .as_ref()
++                .is_some_and(|session| session.descends_from(ancestor))
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs
+@@ -0,0 +1,269 @@
++use super::*;
++use std::future::Future;
++use std::task::{Context, Waker};
++use std::time::Duration;
++
++fn endpoints() -> (Arc<Gate>, Arc<Session>, Arc<Session>) {
++    let gate = Gate::new();
++    let source = gate
++        .session(None, Arc::new(|| true), 42, 7, Some((1, 2)))
++        .unwrap();
++    let destination = gate
++        .session(None, Arc::new(|| true), 42, 8, Some((1, 2)))
++        .unwrap();
++    (gate, source, destination)
++}
++
++// Kept as the original production-seam counterexample. Unbound windows remain
++// unrelated; the new API must not silently expand an ordinary operation.
++#[tokio::test]
++async fn controlled_unbound_destination_is_not_a_dependency_legacy_counterexample() {
++    let (_, source, destination) = endpoints();
++    let op = source.new_operation().unwrap();
++    op.begin().unwrap();
++    assert!(destination.new_operation().is_ok());
++    destination.revoke();
++    assert!(!op.session.descends_from(&destination));
++    assert!(!op.depends_on_subtree(&destination));
++    assert_eq!(op.primary(true, || "admitted"), Ok("admitted"));
++    op.finish();
++    assert_eq!(
++        op.terminal().await.unwrap(),
++        Terminal {
++            cancelled: false,
++            input_committed: true
++        }
++    );
++}
++
++#[test]
++fn controlled_drag_dependency_rejects_scope_identity_and_rebinding() {
++    let (gate, source, destination) = endpoints();
++    let op = source.new_operation().unwrap();
++    let foreign = Gate::new()
++        .session(None, Arc::new(|| true), 43, 9, Some((1, 2)))
++        .unwrap();
++    let discovery = gate.discovery_session(None, Arc::new(|| true)).unwrap();
++    let browser = gate.browser_session(Arc::new(|| true)).unwrap();
++    let missing = gate.session(None, Arc::new(|| true), 43, 9, None).unwrap();
++    let changed = gate
++        .session(None, Arc::new(|| true), 42, 9, Some((2, 2)))
++        .unwrap();
++    for invalid in [
++        source.clone(),
++        foreign,
++        discovery.clone(),
++        browser.clone(),
++        missing,
++        changed,
++    ] {
++        assert!(op.bind_drag_destination(invalid).is_err());
++    }
++    for invalid_source in [discovery, browser] {
++        let invalid = invalid_source.new_operation().unwrap();
++        assert!(invalid.bind_drag_destination(destination.clone()).is_err());
++        invalid.cancel();
++    }
++    op.bind_drag_destination(destination.clone()).unwrap();
++    assert!(!op.session.descends_from(&destination));
++    assert!(op.depends_on_subtree(&destination));
++    assert_eq!(op.session.native_window().unwrap().window_id, 7);
++    assert!(op.bind_drag_destination(destination).is_err());
++    op.cancel();
++}
++
++#[test]
++fn controlled_drag_dependency_must_bind_before_configuration_or_start() {
++    for configured in 0..3 {
++        let (_, source, destination) = endpoints();
++        let op = source.new_operation().unwrap();
++        match configured {
++            0 => op.begin().unwrap(),
++            1 => op.configure_plan(1, Duration::from_secs(1)).unwrap(),
++            _ => op
++                .configure_segment(vec![1], Duration::from_secs(1))
++                .unwrap(),
++        }
++        assert!(op.bind_drag_destination(destination).is_err());
++        op.cancel();
++        op.finish();
++    }
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_revocation_between_validation_and_primary() {
++    let (_, source, destination) = endpoints();
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination.clone()).unwrap();
++    op.begin().unwrap();
++    let worker = op.clone();
++    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
++    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
++    let thread = std::thread::spawn(move || {
++        worker.checkpoint().unwrap();
++        ready_tx.send(()).unwrap();
++        resume_rx.recv().unwrap();
++        worker.primary(true, || panic!("destination revoked after validation"))
++    });
++    ready_rx.recv().unwrap();
++    destination.revoke();
++    resume_tx.send(()).unwrap();
++    assert_eq!(thread.join().unwrap(), Err("cancelled"));
++    op.finish();
++    assert_eq!(
++        op.terminal().await.unwrap(),
++        Terminal {
++            cancelled: true,
++            input_committed: false
++        }
++    );
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_both_ancestors_wake_and_cancel_without_sdk_cancel() {
++    for revoke_source in [true, false] {
++        let (gate, source_parent, destination_parent) = endpoints();
++        let source = gate
++            .session(
++                Some(source_parent.clone()),
++                Arc::new(|| true),
++                42,
++                7,
++                Some((1, 2)),
++            )
++            .unwrap();
++        let destination = gate
++            .session(
++                Some(destination_parent.clone()),
++                Arc::new(|| true),
++                42,
++                8,
++                Some((1, 2)),
++            )
++            .unwrap();
++        let op = source.new_operation().unwrap();
++        op.bind_drag_destination(destination).unwrap();
++        assert!(op.depends_on_subtree(&source_parent));
++        assert!(op.depends_on_subtree(&destination_parent));
++        op.begin().unwrap();
++        let mut cancelled = Box::pin(op.cancelled());
++        assert!(cancelled
++            .as_mut()
++            .poll(&mut Context::from_waker(Waker::noop()))
++            .is_pending());
++        if revoke_source {
++            source_parent.revoke();
++        } else {
++            destination_parent.revoke();
++        }
++        assert!(cancelled
++            .as_mut()
++            .poll(&mut Context::from_waker(Waker::noop()))
++            .is_ready());
++        assert!(op.checkpoint().is_err());
++        op.finish();
++        assert!(op.terminal().await.unwrap().cancelled);
++    }
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_unstarted_and_action_admission_cancel() {
++    for stage in 0..4 {
++        let (_, source, destination) = endpoints();
++        let op = source.new_operation().unwrap();
++        op.bind_drag_destination(destination.clone()).unwrap();
++        if stage == 1 {
++            op.configure_plan(1, Duration::from_secs(1)).unwrap();
++            op.begin().unwrap();
++        }
++        if stage == 2 {
++            op.configure_segment(vec![1], Duration::from_secs(1))
++                .unwrap();
++            op.begin().unwrap();
++        }
++        destination.revoke();
++        match stage {
++            0 => assert!(op.begin().is_err()),
++            1 => assert!(op.begin_step(0).is_err()),
++            2 => assert!(op.begin_segment_action(0).is_err()),
++            _ => {
++                assert!(op.configure_plan(1, Duration::from_secs(1)).is_err());
++                assert!(op
++                    .configure_segment(vec![1], Duration::from_secs(1))
++                    .is_err());
++            }
++        }
++        if stage == 1 || stage == 2 {
++            op.finish();
++        }
++        assert!(op.terminal().await.unwrap().cancelled);
++    }
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_terminal_waits_owned_cleanup_after_revoke() {
++    let (_, source, destination) = endpoints();
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination.clone()).unwrap();
++    op.begin().unwrap();
++    let work = op.track().unwrap();
++    let held = AtomicBool::new(false);
++    op.primary(true, || held.store(true, Ordering::SeqCst))
++        .unwrap();
++    destination.revoke();
++    // Cleanup registration remains legal; it cannot create another primary.
++    let callback = op.track_callback().unwrap();
++    op.finish();
++    let mut terminal = Box::pin(op.terminal());
++    assert!(terminal
++        .as_mut()
++        .poll(&mut Context::from_waker(Waker::noop()))
++        .is_pending());
++    assert!(held.swap(false, Ordering::SeqCst));
++    drop(callback);
++    drop(work);
++    assert_eq!(
++        terminal.await.unwrap(),
++        Terminal {
++            cancelled: true,
++            input_committed: true
++        }
++    );
++    assert!(!held.load(Ordering::SeqCst));
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_native_authority_and_panic_keep_guards() {
++    let (gate, source, _) = endpoints();
++    let live = Arc::new(AtomicBool::new(true));
++    let authority = live.clone();
++    let destination = gate
++        .session(
++            None,
++            Arc::new(move || authority.load(Ordering::Acquire)),
++            43,
++            9,
++            Some((1, 2)),
++        )
++        .unwrap();
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination).unwrap();
++    op.begin().unwrap();
++    live.store(false, Ordering::Release);
++    assert!(op
++        .primary(false, || panic!("dead canonical authority"))
++        .is_err());
++    op.finish();
++    assert!(op.terminal().await.unwrap().cancelled);
++    let (_, source, destination) = endpoints();
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination).unwrap();
++    op.begin().unwrap();
++    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let _work = op.track().unwrap();
++        panic!("owned producer unwind");
++    }))
++    .is_err());
++    op.finish();
++    assert_eq!(op.terminal().await, Err("quarantined"));
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
+@@ -68,7 +68,7 @@
+     ) -> Result<(), &'static str> {
+         let closed = self.session.gate.guard();
+         let mut state = self.state();
+-        if *closed || !self.session.live() || state.cancelled || state.producer_done {
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
+             return Err("cancelled");
+         }
+         if state.started
+@@ -97,7 +97,7 @@
+     pub fn begin_segment_action(&self, index: u32) -> Result<(), &'static str> {
+         let closed = self.session.gate.guard();
+         let mut state = self.state();
+-        if *closed || !self.session.live() || state.cancelled || state.producer_done {
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
+             return Err("cancelled");
+         }
+         if !state.started
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+@@ -1,6 +1,7 @@
+ //! Pi-owned controlled facade. Native sequential plans retain the same gate and drain proof.
+ mod browser;
+ mod discovery;
++mod drag_dependency;
+ pub use discovery::ComputerDiscoveredWindow;
+ mod image;
+ mod keyboard;
+@@ -524,6 +525,7 @@
+         let operation = Arc::new(ComputerOperation {
+             core: core.clone(),
+             session: self.clone(),
++            drag_destination: Mutex::new(None),
+             outcome: Mutex::new(None),
+         });
+         operations.retain(|operation| !operation.is_proven_terminal());
+@@ -548,16 +550,20 @@
+         } else {
+             self.host.gate.quarantine();
+         }
+-        if let Ok(operations) = self.host.operations.lock() {
+-            for operation in operations
+-                .iter()
+-                .filter(|op| op.session.descends_from(&self.gate))
+-            {
++        if let Ok(operations) = self.dependent_operations() {
++            for operation in operations {
+                 operation.cancel();
+             }
+         } else {
+             self.host.gate.quarantine();
+         }
++    }
++}
++
++impl ComputerSession {
++    fn dependent_operations(&self) -> Result<Vec<Arc<Operation>>, ComputerError> {
++        Ok(self.host.operations.lock().map_err(|_| self.host.quarantine())?
++            .iter().filter(|op| op.depends_on_subtree(&self.gate)).cloned().collect())
+     }
+ }
+
+@@ -575,15 +581,7 @@
+                     if session.host.gate.is_quarantined() {
+                         return Err(ComputerError::Quarantined);
+                     }
+-                    let operations = session
+-                        .host
+-                        .operations
+-                        .lock()
+-                        .map_err(|_| session.host.quarantine())?
+-                        .iter()
+-                        .filter(|op| op.session.descends_from(&session.gate))
+-                        .cloned()
+-                        .collect::<Vec<_>>();
++                    let operations = session.dependent_operations()?;
+                     for operation in operations {
+                         operation
+                             .terminal()
+@@ -695,6 +693,9 @@
+ pub struct ComputerOperation {
+     core: Arc<Operation>,
+     session: Arc<ComputerSession>,
++    // A core dependency checks admission; the facade also keeps destination
++    // runtime/snapshot ownership alive until its independent producer drains.
++    drag_destination: Mutex<Option<Arc<ComputerSession>>>,
+     outcome: Mutex<Option<Result<ComputerResult, ComputerError>>>,
+ }
+
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/drag_dependency.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/drag_dependency.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/drag_dependency.rs
+@@ -0,0 +1,37 @@
++//! Rust-only lifetime attachment. No new foreign entry or input route.
++use super::{refused, ComputerError, ComputerOperation, ComputerSession};
++use std::sync::Arc;
++
++impl ComputerOperation {
++    /// Attach a genuine destination before launch. Neither this method nor the
++    /// core dependency changes either endpoint's single-window authority.
++    pub fn bind_drag_destination(
++        &self,
++        destination: Arc<ComputerSession>,
++    ) -> Result<(), ComputerError> {
++        if !Arc::ptr_eq(&self.session.host, &destination.host) {
++            return Err(refused("foreign_drag_destination"));
++        }
++        // Registry -> gate/state ordering matches close's dependency snapshot.
++        // If close revoked first, core rejects; otherwise close observes this
++        // dependency and must await the already-registered operation.
++        let _operations = self
++            .session
++            .host
++            .operations
++            .lock()
++            .map_err(|_| self.session.host.quarantine())?;
++        let mut retained = self
++            .drag_destination
++            .lock()
++            .map_err(|_| self.session.host.quarantine())?;
++        if retained.is_some() {
++            return Err(refused("drag_destination_already_bound_or_started"));
++        }
++        self.core
++            .bind_drag_destination(destination.gate.clone())
++            .map_err(refused)?;
++        *retained = Some(destination);
++        Ok(())
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+@@ -9,6 +9,7 @@
+ use std::time::Duration;
+
+ mod discovery;
++mod drag_dependency;
+ mod images;
+ #[cfg(target_os = "macos")]
+ mod pointer;
+@@ -167,6 +168,15 @@
+     host: &Arc<ComputerHost>,
+     parent: Option<&Arc<ComputerSession>>,
+ ) -> Arc<ComputerSession> {
++    session_target(host, parent, 7, None)
++}
++
++fn session_target(
++    host: &Arc<ComputerHost>,
++    parent: Option<&Arc<ComputerSession>>,
++    window_id: u32,
++    process_stamp: Option<(u64, u64)>,
++) -> Arc<ComputerSession> {
+     let label = format!("controlled-test-{}", uuid::Uuid::new_v4());
+     let native = host
+         .runtime
+@@ -189,8 +199,8 @@
+             parent.map(|parent| parent.gate.clone()),
+             Arc::new(move || authority.computer_authority_live()),
+             42,
+-            7,
+-            None,
++            window_id,
++            process_stamp,
+         )
+         .unwrap();
+     assert!(native.computer_bind_resources(gate.snapshots.clone(), gate.resources.clone()));
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/drag_dependency.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/drag_dependency.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/drag_dependency.rs
+@@ -0,0 +1,191 @@
++use super::*;
++use std::sync::atomic::AtomicUsize;
++
++fn endpoint(
++    host: &Arc<ComputerHost>,
++    parent: Option<&Arc<ComputerSession>>,
++    window: u32,
++) -> Arc<ComputerSession> {
++    session_target(host, parent, window, Some((1, 2)))
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_sdk_rejects_foreign_and_keeps_single_window_scope() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let foreign = super::host();
++    let source = endpoint(&host, None, 7);
++    let destination = endpoint(&host, None, 8);
++    let op = source.clone().new_operation().unwrap();
++    for invalid in [
++        endpoint(&foreign, None, 9),
++        source.clone(),
++        session_target(&host, None, 9, None),
++        host.clone().open_discovery_session(None).unwrap(),
++    ] {
++        assert!(matches!(
++            op.bind_drag_destination(invalid),
++            Err(ComputerError::Refused { .. })
++        ));
++    }
++    op.bind_drag_destination(destination.clone()).unwrap();
++    assert!(op.bind_drag_destination(destination.clone()).is_err());
++    assert_eq!(op.core.session.native_window().unwrap().window_id, 7);
++    assert!(!op.core.session.descends_from(&destination.gate));
++    assert!(destination
++        .dependent_operations()
++        .unwrap()
++        .iter()
++        .any(|candidate| Arc::ptr_eq(candidate, &op.core)));
++    op.cancel();
++    op.terminal().await.unwrap();
++    host.close().await.unwrap();
++    foreign.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_sdk_retains_destination_facade_without_cycle() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let source = endpoint(&host, None, 7);
++    let destination = endpoint(&host, None, 8);
++    let weak = Arc::downgrade(&destination);
++    let native = destination.native.clone();
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination).unwrap();
++    assert!(weak.upgrade().is_some() && native.computer_authority_live());
++    op.cancel();
++    assert!(op.terminal().await.unwrap().cancelled);
++    weak.upgrade().unwrap().close().await.unwrap();
++    drop(op);
++    assert!(weak.upgrade().is_none());
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_sdk_destination_close_waits_owned_work_and_snapshot_drain() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let source = endpoint(&host, None, 7);
++    let destination = endpoint(&host, None, 8);
++    let op = source.clone().new_operation().unwrap();
++    op.bind_drag_destination(destination.clone()).unwrap();
++    let retired = Arc::new(AtomicUsize::new(0));
++    let count = retired.clone();
++    destination
++        .gate
++        .snapshots
++        .replace(move || {
++            count.fetch_add(1, Ordering::SeqCst);
++        })
++        .unwrap();
++    op.core.begin().unwrap();
++    let work = op.core.track_callback().unwrap();
++    op.core.primary(true, || ()).unwrap();
++    op.core.finish();
++    // The production close snapshot includes this op even though its source is
++    // outside the destination subtree. Terminal is pending while work exists.
++    assert_eq!(destination.dependent_operations().unwrap().len(), 1);
++    let mut terminal = Box::pin(op.core.terminal());
++    assert!(terminal
++        .as_mut()
++        .poll(&mut Context::from_waker(Waker::noop()))
++        .is_pending());
++    let mut closer = Box::pin(destination.clone().close());
++    assert!(closer
++        .as_mut()
++        .poll(&mut Context::from_waker(Waker::noop()))
++        .is_pending());
++    assert!(op.core.is_cancelled());
++    assert!(!destination.closed.load(Ordering::Acquire));
++    assert_eq!(retired.load(Ordering::SeqCst), 0);
++    // Dropping this foreign waiter does not own the independent close producer.
++    drop(closer);
++    drop(work);
++    let receipt = terminal.await.unwrap();
++    assert!(receipt.cancelled && receipt.input_committed);
++    destination.close().await.unwrap();
++    assert_eq!(retired.load(Ordering::SeqCst), 1);
++    assert!(source.native.computer_authority_live());
++    let next = source.new_operation().unwrap();
++    next.cancel();
++    next.terminal().await.unwrap();
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_sdk_either_ancestor_revoke_cancels_only_dependents() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    for close_source in [true, false] {
++        let host = host();
++        let a = endpoint(&host, None, 7);
++        let b = endpoint(&host, None, 8);
++        let source = endpoint(&host, Some(&a), 7);
++        let destination = endpoint(&host, Some(&b), 8);
++        let sibling = endpoint(&host, None, 9);
++        let unrelated = sibling.new_operation().unwrap();
++        let op = source.new_operation().unwrap();
++        op.bind_drag_destination(destination).unwrap();
++        if close_source {
++            a.revoke();
++        } else {
++            b.revoke();
++        }
++        let receipt = op.terminal().await.unwrap();
++        assert!(receipt.cancelled && !receipt.input_committed);
++        assert!(!unrelated.core.is_cancelled());
++        unrelated.cancel();
++        host.close().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_sdk_close_wins_attachment_at_registry_boundary() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let source = endpoint(&host, None, 7);
++    let destination = endpoint(&host, None, 8);
++    let op = source.new_operation().unwrap();
++    let registry = host.operations.lock().unwrap();
++    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
++    let binder_op = op.clone();
++    let binder_destination = destination.clone();
++    let binder = std::thread::spawn(move || {
++        ready_tx.send(()).unwrap();
++        binder_op.bind_drag_destination(binder_destination)
++    });
++    ready_rx.recv().unwrap();
++    // Exact first phase of ComputerSession::revoke; binding is blocked on the
++    // registry and cannot retroactively join a subtree whose gate is revoked.
++    destination.gate.revoke();
++    drop(registry);
++    assert!(matches!(
++        binder.join().unwrap(),
++        Err(ComputerError::Refused { .. })
++    ));
++    assert!(op.drag_destination.lock().unwrap().is_none());
++    destination.close().await.unwrap();
++    op.cancel();
++    op.terminal().await.unwrap();
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_drag_dependency_sdk_unproven_producer_keeps_close_quarantined() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let source = endpoint(&host, None, 7);
++    let destination = endpoint(&host, None, 8);
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination.clone()).unwrap();
++    op.core.begin().unwrap();
++    drop(op); // Deliberately lose the synthetic producer; no terminal invention.
++    assert!(matches!(
++        destination.close().await,
++        Err(ComputerError::Quarantined)
++    ));
++    assert!(matches!(
++        host.close().await,
++        Err(ComputerError::Quarantined)
++    ));
++}
