@@ -36,7 +36,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		name: "computer",
 		label: "Computer",
 		description:
-			"Discover windows (optional literal, case-insensitive app/title filters), select one returned ref, then observe semantic elements or capture an image. " +
+			"Discover windows (optional literal, case-insensitive app/title filters and focused:true), explicitly select one returned ref, then observe semantic elements or capture an image. Focused child surfaces require their own selection; parent refs do not include them. " +
 			"Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
 			"Segment support requires the qualified native candidate; legacy execute/click/scroll/key routes remain available. " +
 			"Segments may automatically foreground the selected window with agent priority, without blocking physical input. " +

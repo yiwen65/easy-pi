@@ -17,6 +17,7 @@ export const DesktopInputSchema = Type.Object(
 					op: StringEnum(["discover"] as const),
 					app: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
 					title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+					focused: Type.Optional(Type.Literal(true)),
 				},
 				{ additionalProperties: false },
 			),

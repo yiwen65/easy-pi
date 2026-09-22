@@ -104,7 +104,7 @@ export function projectObservation(observation: WindowStateOutput) {
 export function projectWindows(
 	windows: readonly ComputerDiscoveredWindow[],
 	omittedWindows: number,
-	filter: { app?: string; title?: string } = {},
+	filter: { app?: string; title?: string; focused?: true } = {},
 ) {
 	if (windows.length > 256 || !Number.isSafeInteger(omittedWindows) || omittedWindows < 0)
 		throw new Error("Invalid native window catalog");
@@ -118,7 +118,8 @@ export function projectWindows(
 	for (const window of windows) {
 		if (
 			(app !== undefined && !window.appName.toLowerCase().includes(app)) ||
-			(title !== undefined && !window.title.toLowerCase().includes(title))
+			(title !== undefined && !window.title.toLowerCase().includes(title)) ||
+			(filter.focused === true && window.isFocused !== true)
 		) {
 			filteredOut++;
 			continue;
@@ -131,6 +132,7 @@ export function projectWindows(
 			title: window.title,
 			bounds: window.bounds,
 			onScreen: window.isOnScreen,
+			focused: window.isFocused,
 		});
 		const size = Buffer.byteLength(line) + 1;
 		if (bytes + size > 8192) {
