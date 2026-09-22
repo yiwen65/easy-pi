@@ -19,6 +19,7 @@ function inspection(includeSystemPrompt = false): ContextInspection {
 		replacementMessageCount: 2,
 		tailMessageCount: 4,
 		toolsTokenEstimate: 30,
+		estimateCalibration: 1,
 		tokenStats: {
 			system: 20,
 			tools: 30,

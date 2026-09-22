@@ -674,7 +674,7 @@ export class AgentSession {
 			checkpointAfter === checkpointBefore
 		) {
 			throw new Error(
-				"Provider request blocked: required compaction did not activate. Reduce context, retry /compact, or switch to a larger-context model.",
+				"Provider request blocked: required compaction did not activate. Retry /compact; if it is rejected as well, the history no longer fits the context window — switch to a larger-context model or start a new session.",
 			);
 		}
 		return checkpointAfter !== checkpointBefore ? this.agent.state.messages.slice() : messages;
@@ -2154,10 +2154,12 @@ export class AgentSession {
 	 *
 	 * This is the manual entry point used by `/compact`, RPC, and extensions. It is
 	 * separate from automatic threshold/overflow compaction, which enters through
-	 * `_checkCompaction()` and `_runAutoCompaction()`. After preparation and the
-	 * `session_before_compact` hook, both paths call the lower-level `compact()`
-	 * function imported from `./compaction/index.ts`, unless the hook cancels or
-	 * supplies a custom result.
+	 * `_checkCompaction()`, `_runAutoCompaction()`, and `_tryHfAutoCompaction()`.
+	 * Both paths compute legacy preparation only as `session_before_compact` hook
+	 * input (when a handler is registered), then call
+	 * `HfCompactionHost.attemptCompaction()`, which owns cut-point selection,
+	 * handoff generation, and validation. The hook can cancel a compaction; an
+	 * extension-provided summary is deprecated and ignored.
 	 *
 	 * Aborts the current agent operation first. Manual compaction never retries or
 	 * continues the interrupted agent turn.
@@ -2234,7 +2236,6 @@ export class AgentSession {
 				complete: hfComplete,
 				branchEntries: pathEntries,
 				signal: this._compactionAbortController.signal,
-				outputReserveTokens: settings.reserveTokens,
 				recentUserTokens: settings.keepRecentTokens,
 				customInstructions,
 				modelContextLimit: requestModel.contextWindow,
@@ -2502,7 +2503,6 @@ export class AgentSession {
 	private async _tryHfAutoCompaction(
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
-		settings: { reserveTokens: number },
 		decision: TriggerDecision,
 		currentInput: string,
 		currentInputExtraTokens: number,
@@ -2532,7 +2532,6 @@ export class AgentSession {
 			complete,
 			branchEntries: this.sessionManager.getBranch(),
 			signal: this._autoCompactionAbortController?.signal,
-			outputReserveTokens: settings.reserveTokens,
 			recentUserTokens: this.settingsManager.getCompactionSettings().keepRecentTokens,
 			modelContextLimit: requestModel.contextWindow,
 		});
@@ -2638,14 +2637,7 @@ export class AgentSession {
 				// free-text summaries violate the subsystem's invariants.
 			}
 
-			return await this._tryHfAutoCompaction(
-				reason,
-				willRetry,
-				settings,
-				decision,
-				currentInput,
-				currentInputExtraTokens,
-			);
+			return await this._tryHfAutoCompaction(reason, willRetry, decision, currentInput, currentInputExtraTokens);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =

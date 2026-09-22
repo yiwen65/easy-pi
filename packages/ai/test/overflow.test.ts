@@ -131,6 +131,22 @@ describe("isContextOverflow", () => {
 		};
 	}
 
+	it("detects silent overflow on a successful tool-use response", () => {
+		const message = createLengthStopMessage({
+			input: 71_870,
+			cacheRead: 200_832,
+			output: 235,
+		});
+		message.stopReason = "toolUse";
+		expect(isContextOverflow(message, 272_000)).toBe(true);
+	});
+
+	it("does not treat an ordinary tool-use response as overflow", () => {
+		const message = createLengthStopMessage({ input: 1000, cacheRead: 0, output: 100 });
+		message.stopReason = "toolUse";
+		expect(isContextOverflow(message, 272_000)).toBe(false);
+	});
+
 	it("detects Xiaomi-style overflow (length stop with zero output and filled context)", () => {
 		const message = createLengthStopMessage({
 			input: 58,

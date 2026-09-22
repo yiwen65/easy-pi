@@ -32,14 +32,16 @@ describe("default-on compaction", () => {
 
 	it("no configuration: auto compaction persists a replacement checkpoint", async () => {
 		const h = await createHarness({
-			// The window must leave room for the fixed costs (system + tools + local trigger + reserve),
-			// otherwise local compaction cannot fit the history and now fails closed instead of sending
-			// a request that a real provider would reject or silently truncate.
-			contextWindow: 20_000,
+			// Two invariants have to hold for threshold compaction to activate and stay feasible: the
+			// provider-reported usage reaches the 95% trigger (57,500 >= 0.95 * 60,000), and the provider
+			// projection plus the local trigger prompt and output reserve still fit inside the window
+			// (57,500 + ~1.4k trigger + 100 reserve <= 60,000). Near the window edge the handoff request
+			// itself no longer fits and provider-projection budgeting fails closed with nothing to trim.
+			contextWindow: 60_000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			responses: [
 				{ text: `first answer ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
-				{ text: `second answer ${"padding ".repeat(150)}`, usage: { totalTokens: 19_000 } },
+				{ text: `second answer ${"padding ".repeat(150)}`, usage: { totalTokens: 57_500 } },
 				{ text: subsystemHandoff }, // single local compaction-item call
 				{ text: "post-compaction answer", usage: { totalTokens: 100 } },
 			],
@@ -128,7 +130,7 @@ describe("default-on compaction", () => {
 
 	it("extension-provided custom summary is ignored (deprecated): result comes from the subsystem", async () => {
 		const h = await createHarnessWithExtensions({
-			contextWindow: 20_000,
+			contextWindow: 60_000,
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
 			extensionFactories: [
 				{
@@ -142,7 +144,7 @@ describe("default-on compaction", () => {
 			],
 			responses: [
 				{ text: `one ${"padding ".repeat(150)}`, usage: { totalTokens: 500 } },
-				{ text: `two ${"padding ".repeat(150)}`, usage: { totalTokens: 19_000 } },
+				{ text: `two ${"padding ".repeat(150)}`, usage: { totalTokens: 57_500 } },
 				{ text: subsystemHandoff },
 				{ text: "post-compaction answer", usage: { totalTokens: 100 } },
 			],
@@ -160,6 +162,32 @@ describe("default-on compaction", () => {
 		expect(
 			h.sessionManager.getBranch().some((entry) => entry.type === "compaction" && entry.replacementHistory),
 		).toBe(true);
+	});
+
+	it("fails closed when the compacted request cannot fit the window", async () => {
+		const h = await createHarness({
+			// The history itself no longer fits a compaction request: system + tools + messages +
+			// compaction reserve (4k) + the local trigger prompt exceed the 20k window, and there are no
+			// tool results to trim. The checkpoint must be rejected instead of sending a request the
+			// provider would truncate. Zero usage keeps the provider-projection correction out of play.
+			contextWindow: 20_000,
+			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
+			responses: [
+				{ text: `first answer ${"padding ".repeat(4000)}`, usage: { totalTokens: 0 } },
+				{ text: `second answer ${"padding ".repeat(4000)}`, usage: { totalTokens: 0 } },
+				{ text: "uncompacted answer", usage: { totalTokens: 0 } },
+			],
+		});
+		harnesses.push(h);
+		await h.session.prompt("start");
+		await h.session.prompt("continue");
+		await h.session.prompt("send the next real request");
+		await h.session.waitForIdle();
+
+		expect(h.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+		const ends = h.eventsOfType("compaction_end");
+		expect(ends).toHaveLength(1);
+		expect(ends[0].errorMessage).toContain("cannot fit the model context");
 	});
 
 	it("overflow recovery: subsystem compaction then retried turn completes", async () => {

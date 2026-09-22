@@ -6623,6 +6623,7 @@ export class InteractiveMode {
 			`${theme.fg("dim", "Replacement messages:")} ${inspection.replacementMessageCount}`,
 			`${theme.fg("dim", "Messages after checkpoint:")} ${inspection.tailMessageCount}`,
 			`${theme.fg("dim", "Current projected tokens:")} ${inspection.tokenStats.total.toLocaleString()}`,
+			`${theme.fg("dim", "Token estimate calibration:")} ×${inspection.estimateCalibration.toFixed(2)} (provider tokens per local estimate)`,
 		];
 		if (inspection.providerContext) {
 			lines.push(

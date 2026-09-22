@@ -72,6 +72,7 @@ describe("InteractiveMode compaction events", () => {
 				this.activeStatusIndicator = undefined;
 			},
 			startGrokTurnTiming: Reflect.get(InteractiveMode.prototype, "startGrokTurnTiming"),
+			createWorkingStatusIndicator: Reflect.get(InteractiveMode.prototype, "createWorkingStatusIndicator"),
 			restoreActiveTurnStatusAfterCompaction: Reflect.get(
 				InteractiveMode.prototype,
 				"restoreActiveTurnStatusAfterCompaction",

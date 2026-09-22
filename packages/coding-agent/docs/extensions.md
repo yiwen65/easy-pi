@@ -19,7 +19,7 @@ Extensions are TypeScript modules that extend pi's behavior. They can subscribe 
 - Permission gates (confirm before `rm -rf`, `sudo`, etc.)
 - Git checkpointing (stash at each turn, restore on branch)
 - Path protection (block writes to `.env`, `node_modules/`)
-- Custom compaction (summarize conversation your way)
+- Compaction control (cancel or observe compaction; see `compaction-control.ts` example)
 - Conversation summaries (see `summarize.ts` example)
 - Interactive tools (questions, wizards, custom dialogs)
 - Stateful tools (todo lists, connection pools)
@@ -453,6 +453,11 @@ Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `
 
 Fired on compaction. See [compaction.md](compaction.md) for details.
 
+The compaction subsystem generates the handoff itself. Returning summary text through
+`compaction` is deprecated and ignored: free-text summaries cannot satisfy the checkpoint
+invariants. Extensions control compaction by cancelling it and by observing the persisted
+checkpoint.
+
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
   const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
@@ -462,21 +467,11 @@ pi.on("session_before_compact", async (event, ctx) => {
 
   // Cancel:
   return { cancel: true };
-
-  // Custom summary:
-  return {
-    compaction: {
-      summary: "...",
-      firstKeptEntryId: preparation.firstKeptEntryId,
-      tokensBefore: preparation.tokensBefore,
-      // usage: summaryResponse.usage, // Optional; included in session totals
-    }
-  };
 });
 
 pi.on("session_compact", async (event, ctx) => {
-  // event.compactionEntry - the saved compaction
-  // event.fromExtension - whether extension provided it
+  // event.compactionEntry - the persisted CompactionEntry (modern checkpoints carry replacementHistory)
+  // event.fromExtension - reserved; pi's checkpoint pipeline always reports false
   // event.reason - "manual" (/compact), "threshold", or "overflow"
   // event.willRetry - whether the aborted turn is retried after compaction (overflow recovery)
 });
@@ -486,7 +481,7 @@ pi.on("session_compact_failed", async (event, ctx) => {
   // event.errorMessage - present for non-abort failures
   // event.aborted - true for cancelled/aborted compactions
   // event.willRetry - whether the aborted turn would have retried after compaction
-  // event.fromExtension - whether extension-provided compaction content was being used
+  // event.fromExtension - reserved; pi's checkpoint pipeline always reports false
 });
 ```
 
@@ -2972,7 +2967,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `prompt-customizer.ts` | Add context-aware tool guidance using `systemPromptOptions` | `on("before_agent_start")`, `BuildSystemPromptOptions` |
 | `file-trigger.ts` | File watcher triggers messages | `sendMessage` |
 | **Compaction & Sessions** |||
-| `custom-compaction.ts` | Custom compaction summary | `on("session_before_compact")` |
+| `compaction-control.ts` | Cancel or observe compaction | `on("session_before_compact")`, `on("session_compact")` |
 | `trigger-compact.ts` | Trigger compaction manually | `compact()` |
 | `git-checkpoint.ts` | Git stash on turns | `on("turn_start")`, `on("session_before_fork")`, `exec` |
 | `git-merge-and-resolve.ts` | Fetch, merge, and resolve conflicts | `on("agent_end")`, `exec`, `sendUserMessage` |

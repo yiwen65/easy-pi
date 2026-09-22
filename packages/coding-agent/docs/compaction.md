@@ -6,7 +6,7 @@ During a multi-turn agent run, Pi evaluates the completed tool results before st
 
 ## Checkpoint contents
 
-Pi uses one local handoff path for every provider. It makes one tool-free model request that mirrors the external boundary of Codex Remote Compaction V2. The request keeps the current canonical system prompt, converts the active Session messages through the normal provider-message converter, includes the current tool schemas, then appends a dedicated `local_compaction_trigger` user item. `toolChoice` is forced to `none`; short cache retention and the active Session routing ID allow the unchanged prefix to reuse provider cache. Only when overflow makes that request impossible are tool-result bodies rewritten to a fixed truncation notice in the compactor request; durable history is not changed. The resulting local replacement history contains:
+Pi uses one local handoff path for every provider. It makes one tool-free model request that mirrors the external boundary of Codex Remote Compaction V2. The request keeps the current canonical system prompt, converts the active Session messages through the normal provider-message converter, includes the current tool schemas, then appends a dedicated `local_compaction_trigger` user item. `toolChoice` is forced to `none`; short cache retention and the active Session routing ID allow the unchanged prefix to reuse provider cache. The request budget incorporates recent provider-reported usage when it exceeds the local estimate. When necessary, tool-result bodies are rewritten to a fixed truncation notice in the compactor request; if the provider still reports overflow, Pi retries once with every tool-result body rewritten. Durable history is not changed. The resulting local replacement history contains:
 
 1. the new compaction item as a historical `compactionSummary` message;
 2. the latest real user message, only when it fits intact within `keepRecentTokens` (default 8,192 tokens).
@@ -50,7 +50,7 @@ If local handoff generation or cancellation fails, no compaction entry is append
 ## Commands and configuration
 
 - `/compact [instructions]`: create a checkpoint immediately.
-- `/context`: show checkpoint identity, message counts, and token composition.
+- `/context`: show checkpoint identity, message counts, and token composition. Zone sizes are calibrated against the most recent provider measurement, and the applied factor is reported here.
 - `/context inspect`: show the replacement history.
 - `/context inspect --full`: additionally show the current system prompt and active tool schemas.
 - `PI_HF_COMPACTION=off|full_pipeline`: disable or enable checkpoint compaction. Unknown and retired mode names are rejected.

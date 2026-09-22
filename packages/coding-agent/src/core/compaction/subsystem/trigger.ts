@@ -16,6 +16,11 @@ export interface TriggerInput {
 	modelContextLimit: number;
 	/** Fraction at which automatic compaction opens. Default 0.95. */
 	triggerFraction?: number;
+	/**
+	 * Largest predicted request a compaction request can still carry: the history it must read plus
+	 * the trigger prompt and the compaction output reserve. Defaults to the fraction threshold.
+	 */
+	maxFeasibleTokens?: number;
 	/** Explicit user/manual compaction request. Automatic callers leave this false. */
 	manual?: boolean;
 	previousCallOverflowed?: boolean;
@@ -34,7 +39,12 @@ export interface TriggerDecision {
 
 export function evaluateTriggers(input: TriggerInput): TriggerDecision {
 	const triggerFraction = input.triggerFraction ?? DEFAULT_COMPACTION_TRIGGER_FRACTION;
-	const triggerTokens = Math.floor(triggerFraction * input.modelContextLimit);
+	const fractionTokens = Math.floor(triggerFraction * input.modelContextLimit);
+	// A compaction request replays the same history plus the local trigger prompt and its own output
+	// reserve, so a threshold beyond that headroom selects a context that can never be compacted.
+	// The ceiling keeps the automatic trigger inside the window it is meant to protect.
+	const ceilingBinding = input.maxFeasibleTokens !== undefined && input.maxFeasibleTokens < fractionTokens;
+	const triggerTokens = ceilingBinding ? input.maxFeasibleTokens! : fractionTokens;
 	const none = (reasons: string[] = []): TriggerDecision => ({
 		action: "none",
 		reasons,
@@ -65,7 +75,9 @@ export function evaluateTriggers(input: TriggerInput): TriggerDecision {
 		return {
 			action: "compact",
 			reasons: [
-				`predicted next request ${input.predictedNextRequestTokens} >= ${Math.round(triggerFraction * 100)}% limit (${triggerTokens})`,
+				ceilingBinding
+					? `predicted next request ${input.predictedNextRequestTokens} >= compaction-feasible ceiling (${triggerTokens})`
+					: `predicted next request ${input.predictedNextRequestTokens} >= ${Math.round(triggerFraction * 100)}% limit (${triggerTokens})`,
 			],
 			triggerTokens,
 			overflowRecovery: false,
