@@ -57,7 +57,6 @@ const updateTurnThinking = Reflect.get(InteractiveMode.prototype, "updateTurnThi
 		currentTurnThinkingGroup?: GrokThinkingTurnGroupComponent;
 	},
 	component: GrokAssistantMessageComponent,
-	isStreaming: boolean,
 ) => void;
 const startGrokTurnTiming = Reflect.get(InteractiveMode.prototype, "startGrokTurnTiming") as (
 	this: { grokComponentFactory?: GrokComponentFactory; grokTurnStartedAt?: number },
@@ -202,10 +201,10 @@ describe("InteractiveMode Grok component routing", () => {
 		const secondMessage = { ...assistantMessage(), content: [{ type: "thinking" as const, thinking: "second" }] };
 		const first = createAssistant.call(context, firstMessage) as GrokAssistantMessageComponent;
 		context.chatContainer.addChild(first);
-		updateTurnThinking.call(context, first, false);
+		updateTurnThinking.call(context, first);
 		const second = createAssistant.call(context, secondMessage) as GrokAssistantMessageComponent;
 		context.chatContainer.addChild(second);
-		updateTurnThinking.call(context, second, false);
+		updateTurnThinking.call(context, second);
 
 		const groups = context.chatContainer.children.filter(
 			(child): child is GrokThinkingTurnGroupComponent => child instanceof GrokThinkingTurnGroupComponent,

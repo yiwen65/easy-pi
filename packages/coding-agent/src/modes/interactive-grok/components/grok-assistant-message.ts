@@ -1,27 +1,26 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type Component, type MarkdownTheme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, type MarkdownTheme, truncateToWidth } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { AssistantMessageComponent } from "../../interactive/components/assistant-message.ts";
 import { getMarkdownTheme, theme } from "../../interactive/theme/theme.ts";
-import { flattenInline, marqueeWindow } from "./grok-marquee.ts";
+import { flattenInline } from "./grok-inline-text.ts";
 
-const TICK_INTERVAL_MS = 120;
-const MARQUEE_PREFIX = "✦ ";
+const PREFIX = "✦ ";
 
 /**
  * One-line thinking placeholder used while thinking is collapsed.
  *
- * Streams a live, horizontally scrolling tail of the latest thinking content
- * while the turn is in flight; once the turn completes it renders the static
- * hidden-thinking label, which stays clickable for expansion.
+ * Shows the newest thinking text flattened into one row, truncated to the
+ * available width while the message is in flight; once it settles the row
+ * renders the static hidden label, which stays clickable for expansion. The
+ * row never scrolls, so already-shown text is not replayed.
  */
-class ThinkingMarqueeComponent implements Component {
+class ThinkingLineComponent implements Component {
 	private flat = "";
 	private readonly label: string;
 	private readonly pad: number;
 	private readonly live: () => boolean;
-	tick = 0;
 
 	constructor(label: string, pad: number, live: () => boolean) {
 		this.label = label;
@@ -34,22 +33,15 @@ class ThinkingMarqueeComponent implements Component {
 	}
 
 	invalidate(): void {
-		// Rendering is derived directly from current text/tick; no cache to clear.
+		// Rendering derives directly from the current text; no cache to clear.
 	}
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
 		const padLeft = " ".repeat(this.pad);
 		const contentWidth = Math.max(1, width - this.pad);
-		if (!this.live()) {
-			const label = theme.italic(theme.fg("accent", `${MARQUEE_PREFIX}${this.label}`));
-			return [padLeft + truncateToWidth(label, contentWidth, "")];
-		}
-		const body =
-			this.flat.length > 0
-				? marqueeWindow(this.flat, Math.max(1, contentWidth - visibleWidth(MARQUEE_PREFIX)), this.tick)
-				: this.label;
-		const line = theme.italic(theme.fg("accent", `${MARQUEE_PREFIX}${body}`));
+		const body = this.live() && this.flat.length > 0 ? this.flat : this.label;
+		const line = theme.italic(theme.fg("accent", `${PREFIX}${body}`));
 		return [padLeft + truncateToWidth(line, contentWidth, "")];
 	}
 }
@@ -60,8 +52,8 @@ class ThinkingMarqueeComponent implements Component {
  * Pi's component still owns Markdown transforms, stream-safe incremental
  * updates, stop-reason messages, and OSC zones. The Grok layer removes the
  * ASSISTANT/THINKING headers entirely: assistant text renders as plain
- * Markdown and thinking collapses to a single line by default — a live
- * scrolling marquee while streaming, a static clickable label afterwards.
+ * Markdown and thinking collapses to a single line by default — the newest
+ * thinking text while streaming, a static clickable label afterwards.
  * `setExpanded` (the global tool-output toggle) or a click on the label
  * re-expands the full thinking content.
  */
@@ -72,10 +64,7 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 	private grokThinkingExpanded = false;
 	private grokThinkingLabel: string;
 	private thinkingDelegated = false;
-	private marquees: ThinkingMarqueeComponent[] = [];
-	private tickerUi?: TUI;
-	private tickerInterval: ReturnType<typeof setInterval> | undefined;
-	private tickerTick = 0;
+	private thinkingLines: ThinkingLineComponent[] = [];
 
 	constructor(
 		message?: AssistantMessage,
@@ -92,12 +81,6 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 		if (message) {
 			this.updateContent(message);
 		}
-	}
-
-	/** Provide the TUI handle that drives marquee animation while streaming. */
-	setTickerUi(ui: TUI | undefined): void {
-		this.tickerUi = ui;
-		this.syncTicker();
 	}
 
 	private thinkingCollapsed(): boolean {
@@ -144,41 +127,13 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 
 	protected override createHiddenThinkingComponent(): Component | undefined {
 		if (this.thinkingDelegated) return undefined;
-		const marquee = new ThinkingMarqueeComponent(this.grokThinkingLabel, this.outputPad, () => this.marqueeLive());
-		this.marquees.push(marquee);
-		return marquee;
+		const line = new ThinkingLineComponent(this.grokThinkingLabel, this.outputPad, () => this.thinkingLive());
+		this.thinkingLines.push(line);
+		return line;
 	}
 
-	private marqueeLive(): boolean {
+	private thinkingLive(): boolean {
 		return this.grokStreaming && !this.thinkingDelegated && !this.userHideThinking && !this.grokThinkingExpanded;
-	}
-
-	private tickerActive(): boolean {
-		return this.tickerUi !== undefined && this.marqueeLive() && this.marquees.length > 0;
-	}
-
-	private syncTicker(): void {
-		if (this.tickerActive() && !this.tickerInterval) {
-			this.tickerInterval = setInterval(() => {
-				this.tickerTick++;
-				for (const marquee of this.marquees) {
-					marquee.tick = this.tickerTick;
-				}
-				this.tickerUi?.requestRender();
-			}, TICK_INTERVAL_MS);
-			(this.tickerInterval as { unref?: () => void }).unref?.();
-		} else if (!this.tickerActive() && this.tickerInterval) {
-			clearInterval(this.tickerInterval);
-			this.tickerInterval = undefined;
-		}
-	}
-
-	/** Stop the marquee timer. Called when the component leaves the transcript. */
-	dispose(): void {
-		if (this.tickerInterval) {
-			clearInterval(this.tickerInterval);
-			this.tickerInterval = undefined;
-		}
 	}
 
 	/**
@@ -207,7 +162,7 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 		}
 		const padLeft = " ".repeat(this.outputPad);
 		const contentWidth = Math.max(1, width - this.outputPad);
-		const label = theme.italic(theme.fg("accent", `${MARQUEE_PREFIX}${this.grokThinkingLabel}`));
+		const label = theme.italic(theme.fg("accent", `${PREFIX}${this.grokThinkingLabel}`));
 		return [padLeft + truncateToWidth(label, contentWidth, ""), ...body];
 	}
 
@@ -220,15 +175,14 @@ export class GrokAssistantMessageComponent extends AssistantMessageComponent {
 	override updateContent(message: AssistantMessage, isStreaming = this.grokStreaming): void {
 		this.grokMessage = message;
 		this.grokStreaming = isStreaming;
-		this.marquees = [];
+		this.thinkingLines = [];
 		this.syncThinkingVisibility();
 		super.updateContent(message, isStreaming);
 		const thinkingText = message.content
 			.map((content) => (content.type === "thinking" ? content.thinking : ""))
 			.join(" ");
-		for (const marquee of this.marquees) {
-			marquee.setThinking(thinkingText);
+		for (const line of this.thinkingLines) {
+			line.setThinking(thinkingText);
 		}
-		this.syncTicker();
 	}
 }
