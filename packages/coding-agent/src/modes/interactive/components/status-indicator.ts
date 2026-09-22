@@ -1,5 +1,6 @@
 import { type Component, Loader, type TUI } from "@earendil-works/pi-tui";
 import type { WorkingIndicatorOptions } from "../../../core/extensions/index.ts";
+import { formatElapsedDuration } from "../../../utils/duration.ts";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { keyText } from "./keybinding-hints.ts";
@@ -26,8 +27,18 @@ export class StatusIndicator extends Loader {
 	}
 }
 
+const ELAPSED_TICK_MS = 1_000;
+
 export class WorkingStatusIndicator extends StatusIndicator {
-	constructor(ui: TUI, message: string, indicator?: WorkingIndicatorOptions) {
+	private baseMessage: string;
+	private readonly startedAt: number;
+	private elapsedTimer: ReturnType<typeof setInterval> | undefined;
+
+	/**
+	 * @param elapsedMs Time already spent working before this indicator appeared,
+	 * so a mid-turn recreation keeps counting from the turn start.
+	 */
+	constructor(ui: TUI, message: string, indicator?: WorkingIndicatorOptions, elapsedMs = 0) {
 		super(
 			"working",
 			ui,
@@ -36,6 +47,30 @@ export class WorkingStatusIndicator extends StatusIndicator {
 			message,
 			indicator,
 		);
+		this.baseMessage = message;
+		this.startedAt = Date.now() - Math.max(0, elapsedMs);
+		this.applyElapsed();
+		this.elapsedTimer = setInterval(() => this.applyElapsed(), ELAPSED_TICK_MS);
+		(this.elapsedTimer as { unref?: () => void }).unref?.();
+	}
+
+	/** Extension working messages replace the base text; the elapsed suffix stays. */
+	override setMessage(message: string): void {
+		this.baseMessage = message;
+		this.applyElapsed();
+	}
+
+	override dispose(): void {
+		if (this.elapsedTimer) {
+			clearInterval(this.elapsedTimer);
+			this.elapsedTimer = undefined;
+		}
+		super.dispose();
+	}
+
+	private applyElapsed(): void {
+		const elapsed = formatElapsedDuration(Date.now() - this.startedAt);
+		super.setMessage(this.baseMessage.trim() ? `${this.baseMessage} ${elapsed}` : elapsed);
 	}
 }
 

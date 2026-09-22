@@ -2293,6 +2293,20 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Working indicator for the current turn; its elapsed timer counts from the turn start. */
+	private createWorkingStatusIndicator(): WorkingStatusIndicator {
+		// The Grok turn clock runs on the monotonic performance clock, so convert the
+		// time already spent into the elapsed offset the indicator continues from.
+		const elapsedMs =
+			this.grokTurnStartedAt === undefined ? 0 : Math.max(0, performance.now() - this.grokTurnStartedAt);
+		return new WorkingStatusIndicator(
+			this.ui,
+			this.workingMessage ?? this.defaultWorkingMessage,
+			this.workingIndicatorOptions,
+			elapsedMs,
+		);
+	}
+
 	private showStatusIndicator(indicator: StatusIndicator): void {
 		this.activeStatusIndicator?.dispose();
 		this.activeStatusIndicator = indicator;
@@ -2328,13 +2342,7 @@ export class InteractiveMode {
 		// run, so no new agent_start event will restore the turn UI afterward.
 		this.startGrokTurnTiming();
 		if (this.workingVisible && !this.activeStatusIndicator) {
-			this.showStatusIndicator(
-				new WorkingStatusIndicator(
-					this.ui,
-					this.workingMessage ?? this.defaultWorkingMessage,
-					this.workingIndicatorOptions,
-				),
-			);
+			this.showStatusIndicator(this.createWorkingStatusIndicator());
 		}
 	}
 
@@ -2348,13 +2356,7 @@ export class InteractiveMode {
 			return;
 		}
 		if (this.session.isStreaming && this.activeStatusIndicator?.kind !== "working") {
-			this.showStatusIndicator(
-				new WorkingStatusIndicator(
-					this.ui,
-					this.workingMessage ?? this.defaultWorkingMessage,
-					this.workingIndicatorOptions,
-				),
-			);
+			this.showStatusIndicator(this.createWorkingStatusIndicator());
 		}
 		this.ui.requestRender();
 	}
@@ -3430,13 +3432,7 @@ export class InteractiveMode {
 					this.retryEscapeHandler = undefined;
 				}
 				if (this.workingVisible) {
-					this.showStatusIndicator(
-						new WorkingStatusIndicator(
-							this.ui,
-							this.workingMessage ?? this.defaultWorkingMessage,
-							this.workingIndicatorOptions,
-						),
-					);
+					this.showStatusIndicator(this.createWorkingStatusIndicator());
 				} else {
 					this.clearStatusIndicator();
 				}

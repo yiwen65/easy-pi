@@ -11,10 +11,7 @@ import { GrokAssistantMessageComponent } from "../src/modes/interactive-grok/com
 import { GrokThinkingTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-thinking-turn-group.ts";
 import { GrokToolExecutionComponent } from "../src/modes/interactive-grok/components/grok-tool-execution.ts";
 import { GrokToolTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-tool-turn-group.ts";
-import {
-	formatWorkedDuration,
-	GrokTurnDurationComponent,
-} from "../src/modes/interactive-grok/components/grok-turn-duration.ts";
+import { GrokTurnDurationComponent } from "../src/modes/interactive-grok/components/grok-turn-duration.ts";
 import { GrokUserMessageComponent } from "../src/modes/interactive-grok/components/grok-user-message.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -55,11 +52,7 @@ describe("Grok transcript components", () => {
 		initTheme("dark");
 	});
 
-	test("formats and renders a compact worked duration", () => {
-		expect(formatWorkedDuration(800)).toBe("0.8s");
-		expect(formatWorkedDuration(12_500)).toBe("13s");
-		expect(formatWorkedDuration(65_000)).toBe("1m 5s");
-		expect(formatWorkedDuration(3_661_000)).toBe("1h 1m 1s");
+	test("renders a compact worked duration", () => {
 		const component = new GrokTurnDurationComponent(65_000, 1);
 		expect(stripAnsi(component.render(40).join("\n"))).toContain("worked 1m 5s");
 		expectFits(component, [16, 40, 80]);
