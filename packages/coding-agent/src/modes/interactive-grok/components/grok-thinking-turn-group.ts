@@ -6,25 +6,32 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { LiveLineScroller } from "../../interactive/components/live-line-scroller.ts";
 import { theme } from "../../interactive/theme/theme.ts";
-import { flattenInline, marqueeWindow } from "./grok-marquee.ts";
+import { flattenInline } from "./grok-inline-text.ts";
 
-const TICK_INTERVAL_MS = 120;
 const PREFIX = "✦ ";
 
-/** One collapsed/expandable Thinking block shared by every assistant message in a turn. */
+/**
+ * One collapsed/expandable Thinking block shared by every assistant message in a turn.
+ *
+ * Collapsed — the default — the block renders exactly one row: the newest
+ * thinking entry, flattened to a single line. Like streaming output, the row
+ * keeps the newest text on screen while the entry grows; once the entry stopped
+ * changing for a moment the row scrolls the hidden beginning into view and
+ * cycles the whole text, so it can be read without expanding. Once the turn
+ * completes the row falls back to the static hidden label. A click on the row
+ * expands the block into the full thinking content of the turn.
+ */
 export class GrokThinkingTurnGroupComponent extends Container {
 	private readonly entries = new Map<object, string>();
-	private readonly streamingEntries = new Set<object>();
+	private readonly scroller: LiveLineScroller;
 	private readonly markdownTheme: MarkdownTheme;
 	private readonly hiddenLabel: string;
 	private readonly outputPad: number;
 	private readonly userHidden: boolean;
-	private readonly ui?: TUI;
 	private expanded = false;
 	private turnComplete = false;
-	private tick = 0;
-	private tickerInterval: ReturnType<typeof setInterval> | undefined;
 	private markdown: Markdown | undefined;
 	private renderedRowCount = 0;
 
@@ -34,44 +41,48 @@ export class GrokThinkingTurnGroupComponent extends Container {
 		this.hiddenLabel = hiddenLabel;
 		this.outputPad = outputPad;
 		this.userHidden = userHidden;
-		this.ui = ui;
+		this.scroller = new LiveLineScroller(ui, "tail");
 	}
 
 	get entryCount(): number {
 		return this.entries.size;
 	}
 
-	updateThinking(owner: object, thinking: string, isStreaming: boolean): void {
+	updateThinking(owner: object, thinking: string): void {
 		const normalized = thinking.trim();
 		if (normalized) this.entries.set(owner, normalized);
 		else this.entries.delete(owner);
-		if (isStreaming && normalized) this.streamingEntries.add(owner);
-		else this.streamingEntries.delete(owner);
 		this.rebuildMarkdown();
-		this.syncTicker();
+		this.syncScroller();
 	}
 
 	completeTurn(): void {
 		this.turnComplete = true;
-		this.streamingEntries.clear();
-		this.syncTicker();
+		this.syncScroller();
 	}
 
 	setExpanded(expanded: boolean): void {
 		if (this.userHidden) return;
 		this.expanded = expanded;
-		this.syncTicker();
+		this.syncScroller();
 	}
 
 	handleOverviewClick(localRow: number): boolean {
 		if (this.userHidden || localRow < 0 || localRow >= this.renderedRowCount) return false;
 		this.expanded = !this.expanded;
-		this.syncTicker();
+		this.syncScroller();
 		return true;
 	}
 
+	/** Stop the idle scroll timer. Called when the group leaves the transcript. */
 	dispose(): void {
-		this.stopTicker();
+		this.scroller.dispose();
+	}
+
+	/** Only the visible live thinking text participates in the idle scroll. */
+	private syncScroller(): void {
+		const live = this.userHidden || this.expanded || this.turnComplete ? undefined : this.latestThinking();
+		this.scroller.setText(live ? flattenInline(live) : "");
 	}
 
 	private combinedThinking(): string {
@@ -90,39 +101,12 @@ export class GrokThinkingTurnGroupComponent extends Container {
 		});
 	}
 
-	private tickerActive(): boolean {
-		return this.ui !== undefined && !this.expanded && !this.userHidden && this.streamingEntries.size > 0;
-	}
-
-	private stopTicker(): void {
-		if (this.tickerInterval) {
-			clearInterval(this.tickerInterval);
-			this.tickerInterval = undefined;
-		}
-	}
-
-	private syncTicker(): void {
-		if (this.tickerActive() && !this.tickerInterval) {
-			this.tickerInterval = setInterval(() => {
-				this.tick++;
-				if (!this.tickerActive()) {
-					this.stopTicker();
-					return;
-				}
-				this.ui?.requestRender();
-			}, TICK_INTERVAL_MS);
-			(this.tickerInterval as { unref?: () => void }).unref?.();
-		} else if (!this.tickerActive() && this.tickerInterval) {
-			this.stopTicker();
-		}
-	}
-
 	private overviewLine(width: number): string {
 		const padLeft = " ".repeat(this.outputPad);
 		const contentWidth = Math.max(1, width - this.outputPad);
 		const liveThinking = this.userHidden || this.expanded || this.turnComplete ? undefined : this.latestThinking();
 		const body = liveThinking
-			? marqueeWindow(flattenInline(liveThinking), Math.max(1, contentWidth - visibleWidth(PREFIX)), this.tick)
+			? this.scroller.window(Math.max(1, contentWidth - visibleWidth(PREFIX)))
 			: this.hiddenLabel;
 		const line = theme.italic(theme.fg("accent", `${PREFIX}${body}`));
 		return padLeft + truncateToWidth(line, contentWidth, "");
@@ -131,7 +115,6 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	override render(width: number): string[] {
 		this.renderedRowCount = 0;
 		if (width <= 0 || this.entries.size === 0) return [];
-		this.syncTicker();
 		const overview = this.overviewLine(width);
 		const lines =
 			!this.expanded || this.userHidden || !this.markdown ? [overview] : [overview, ...this.markdown.render(width)];

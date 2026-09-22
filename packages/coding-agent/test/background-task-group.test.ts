@@ -59,12 +59,15 @@ describe("BackgroundTaskGroupComponent", () => {
 		if (!quick.ok || !slow.ok) throw new Error("start failed");
 		await manager.wait(quick.value.id, 10_000);
 
-		// collapsed: exactly one line with the live count
+		// collapsed: exactly one line with the live count, showing the latest command verbatim
 		let lines = group.render(100);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("background tasks");
 		expect(lines[0]).toContain("1 running");
 		expect(lines[0]).toContain("1 finished");
+		expect(lines[0]).toContain("setTimeout");
+		// The command text never scrolls, so a later render shows the same line.
+		expect(group.render(100)[0]).toBe(lines[0]);
 
 		// expand: one line per task, active first
 		group.setExpanded(true);
@@ -91,6 +94,46 @@ describe("BackgroundTaskGroupComponent", () => {
 		group.dispose();
 	});
 
+	it("scrolls the truncated command into view once the header goes idle", () => {
+		vi.useFakeTimers();
+		const record = {
+			id: "bg-1",
+			command: `npm run build --workspace packages/coding-agent -- --filter ${"long".repeat(8)}`,
+			cwd: dir,
+			status: "running" as const,
+			startedAt: Date.now(),
+			outputPath: join(dir, "bg-1.log"),
+			promoted: false,
+			lastOutputAt: Date.now(),
+		};
+		const manager = {
+			list: () => [record],
+			onStart: () => () => {},
+			onTerminal: () => () => {},
+			stallTimeoutMs: 0,
+		} as unknown as BackgroundTaskManager;
+		const requestRender = vi.fn();
+		const group = new BackgroundTaskGroupComponent(manager, requestRender);
+		try {
+			const head = stripVTControlCharacters(group.render(60).join("\n"));
+			expect(head).toContain("background tasks");
+			expect(head).toContain("npm run build");
+			expect(head).not.toContain("longlonglong");
+
+			vi.advanceTimersByTime(1_000);
+			let sawTail = false;
+			for (let tick = 0; tick < 120 && !sawTail; tick++) {
+				vi.advanceTimersByTime(120);
+				sawTail = stripVTControlCharacters(group.render(60).join("\n")).includes("longlonglong");
+			}
+			expect(sawTail).toBe(true);
+			expect(requestRender).toHaveBeenCalled();
+		} finally {
+			group.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	it("keeps a finished task's runtime duration (start -> end) instead of counting up", async () => {
 		const group = new BackgroundTaskGroupComponent(manager, () => {});
 		const task = await manager.start("setTimeout(() => process.stdout.write('late'), 1000)", {
@@ -102,7 +145,7 @@ describe("BackgroundTaskGroupComponent", () => {
 		expect(manager.get(task.value.id)?.endedAt).toBeDefined();
 
 		group.setExpanded(true);
-		// Only the task row carries the time; the header marquee animates independently.
+		// Only the task row carries the time; the header line stays independent of it.
 		const taskRow = (): string =>
 			stripVTControlCharacters(group.render(200).join("\n"))
 				.split("\n")

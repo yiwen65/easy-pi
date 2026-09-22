@@ -9,7 +9,7 @@ beforeAll(() => initTheme("dark"));
 test.each([false, true])("thinking mouse clicks toggle without copying (stationary motion: %s)", async (motion) => {
 	const terminal = new VirtualTerminal(80, 10);
 	const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
-	group.updateThinking({}, "first reasoning\n\nsecond reasoning", false);
+	group.updateThinking({}, "first reasoning\n\nsecond reasoning");
 	group.completeTurn();
 	const scrollView = new ScrollView(group, { primary: true });
 	const copySelection = vi.fn(async () => true);
@@ -55,6 +55,5 @@ test.each([false, true])("thinking mouse clicks toggle without copying (stationa
 	} finally {
 		vi.restoreAllMocks();
 		tui.stop();
-		group.dispose();
 	}
 });

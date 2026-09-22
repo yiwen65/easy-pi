@@ -772,9 +772,8 @@ export class InteractiveMode {
 			this.outputPad,
 			this.getMarkdownTransformers(),
 		);
-		// Keep animation and the global expand toggle consistent for newly arrived Grok turns.
+		// Keep the global expand toggle consistent for newly arrived Grok turns.
 		if (component instanceof GrokAssistantMessageComponent) {
-			component.setTickerUi(this.ui);
 			component.setExpanded(this.toolOutputExpanded);
 		}
 		return component;
@@ -863,7 +862,7 @@ export class InteractiveMode {
 	}
 
 	/** Aggregate one assistant message's thinking into the current turn block. */
-	private updateTurnThinking(component: GrokAssistantMessageComponent, isStreaming: boolean): void {
+	private updateTurnThinking(component: GrokAssistantMessageComponent): void {
 		const thinking = component.getThinkingText();
 		if (!thinking.trim()) return;
 		component.setThinkingDelegated(true);
@@ -879,21 +878,17 @@ export class InteractiveMode {
 			group.setExpanded(this.toolOutputExpanded);
 			this.currentTurnThinkingGroup = group;
 		}
-		group.updateThinking(component, thinking, isStreaming);
+		group.updateThinking(component, thinking);
 		this.chatContainer.removeChild(group);
 		const componentIndex = this.chatContainer.children.indexOf(component);
 		if (componentIndex >= 0) this.chatContainer.children.splice(componentIndex, 0, group);
 		else this.chatContainer.addChild(group);
 	}
 
-	/** Clear transcript content and stop Grok marquee timers first. */
+	/** Clear transcript content and stop the Grok live-row scroll timers first. */
 	private clearChatContainer(): void {
 		for (const child of this.chatContainer.children) {
-			if (
-				child instanceof GrokAssistantMessageComponent ||
-				child instanceof GrokThinkingTurnGroupComponent ||
-				child instanceof GrokToolTurnGroupComponent
-			) {
+			if (child instanceof GrokThinkingTurnGroupComponent || child instanceof GrokToolTurnGroupComponent) {
 				child.dispose();
 			}
 		}
@@ -3484,7 +3479,7 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage, true);
 					if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
-						this.updateTurnThinking(this.streamingComponent, true);
+						this.updateTurnThinking(this.streamingComponent);
 					}
 
 					for (const content of this.streamingMessage.content) {
@@ -3524,13 +3519,10 @@ export class InteractiveMode {
 						this.session.autoRetryEnabled && isUnlimitedRetryAssistantError(this.streamingMessage);
 					if (suppressUnlimitedRetryError) {
 						this.chatContainer.removeChild(this.streamingComponent);
-						if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
-							this.streamingComponent.dispose();
-						}
 					} else {
 						this.streamingComponent.updateContent(this.streamingMessage, false);
 						if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
-							this.updateTurnThinking(this.streamingComponent, false);
+							this.updateTurnThinking(this.streamingComponent);
 						}
 					}
 
@@ -3938,7 +3930,7 @@ export class InteractiveMode {
 				const assistantComponent = this.createAssistantMessageComponent(message);
 				this.chatContainer.addChild(assistantComponent);
 				if (assistantComponent instanceof GrokAssistantMessageComponent) {
-					this.updateTurnThinking(assistantComponent, false);
+					this.updateTurnThinking(assistantComponent);
 				}
 				break;
 			}
@@ -4643,7 +4635,7 @@ export class InteractiveMode {
 			this.streamingComponent.updateContent(this.streamingMessage);
 			this.chatContainer.addChild(this.streamingComponent);
 			if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
-				this.updateTurnThinking(this.streamingComponent, true);
+				this.updateTurnThinking(this.streamingComponent);
 			}
 		}
 

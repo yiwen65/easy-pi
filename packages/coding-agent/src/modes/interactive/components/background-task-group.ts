@@ -1,6 +1,6 @@
 import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { isTerminalTaskStatus } from "@earendil-works/pi-agent-core/node";
-import { Container, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Container, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import {
 	backgroundTaskStallHint,
@@ -10,13 +10,16 @@ import {
 	sortBackgroundTasks,
 	backgroundTaskDuration as taskTime,
 } from "./background-task-view.ts";
+import { LiveLineScroller } from "./live-line-scroller.ts";
 
 const TICK_MS = 1_000;
 const OUTPUT_PREVIEW_BYTES = 8 * 1024;
 
 /**
  * One folding transcript block for all background bash tasks. Collapsed: a single live line
- * ("⚙ N background tasks · latest command") refreshed once per second while tasks are active.
+ * ("⚙ N background tasks · latest command") refreshed once per second while tasks are active;
+ * the command shows its head while tasks come and go and scrolls its truncated part into view
+ * once the line sits idle.
  * Expanded: one line per task (icon, id, state, duration, command). Clicking a task row expands
  * just that task's detail (status, log path, output tail). Click the header again to fold back.
  * Display-only: the block never starts, stops, or otherwise mutates tasks.
@@ -24,8 +27,8 @@ const OUTPUT_PREVIEW_BYTES = 8 * 1024;
 export class BackgroundTaskGroupComponent extends Container {
 	private expanded = false;
 	private expandedTaskId: string | undefined;
-	private tick = 0;
 	private ticker: ReturnType<typeof setInterval> | undefined;
+	private readonly scroller: LiveLineScroller;
 	private readonly unsubscribes: Array<() => void> = [];
 
 	/** The manager this block renders; the TUI remounts when a session swap changes it. */
@@ -36,6 +39,7 @@ export class BackgroundTaskGroupComponent extends Container {
 		super();
 		this.manager = manager;
 		this.onRequestRender = onRequestRender;
+		this.scroller = new LiveLineScroller({ requestRender: onRequestRender });
 		const refresh = (): void => this.requestRender();
 		this.unsubscribes.push(manager.onStart(refresh), manager.onTerminal(refresh));
 	}
@@ -51,7 +55,6 @@ export class BackgroundTaskGroupComponent extends Container {
 		const active = this.manager.list().length > 0;
 		if (active && !this.ticker) {
 			this.ticker = setInterval(() => {
-				this.tick++;
 				if (this.manager.list().length === 0) {
 					if (this.ticker) clearInterval(this.ticker);
 					this.ticker = undefined;
@@ -70,14 +73,16 @@ export class BackgroundTaskGroupComponent extends Container {
 	private collapsedLine(width: number, tasks: BackgroundTaskRecord[]): string {
 		const active = tasks.filter((record) => !isTerminalTaskStatus(record.status));
 		const terminalCount = tasks.length - active.length;
-		const marqueeSource = active[active.length - 1];
+		const latest = active[active.length - 1];
 		const count = `${active.length} running${terminalCount > 0 ? ` · ${terminalCount} finished` : ""}`;
 		const fallback = tasks[0];
-		const tail = marqueeSource ? oneLine(marqueeSource.command) : fallback ? oneLine(fallback.command) : "";
-		const scroll = tail.length > 32 ? tail.slice((this.tick * 2) % Math.max(1, tail.length), undefined) : tail;
+		const command = latest ? oneLine(latest.command) : fallback ? oneLine(fallback.command) : "";
+		this.scroller.setText(command);
 		const prefix = `⚙ background tasks · ${count}`;
-		const suffix = tail ? ` · ${scroll}` : "";
-		return truncateToWidth(theme.fg("accent", prefix) + theme.fg("muted", suffix), width);
+		const gap = command ? " · " : "";
+		const commandWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(gap));
+		const suffix = this.scroller.window(commandWidth);
+		return truncateToWidth(theme.fg("accent", prefix) + theme.fg("muted", gap + suffix), width);
 	}
 
 	private taskLine(record: BackgroundTaskRecord, width: number, now: number): string {
@@ -163,10 +168,11 @@ export class BackgroundTaskGroupComponent extends Container {
 		return lines;
 	}
 
-	/** Stop the ticker when the block leaves the transcript. */
+	/** Stop the ticker and the idle scroll when the block leaves the transcript. */
 	dispose(): void {
 		if (this.ticker) clearInterval(this.ticker);
 		this.ticker = undefined;
+		this.scroller.dispose();
 		for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe();
 	}
 }

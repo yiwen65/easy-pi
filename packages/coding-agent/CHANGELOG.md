@@ -59,6 +59,7 @@
 - Documented the generic `AI_AGENT=pi` process marker and how it differs from `PI_CODING_AGENT=true` ([#7747](https://github.com/earendil-works/pi/issues/7747)).
 - Changed inherited OpenAI Responses deferred tool loading to prefer message-anchored `additional_tools` where supported while retaining tool-search and top-level fallbacks ([#7709](https://github.com/earendil-works/pi/issues/7709)).
 - Reduced inherited fullscreen rendering allocation churn by painting full-width layout rows directly instead of recompositing them on every frame.
+- Grok transcript live rows now show only the newest entry instead of cycling every earlier one: the Thinking row follows the newest text while it streams (like streaming output), tool rows and background task headers stay head-anchored while their args keep arriving, and once such a row has been idle for a second it scrolls its hidden part into view and cycles the whole text.
 
 ### Fixed
 

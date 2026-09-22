@@ -1,35 +1,38 @@
 import { Container, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { LiveLineScroller } from "../../interactive/components/live-line-scroller.ts";
 import { theme } from "../../interactive/theme/theme.ts";
-import { flattenInline, marqueeWindow } from "./grok-marquee.ts";
+import { flattenInline } from "./grok-inline-text.ts";
 import { GrokToolExecutionComponent } from "./grok-tool-execution.ts";
-
-const TICK_INTERVAL_MS = 120;
 
 /**
  * Grok turn-level container for tool executions.
  *
  * All tool calls of one turn (user prompt → final answer) live in a single
- * group. Collapsed — the default — the group renders exactly one line: while
- * tools are running it shows the current tool with a live horizontally
- * scrolling arg summary; once the turn settles it shows the last tool plus a
- * count suffix. A click on that line expands the group into one overview row
- * per tool (level 1); clicking a tool row toggles that tool's full details
- * (level 2, handled by GrokToolExecutionComponent itself).
+ * group. Collapsed — the default — the group renders exactly one row: the tool
+ * whose call is current (or the last one once the turn settled, with a count
+ * suffix). While its args keep streaming the row shows their head; once nothing
+ * changed for a moment the row scrolls the truncated args into view and cycles
+ * them, so the full command can be read without expanding. A click on that row
+ * expands the group into one overview row per tool (level 1); clicking a tool
+ * row toggles that tool's full details (level 2, handled by
+ * GrokToolExecutionComponent itself).
  */
 export class GrokToolTurnGroupComponent extends Container {
+	private readonly scroller: LiveLineScroller;
 	private groupExpanded = false;
-	private tick = 0;
-	private tickerInterval: ReturnType<typeof setInterval> | undefined;
-	private readonly ui?: TUI;
 
 	constructor(ui?: TUI) {
 		super();
-		this.ui = ui;
+		this.scroller = new LiveLineScroller(ui);
 	}
 
 	addTool(component: GrokToolExecutionComponent): void {
 		this.addChild(component);
-		this.syncTicker();
+	}
+
+	/** Stop the idle scroll timer. Called when the group leaves the transcript. */
+	dispose(): void {
+		this.scroller.dispose();
 	}
 
 	get toolCount(): number {
@@ -64,7 +67,6 @@ export class GrokToolTurnGroupComponent extends Container {
 		for (const tool of this.tools()) {
 			tool.setExpanded(expanded);
 		}
-		this.syncTicker();
 	}
 
 	/** Forward image settings to the grouped tool components. */
@@ -88,7 +90,6 @@ export class GrokToolTurnGroupComponent extends Container {
 		if (!this.groupExpanded) {
 			if (localRow !== 0) return false;
 			this.groupExpanded = true;
-			this.syncTicker();
 			return true;
 		}
 		if (localRow === 0) {
@@ -96,7 +97,6 @@ export class GrokToolTurnGroupComponent extends Container {
 			for (const tool of this.tools()) {
 				tool.setExpanded(false);
 			}
-			this.syncTicker();
 			return true;
 		}
 		let cursor = 1;
@@ -110,78 +110,47 @@ export class GrokToolTurnGroupComponent extends Container {
 		return false;
 	}
 
-	/** Stop the ticker. Called when the group leaves the transcript. */
-	dispose(): void {
-		this.stopTicker();
-	}
-
-	private tickerActive(): boolean {
-		return this.ui !== undefined && !this.groupExpanded && this.activeTool() !== undefined;
-	}
-
-	private stopTicker(): void {
-		if (this.tickerInterval) {
-			clearInterval(this.tickerInterval);
-			this.tickerInterval = undefined;
-		}
-	}
-
-	private syncTicker(): void {
-		if (this.tickerActive() && !this.tickerInterval) {
-			this.tickerInterval = setInterval(() => {
-				this.tick++;
-				if (!this.tickerActive()) {
-					this.stopTicker();
-					return;
-				}
-				this.ui?.requestRender();
-			}, TICK_INTERVAL_MS);
-			(this.tickerInterval as { unref?: () => void }).unref?.();
-		} else if (!this.tickerActive() && this.tickerInterval) {
-			this.stopTicker();
-		}
-	}
-
-	/** Collapsed line while a tool is active: fixed prefix + scrolling args. */
-	private activeLine(tool: GrokToolExecutionComponent, width: number): string {
-		const symbol = tool.stateSymbol();
-		const name = tool.getGrokToolName();
-		const prefix = theme.fg(tool.stateColor(), `${symbol} `) + theme.fg("toolTitle", theme.bold(name));
-		const prefixWidth = visibleWidth(`${symbol} ${name}`);
-		const summary = flattenInline(tool.summarizeCurrentArgs());
-		if (!summary) {
-			return truncateToWidth(prefix, width, "");
-		}
-		const gap = "  ";
-		const windowWidth = width - prefixWidth - visibleWidth(gap);
-		if (windowWidth <= 0) {
-			return truncateToWidth(prefix, width, "");
-		}
-		const scrolled = marqueeWindow(summary, windowWidth, this.tick);
-		return truncateToWidth(prefix + theme.fg("muted", gap + scrolled), width, "");
-	}
-
-	/** Collapsed line once the turn settled: last tool + aggregate count. */
-	private settledLine(width: number): string {
+	/** Tool whose call the collapsed row represents: the active one, else the last (errors win). */
+	private representativeTool(): GrokToolExecutionComponent | undefined {
 		const tools = this.tools();
+		const active = this.activeTool();
+		if (active) return active;
 		const last = tools[tools.length - 1];
-		if (!last) return "";
+		if (!last) return undefined;
 		// Never hide a failed call behind a later successful tool in the summary.
-		const representative = [...tools].reverse().find((tool) => tool.getGrokState() === "error") ?? last;
-		if (tools.length === 1) {
-			return representative.overviewLine(width);
-		}
-		const suffixText = ` · ${tools.length} tools`;
-		const suffixWidth = visibleWidth(suffixText);
-		const base = representative.overviewLine(Math.max(1, width - suffixWidth));
-		return truncateToWidth(base + theme.fg("muted", suffixText), width, "");
+		return [...tools].reverse().find((tool) => tool.getGrokState() === "error") ?? last;
+	}
+
+	/**
+	 * Collapsed row: tool symbol, name and args summary; plus the aggregate count
+	 * once the turn settled. The summary scrolls its hidden part into view while
+	 * the row sits idle.
+	 */
+	private collapsedLine(width: number): string {
+		const tools = this.tools();
+		const tool = this.representativeTool();
+		if (!tool) return "";
+		this.scroller.setText(flattenInline(tool.summarizeCurrentArgs()));
+
+		const settled = this.activeTool() === undefined && tools.length > 1;
+		const suffix = settled ? ` · ${tools.length} tools` : "";
+		const gap = "  ";
+		const head =
+			theme.fg(tool.stateColor(), `${tool.stateSymbol()} `) +
+			theme.fg("toolTitle", theme.bold(tool.getGrokToolName()));
+		const available = Math.max(1, width - visibleWidth(suffix));
+		const summaryWidth = Math.max(
+			0,
+			available - visibleWidth(`${tool.stateSymbol()} ${tool.getGrokToolName()}${gap}`),
+		);
+		const summary = this.scroller.window(summaryWidth);
+		const body = summary ? head + theme.fg("muted", gap + summary) : head;
+		return truncateToWidth(body + theme.fg("muted", suffix), width, "");
 	}
 
 	override render(width: number): string[] {
 		if (width <= 0) return [];
-		this.syncTicker();
-		const active = this.activeTool();
-		const summary = active ? this.activeLine(active, width) : this.settledLine(width);
+		const summary = this.collapsedLine(width);
 		if (this.groupExpanded) {
 			return [summary, ...super.render(width)];
 		}

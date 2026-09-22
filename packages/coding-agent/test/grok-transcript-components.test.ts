@@ -128,7 +128,7 @@ describe("Grok transcript components", () => {
 		expect(component.getText()).toBe(text);
 	});
 
-	test("renders thinking as a one-line live marquee without role headers", () => {
+	test("renders thinking as a one-line live status without role headers", () => {
 		const component = new GrokAssistantMessageComponent();
 		component.updateContent(
 			createAssistantMessage([
@@ -280,6 +280,47 @@ describe("Grok transcript components", () => {
 		expectFits(group);
 	});
 
+	test("shows the live tool row head-anchored, then scrolls the truncated args into view once idle", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const ui = { requestRender } as unknown as TUI;
+		try {
+			const tool = new GrokToolExecutionComponent(
+				"bash",
+				"turn-tool-static",
+				{ command: 'rg -n "thinking-turn-group" packages/coding-agent/src | head -20' },
+				{},
+				undefined,
+				createFakeTui(),
+				process.cwd(),
+			);
+			tool.markExecutionStarted();
+			const group = new GrokToolTurnGroupComponent(ui);
+			group.addTool(tool);
+			try {
+				const row = group.render(40)[0] ?? "";
+				expect(visibleWidth(row)).toBeLessThanOrEqual(40);
+				expect(stripAnsi(row)).toContain('◈ bash  rg -n "thinking-turn-group"');
+				expect(stripAnsi(row)).not.toContain("head -20");
+
+				// Idle: the hidden part of the command scrolls through the row.
+				vi.advanceTimersByTime(1_000);
+				let sawTail = false;
+				for (let tick = 0; tick < 80 && !sawTail; tick++) {
+					vi.advanceTimersByTime(120);
+					sawTail = stripAnsi(group.render(40)[0] ?? "").includes("head -20");
+				}
+				expect(sawTail).toBe(true);
+				expect(requestRender).toHaveBeenCalled();
+				expectFits(group, [20, 40, 80]);
+			} finally {
+				group.dispose();
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("summarizes args with preferred keys and degrades safely", () => {
 		const readTool = new GrokToolExecutionComponent(
 			"read",
@@ -377,7 +418,7 @@ describe("Grok transcript components", () => {
 			{ type: "text", text: "最终回答" },
 		]);
 
-		// Streaming: thinking is a compact live one-line marquee.
+		// Streaming: thinking is a compact live one-line status.
 		component.updateContent(thinkingMessage, true);
 		const streamingFrame = component.render(80).join("\n");
 		const streaming = stripAnsi(streamingFrame);
@@ -426,8 +467,8 @@ describe("Grok transcript components", () => {
 
 	test("merges a turn's thinking entries into one reversible collapsed block", () => {
 		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
-		group.updateThinking({ id: 1 }, "first reasoning", false);
-		group.updateThinking({ id: 2 }, "second reasoning", false);
+		group.updateThinking({ id: 1 }, "first reasoning");
+		group.updateThinking({ id: 2 }, "second reasoning");
 
 		// Internal assistant/tool boundaries keep the latest thinking visible.
 		const activeFrame = group.render(80).join("\n");
@@ -462,24 +503,40 @@ describe("Grok transcript components", () => {
 		expectFits(group);
 	});
 
-	test("distinguishes live thinking from completed history and stops its animation", () => {
+	test("streams the newest thinking text, then cycles the full text once idle", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
 		const ui = { requestRender } as unknown as TUI;
 		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false, ui);
 		const owner = {};
 		try {
-			group.updateThinking(owner, "正在分析输入并检查边界条件", true);
-			expect(stripAnsi(group.render(80)[0])).toContain("✦ 正在分析");
-			vi.advanceTimersByTime(120);
+			group.updateThinking(owner, "正在分析输入并检查边界条件，然后核对第二处");
+			const live = group.render(20)[0] ?? "";
+			expect(visibleWidth(live)).toBeLessThanOrEqual(20);
+			// Streaming output: the newest text is on screen, earlier text already scrolled off.
+			expect(stripAnsi(live)).toContain("第二处");
+			expect(stripAnsi(live)).not.toContain("正在分析输入");
+
+			// Growing text keeps following the newest part.
+			group.updateThinking(owner, "正在分析输入并检查边界条件，然后核对第二处，最后汇总");
+			expect(stripAnsi(group.render(20)[0] ?? "")).toContain("最后汇总");
+
+			// Idle: the row keeps its place and then cycles the hidden beginning in.
+			const tail = stripAnsi(group.render(20)[0] ?? "");
+			vi.advanceTimersByTime(1_000);
+			expect(stripAnsi(group.render(20)[0] ?? "")).toBe(tail);
+			let sawHead = false;
+			for (let tick = 0; tick < 80 && !sawHead; tick++) {
+				vi.advanceTimersByTime(120);
+				sawHead = stripAnsi(group.render(20)[0] ?? "").includes("正在分析输入");
+			}
+			expect(sawHead).toBe(true);
 			expect(requestRender).toHaveBeenCalled();
+
+			// Expanding or completing the turn drops the scroll again.
 			group.setExpanded(true);
 			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
 			group.completeTurn();
-			requestRender.mockClear();
-			vi.advanceTimersByTime(240);
-			expect(requestRender).not.toHaveBeenCalled();
-			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
 			group.setExpanded(false);
 			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
 			expectFits(group, [4, 12, 24, 80]);
@@ -491,7 +548,7 @@ describe("Grok transcript components", () => {
 
 	test("preserves custom thinking labels and keeps hidden thinking private", () => {
 		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Custom reasoning", 1, true);
-		group.updateThinking({}, "private content", true);
+		group.updateThinking({}, "private content");
 		expect(stripAnsi(group.render(80)[0])).toContain("✦ Custom reasoning");
 		expect(stripAnsi(group.render(80).join("\n"))).not.toContain("private content");
 		group.completeTurn();
@@ -501,8 +558,8 @@ describe("Grok transcript components", () => {
 	test("toggles turn thinking from every rendered row, including wrapped content", () => {
 		for (const width of [20, 80]) {
 			const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
-			group.updateThinking({}, "first reasoning with enough words to wrap across narrow rows", true);
-			group.updateThinking({}, "second reasoning\n\nlast paragraph", false);
+			group.updateThinking({}, "first reasoning with enough words to wrap across narrow rows");
+			group.updateThinking({}, "second reasoning\n\nlast paragraph");
 			expect(group.render(width)).toHaveLength(1);
 			expect(group.handleOverviewClick(-1)).toBe(false);
 			expect(group.handleOverviewClick(1)).toBe(false);
@@ -532,7 +589,7 @@ describe("Grok transcript components", () => {
 			expect(group.render(80)).toHaveLength(0);
 			expect(group.handleOverviewClick(0)).toBe(false);
 			if (hidden) {
-				group.updateThinking({}, "hidden reasoning", false);
+				group.updateThinking({}, "hidden reasoning");
 				expect(group.render(80)).toHaveLength(1);
 				expect(group.handleOverviewClick(0)).toBe(false);
 			}
@@ -551,7 +608,6 @@ describe("Grok transcript components", () => {
 		expect(lines).toHaveLength(2);
 		expect(lines[0].trim()).toBe("");
 		expect(lines[1]).toContain("answer");
-		component.dispose();
 	});
 
 	test("legacy assistant component keeps thinking expanded by default", () => {
