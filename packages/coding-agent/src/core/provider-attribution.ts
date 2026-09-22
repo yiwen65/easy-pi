@@ -1,6 +1,4 @@
 import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
-import type { SettingsManager } from "./settings-manager.ts";
-import { isInstallTelemetryEnabled } from "./telemetry.ts";
 
 const OPENROUTER_HOST = "openrouter.ai";
 const NVIDIA_NIM_HOST = "integrate.api.nvidia.com";
@@ -33,31 +31,24 @@ function isCloudflareModel(model: Model<Api>): boolean {
 	);
 }
 
-function getDefaultAttributionHeaders(
-	model: Model<Api>,
-	settingsManager: SettingsManager,
-): Record<string, string> | undefined {
-	if (!isInstallTelemetryEnabled(settingsManager)) {
-		return undefined;
-	}
-
+function getDefaultAttributionHeaders(model: Model<Api>): Record<string, string> | undefined {
 	if (isOpenRouterModel(model)) {
 		return {
-			"HTTP-Referer": "https://pi.dev",
-			"X-OpenRouter-Title": "pi",
+			"HTTP-Referer": "https://github.com/yiwen65/easy-pi",
+			"X-OpenRouter-Title": "easy-pi",
 			"X-OpenRouter-Categories": "cli-agent",
 		};
 	}
 
 	if (isNvidiaNimModel(model)) {
 		return {
-			"X-BILLING-INVOKE-ORIGIN": "Pi",
+			"X-BILLING-INVOKE-ORIGIN": "easy-pi",
 		};
 	}
 
 	if (isCloudflareModel(model)) {
 		return {
-			"User-Agent": "pi-coding-agent",
+			"User-Agent": "easy-pi",
 		};
 	}
 
@@ -73,18 +64,17 @@ function getSessionHeaders(model: Model<Api>, sessionId: string | undefined): Re
 	) {
 		return undefined;
 	}
-	return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
+	return { "x-opencode-session": sessionId, "x-opencode-client": "easy-pi" };
 }
 
 export function mergeProviderAttributionHeaders(
 	model: Model<Api>,
-	settingsManager: SettingsManager,
 	sessionId: string | undefined,
 	...headerSources: Array<ProviderHeaders | undefined>
 ): ProviderHeaders | undefined {
 	const merged: ProviderHeaders = {
 		...getSessionHeaders(model, sessionId),
-		...getDefaultAttributionHeaders(model, settingsManager),
+		...getDefaultAttributionHeaders(model),
 	};
 
 	for (const headers of headerSources) {

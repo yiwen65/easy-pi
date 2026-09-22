@@ -49,13 +49,31 @@ afterEach(() => {
 });
 
 describe("Radius provider", () => {
+	function declareRadiusGateway(modelsJson: Record<string, unknown> = {}): string {
+		const modelsPath = join(tempDir, "models.json");
+		writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					[RADIUS_PROVIDER_ID]: {
+						name: "Radius",
+						baseUrl: "https://radius.example.com/v1",
+						oauth: "radius",
+						...modelsJson,
+					},
+				},
+			}),
+		);
+		return modelsPath;
+	}
+
 	it("restores the legacy credential catalog without network access", async () => {
 		const runtime = await ModelRuntime.create({
 			credentials: AuthStorage.inMemory({
 				[RADIUS_PROVIDER_ID]: radiusOAuthCredential("https://radius.example.com/v1"),
 			}),
 			modelsStore: new InMemoryModelsStore(),
-			modelsPath: null,
+			modelsPath: declareRadiusGateway(),
 			allowModelNetwork: false,
 		});
 
@@ -85,7 +103,7 @@ describe("Radius provider", () => {
 		const runtime = await ModelRuntime.create({
 			credentials,
 			modelsStore,
-			modelsPath: null,
+			modelsPath: declareRadiusGateway(),
 			allowModelNetwork: true,
 		});
 
@@ -93,7 +111,7 @@ describe("Radius provider", () => {
 		expect((await modelsStore.read(RADIUS_PROVIDER_ID))?.models).toHaveLength(1);
 		const radiusRequest = vi
 			.mocked(fetch)
-			.mock.calls.find(([url]) => String(url) === "https://radius.pi.dev/v1/config");
+			.mock.calls.find(([url]) => String(url) === "https://radius.example.com/v1/config");
 		expect(radiusRequest?.[1]?.headers).toMatchObject({ authorization: "Bearer access-token" });
 	});
 
@@ -104,7 +122,7 @@ describe("Radius provider", () => {
 				[RADIUS_PROVIDER_ID]: radiusOAuthCredential("https://radius.example.com/v1"),
 			}),
 			modelsStore: new InMemoryModelsStore(),
-			modelsPath: null,
+			modelsPath: declareRadiusGateway(),
 		});
 
 		expect(runtime.getModel(RADIUS_PROVIDER_ID, "auto")).toBeDefined();

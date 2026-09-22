@@ -118,7 +118,9 @@ export function builtinProviders(): Provider[] {
 		qwenTokenPlanProvider(),
 		qwenTokenPlanCnProvider(),
 		qwenTokenPlanIndividualProvider(),
-		radiusProvider(),
+		// Radius is intentionally not a default built-in: easy-pi does not operate
+		// a gateway and does not route users to the upstream one. Custom Radius
+		// gateways remain available via models.json ("oauth": "radius").
 		togetherProvider(),
 		vercelAIGatewayProvider(),
 		xaiProvider(),

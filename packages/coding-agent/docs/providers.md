@@ -21,9 +21,8 @@ Use `/login` in interactive mode, then select a provider:
 - GitHub Copilot
 - xAI (Grok/X subscription)
 - OpenRouter (OAuth-minted API key billed from OpenRouter credits)
-- Radius
 
-Use `/logout` to clear credentials. Tokens are stored in `~/.pi/agent/auth.json` and auto-refresh when expired. OpenRouter instead mints a user-controlled API key that does not expire automatically.
+Use `/logout` to clear credentials. Tokens are stored in `~/.epi/agent/auth.json` and auto-refresh when expired. OpenRouter instead mints a user-controlled API key that does not expire automatically.
 
 ### OpenAI Codex
 
@@ -53,7 +52,7 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 ### Radius
 
-Radius is a dynamic `pi-messages` gateway. `/login radius` stores OAuth tokens in `auth.json`; the gateway catalog is refreshed independently and cached in `models-store.json`. Custom Radius gateways can be declared in `models.json` with `"oauth": "radius"` and a gateway `baseUrl`.
+Radius is a dynamic `pi-messages` gateway protocol. easy-pi does not ship a default Radius gateway; declare one in `models.json` with `"oauth": "radius"` and a gateway `baseUrl`. Logging in stores OAuth tokens in `auth.json`; the gateway catalog is refreshed independently and cached in `models-store.json`. `RADIUS_API_KEY` remains available for key-based gateway auth.
 
 ## API Keys
 
@@ -88,7 +87,6 @@ pi
 | ZAI Coding Plan (China) | `ZAI_CODING_CN_API_KEY` | `zai-coding-cn` |
 | OpenCode Zen | `OPENCODE_API_KEY` | `opencode` |
 | OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` |
-| Radius | `RADIUS_API_KEY` | `radius` |
 | Hugging Face | `HF_TOKEN` | `huggingface` |
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Together AI | `TOGETHER_API_KEY` | `together` |
