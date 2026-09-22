@@ -1,5 +1,14 @@
 # Project Learnings
 
+## 全屏选区复制——屏幕行复制会带上边框/软换行/可见窗口，输入复制必须走编辑器逻辑文本
+
+- What happened: 用户报告“输入控件换行异常，复制已输入的文字会自动加分割线”。真实 TUI 复现：全屏（alt-screen）下拖选输入框或用户消息，剪贴板得到 `╭─ ❯ 20:13 ─…╮` / `│` / `╰────╯` 等边框行、行尾填充空格、在视觉折行处插入的 `\n`；19 行输入只复制到可见 10 行 + `❯ ─── ↑ 9 more ───` 指示器；粘贴占位符 `[paste #1 +12 lines]` 被原样复制。
+- Why it failed: `packages/tui/src/tui-alt-screen.ts` 的 `copySelectionToClipboard()` 以 `previousScreen`（整屏渲染行）或 `box.scrollContentLines`（组件渲染行）为数据源，逐行 `join("\n")`，没有任何“UI 装饰 vs 内容”“软换行续行”“组件逻辑文本”的概念；easy-pi 的 grok 引擎又给输入框和每条用户消息都加了边框，编辑器还只渲染 `max(5, rows*0.3)` 行，三者叠加放大了症状。
+- Correct approach: 复制“自己输入的文字”不要依赖屏幕选区——新增 `handleCopyShortcut`（`app.message.copy`/ctrl+x）：编辑器非空时复制 `editor.getExpandedText?.() ?? editor.getText()` 的逻辑文本（占位符已展开、无边框、无软换行断点、包含滚出窗口的行），为空时保持复制最后一条助手消息。
+- Prevention: 任何“复制输入/消息”需求都要求组件提供逻辑文本，禁止用屏幕行拼接兜底；验证时用 `pbpaste` 断言剪贴板字节（无 `│╭╰❯`、无 `[paste #`、无 UI 填充），再断言 fullscreen 的 `Copied!` flash 与 regular 的状态行。
+- Related pitfall（本次误判根因）: `tmux send-keys -l` 会丢弃字符串里的控制字节（LF/CR 静默消失），据此得出的“Ctrl+J/Enter 不插入换行”是假结论；控制键必须用 `tmux send-keys -H 0a`（或 `send-keys Enter`），并用 `stty raw -echo; cat -u -v > file` 先验证字节确实到达 pane。
+- Verified by: 2026-09-20 源码运行 `--tui-mode fullscreen`（grok）实测：空编辑器 ctrl+x 得到 `two`（最后助手消息）；含长中文行 + 12 行粘贴占位符的草稿 ctrl+x 得到 14 行纯逻辑文本（无边框/无占位符/长行未被折断）。`packages/coding-agent` vitest 2556 通过（6 个失败均为本 worktree 既有的会话重绑/缓存亲和失败，与本次改动无关）；`tsgo --noEmit` 与改动文件 biome 通过。
+
 ## Thinking 点击折叠——必须验证鼠标选择状态机，而非只调用组件方法
 
 - Wrong approach: 只测试 `GrokThinkingTurnGroupComponent.handleOverviewClick` 的行命中，就认定任意行点击可折叠；用户随后报告点击触发 copy。

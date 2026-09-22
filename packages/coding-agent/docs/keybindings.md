@@ -181,7 +181,7 @@ Open `/agents` in Grok-TUI; Up/Down selects, Enter watches, Escape returns to th
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
-| `app.message.copy` | `ctrl+x` | Copy the last assistant message, or the selected message in `/tree` |
+| `app.message.copy` | `ctrl+x` | Copy the editor's input text (paste markers expanded) when it is non-empty; otherwise the last assistant message, or the selected message in `/tree` |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `shift+alt+up` | Restore queued messages to editor |
 

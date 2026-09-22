@@ -123,7 +123,7 @@ export const KEYBINDINGS = {
 	},
 	"app.message.copy": {
 		defaultKeys: "ctrl+x",
-		description: "Copy message to clipboard",
+		description: "Copy input text, or last agent message when the input is empty",
 	},
 	"app.message.followUp": {
 		defaultKeys: "alt+enter",
