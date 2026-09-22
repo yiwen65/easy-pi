@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>easy-pi token usage</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-identity">
+      <h1>easy-pi token usage</h1>
+      <p class="subtitle">Local session history · dates are local calendar days · cost is the catalog-rate value recorded in the session</p>
+    </div>
+    <form class="controls" id="controls-form">
+      <label class="field">
+        <span class="field-label">Range</span>
+        <select id="days-select">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="0">All time</option>
+        </select>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="include-all-toggle">
+        <span>Include test &amp; temp sessions</span>
+      </label>
+      <button type="button" class="btn" id="refresh-button">Refresh</button>
+    </form>
+  </header>
+
+  <main>
+    <p class="status" id="status-bar" role="status" aria-live="polite">Loading…</p>
+
+    <section class="cards" id="summary-cards" aria-label="Summary"></section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Daily usage</h2>
+        <p class="hint">Stacked bars: uncached input · cache read · cache write · output (left axis, tokens). Line: cost (right axis, USD).</p>
+      </div>
+      <div class="chart" id="chart-container"></div>
+      <ul class="legend" id="chart-legend"></ul>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>By model</h2>
+        <p class="hint">Model key is <code>provider/responseModel ?? model</code>. Click a column header to sort the loaded rows.</p>
+      </div>
+      <div class="table-wrap" id="model-table"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>By provider</h2>
+      </div>
+      <div class="table-wrap" id="provider-table"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>By project</h2>
+        <p class="hint">Project = session working directory (no git-repo merging).</p>
+      </div>
+      <div class="table-wrap" id="project-table"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Sessions</h2>
+        <p class="hint">One row per session file. Sorted by cost by default.</p>
+      </div>
+      <div class="table-wrap" id="sessions-table"></div>
+    </section>
+
+    <section class="panel" id="excluded-panel" hidden>
+      <div class="panel-head">
+        <h2>Excluded sessions</h2>
+        <p class="hint">Test/temp sessions are marked at scan time and left out of the totals above unless “Include test &amp; temp sessions” is on.</p>
+      </div>
+      <div id="excluded-summary"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Notes</h2>
+      </div>
+      <ul class="notes">
+        <li>Token classes: <strong>input</strong> = uncached prompt, <strong>cache read</strong> / <strong>cache write</strong> = prompt-cache traffic, <strong>output</strong> = completion tokens.</li>
+        <li>Cache hit rate = cache read / (input + cache read + cache write).</li>
+        <li>Cost uses the model catalog rates recorded with each message; subscription plans are not discounted and historical prices are not recomputed.</li>
+        <li>Compaction, branch-summary and tool-result usage are included, matching the in-session <code>/session</code> totals.</li>
+        <li>The panel is read-only, binds to <code>127.0.0.1</code> and performs no outbound requests.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="footnote">
+    <span id="root-list"></span>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
