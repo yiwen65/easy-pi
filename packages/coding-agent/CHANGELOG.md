@@ -31,6 +31,7 @@
 - Fixed llama.cpp login guidance to direct users to `/llama` before `/model` when no local models are loaded ([#8203](https://github.com/earendil-works/pi/issues/8203)).
 - Fixed hung pi.dev model catalog requests consuming the entire refresh deadline without retrying ([#8198](https://github.com/earendil-works/pi/issues/8198)).
 - Fixed inherited Xiaomi model catalogs listing shut-down MiMo V2 models in `/model` and `--list-models` ([#8187](https://github.com/earendil-works/pi/issues/8187)).
+- Fixed the tmux keyboard setup warning popping up in bright yellow on every startup; each unique warning is now shown only once and recorded in settings (`tmuxKeyboardWarningShown`), so fixing the tmux config is no longer nagged about repeatedly.
 
 ## [0.84.2] - 2026-08-14
 
