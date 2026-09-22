@@ -203,10 +203,12 @@ works on every macOS release. Rounded/nonrectangular target edges and transient
 window/Space transitions require GUI qualification. Metadata/drawing can lag by
 a frame; there is no atomic WindowServer snapshot-and-order operation here.
 
-`sharingType = .none` is set as sharing metadata. It is **not proof of
-ScreenCaptureKit exclusion**. Existing native exact-window capture excludes
-child windows and this helper is a separate process/overlay; coordinator must
-test actual capture behavior and owned-ID filtering. Headless tests establish
+`sharingType = .readOnly` keeps this content-free cue independently capturable
+for actual pixel verification. Model-image exclusion relies on the native
+exact-target window filter and owned-ID exclusions, **not a sharing hint**.
+The helper is a separate process/window; actual capture behavior and owned-ID
+filtering still require qualification. Earlier `.none` candidates below remain
+historical evidence, not the current sharing policy. Headless tests establish
 neither visible rendering, actual click-through, focus/cursor noninterference,
 multi-DPI appearance, occlusion correctness, GUI EOF close, nor packaging. Those
 are required T-051/native/GUI integration gates, with performance measured there.

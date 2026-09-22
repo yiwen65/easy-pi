@@ -78,7 +78,10 @@ final class Renderer: NSObject, NSApplicationDelegate {
         panel.becomesKeyOnlyIfNeeded = true
         panel.isFloatingPanel = false
         panel.level = .normal
-        panel.sharingType = .none
+        // The cue has no document content. Keep it independently capturable
+        // for visual verification; Computer images exclude this separate owned
+        // window by exact target filtering, not by this WindowServer hint.
+        panel.sharingType = .readOnly
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.contentView = cursor
