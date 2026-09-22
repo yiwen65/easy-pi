@@ -1,0 +1,106 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
+@@ -30,6 +30,19 @@
+
+ #[cfg(target_os = "macos")]
+ impl ComputerOperation {
++    pub(super) async fn segment_blocking<T: Send + 'static>(
++        &self,
++        call: impl FnOnce() -> T + Send + 'static,
++    ) -> Result<T, &'static str> {
++        let runtime_scope = self.session.host.runtime.runtime_scope_key();
++        // Unlike canonical registry invocation, this direct segment producer
++        // must install its trusted runtime generation explicitly. Model refs
++        // never choose the namespace; the tracked worker still owns all work.
++        self.core
++            .blocking(move || cua_driver_core::tool::with_runtime_scope(runtime_scope, call))
++            .await
++    }
++
+     async fn execute_segment(
+         &self,
+         segment: ComputerSegment,
+@@ -94,8 +107,7 @@
+         };
+         let input = segment.clone();
+         let execution = self
+-            .core
+-            .blocking(move || {
++            .segment_blocking(move || {
+                 context.execute(input, |tool, args| {
+                     native.computer_segment_authorize(tool, args)
+                 })
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs
+@@ -93,3 +93,69 @@
+     ];
+     assert!(platform_macos::tools::computer::segment::budgets(&segment).is_err());
+ }
++
++struct InertPayload;
++impl cua_driver_core::element_cache::SnapshotPayload for InertPayload {
++    type Element = u8;
++    fn len(&self) -> usize { 1 }
++    fn retain(&self, index: usize) -> Option<u8> { (index == 0).then_some(7) }
++}
++
++fn resolve_inert(
++    cache: &cua_driver_core::element_cache::ElementCacheCore<InertPayload>,
++    token: &str,
++    window: u64,
++) -> Result<u8, String> {
++    match cache.resolve_element_args(42, None, Some(token), None, Some(window), "click") {
++        Ok(cua_driver_core::element_token::ResolvedElement::Element { element, .. }) => Ok(element),
++        Ok(_) => Err("missing_element".into()),
++        Err(result) => Err(result.structured_content
++            .and_then(|value| value["refusal"]["code"].as_str().map(str::to_owned))
++            .unwrap_or_else(|| "unknown_refusal".into())),
++    }
++}
++
++#[tokio::test]
++async fn controlled_segment_worker_scope_resolves_current_ref_but_not_stale_or_wrong_window() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let expected_scope = host.runtime.runtime_scope_key();
++    let cache = Arc::new(cua_driver_core::tool::with_runtime_scope(expected_scope.clone(), || {
++        cua_driver_core::element_cache::ElementCacheCore::new()
++    }));
++    let token = cua_driver_core::element_token::token_for(cache.publish(42, 7, InertPayload), 0);
++    let operation = session(&host, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    let actual = operation.segment_blocking(move || {
++        let scope = cua_driver_core::tool::current_dispatch_runtime_scope();
++        let current = resolve_inert(&cache, &token, 7);
++        let wrong_window = resolve_inert(&cache, &token, 8).is_err();
++        let next = cua_driver_core::element_token::token_for(cache.publish(42, 7, InertPayload), 0);
++        let stale = resolve_inert(&cache, &token, 7).is_err();
++        let newer = resolve_inert(&cache, &next, 7);
++        (scope, current, wrong_window, stale, newer)
++    }).await.unwrap();
++    operation.core.finish();
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    host.close().await.unwrap();
++    assert_eq!(actual, (Some(expected_scope), Ok(7), true, true, Ok(7)));
++}
++
++#[tokio::test]
++async fn controlled_segment_worker_scope_cannot_resolve_foreign_runtime_cache() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let first = host();
++    let second = host();
++    let cache = Arc::new(cua_driver_core::tool::with_runtime_scope(first.runtime.runtime_scope_key(), || {
++        cua_driver_core::element_cache::ElementCacheCore::new()
++    }));
++    let token = cua_driver_core::element_token::token_for(cache.publish(42, 7, InertPayload), 0);
++    let operation = session(&second, None).new_operation().unwrap();
++    operation.core.begin().unwrap();
++    let actual = operation.segment_blocking(move || resolve_inert(&cache, &token, 7)).await.unwrap();
++    operation.core.finish();
++    assert!(!operation.terminal().await.unwrap().input_committed);
++    first.close().await.unwrap();
++    second.close().await.unwrap();
++    assert_eq!(actual, Err("generation_mismatch".into()));
++}

@@ -1,0 +1,112 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -233,10 +233,26 @@
+         &self,
+         events: &mut Events,
+         element: &RetainedElement,
++        editable_without_press: bool,
+     ) -> Result<(ActionRoute, bool), &'static str> {
+         self.member(element)?;
+         let ptr = element.as_ptr() as bindings::AXUIElementRef;
+-        let semantic = unsafe { bindings::is_attribute_settable(ptr, "AXFocused") };
++        let attribute = CFString::new("AXFocused");
++        let mut settable = 0;
++        let error = unsafe {
++            bindings::AXUIElementIsAttributeSettable(
++                ptr,
++                attribute.as_concrete_TypeRef(),
++                &mut settable,
++            )
++        };
++        // Focus is not permission to click an actionable control. Unknown
++        // capability also refuses before any activation or input mutation.
++        let semantic = focus::semantic_focus_route(match error {
++            bindings::kAXErrorSuccess => Ok(settable != 0),
++            bindings::kAXErrorAPIDisabled => Err("accessibility_permission_denied"),
++            _ => Err("focus_capability_unknown"),
++        }, editable_without_press)?;
+         if semantic {
+             if unsafe { bindings::set_bool_attr_true(ptr, "AXFocused") }
+                 != bindings::kAXErrorSuccess
+@@ -244,6 +260,8 @@
+                 return Err("semantic_delivery_unknown");
+             }
+         } else {
++            // Preserve the existing editable-field route, never a generic
++            // enabled control or unknown/advertised press capability.
+             if events.held() {
+                 return Err("route_change_with_held_input");
+             }
+@@ -298,11 +316,7 @@
+             },
+         )?;
+         Ok((
+-            if semantic {
+-                ActionRoute::Accessibility
+-            } else {
+-                ActionRoute::SyntheticEvents
+-            },
++            if semantic { ActionRoute::Accessibility } else { ActionRoute::SyntheticEvents },
+             self.foreground(),
+         ))
+     }
+@@ -330,8 +344,11 @@
+                 {
+                     return Err("target_not_editable");
+                 }
++                let editable_without_press = data.general_fillable()
++                    && !data.metadata_incomplete
++                    && !data.actions.iter().any(|action| action == "AXPress");
+                 match action {
+-                    ComputerInput::Focus { .. } => self.focus_element(events, &element),
++                    ComputerInput::Focus { .. } => self.focus_element(events, &element, editable_without_press),
+                     ComputerInput::Fill { text, .. }
+                         if data.value_fillable() && self.native_text(&element) =>
+                     {
+@@ -348,7 +365,7 @@
+                             self.operation.session.recover_intent(&self.intent_ref)?;
+                             self.activate()?;
+                         }
+-                        let (_, foreground) = self.focus_element(events, &element)?;
++                        let (_, foreground) = self.focus_element(events, &element, editable_without_press)?;
+                         events.foreground = foreground;
+                         let check = || {
+                             self.input_check(foreground, true)?;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/focus.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/focus.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/focus.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/focus.rs
+@@ -1,5 +1,17 @@
+ //! Focus acknowledgement can precede the target application's AX update.
+ //! Poll only identity; never repeat the focus mutation or synthesize another click.
++pub(super) fn semantic_focus_route(
++    capability: Result<bool, &'static str>,
++    editable_without_press: bool,
++) -> Result<bool, &'static str> {
++    match capability {
++        Ok(true) => Ok(true),
++        Ok(false) if editable_without_press => Ok(false),
++        Ok(false) => Err("focus_not_supported"),
++        Err(code) => Err(code),
++    }
++}
++
+ pub(super) fn activate_unless_current(
+     current: bool,
+     activate: impl FnOnce() -> Result<(), &'static str>,
+@@ -29,6 +41,15 @@
+ mod tests {
+     use super::confirm_focus;
+     use std::cell::Cell;
++
++    #[test]
++    fn controlled_focus_unsupported_and_unknown_never_authorize_click_fallback() {
++        assert_eq!(super::semantic_focus_route(Ok(false), false), Err("focus_not_supported"));
++        assert_eq!(super::semantic_focus_route(Err("focus_capability_unknown"), true), Err("focus_capability_unknown"));
++        assert_eq!(super::semantic_focus_route(Err("accessibility_permission_denied"), true), Err("accessibility_permission_denied"));
++        assert_eq!(super::semantic_focus_route(Ok(true), false), Ok(true));
++        assert_eq!(super::semantic_focus_route(Ok(false), true), Ok(false));
++    }
+
+     #[test]
+     fn controlled_focus_explicit_current_surface_never_activates_or_raises_parent() {
