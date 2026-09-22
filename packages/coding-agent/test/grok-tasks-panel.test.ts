@@ -145,9 +145,9 @@ async function fixture(mode: "tui" | "rpc" = "tui") {
 	};
 }
 
-test("status bar shows the active background task count and hides at zero", async () => {
+test("background tasks never write a footer status line", async () => {
 	const f = await fixture();
-	// session_start cleared the indicator: no statuses -> the Grok footer renders nothing.
+	// session_start writes nothing: the Grok footer renders no task line at all.
 	expect(f.footer.render(80)).toEqual([]);
 	const manager = f.session.backgroundTasks!;
 	expect(manager).toBeDefined();
@@ -156,19 +156,18 @@ test("status bar shows the active background task count and hides at zero", asyn
 	expect(first.ok).toBe(true);
 	const second = await manager.start("sleep 30", { cwd: f.cwd });
 	expect(second.ok).toBe(true);
-	await vi.waitFor(() => expect(f.footer.render(80).join("\n")).toContain("2 bg tasks"));
-	expect(f.statusCalls.at(-1)).toEqual(["bg-tasks", "⚙ 2 bg tasks"]);
+	await vi.waitFor(() => expect(manager.list().length).toBe(2));
+	// The footer under the editor stays empty while tasks run and after they finish.
+	expect(f.footer.render(80)).toEqual([]);
 
-	await manager.stop(first.ok ? first.value.id : "");
 	const firstId = first.ok ? first.value.id : "";
-	await manager.wait(firstId, 10_000);
-	await vi.waitFor(() => expect(f.footer.render(80).join("\n")).toContain("1 bg task"));
-
 	const secondId = second.ok ? second.value.id : "";
+	await manager.stop(firstId);
+	await manager.wait(firstId, 10_000);
 	await manager.stop(secondId);
 	await manager.wait(secondId, 10_000);
-	await vi.waitFor(() => expect(f.footer.render(80)).toEqual([]));
-	expect(f.statusCalls.at(-1)).toEqual(["bg-tasks", undefined]);
+	expect(f.footer.render(80)).toEqual([]);
+	expect(f.statusCalls.filter(([key]) => key === "bg-tasks")).toEqual([]);
 });
 
 test("/tasks opens a read-only panel with live list, detail watch and clean close", async () => {
@@ -228,7 +227,7 @@ test("/tasks opens a read-only panel with live list, detail watch and clean clos
 	await open.command;
 });
 
-test("terminal failures raise no transcript toast, only the unread badge; opening /tasks clears it", async () => {
+test("terminal failures raise neither a transcript toast nor a footer badge", async () => {
 	const f = await fixture();
 	const manager = f.session.backgroundTasks!;
 
@@ -238,11 +237,12 @@ test("terminal failures raise no transcript toast, only the unread badge; openin
 	// terminal events never produce transcript toasts; the folding task block is the single surface
 	await new Promise((resolve) => setTimeout(resolve, 700));
 	expect(f.notices.filter((notice) => notice.message.includes(failedId))).toEqual([]);
-	// no active tasks left, so the badge carries the unread failure on its own
-	await vi.waitFor(() => expect(f.statusCalls.at(-1)).toEqual(["bg-tasks", "✗ 1 failed"]));
+	// no footer badge either: unread failures surface only through /tasks
+	expect(f.footer.render(80)).toEqual([]);
+	expect(f.statusCalls).toEqual([]);
 
 	const open = await f.show();
-	await vi.waitFor(() => expect(f.statusCalls.at(-1)).toEqual(["bg-tasks", undefined]));
+	await vi.waitFor(() => expect(f.text()).toContain(failedId));
 	f.key("\x1b");
 	await open.command;
 });
