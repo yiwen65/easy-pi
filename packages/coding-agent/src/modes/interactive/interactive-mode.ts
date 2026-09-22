@@ -440,6 +440,35 @@ interface InteractiveTuiOptions {
 	onContentClick?: (click: { scrollView: ScrollView; row: number; col: number }) => boolean;
 }
 
+interface ClipboardConfirmationHost {
+	ui: TUI;
+	showStatus: (message: string) => void;
+	showError: (message: string) => void;
+}
+
+/**
+ * Copy text and report the outcome: flash in fullscreen mode, status line elsewhere.
+ * Shared by the message copy command and the editor draft copy shortcut so both
+ * report failures the same way.
+ */
+async function copyToClipboardWithConfirmation(
+	host: ClipboardConfirmationHost,
+	text: string,
+	options: { flashConfirmation?: boolean },
+	statusMessage: string,
+): Promise<void> {
+	try {
+		await copyToClipboard(text);
+		if (options.flashConfirmation && host.ui instanceof TuiAltScreen) {
+			host.ui.flash("Copied!");
+		} else {
+			host.showStatus(statusMessage);
+		}
+	} catch (error) {
+		host.showError(error instanceof Error ? error.message : String(error));
+	}
+}
+
 const interactiveTuiTerminals = new WeakMap<TuiMainScreen | TuiAltScreen, Terminal>();
 
 function rememberInteractiveTerminal<T extends TuiMainScreen | TuiAltScreen>(tui: T, terminal: Terminal): T {
@@ -3064,7 +3093,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => void this.handleOpenExternalEditor());
-		this.defaultEditor.onAction("app.message.copy", () => void this.handleCopyCommand({ flashConfirmation: true }));
+		this.defaultEditor.onAction("app.message.copy", () => void this.handleCopyShortcut({ flashConfirmation: true }));
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
@@ -6489,6 +6518,29 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Copy shortcut: prefer the editor draft so copying typed input never picks up
+	 * the rendered composer frame or soft-wrap breaks; fall back to the last agent
+	 * message when the editor is empty (or holds only whitespace).
+	 */
+	private async handleCopyShortcut(options: { flashConfirmation?: boolean } = {}): Promise<void> {
+		const draft = this.editor.getExpandedText?.() ?? this.editor.getText();
+		if (!draft.trim()) {
+			await this.handleCopyCommand(options);
+			return;
+		}
+		await copyToClipboardWithConfirmation(
+			{
+				ui: this.ui,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+			},
+			draft,
+			options,
+			"Copied input to clipboard",
+		);
+	}
+
 	private async handleCopyCommand(options: { flashConfirmation?: boolean } = {}): Promise<void> {
 		const text = this.session.getLastAssistantText();
 		if (!text) {
@@ -6496,16 +6548,16 @@ export class InteractiveMode {
 			return;
 		}
 
-		try {
-			await copyToClipboard(text);
-			if (options.flashConfirmation && this.ui instanceof TuiAltScreen) {
-				this.ui.flash("Copied!");
-			} else {
-				this.showStatus("Copied last agent message to clipboard");
-			}
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
+		await copyToClipboardWithConfirmation(
+			{
+				ui: this.ui,
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+			},
+			text,
+			options,
+			"Copied last agent message to clipboard",
+		);
 	}
 
 	private handleNameCommand(text: string): void {
@@ -6798,7 +6850,7 @@ export class InteractiveMode {
 | \`${promptPrev}\` / \`${promptNext}\` | Jump to previous/next user prompt (grok TUI) |
 | \`${promptList}\` | Open user prompt list to jump (grok TUI) |
 | \`${externalEditor}\` | Edit message in external editor |
-| \`${copyMessage}\` | Copy last assistant message |
+| \`${copyMessage}\` | Copy input text (paste markers expanded), or last assistant message when the input is empty |
 | \`${followUp}\` | Queue follow-up message |
 | \`${dequeue}\` | Restore queued messages |
 | \`${pasteImage}\` | Paste image or text from clipboard |

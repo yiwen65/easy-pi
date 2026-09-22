@@ -357,6 +357,119 @@ describe("InteractiveMode copy confirmation", () => {
 	);
 });
 
+type CopyShortcutContext = {
+	editor: { getText: () => string; getExpandedText?: () => string };
+	session: { getLastAssistantText: () => string | undefined };
+	ui: ReturnType<typeof createInteractiveTui>;
+	showStatus: (message: string) => void;
+	showError: (message: string) => void;
+	/** Present on the real instance; required by the empty-draft fallback path. */
+	handleCopyCommand: (options?: CopyCommandOptions) => Promise<void>;
+};
+
+type CopyShortcutPrototype = {
+	handleCopyShortcut(this: CopyShortcutContext, options?: CopyCommandOptions): Promise<void>;
+};
+
+const copyShortcutPrototype = InteractiveMode.prototype as unknown as CopyShortcutPrototype;
+
+describe("InteractiveMode copy shortcut", () => {
+	beforeEach(() => {
+		clipboardMocks.copyToClipboard.mockReset();
+		clipboardMocks.copyToClipboard.mockResolvedValue(undefined);
+	});
+
+	it.each(["legacy", "grok"] as const)(
+		"copies the editor draft instead of the last message in %s fullscreen mode",
+		async (tuiEngine) => {
+			const terminal = new RecordingTerminal(40, 4);
+			const ui = createInteractiveTui({
+				tuiEngine,
+				tuiMode: "fullscreen",
+				showHardwareCursor: false,
+				logDirectory: "/tmp",
+				terminal,
+			});
+			const showStatus = vi.fn();
+			const showError = vi.fn();
+			const context: CopyShortcutContext = {
+				editor: { getText: () => "[paste #1 +2 lines]", getExpandedText: () => "first line\nsecond line" },
+				session: { getLastAssistantText: () => "assistant response" },
+				ui,
+				showStatus,
+				showError,
+				handleCopyCommand: copyCommandPrototype.handleCopyCommand,
+			};
+
+			ui.start();
+			try {
+				await terminal.waitForRender();
+				await copyShortcutPrototype.handleCopyShortcut.call(context, { flashConfirmation: true });
+				await terminal.waitForRender();
+
+				expect(clipboardMocks.copyToClipboard).toHaveBeenCalledWith("first line\nsecond line");
+				expect(showStatus).not.toHaveBeenCalled();
+				expect(showError).not.toHaveBeenCalled();
+				expect(terminal.getViewport().some((line) => line.includes("Copied!"))).toBe(true);
+			} finally {
+				ui.stop();
+			}
+		},
+	);
+
+	it("reports the draft copy on the status line in regular mode", async () => {
+		const ui = createInteractiveTui({
+			tuiEngine: "grok",
+			tuiMode: "regular",
+			showHardwareCursor: false,
+			logDirectory: "/tmp",
+			terminal: new RecordingTerminal(),
+		});
+		const showStatus = vi.fn();
+		const showError = vi.fn();
+		const context: CopyShortcutContext = {
+			editor: { getText: () => "typed input" },
+			session: { getLastAssistantText: () => "assistant response" },
+			ui,
+			showStatus,
+			showError,
+			handleCopyCommand: copyCommandPrototype.handleCopyCommand,
+		};
+
+		await copyShortcutPrototype.handleCopyShortcut.call(context, { flashConfirmation: true });
+
+		expect(clipboardMocks.copyToClipboard).toHaveBeenCalledWith("typed input");
+		expect(showStatus).toHaveBeenCalledWith("Copied input to clipboard");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("falls back to the last agent message when the editor holds only whitespace", async () => {
+		const ui = createInteractiveTui({
+			tuiEngine: "grok",
+			tuiMode: "regular",
+			showHardwareCursor: false,
+			logDirectory: "/tmp",
+			terminal: new RecordingTerminal(),
+		});
+		const showStatus = vi.fn();
+		const showError = vi.fn();
+		const context: CopyShortcutContext = {
+			editor: { getText: () => "  \n " },
+			session: { getLastAssistantText: () => "assistant response" },
+			ui,
+			showStatus,
+			showError,
+			handleCopyCommand: copyCommandPrototype.handleCopyCommand,
+		};
+
+		await copyShortcutPrototype.handleCopyShortcut.call(context, { flashConfirmation: true });
+
+		expect(clipboardMocks.copyToClipboard).toHaveBeenCalledWith("assistant response");
+		expect(showStatus).toHaveBeenCalledWith("Copied last agent message to clipboard");
+		expect(showError).not.toHaveBeenCalled();
+	});
+});
+
 type ClearStatusContext = {
 	activeStatusIndicator: { kind: "working"; dispose: () => void } | undefined;
 	statusContainer: Container;
