@@ -5,7 +5,7 @@
 - Mode: execute
 - Overall status: blocked
 - Source: /Users/w/Projects/easy-pi/docs/EASY_PI_COMPUTER_IMPLEMENTATION_PLAN.md；P00–P08限定交付已完成；2026-09-20用户确认通用Computer修订需求并要求“制定实现方案并更新 task 文档”。
-- Current scope: G00–G07通用化执行；T-042–T-047、T-057–T-070、T-072/T-073 done，T-048/T-071 blocked/coordinator（等待真实本机键盘活动），T-049–T-056按依赖推进。coordinator独占生产native/GUI；没有活跃worker，继续双目标生产拖拽与只读设备共存取证。用户于方案后明确完全授权并要求自主完成及验证，不停在计划/失败尝试。
+- Current scope: G00–G07通用化执行；T-042–T-047、T-057–T-070、T-072/T-073 done，T-048/T-071 blocked/coordinator（首轮接收按键为零，等待用户现场反馈），T-049–T-056按依赖推进。coordinator独占生产native/GUI；没有活跃worker，继续双目标生产拖拽与只读设备共存取证。用户于方案后明确完全授权并要求自主完成及验证，不停在计划/失败尝试。
 
 <!-- task-doc-section:background-goal -->
 ## Background and goal
@@ -976,8 +976,8 @@ T-001–T-041保留历史限定交付；新增T-042–T-056位于本节末，状
 - Execution steps: 逐动作选择准确语义/定向后台再前台；移除无关全局HID活动对后台的否决；审查并去除foreground helper物理事件拦截；已投递未知先确认，不能双transport重复post；段级接管而非每键front/restore；不等待quiet、不新增人审。
 - Acceptance criteria: 用户另窗连续输入时后台任务实际完成且焦点/系统光标不变；确需前台时自动执行并如实标注；物理输入始终可用；目标被用户切走不向错窗口发事件，不无界重抢或伪装静默。
 - Verification method: route选择/无重复post/焦点代际单测；真实并发输入、同PID多窗口、后台不接收与前台兜底对照；审查event tap/输入抑制路径；取消和宿主退出回归。
-- Validation evidence: 已复读当前General segment/Events：可写native字段走AXValue后台，定向pointer使用private-source PID投递，foreground才查held冲突；pointer_route_unavailable仅零primary且无owned holds时允许一次前台准备，未知输入不补发。T-072另有真实自动前台准备/两目标global及停止证据。general/coexistence已准备原安装AgentSession的AX填值＋定向pixel两臂、独立前台收键窗口、每臂non-seizing IOHID聚合与focus/cursor/真实效果核对；strict Swift6编译、probe语法、Python编译及控制/正负证据pure gates通过。首次单文件Swift遗漏-parse-as-library的编译失败保留，修正编译方式后通过。尚未执行该共存GUI，也没有正向物理重叠资格。
-- Blocker: 实体键盘活动必须由用户实际产生；软件CGEvent不能代替本项验收。测试已就绪，无活跃GUI/设备observer，最后clean C393；等待用户确认在本机键盘参与约20秒。
+- Validation evidence: 已复读当前General segment/Events：可写native字段走AXValue后台，定向pointer使用private-source PID投递，foreground才查held冲突；pointer_route_unavailable仅零primary且无owned holds时允许一次前台准备，未知输入不补发。T-072另有真实自动前台准备/两目标global及停止证据。general/coexistence已准备原安装AgentSession的AX填值＋定向pixel两臂、独立前台收键窗口、每臂non-seizing IOHID聚合与focus/cursor/真实效果核对；strict Swift6编译、probe语法、Python编译及控制/正负证据pure gates通过。首次单文件Swift遗漏-parse-as-library的编译失败保留，修正编译方式后通过。用户就绪后首轮installed-physical-coexistence-01在等待前台接收窗口至少两次完整按键处30s超时，整轮失败：receiver曾报告appActive/keyWindow/frontPid匹配，但所有keyDown/Up计数0；尚未开始AX/pixel两臂，也未打开IOHID manager。只有discover/select/observe三terminal且全部inputCommitted=false，三个孩子自然exit0、无forced、clean C394，coexistence/first-wait-verification.json独立封存。不将零计数归因为用户未输入或产品屏蔽，具体原因待现场反馈；没有正向物理重叠资格。
+- Blocker: 首轮接收计数为零，尚未区分用户未看到/未敲键、选错窗口或接收链问题；需要用户反馈是否在T071窗口实际敲键，不能盲目重复GUI或把未观察到当没有物理输入。
 - Unblock condition: 用户就绪后刷新console/marker/TCC，用general/coexistence/run.py新证据名从实际clean代际启动；接收窗口出现后持续轻按字母键、鼠标保持不动，直到TEST COMPLETE。两臂必须实际成功且各有正向OS-reported键盘变化、焦点/光标与自然关闭证据；零计数不能通过。
 
 ### [ ] T-049 — G03 信息依赖分段与业务状态确认
@@ -1322,7 +1322,7 @@ T-001–T-041保留历史限定交付；新增T-042–T-056位于本节末，状
 - Acceptance criteria: 不独占/屏蔽物理输入、不读字符内容、不把CGEvent软件post算物理设备报告；权限不够正常拒绝，无绕过或假成功；源与实际观察证据分别报告。
 - Verification method: pure transport/activity计数/参数/边界测试和严格编译；coordinator真实IOHID open/close、任务区间activity重叠与同进程焦点/指针观察，T-048最终共存另验收。
 - Validation evidence: worker完成non-seizing IOHIDManager observer，仅recognized USB/Bluetooth/BLE/SPI、聚合变化/非零relative callback计数，不存字符/键序/设备名。严格clang、103pure assertions及同103ASan/UBSan全过；coordinator已读源码/核对SHA256SUMS并独立重跑103。实际hid-observer-live PID48368新permission/open→begin→0.208s→end/close→自然exit0，incomplete=false、零计数；不是共存或正向物理活动证明。binary11f75851、core6a4caccc、observer3a340695已封存。真实任务重叠尚未执行；OS-reported transport不是恶意driver证明、callback时间非硬件时间、首次absolute baseline可漏首次transition、零计数不证明无输入。check/open之间撤权可能令公开open隐式请求权限的SDK限制保留。随后coexistence测试接收窗口/原安装probe已strict编译与纯门禁验证；原observer103pure及同103sanitizer检查再次通过，未打开设备或新GUI。
-- Blocker: 等待真实本机键盘活动与后台任务重叠；助手无法通过软件事件制造物理设备来源证据。
+- Blocker: 共存首轮在前台收键等待超时，IOHID尚未启动；需要用户现场反馈后修正刺激/接收链并新鲜验证，不能用软件事件替代物理来源。
 - Unblock condition: 用户确认短时参与后运行已准备的两臂共存测试；IOHID与独立前台接收计数均实际为正且原生任务/终态/关闭通过后才验收。
 
 ### [x] T-072 — G02 显式双目标拖拽与受拥有前台路线
@@ -1395,7 +1395,7 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 
 ### 通用化当前风险
 
-- 当前为execute，T-042–T-047 done，T-048/T-071 blocked/coordinator（实际键盘共存），T-049–T-056 pending；没有新的产品偏好待确认。技术风险由对应任务验证，不用“平台可能不支持”提前缩成fixture-only交付。
+- 当前为execute，T-042–T-047 done，T-048/T-071 blocked/coordinator（实际键盘共存首轮无收到按键），T-049–T-056 pending；没有新的产品偏好待确认。技术风险由对应任务验证，不用“平台可能不支持”提前缩成fixture-only交付。
 - 任意应用后台输入不是macOS天然保证；尤其同PID多窗口、Web AX回声、输入法与用户修饰键。后台不成立时走已批准前台；前台也不能确定结果时如实停止，不重复副作用。
 - 去固定等待、整图相等和整树检查必须有替代的目标/状态证据；只把guard删除可能更快，但不能证明准确性。反过来，继续要求所有用户停止键鼠会直接违背已确认的后台目标。
 - 现有浏览器通常不能假定DOM接入；不能靠关闭/重启个人浏览器、复制profile或另开空白CfT满足“使用现有登录态”。DOM为有条件加速，AX/像素/前台是必须交付的兼容路线。
@@ -1437,6 +1437,10 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
+
+- 2026-09-22T22:57Z: 用户“现在可以”后实际coexistence首轮失败于前台接收窗口按键等待30s；只进行了3个只读native operation，0input，AX/pixel工作和IOHID manager均尚未开始。接收窗口曾报foreground/key，但keyDown/Up始终0，未确定用户行为/接收链原因；3自然退出、无forced、clean C394，独立first-wait-verification通过。T-048/T-071转blocked，询问现场是否看到并在T071窗口敲键；无盲重试/清锁/假阳性。
+
+- 2026-09-22: 用户通过physical_keyboard_ready选择“现在可以”。T-048/T-071恢复in_progress/coordinator，立即从fresh C393进行准备好的原安装两臂共存实测；用户只在专用前台窗口轻按实体字母键，未扩大到个人内容/真实API或输入屏蔽。
 
 - 2026-09-22: ae00132bb提交24个本任务路径，未包含LEARNS既有修改；T-072/T-047完成后继续T-048。coexistence两臂原安装AgentSession测试及不记录字符/键码的前台接收窗口已准备：strict Swift6、probe/Python语法、HID正负门禁、原observer103pure＋同103sanitizer通过；没有新GUI/设备open。接收窗口完成提示后等待按键释放/安静再关闭，避免用户继续打字落到别的应用。T-048/T-071转blocked等待用户在本机真实键盘短时参与；不是新的权限审批，也不以软件模拟或零callback冒充完成。无活跃任务，最后clean C393，下一步是用户就绪后fresh准入的有界实测。
 
@@ -1857,7 +1861,7 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 ## Final validation result
 
 - Result: blocked
-- Planning validation: 通用化需求和依赖已确认，Mode=execute；T-042–T-047 done、T-070机制/T-072双目标资格/T-073生命周期基础done、T-048/T-071 blocked（coordinator，等待实体键盘共存）、T-049–T-056 pending；T-057–T-069狭义增量按各自记录验收。规划/协议子集完成不等于运行验收通过。
+- Planning validation: 通用化需求和依赖已确认，Mode=execute；T-042–T-047 done、T-070机制/T-072双目标资格/T-073生命周期基础done、T-048/T-071 blocked（coordinator，首轮收键为零，待用户现场反馈）、T-049–T-056 pending；T-057–T-069狭义增量按各自记录验收。规划/协议子集完成不等于运行验收通过。
 - Evidence: T-001—T-041全部done仅表示历史P00–P08限定Node24.15.0/macOS26.5.1 arm64交付完成；新增G00基线、G01协议契约T-043和T-044限定精简门禁通过；通用化目标未交付。实际原生/安装/真实vision/compaction与P08性能、cancel/revoke和browser门禁均有独立证据。最新delivery-final-check完整0（1420文件无修复）/204pass+5skip/controller38/drift0；两层native类型0、context7/7、desktop21/21。完整无密钥套件仍同历史九失败，不是全仓绿灯；Bun未支持。最终交付迁移、离线重装、hash/internal-link与真实no-host/smoke通过，见p08/delivery-verification.json。
 - Historical delivery: .artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz，40449085B，SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb；manifest SHA256 7ddfbf6edaf09e894c9bf9c7220d18545f90fd5058c97b5841fde7394c55072c，14215文件/8内部links。仓库外验证位置/private/tmp/epi-computer-delivery-h859lqzg/node24.15.0-darwin-arm64；另reinstall目录offline npm ci使用此前hydrated缓存，原交付payload未变。所有测量及GUI任务已结束，最后clean C237，无活跃GUI/assertion，不是未来准入承诺。源码提交d84c2af438e31eb4720c2d3782199cfdebbba14d；工作树无关改动完整保留，构建来源如实标记既有dirty snapshot，不冒称clean commit可复现。真实provider仍5attempts/2success，未push/publication。
 - Historical evidence: T-030 done：native两修复before101/after4pass、49/43/66及生成/全部离线check通过，probe幂等回归before2fail/after2pass；fixed-2 fresh owner21507/Chrome21547/window150完成真实prepare→terminal→close→destroy、两自然0/EOF、私有files清理、C27。独立prepare-qualified-verification核对通过。完整browser观察/输入/计划仍待，P04–P08未交付。以下历史：D25诊断给出10窗口/唯一几何114及resource0:image_catalog_changed，两个原因已被先红后绿4case修复；platform49/SDK43/core66/生成/check/stage/header/nohost/full isolated check均0，193pass+5skip/controller38/drift0，四Rust patch655ba915。三个新的native只读image目录快照均0live，无lease/signal/delete；D25行政恢复尚未批准/执行，真实修复GUI尚待。D24已按一次授权在新boot同inode恢复C24，历史D24不补造terminal。以下历史：T-030已完成诊断/恢复准备：opt-in两文件diag patchdd84611e，diagnostic1+2/platform45/SDK43/core66、生成/check/N-API/header/nohost/隔离全check均0，193pass+5skip/controller38/drift0；旧16原生产物归档，605源边界/原失败raw核对0。私有D24恢复20/20，不代表canonical执行；等待用户手动重启，尚无confirmed-boot.txt/恢复archive或新GUI。真实失败原因仍未唯一证明，未声称行为修复。此前browser SDK prepare facade/registry/pool/初始绑定的platform45/SDK43/core66/生成及--check/N-API/header/strictTS/nohost load全部通过，七Rust增量patch1d0ebe4c/605源；新isolated check0及193pass/5skip/controller38/drift0。但prepare-live-2实际CfT启动后browser_window_ambiguous，资源close Quarantined，无clean host receipt；Node自然1/fixture自然0/EOF，无forced、无page输入，同inodeD24未清除，私有profile保留。T-029已修正严格TCC形态判断，9/9及fresh93502两服务完整Allowed通过。根因诊断/恢复门禁归T-030。以下历史：最新launcher内部装配platform42/SDK41/core66/fmt和isolated check全0（193pass/5skip、controller38、drift0），三文件incremental patch59cd9c41/602源边界核对；未注册/未公开ABI/未执行真实浏览器，详见launcher-report.md。最新授权允许必要权限/任意版本自主选择；官方CfT153.0.8010.52的供应商签名失败事实保留，经明确授权后完整官方归档/346文件/5links内容校验0，content-manifest81c3f5a8、未执行浏览器。此前T-027 image事实子集5/五轮5/platform33/SDK41/core66及fmt全0，incremental patch24584ae5/600源与历史输入核对0；browser-image-observer-check完整0/1376files无修复、193pass/5skip、38/38、drift0。Chrome153只私有复制验证，未执行或创建profile；外部code-sign clone/helper生命周期尚未覆盖，观察事实不作terminal/ownership。此前T-027 process-group子集process11/五轮10/platform28（含11 process）/SDK41/core66及fmt全0，natural-exit EPERM回归before101/after0，incremental process.patch bd351bd1及历史输入核对0；browser-process-check完整0/1376files无修复、193pass/5skip、38/38、drift0。仅group proof，不含escaped Chrome helpers；无Chrome/profile/GUI/public ABI/产品切换。此前T-027 distinct scope子集core66/registry70/authorization40/manifest15/SDK41/platform17及fmt通过，incremental scope.patch41e97239/历史输入核对0；browser-scope-check完整0/1376files无修复、193pass/5skip、38/38、drift0，无profile/GUI/public ABI/产品切换，T-027仍未验收。此前T-027异步生命周期子集core56/CDP33（19重叠）/SDK40/platform16通过，foreign pool/首失败握手两回归before101/after0，incremental patch27a67104及历史输入核对0；browser-lifecycle-check完整0/1376files无修复、193pass/5skip、38/38、drift0。T-027整体仍未验收，无profile/GUI/ABI/产物切换。此前T-028独立transport40/CDP25/SDK33/platform16通过、两回归before101/after0、patch9b6df0b6 apply/hash/reverse及历史输入核对0；browser-transport-check完整0（1376files无修复）、193pass/5skip、38/38、drift0，未切换产品pins或运行browser GUI。此前真实八步表单/十AppKit场景通过；T-026两回归before101/after0、SDK33/33，生成/header/strict types/load-only通过；tool8/8、真实AgentSession/faux4/4。modal-check完整npm check0（1376files，只格式化任务pin JSON已审查回写）、193pass/5skip、controller38/38，检查期live drift0。最后C23同inode，native terminal/close/destroy/自然exit0/EOF，未强制清理。T-024提交8779ac9ff仅三AI测试，无新提交；完整suite未重跑，历史9失败不是当前全绿声明。
