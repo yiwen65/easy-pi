@@ -13,6 +13,89 @@ afterEach(() => {
 });
 
 describe("strict model generation", () => {
+	it.each([false, true])("generates Kimi data from the matching regional catalog (dataOnly=%s)", (dataOnly) => {
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-kimi-models-"));
+		temporaryRoots.push(fixtureRoot);
+		const isolatedPackageRoot = join(fixtureRoot, "package");
+		mkdirSync(isolatedPackageRoot);
+		for (const entry of ["package.json", "scripts", "src"]) {
+			cpSync(join(packageRoot, entry), join(isolatedPackageRoot, entry), { recursive: true });
+		}
+		// Hydration should need only the provider under test, independent of local generated data.
+		const providersDir = join(isolatedPackageRoot, "src/providers");
+		rmSync(providersDir, { recursive: true });
+		mkdirSync(providersDir);
+		cpSync(join(packageRoot, "src/providers/kimi-coding.models.ts"), join(providersDir, "kimi-coding.models.ts"));
+		writeFileSync(
+			join(isolatedPackageRoot, "src/models.generated.ts"),
+			'import { KIMI_CODING_MODELS } from "./providers/kimi-coding.models.ts";\n',
+		);
+		const modelIds = [
+			"deepseek-v4-flash-0731",
+			"deepseek-v4-pro",
+			"deepseek-v4-pro-0813",
+			"glm-5.2",
+			"qwen3.6-flash",
+			"qwen3.7-max",
+			"qwen3.7-plus",
+			"qwen3.8-max",
+		];
+		const catalog = {
+			"alibaba-token-plan": {
+				models: Object.fromEntries(modelIds.map((id) => [id, { id, name: id, tool_call: true }])),
+			},
+			"kimi-code-plan-cn": {
+				models: {
+					"kimi-for-coding": {
+						id: "kimi-for-coding",
+						name: "Kimi CN",
+						tool_call: true,
+						reasoning: true,
+						limit: { context: 1048576, output: 32768 },
+						modalities: { input: ["text", "image"] },
+					},
+				},
+			},
+			"kimi-code-plan-global": {
+				models: {
+					"global-only": { id: "global-only", name: "Global only", tool_call: true },
+				},
+			},
+		};
+		const preloadPath = join(fixtureRoot, "mock-catalog.mjs");
+		writeFileSync(
+			preloadPath,
+			`const catalog = ${JSON.stringify(catalog)};\n` +
+				`globalThis.fetch = async (input) => {\n` +
+				`  const url = String(input);\n` +
+				`  if (url === "https://models.dev/api.json") return Response.json(catalog);\n` +
+				`  if (["https://openrouter.ai/api/v1/models", "https://ai-gateway.vercel.sh/v1/models"].includes(url)) return Response.json({ data: [] });\n` +
+				`  throw new Error(\`Unexpected fetch: \${url}\`);\n` +
+				`};\n`,
+		);
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				pathToFileURL(preloadPath).href,
+				"scripts/generate-models.ts",
+				"--strict",
+				...(dataOnly ? ["--data-only"] : []),
+			],
+			{ cwd: isolatedPackageRoot, encoding: "utf8", timeout: 10_000 },
+		);
+		expect(result.status, result.stderr).toBe(0);
+		const values = JSON.parse(readFileSync(join(providersDir, "data/kimi-coding.json"), "utf8"));
+		expect(Object.keys(values["anthropic-messages"])).toEqual(["kimi-for-coding"]);
+		expect(values["anthropic-messages"]["kimi-for-coding"]).toMatchObject({
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			name: "Kimi CN",
+			contextWindow: 1048576,
+			maxTokens: 32768,
+		});
+	});
+
 	it("fails before mutating generated data when an Individual model loses tool support", () => {
 		const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-generate-models-"));
 		temporaryRoots.push(fixtureRoot);
