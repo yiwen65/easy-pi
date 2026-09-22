@@ -165,6 +165,28 @@ These commands manage pi packages and `pi update` can update the pi CLI installa
 
 See [Pi Packages](packages.md) for package sources and security notes.
 
+### Token Usage Panel
+
+```bash
+epi stats                    # Serve the local panel on 127.0.0.1 and open it in the browser
+epi stats --days 7           # Start with the last 7 days selected (0 = all time)
+epi stats --all              # Include test/temporary sessions (excluded by default)
+epi stats --dir <path>       # Scan a specific session directory (repeatable)
+epi stats --port 9000        # Pick the port (a busy port falls back to a free one)
+epi stats --no-open          # Serve without opening a browser
+epi stats --json             # Print the aggregate snapshot as JSON and exit
+```
+
+`epi stats` reads the session JSONL files under the agent sessions directory (see
+[Environment Variables](environment-variables.md) for `--dir` and directory overrides), totals the
+recorded per-message usage (input, output, cache read, cache write, total tokens, and the catalog-rate
+cost stored with each message), and serves a read-only web panel on loopback: totals, a daily trend,
+and breakdowns by model, provider, project, and session. Nothing is written back to the sessions and
+no network access is used. Sessions whose cwd is a system temp directory, and sessions produced only by
+the `faux` provider, are excluded by default; `--all` includes them. Costs are the catalog rates that
+were recorded at session time, so subscription plans are not discounted and historical prices are not
+re-stated.
+
 ### Modes
 
 | Flag | Description |

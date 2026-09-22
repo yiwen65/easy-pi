@@ -419,6 +419,21 @@ export function getExportTemplateDir(): string {
 	return join(packageDir, srcOrDist, "core", "export-html");
 }
 
+/**
+ * Get path to the token usage panel assets directory (shipped with package)
+ * - For Bun binary: stats-web/ next to executable
+ * - For Node.js (dist/): dist/core/stats/web/
+ * - For tsx (src/): src/core/stats/web/
+ */
+export function getStatsWebDir(): string {
+	if (isBunBinary) {
+		return join(getPackageDir(), "stats-web");
+	}
+	const packageDir = getPackageDir();
+	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
+	return join(packageDir, srcOrDist, "core", "stats", "web");
+}
+
 /** Get path to package.json */
 export function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
