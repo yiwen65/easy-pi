@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a live elapsed-time suffix to the `Working...` indicator: it counts in seconds and switches to minutes (`12m 34s`) and hours (`1h 2m 5s`) automatically, counting from the turn start and refreshing once per second.
 - Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
 - Added `backgroundBashCompletionInlineOutput` (`failures` default, `always`, `tail-lines`, `never`) and `backgroundBashCompletionInlineBytes` (default 4096, clamped 256..32768) so completion notices can carry as much or as little output as you want; every notice now also states how to inspect output (`task_output(<id>)`).
 - Added `background_task_started` / `background_task_completed` / `background_task_stalled` extension events plus the matching session events (`session.subscribe(...)`) for background bash tasks.
