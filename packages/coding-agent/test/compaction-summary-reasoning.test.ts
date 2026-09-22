@@ -156,6 +156,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		expect(res.errorMessage).toContain("context overflow");
 		expect(res.errorMessage).toContain("763998");
 		expect(res.errorMessage).toContain("200000");
+		expect(res.contextOverflow).toBe(true);
 	});
 
 	it("keeps a length stop visible instead of reporting a complete handoff", async () => {

@@ -83,6 +83,52 @@ describe("HfCompactionHost checkpoint pipeline", () => {
 		expect(outcome.tokensAfter).toBeLessThan(outcome.tokensBefore!);
 	});
 
+	it("uses recent provider usage to leave enough room when the local estimate is low", async () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "compact this history", timestamp: 1 });
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-large", name: "read", arguments: { path: "large.log" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 40_000,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 40_010,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 2,
+		});
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-large",
+			toolName: "read",
+			content: [{ type: "text", text: "x".repeat(20_000) }],
+			details: undefined,
+			isError: false,
+			timestamp: 3,
+		});
+		let captured = "";
+
+		const outcome = await host().attemptCompaction({
+			branchEntries: manager.getBranch(),
+			modelContextLimit: 45_000,
+			outputReserveTokens: 100,
+			complete: async (request) => {
+				captured = JSON.stringify(request.messages);
+				return { text: compliantHandoff, stopReason: "stop" };
+			},
+		});
+
+		expect(outcome.activated).toBe(true);
+		expect(captured).toContain("truncated before local compaction");
+		expect(captured).not.toContain("x".repeat(20_000));
+	});
+
 	it("does not append an answered latest user message after the compaction item", async () => {
 		const manager = fixture();
 		manager.appendMessage({

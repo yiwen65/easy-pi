@@ -26,6 +26,8 @@ export interface CompactionLLMResponse {
 	/** "length" means the provider stopped at an output limit; the handoff is incomplete. */
 	stopReason: "stop" | "length" | "error" | "aborted";
 	errorMessage?: string;
+	/** The provider accepted or reported an input larger than the configured context window. */
+	contextOverflow?: boolean;
 	usage?: { input: number; output: number };
 }
 

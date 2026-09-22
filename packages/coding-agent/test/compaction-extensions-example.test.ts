@@ -10,43 +10,36 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	serializeConversation: () => "conversation",
 }));
 
-const { default: customCompactionExtension } = await import("../examples/extensions/custom-compaction.ts");
+const { default: compactionControlExtension } = await import("../examples/extensions/compaction-control.ts");
 
 describe("Documentation example", () => {
-	it("custom compaction example should type-check correctly", () => {
-		// This is the example from extensions.md - verify it compiles
+	it("compaction control example should type-check correctly", () => {
+		// This is the contract documented in extensions.md - verify the supported fields compile.
 		const exampleExtension = (pi: ExtensionAPI) => {
 			pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx) => {
 				// All these should be accessible on the event
-				const { preparation, branchEntries } = event;
-				// sessionManager, modelRegistry, and model come from ctx
-				const { sessionManager, modelRegistry } = ctx;
-				const { messagesToSummarize, turnPrefixMessages, tokensBefore, firstKeptEntryId, isSplitTurn } =
-					preparation;
+				const { preparation, branchEntries, reason, willRetry, signal } = event;
+				const { messagesToSummarize, turnPrefixMessages, tokensBefore, isSplitTurn } = preparation;
 
 				// Verify types
 				expect(Array.isArray(messagesToSummarize)).toBe(true);
 				expect(Array.isArray(turnPrefixMessages)).toBe(true);
 				expect(typeof isSplitTurn).toBe("boolean");
 				expect(typeof tokensBefore).toBe("number");
-				expect(typeof sessionManager.getEntries).toBe("function");
-				expect(typeof modelRegistry.getApiKeyAndHeaders).toBe("function");
-				expect(typeof firstKeptEntryId).toBe("string");
 				expect(Array.isArray(branchEntries)).toBe(true);
+				expect(typeof reason).toBe("string");
+				expect(typeof willRetry).toBe("boolean");
+				expect(signal).toBeInstanceOf(AbortSignal);
+				expect(typeof ctx.ui.notify).toBe("function");
 
-				const summary = messagesToSummarize
-					.filter((m) => m.role === "user")
-					.map((m) => `- ${typeof m.content === "string" ? m.content.slice(0, 100) : "[complex]"}`)
-					.join("\n");
+				// Cancellation is the only supported control; summary text is deprecated.
+				if (tokensBefore < 1_000) return { cancel: true };
+				return undefined;
+			});
 
-				// Extensions return compaction content - SessionManager adds id/parentId
-				return {
-					compaction: {
-						summary: `User requests:\n${summary}`,
-						firstKeptEntryId,
-						tokensBefore,
-					},
-				};
+			pi.on("session_compact", async (event: SessionCompactEvent) => {
+				expect(event.compactionEntry.type).toBe("compaction");
+				expect(typeof event.compactionEntry.tokensBefore).toBe("number");
 			});
 		};
 
@@ -54,83 +47,42 @@ describe("Documentation example", () => {
 		expect(typeof exampleExtension).toBe("function");
 	});
 
-	it("custom compaction example dispatches through modelRegistry.complete", async () => {
-		let handler: ((event: any, ctx: any) => Promise<any>) | undefined;
-		customCompactionExtension({
-			on(event, fn) {
-				if (event === "session_before_compact") handler = fn as typeof handler;
+	it("compaction control example cancels small compactions and reports checkpoints", async () => {
+		const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();
+		compactionControlExtension({
+			on(event: string, fn: (event: any, ctx: any) => Promise<any>) {
+				handlers.set(event, fn);
 			},
-		} as ExtensionAPI);
+		} as unknown as ExtensionAPI);
 
-		expect(handler).toBeDefined();
-
-		const complete = vi.fn(async () => ({
-			role: "assistant",
-			content: [{ type: "text", text: "custom provider summary" }],
-			provider: "example-custom",
-			api: "example-custom-api",
-			model: "summary-model",
-			stopReason: "stop",
-			usage: {
-				input: 1,
-				output: 2,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 3,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		}));
-		const model = {
-			provider: "example-custom",
-			api: "example-custom-api",
-			id: "summary-model",
-			name: "Summary Model",
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 1000,
-			maxTokens: 100,
+		const notify = vi.fn();
+		const ctx = { ui: { notify } };
+		const smallEvent = {
+			preparation: { tokensBefore: 42 },
+			reason: "manual",
+			branchEntries: [],
 		};
 
-		const result = await handler!(
-			{
-				preparation: {
-					messagesToSummarize: [
-						{ role: "user", content: [{ type: "text", text: "please remember this" }], timestamp: Date.now() },
-					],
-					turnPrefixMessages: [],
-					tokensBefore: 42,
-					firstKeptEntryId: "entry-1",
-				},
-				branchEntries: [],
-				signal: new AbortController().signal,
-			},
-			{
-				ui: { notify: vi.fn() },
-				modelRegistry: {
-					find: vi.fn(() => model),
-					complete,
-				},
-			},
-		);
+		const cancelled = await handlers.get("session_before_compact")!(smallEvent, ctx);
+		expect(cancelled).toEqual({ cancel: true });
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("Skipping manual compaction"), "info");
 
-		expect(complete).toHaveBeenCalledWith(
-			model,
-			expect.objectContaining({ messages: expect.any(Array) }),
-			expect.objectContaining({ maxTokens: 8192 }),
+		// At or above the threshold the subsystem compacts normally.
+		notify.mockClear();
+		const allowed = await handlers.get("session_before_compact")!(
+			{ ...smallEvent, preparation: { tokensBefore: 50_000 } },
+			ctx,
 		);
-		expect(complete).not.toHaveBeenCalledWith(
-			expect.anything(),
-			expect.anything(),
-			expect.objectContaining({ apiKey: expect.anything() }),
+		expect(allowed).toBeUndefined();
+		expect(notify).not.toHaveBeenCalled();
+
+		// The persisted checkpoint is reported.
+		const saved = await handlers.get("session_compact")!(
+			{ compactionEntry: { id: "entry-9", type: "compaction", tokensBefore: 50_000 }, reason: "threshold" },
+			ctx,
 		);
-		expect(result).toMatchObject({
-			compaction: {
-				summary: "custom provider summary",
-				firstKeptEntryId: "entry-1",
-				tokensBefore: 42,
-			},
-		});
+		expect(saved).toBeUndefined();
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("Compaction checkpoint entry-9 saved"), "info");
 	});
 
 	it("compact event should have correct fields", () => {
@@ -141,8 +93,9 @@ describe("Documentation example", () => {
 				const fromExtension = event.fromExtension;
 
 				expect(entry.type).toBe("compaction");
-				expect(typeof entry.summary).toBe("string");
 				expect(typeof entry.tokensBefore).toBe("number");
+				// Modern checkpoints carry replacementHistory; only legacy checkpoints carry summary text.
+				expect(Array.isArray(entry.replacementHistory) || typeof entry.summary === "string").toBe(true);
 				expect(typeof fromExtension).toBe("boolean");
 			});
 		};

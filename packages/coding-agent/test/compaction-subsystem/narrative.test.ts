@@ -145,6 +145,76 @@ describe("local Remote V2-style compaction item", () => {
 		expect(JSON.stringify(capturedRequest?.messages[1])).toContain("truncated before local compaction");
 	});
 
+	it("retries one provider-reported overflow with every tool result rewritten", async () => {
+		const requests: CompactionLLMRequest[] = [];
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			messageTokenBudget: 10_000,
+			complete: async (request) => {
+				requests.push(request);
+				return requests.length === 1
+					? { text: "", stopReason: "error", errorMessage: "overflow", contextOverflow: true }
+					: { text: compliantHandoff, stopReason: "stop" };
+			},
+		});
+
+		expect(result.rejected).toBe(false);
+		expect(requests).toHaveLength(2);
+		expect(JSON.stringify(requests[0].messages)).toContain("x".repeat(10_000));
+		expect(JSON.stringify(requests[1].messages)).toContain("truncated before local compaction");
+		expect(JSON.stringify(messages[1])).toContain("x".repeat(10_000));
+	});
+
+	it("retries provider overflow with tool results rewritten even without a configured budget", async () => {
+		const requests: CompactionLLMRequest[] = [];
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async (request) => {
+				requests.push(request);
+				return requests.length === 1
+					? { text: "", stopReason: "error", errorMessage: "overflow", contextOverflow: true }
+					: { text: compliantHandoff, stopReason: "stop" };
+			},
+		});
+
+		expect(result.rejected).toBe(false);
+		expect(requests).toHaveLength(2);
+		expect(JSON.stringify(requests[1].messages)).toContain("truncated before local compaction");
+	});
+
+	it("does not resend the same already-truncated request after provider overflow", async () => {
+		let calls = 0;
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			messageTokenBudget: 200,
+			complete: async () => {
+				calls++;
+				return { text: "", stopReason: "error", errorMessage: "overflow", contextOverflow: true };
+			},
+		});
+
+		expect(result.rejected).toBe(true);
+		expect(calls).toBe(1);
+	});
+
+	it("does not retry a generic compactor failure", async () => {
+		let calls = 0;
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			complete: async () => {
+				calls++;
+				return { text: "", stopReason: "error", errorMessage: "rate limit" };
+			},
+		});
+
+		expect(result.rejected).toBe(true);
+		expect(calls).toBe(1);
+	});
+
 	it("rejects an empty or failed compactor response without publishing fallback state", async () => {
 		const result = await generateCompactionItem({
 			messages,
@@ -196,17 +266,38 @@ describe("local Remote V2-style compaction item", () => {
 	});
 
 	it("rejects a structured handoff that is implausibly small for the history it replaces", async () => {
-		const largeHistory = [{ role: "user" as const, content: "x".repeat(200_000), timestamp: 1 }];
+		// Proportionality only carries information when the compactor's input was truncated, so the
+		// request first reports an overflow and the retry answers with a handoff that is far too small
+		// for the history it would replace.
+		const largeHistory = [
+			{ role: "user" as const, content: "x".repeat(200_000), timestamp: 1 },
+			{
+				role: "toolResult" as const,
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text" as const, text: "y".repeat(200_000) }],
+				details: undefined,
+				isError: false,
+				timestamp: 3,
+			},
+		];
+		let calls = 0;
 		const result = await generateCompactionItem({
 			messages: largeHistory,
 			systemPrompt: "CURRENT SYSTEM",
-			complete: async () => ({
-				// ~198 chars: above the absolute floor and structured, yet far below the ~400 chars
-				// (0.2% of the 50k-token history) that a credible handoff would need.
-				text: `## Conversation timeline\n${"one episode. ".repeat(10)}\n## Current continuation point\nnext action.`,
-				stopReason: "stop",
-			}),
+			complete: async () => {
+				calls++;
+				return calls === 1
+					? { text: "", stopReason: "error" as const, errorMessage: "overflow", contextOverflow: true }
+					: {
+							// ~198 chars: above the absolute floor and structured, yet far below the ~400 chars
+							// (0.2% of the 50k-token history) that a credible handoff would need.
+							text: `## Conversation timeline\n${"one episode. ".repeat(10)}\n## Current continuation point\nnext action.`,
+							stopReason: "stop" as const,
+						};
+			},
 		});
+		expect(calls).toBe(2);
 		expect(result.rejected).toBe(true);
 		expect(result.reason).toContain("implausibly small");
 	});

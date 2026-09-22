@@ -83,8 +83,9 @@ const NON_OVERFLOW_PATTERNS = [
  * This handles three cases:
  * 1. Error-based overflow: Most providers return stopReason "error" with a
  *    specific error message pattern.
- * 2. Silent overflow: Some providers accept overflow requests and return
- *    successfully. For these, we check if usage.input exceeds the context window.
+ * 2. Silent overflow: Some providers accept overflow requests and return a
+ *    successful stop or tool-use response. For these, we check if provider-reported
+ *    input exceeds the context window.
  * 3. Length-stop overflow: Xiaomi MiMo can return "length" with zero output when
  *    the input fills the context window.
  *
@@ -141,8 +142,9 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		}
 	}
 
-	// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
-	if (contextWindow && message.stopReason === "stop") {
+	// Case 2: Silent overflow (z.ai style) - a successful response may end normally
+	// or request tools, but either result proves that the provider accepted an oversized prefix.
+	if (contextWindow && (message.stopReason === "stop" || message.stopReason === "toolUse")) {
 		const inputTokens = message.usage.input + message.usage.cacheRead;
 		if (inputTokens > contextWindow) {
 			return true;

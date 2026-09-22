@@ -11,6 +11,16 @@ export interface CompactionItemResult {
 	rejected: boolean;
 	reason?: string;
 	modelUsage?: { input: number; output: number };
+	/** The compactor request overflowed or its output was cut short, so its handoff may be partial. */
+	truncatedInput?: boolean;
+}
+
+export interface CompactionSummaryValidationOptions {
+	/**
+	 * The compactor reported an overflowing request. Only then does the handoff's size relative to the
+	 * replaced history say anything about whether the model saw it.
+	 */
+	truncatedInput?: boolean;
 }
 
 const LOCAL_COMPACTION_TRIGGER = `<local_compaction_trigger>
@@ -62,8 +72,11 @@ export const REQUIRED_COMPACTION_SECTIONS = ["Conversation timeline", "Current c
 export const SUMMARY_STRUCTURE_GUARD_MIN_INPUT_TOKENS = 5_000;
 /** A handoff must retain at least this fraction of the tokens it replaces. */
 export const MIN_SUMMARY_TO_HISTORY_RATIO = 0.002;
-/** A handoff that ignores the required structure must at least be substantial. */
-export const MIN_UNSTRUCTURED_COMPACTION_SUMMARY_CHARS = 1_000;
+/**
+ * A handoff this long stands on its own: a handoff that ignores the prescribed sections is only
+ * accepted at this length, and it is the practical size of the handoffs real compactor runs write.
+ */
+export const MIN_CREDIBLE_HANDOFF_CHARS = 1_000;
 
 /**
  * Reject a degenerate handoff before it is allowed to replace durable history.
@@ -75,7 +88,11 @@ export const MIN_UNSTRUCTURED_COMPACTION_SUMMARY_CHARS = 1_000;
  * large branch means the model never saw that branch. Returns the rejection reason, or undefined
  * when the summary is acceptable.
  */
-export function validateCompactionSummary(text: string, replacedTokens?: number): string | undefined {
+export function validateCompactionSummary(
+	text: string,
+	replacedTokens?: number,
+	options: CompactionSummaryValidationOptions = {},
+): string | undefined {
 	const trimmed = text.trim();
 	if (trimmed.length < MIN_COMPACTION_SUMMARY_CHARS) {
 		return `compaction summary is degenerate (${trimmed.length} chars < ${MIN_COMPACTION_SUMMARY_CHARS} minimum); history preserved`;
@@ -85,15 +102,16 @@ export function validateCompactionSummary(text: string, replacedTokens?: number)
 	}
 	const summaryTokens = Math.ceil(trimmed.length / 4);
 	const requiredTokens = Math.ceil(replacedTokens * MIN_SUMMARY_TO_HISTORY_RATIO);
-	if (summaryTokens < requiredTokens) {
+	// Proportionality is only evidence of truncation when the compactor actually reported an
+	// overflowing request or a cut-short answer. Real-provider runs produced 64-1600 character
+	// handoffs for 100k-260k token histories (correct for low-information bulk work); demanding a
+	// fixed fraction of such histories rejected every attempt and left the session uncompactable.
+	if (options.truncatedInput === true && summaryTokens < requiredTokens) {
 		return `compaction summary is implausibly small for the history it replaces (~${summaryTokens} tokens < ${requiredTokens} required for ${replacedTokens} tokens of history); history preserved`;
 	}
 	const haystack = trimmed.toLowerCase();
 	const missing = REQUIRED_COMPACTION_SECTIONS.filter((section) => !haystack.includes(section.toLowerCase()));
-	if (
-		missing.length === REQUIRED_COMPACTION_SECTIONS.length &&
-		trimmed.length < MIN_UNSTRUCTURED_COMPACTION_SUMMARY_CHARS
-	) {
+	if (missing.length === REQUIRED_COMPACTION_SECTIONS.length && trimmed.length < MIN_CREDIBLE_HANDOFF_CHARS) {
 		return `compaction summary lacks every required section (${REQUIRED_COMPACTION_SECTIONS.join(", ")}) and is too short to be a credible handoff (${trimmed.length} chars); history preserved`;
 	}
 	return undefined;
@@ -130,14 +148,16 @@ export function estimateLocalCompactionTriggerTokens(customInstructions?: string
 export function trimToolResultsForLocalCompaction(
 	messages: readonly AgentMessage[],
 	messageTokenBudget?: number,
+	force = false,
 ): AgentMessage[] {
-	if (messageTokenBudget === undefined) return [...messages];
+	if (messageTokenBudget === undefined && !force) return [...messages];
+	const effectiveBudget = messageTokenBudget ?? Number.POSITIVE_INFINITY;
 	let estimatedTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0);
-	if (estimatedTokens <= messageTokenBudget) return [...messages];
+	if (!force && estimatedTokens <= effectiveBudget) return [...messages];
 
 	const prepared = [...messages];
 	let replacedToolResults = 0;
-	for (let index = prepared.length - 1; index >= 0 && estimatedTokens > messageTokenBudget; index--) {
+	for (let index = prepared.length - 1; index >= 0 && (force || estimatedTokens > effectiveBudget); index--) {
 		const message = prepared[index];
 		if (message.role !== "toolResult") continue;
 		const replacement: AgentMessage = {
@@ -153,7 +173,7 @@ export function trimToolResultsForLocalCompaction(
 	// degenerate summary that replaces the branch. A zero budget means the fixed costs (system prompt,
 	// tools, trigger, output reserve) already exceed the window, so no request could ever fit; there
 	// compaction is the session's last resort and is attempted anyway, judged by the summary gates.
-	if (messageTokenBudget > 0 && estimatedTokens > messageTokenBudget) {
+	if (messageTokenBudget !== undefined && messageTokenBudget > 0 && estimatedTokens > messageTokenBudget) {
 		throw new LocalCompactionBudgetError(estimatedTokens, messageTokenBudget, replacedToolResults);
 	}
 	return prepared;
@@ -172,16 +192,24 @@ export async function generateCompactionItem(options: {
 	// Estimated over the untrimmed history: that is what the handoff has to stand in for.
 	const replacedTokens = options.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 	try {
-		const response = await options.complete({
-			systemPrompt: options.systemPrompt,
-			messages: [
-				...convertToLlm(trimToolResultsForLocalCompaction(options.messages, options.messageTokenBudget)),
-				{ role: "user", content: instructions, timestamp: Date.now() },
-			],
-			tools: options.tools,
-			promptVersion: LOCAL_COMPACTION_PROMPT_VERSION,
-			signal: options.signal,
-		});
+		const preparedMessages = trimToolResultsForLocalCompaction(options.messages, options.messageTokenBudget);
+		const request = async (messages: readonly AgentMessage[]) =>
+			await options.complete({
+				systemPrompt: options.systemPrompt,
+				messages: [...convertToLlm([...messages]), { role: "user", content: instructions, timestamp: Date.now() }],
+				tools: options.tools,
+				promptVersion: LOCAL_COMPACTION_PROMPT_VERSION,
+				signal: options.signal,
+			});
+		let response = await request(preparedMessages);
+		let sawContextOverflow = response.contextOverflow === true;
+		if (response.contextOverflow) {
+			const overflowFallback = trimToolResultsForLocalCompaction(options.messages, options.messageTokenBudget, true);
+			if (JSON.stringify(overflowFallback) !== JSON.stringify(preparedMessages)) {
+				response = await request(overflowFallback);
+				sawContextOverflow = sawContextOverflow || response.contextOverflow === true;
+			}
+		}
 		if (response.stopReason !== "stop" || !response.text.trim()) {
 			return {
 				text: "",
@@ -191,11 +219,14 @@ export async function generateCompactionItem(options: {
 			};
 		}
 		const text = response.text.trim();
-		const qualityIssue = validateCompactionSummary(text, replacedTokens);
+		// A length-truncated answer never reaches this point: it is rejected above as an incomplete
+		// generation. Only an observed input overflow makes the handoff's size meaningful.
+		const truncatedInput = sawContextOverflow;
+		const qualityIssue = validateCompactionSummary(text, replacedTokens, { truncatedInput });
 		if (qualityIssue) {
-			return { text: "", rejected: true, reason: qualityIssue, modelUsage: response.usage };
+			return { text: "", rejected: true, reason: qualityIssue, modelUsage: response.usage, truncatedInput };
 		}
-		return { text, rejected: false, modelUsage: response.usage };
+		return { text, rejected: false, modelUsage: response.usage, truncatedInput };
 	} catch (error) {
 		return {
 			text: "",

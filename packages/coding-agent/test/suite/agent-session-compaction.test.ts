@@ -22,6 +22,7 @@ const COMPACT_DECISION = {
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
+	_compactProviderContextIfNeeded: (messages: AgentMessage[]) => Promise<AgentMessage[]>;
 	_runAutoCompaction: (
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
@@ -1063,6 +1064,53 @@ describe("AgentSession compaction characterization", () => {
 		await sessionInternals._checkCompaction(staleAssistant, false);
 
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not block a below-window provider request solely because threshold compaction was rejected", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const assistant = createAssistant(harness, {
+			stopReason: "toolUse",
+			totalTokens: 190_000,
+			timestamp: Date.now(),
+		});
+		harness.sessionManager.appendMessage(assistant);
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		vi.spyOn(harness.session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
+			decision: COMPACT_DECISION,
+			predictedNextRequestTokens: 100_000,
+			tokenEstimateProvenance: "provider_projection_with_recent_usage_floor",
+			sameProviderContextAsLastCompaction: false,
+		});
+		vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		await expect(
+			sessionInternals._compactProviderContextIfNeeded(harness.session.agent.state.messages),
+		).resolves.toEqual(harness.session.agent.state.messages);
+	});
+
+	it("treats an oversized tool-use response as overflow before the next provider request", async () => {
+		const harness = await createHarness({ models: [{ id: "faux-1", contextWindow: 200_000 }] });
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const assistant = createAssistant(harness, {
+			stopReason: "toolUse",
+			totalTokens: 200_001,
+			timestamp: Date.now(),
+		});
+		const decision = { ...COMPACT_DECISION, overflowRecovery: true };
+		vi.spyOn(harness.session.hfCompactionHost!, "evaluateCompactionTrigger").mockReturnValue({
+			decision,
+			predictedNextRequestTokens: 200_001,
+			tokenEstimateProvenance: "provider_projection_with_recent_usage_floor",
+			sameProviderContextAsLastCompaction: false,
+		});
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
+
+		await sessionInternals._checkCompaction(assistant, false);
+
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("overflow", true, decision, "", 0);
 	});
 
 	it("triggers threshold compaction for error messages using the last successful usage", async () => {
