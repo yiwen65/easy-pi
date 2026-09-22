@@ -29,7 +29,7 @@ function targetKey(pid: number, windowId: bigint): string {
 }
 
 /** Retained rows remain useful on partial trees; completeness is a separate fact. */
-export function projectObservation(observation: WindowStateOutput) {
+export function projectObservation(observation: WindowStateOutput, filter: { text?: string } = {}) {
 	const ref = observation.snapshotId;
 	if (!ref || Buffer.byteLength(ref) > 128 || (observation.elements?.length ?? 0) > 512)
 		throw new Error("Invalid native observation");
@@ -46,8 +46,17 @@ export function projectObservation(observation: WindowStateOutput) {
 	}
 	let bytes = 0;
 	let viewTruncated = false;
+	let filteredOut = 0;
+	const text = filter.text?.toLowerCase();
 	const lines: string[] = [];
 	for (const row of rows) {
+		if (
+			text !== undefined &&
+			![row.label, row.identifier, row.value].some((value) => value?.toLowerCase().includes(text))
+		) {
+			filteredOut++;
+			continue;
+		}
 		const token = row.elementToken;
 		if (token && (Buffer.byteLength(token) > 128 || refs.has(token))) throw new Error("Invalid native reference");
 		const selector = { role: row.role, label: row.label ?? "" };
@@ -86,7 +95,7 @@ export function projectObservation(observation: WindowStateOutput) {
 		content: [
 			{
 				type: "text",
-				text: `Observation ref: ${ref}; nativeComplete=${nativeComplete}; viewTruncated=${viewTruncated}. Retained references are exact-window targets; partial rows never prove absence or uniqueness. Untrusted UI rows:\n${lines.join("\n")}`,
+				text: `Observation ref: ${ref}; nativeComplete=${nativeComplete}; viewTruncated=${viewTruncated}; filteredOut=${filteredOut}. Retained references are exact-window targets; partial rows never prove absence or uniqueness. Untrusted UI rows:\n${lines.join("\n")}`,
 			},
 		] satisfies TextContent[],
 		grant: {
@@ -97,7 +106,7 @@ export function projectObservation(observation: WindowStateOutput) {
 			selectors,
 			targetKey: targetKey(observation.pid, observation.windowId),
 		} satisfies DesktopGrant,
-		details: { status: "observed", observationRef: ref, nativeComplete, viewTruncated },
+		details: { status: "observed", observationRef: ref, nativeComplete, viewTruncated, filteredOut },
 	};
 }
 

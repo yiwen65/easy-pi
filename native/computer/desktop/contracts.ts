@@ -14,6 +14,13 @@ export const DesktopInputSchema = Type.Object(
 			ControlledComputerInputSchema.properties.request,
 			Type.Object(
 				{
+					op: StringEnum(["observe"] as const),
+					text: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+				},
+				{ additionalProperties: false },
+			),
+			Type.Object(
+				{
 					op: StringEnum(["discover"] as const),
 					app: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
 					title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
@@ -77,8 +84,12 @@ export function parseDesktopInput(input: unknown): DesktopInput {
 				throw new Error("Invalid computer discovery filter");
 		}
 	}
+	if (request.op === "observe" && "text" in request && request.text !== undefined) {
+		if (Buffer.byteLength(request.text) > 256 || /[\uD800-\uDFFF]/u.test(request.text))
+			throw new Error("Invalid computer observation filter");
+	}
 	if (request.op === "segment") return parseComputerSegmentInput(input);
-	if (request.op === "observe" || request.op === "execute") return parseControlledComputerInput(input);
+	if (request.op === "execute") return parseControlledComputerInput(input);
 	if ("ref" in request && Buffer.byteLength(request.ref) > 128) throw new Error("Invalid computer reference");
 	if ("x" in request && (!Number.isFinite(request.x) || !Number.isFinite(request.y)))
 		throw new Error("Invalid computer coordinates");

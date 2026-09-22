@@ -1,0 +1,61 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+@@ -28,6 +28,24 @@
+     }
+ }
+
++fn action_metadata_error(
++    error: AXError,
++    general: bool,
++    incomplete: &mut bool,
++) -> Result<(), &'static str> {
++    if error == kAXErrorAttributeUnsupported || error == kAXErrorNoValue {
++        return Ok(());
++    }
++    // A readable node with unknown advertised actions is still observable.
++    // General scans retain the incomplete marker and no action claims; legacy
++    // scans and permission denial remain failures.
++    metadata::<()>(Err(if error == kAXErrorAPIDisabled {
++        "accessibility_permission_denied"
++    } else {
++        "observation_read_failed"
++    }), general, incomplete).map(|_| ())
++}
++
+ fn prepared() -> &'static Mutex<HashSet<(i32, (u64, u64))>> {
+     static PREPARED: OnceLock<Mutex<HashSet<(i32, (u64, u64))>>> = OnceLock::new();
+     PREPARED.get_or_init(|| Mutex::new(HashSet::new()))
+@@ -143,6 +161,17 @@
+ #[cfg(test)]
+ mod readiness_tests {
+     use super::*;
++    #[test]
++    fn controlled_general_action_metadata_failure_does_not_cut_the_tree() {
++        let mut incomplete = false;
++        assert_eq!(action_metadata_error(kAXErrorFailure, true, &mut incomplete), Ok(()));
++        assert!(incomplete);
++        let mut incomplete = false;
++        assert_eq!(action_metadata_error(kAXErrorFailure, false, &mut incomplete), Err("observation_read_failed"));
++        assert!(!incomplete);
++        assert_eq!(action_metadata_error(kAXErrorAPIDisabled, true, &mut incomplete), Err("accessibility_permission_denied"));
++        assert!(!incomplete);
++    }
+     #[test]
+     fn controlled_general_metadata_errors_remain_unknown_without_swallowing_permission_or_cancel() {
+         let mut incomplete = false;
+@@ -480,13 +509,7 @@
+                 if !actions.is_null() {
+                     CFRelease(actions as CFTypeRef);
+                 }
+-                if error != kAXErrorAttributeUnsupported && error != kAXErrorNoValue {
+-                    return Err(if error == kAXErrorAPIDisabled {
+-                        "accessibility_permission_denied"
+-                    } else {
+-                        "observation_read_failed"
+-                    });
+-                }
++                action_metadata_error(error, general, &mut data.metadata_incomplete)?;
+             }
+             if matches!(data.role.as_str(), "AXTextField" | "AXTextArea") {
+                 let key = CFString::new("AXValue");

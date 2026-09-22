@@ -37,7 +37,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		label: "Computer",
 		description:
 			"Discover windows (optional literal, case-insensitive app/title filters and focused:true), explicitly select one returned ref, then observe semantic elements or capture an image. Focused child surfaces require their own selection; parent refs do not include them. " +
-			"Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
+			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
 			"Segment support requires the qualified native candidate; legacy execute/click/scroll/key routes remain available. " +
 			"Segments may automatically foreground the selected window with agent priority, without blocking physical input. " +
 			"Use only current visible refs and output-image coordinates. Delivery is not effect confirmation; visual expectations need your judgement of fresh evidence. " +
@@ -246,7 +246,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 				const result = outcome.value;
 				const api = getApi();
 				if (request.op === "observe" && api.ComputerResult.Observation.instanceOf(result)) {
-					const projection = projectObservation(result.inner.value);
+					const projection = projectObservation(result.inner.value, "text" in request ? request : {});
 					if (canPublish()) view.publish(id, projection.content, { ...projection.grant, revision: ++revision });
 					return { content: projection.content, details: projection.details };
 				}
