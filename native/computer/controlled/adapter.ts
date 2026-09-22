@@ -78,6 +78,11 @@ export class ControlledComputerRuntime implements ComputerNativeRuntime<Controll
 		return this.failure !== undefined;
 	}
 
+	/** Internal: a peer dependency must be owned by this same runtime. */
+	ownsSession(session: ControlledComputerSession): boolean {
+		return this.sessions.has(session);
+	}
+
 	/** Internal lifecycle check, also used by sessions before releasing their handles. */
 	assertHealthy(): void {
 		if (this.failure) throw this.failure.error;
@@ -277,6 +282,30 @@ export class ControlledComputerSession implements ComputerNativeSession {
 
 	/** Internal trusted composition seam; retains the same allocation/cancel/drain protocol. */
 	callNative(start: (operation: NativeOperation) => void, signal?: AbortSignal): ControlledComputerCall {
+		return this.callOwned(start, signal);
+	}
+
+	/** One real operation, registered with both endpoint lifetimes before allocation. */
+	callNativeWithDestination(
+		destination: ControlledComputerSession,
+		start: (operation: NativeOperation, destination: NativeSession) => void,
+		signal?: AbortSignal,
+	): ControlledComputerCall {
+		return this.callOwned((operation) => start(operation, destination.native!), signal, destination);
+	}
+
+	private callOwned(
+		start: (operation: NativeOperation) => void,
+		signal?: AbortSignal,
+		destination?: ControlledComputerSession,
+	): ControlledComputerCall {
+		const validDestination =
+			destination === undefined ||
+			(destination !== this &&
+				destination.runtime === this.runtime &&
+				this.runtime.ownsSession(this) &&
+				this.runtime.ownsSession(destination));
+		const participants = destination && validDestination ? [this, destination] : [this];
 		const result = deferred<NativeResult>();
 		const receipt = deferred<NativeReceipt | undefined>();
 		const terminal = receipt.promise.then(() => undefined);
@@ -317,18 +346,23 @@ export class ControlledComputerSession implements ComputerNativeSession {
 			drained = true;
 			signal?.removeEventListener("abort", requestCancel);
 			if (!this.runtime.quarantined) {
-				this.pending.delete(pending);
+				for (const participant of participants) participant.pending.delete(pending);
 				native = undefined;
 			}
 			if (value !== undefined) this.runtime.observeTerminal();
 			receipt.resolve(value);
 		};
 		// Register before allocation/start or any injected callback. No generated waiter gets a signal.
-		this.pending.add(pending);
+		for (const participant of participants) participant.pending.add(pending);
 		if (!cancelled) signal?.addEventListener("abort", requestCancel, { once: true });
 		if (signal?.aborted) cancelled = true;
 		void Promise.resolve().then(() => {
-			if (this.revoked || cancelled) {
+			if (!validDestination) {
+				result.reject(new Error("Controlled computer destination is foreign, identical or unowned"));
+				complete(undefined);
+				return;
+			}
+			if (participants.some((participant) => participant.revoked) || cancelled) {
 				result.reject(
 					cancelled
 						? (signal?.reason ?? new DOMException("Computer operation cancelled before allocation", "AbortError"))
@@ -361,7 +395,7 @@ export class ControlledComputerSession implements ComputerNativeSession {
 				subscriberFailed = true;
 				result.reject(error);
 			}
-			if (subscriberFailed || cancelled || this.revoked) {
+			if (subscriberFailed || cancelled || participants.some((participant) => participant.revoked)) {
 				requestCancel();
 				return;
 			}

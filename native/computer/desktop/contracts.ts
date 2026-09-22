@@ -3,6 +3,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { ControlledComputerInputSchema, parseControlledComputerInput } from "../controlled/contracts.ts";
+import { ComputerDragInputSchema, parseComputerDragInput } from "./drag-contracts.ts";
 import { ComputerSegmentInputSchema, parseComputerSegmentInput } from "./segment-contracts.ts";
 
 const ref = Type.String({ minLength: 1, maxLength: 128 });
@@ -10,6 +11,7 @@ const coordinate = Type.Number({ minimum: 0, maximum: 2048 });
 export const DesktopInputSchema = Type.Object(
 	{
 		request: Type.Union([
+			ComputerDragInputSchema.properties.request,
 			ComputerSegmentInputSchema.properties.request,
 			ControlledComputerInputSchema.properties.request,
 			Type.Object(
@@ -28,9 +30,15 @@ export const DesktopInputSchema = Type.Object(
 				},
 				{ additionalProperties: false },
 			),
-			Type.Object({ op: StringEnum(["select"] as const), ref }, { additionalProperties: false }),
 			Type.Object(
-				{ op: StringEnum(["capture"] as const), maxDimension: Type.Integer({ minimum: 1, maximum: 2048 }) },
+				{ op: StringEnum(["select", "select_destination"] as const), ref },
+				{ additionalProperties: false },
+			),
+			Type.Object(
+				{
+					op: StringEnum(["capture", "capture_pair"] as const),
+					maxDimension: Type.Integer({ minimum: 1, maximum: 2048 }),
+				},
 				{ additionalProperties: false },
 			),
 			Type.Object(
@@ -88,6 +96,7 @@ export function parseDesktopInput(input: unknown): DesktopInput {
 		if (Buffer.byteLength(request.text) > 256 || /[\uD800-\uDFFF]/u.test(request.text))
 			throw new Error("Invalid computer observation filter");
 	}
+	if (request.op === "drag_between") return parseComputerDragInput(input);
 	if (request.op === "segment") return parseComputerSegmentInput(input);
 	if (request.op === "execute") return parseControlledComputerInput(input);
 	if ("ref" in request && Buffer.byteLength(request.ref) > 128) throw new Error("Invalid computer reference");

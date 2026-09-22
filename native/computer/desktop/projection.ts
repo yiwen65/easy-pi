@@ -3,9 +3,12 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { ComputerDiscoveredWindow, ComputerImage, WindowStateOutput } from "@trycua/cua-driver";
 import { selectorKey } from "./legacy.ts";
 
+export type DesktopImageGrant = { kind: "image"; ref: string; width: number; height: number; targetKey: string };
+export type DesktopPairGrant = { kind: "pair"; source: DesktopImageGrant; destination: DesktopImageGrant };
 export type DesktopGrant =
 	| { kind: "windows"; refs: ReadonlySet<string> }
-	| { kind: "image"; ref: string; width: number; height: number; targetKey: string }
+	| DesktopImageGrant
+	| DesktopPairGrant
 	| {
 			kind: "semantic";
 			ref: string;
@@ -162,6 +165,24 @@ export function projectWindows(
 		content,
 		grant: { kind: "windows", refs } satisfies DesktopGrant,
 		details: { status: "discovered", omittedWindows: omitted, filteredOut },
+	};
+}
+
+/** One indivisible view: filtering either image invalidates the whole pair. */
+export function projectImagePair(source: ComputerImage, destination: ComputerImage) {
+	const from = projectImage(source);
+	const to = projectImage(destination);
+	if (from.grant.ref === to.grant.ref || from.grant.targetKey === to.grant.targetKey)
+		throw new Error("Distinct drag targets and images required");
+	return {
+		content: [
+			{ type: "text", text: "Drag SOURCE image follows. Pair captured sequentially, not simultaneously." },
+			...from.content,
+			{ type: "text", text: "Drag DESTINATION image follows. Use drag_between with both current image refs." },
+			...to.content,
+		] satisfies (TextContent | ImageContent)[],
+		grant: { kind: "pair", source: from.grant, destination: to.grant } satisfies DesktopPairGrant,
+		details: { status: "captured_pair", source: from.details, destination: to.details },
 	};
 }
 

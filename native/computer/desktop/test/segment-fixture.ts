@@ -21,9 +21,10 @@ function deferred<T>() {
 }
 export function fixture(
 	options: {
-		mode?: "partial" | "lost" | "paused" | "confirmed";
-		hold?: "segment" | "capture";
+		mode?: "partial" | "lost" | "paused" | "confirmed" | "prepared";
+		hold?: "segment" | "capture" | "pair_capture";
 		terminalFailure?: boolean;
+		failCapture?: number;
 		windowIds?: readonly bigint[];
 	} = {},
 ) {
@@ -31,6 +32,9 @@ export function fixture(
 	const sdk = api;
 	const events: string[] = [];
 	const segments: CuaSdk.ComputerSegment[] = [];
+	const dragPeers: NativeSession[] = [];
+	const captures: number[] = [];
+	const closed: number[] = [];
 	const held = deferred<void>();
 	const entered = deferred<void>();
 	let reads = 0;
@@ -45,8 +49,10 @@ export function fixture(
 			},
 			async close() {
 				events.push("close");
+				closed.push(index);
 			},
 			newOperation(): NativeOperation {
+				let crossDrag = false;
 				const result = deferred<CuaSdk.ComputerResult>();
 				const terminal = deferred<CuaSdk.ComputerTerminal>();
 				const done = (name: string, value: CuaSdk.ComputerResult | Error, committed = false) => {
@@ -59,7 +65,10 @@ export function fixture(
 							terminal.reject(new Error("PRIVATE terminal error"));
 						else terminal.resolve({ operationId: name, cancelled: false, inputCommitted: committed });
 					};
-					if (options.hold === name && (name !== "capture" || segments.length > 0)) {
+					if (
+						(options.hold === name && (name !== "capture" || segments.length > 0)) ||
+						(options.hold === "pair_capture" && name === "capture" && captures.length === 2)
+					) {
 						entered.resolve();
 						void held.promise.then(proof);
 					} else proof();
@@ -122,6 +131,11 @@ export function fixture(
 					},
 					startCapture() {
 						assert.ok(child);
+						captures.push(index);
+						if (options.failCapture === captures.length) {
+							done("capture", new Error("PRIVATE capture failure"));
+							return;
+						}
 						const png = new ArrayBuffer(33);
 						const b = Buffer.from(png);
 						b.set([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -155,6 +169,11 @@ export function fixture(
 							}),
 						);
 					},
+					startCrossWindowDrag(peer, segment) {
+						crossDrag = true;
+						dragPeers.push(peer);
+						this.startSegment(segment);
+					},
 					startSegment(segment) {
 						assert.ok(child, "segment uses selected child");
 						segments.push(segment);
@@ -163,18 +182,24 @@ export function fixture(
 							return;
 						}
 						const partial = options.mode === "partial";
-						const paused = options.mode === "paused";
+						const paused = options.mode === "paused" || options.mode === "prepared";
 						const confirmed = options.mode === "confirmed";
 						const value = sdk.ComputerSegmentResult.create({
 							status: confirmed
 								? sdk.ComputerSegmentStatus.Confirmed
-								: paused
+								: options.mode === "paused"
 									? sdk.ComputerSegmentStatus.Paused
 									: partial
 										? sdk.ComputerSegmentStatus.OutcomeUnknown
 										: sdk.ComputerSegmentStatus.NeedsObservation,
 							actions: paused
-								? [{ index: 0, dispatch: sdk.ComputerDispatch.NotDispatched, code: "target_missing" }]
+								? [
+										{
+											index: 0,
+											dispatch: sdk.ComputerDispatch.NotDispatched,
+											code: options.mode === "prepared" ? "drag_foreground_prepared" : "target_missing",
+										},
+									]
 								: partial
 									? [{ index: 0, dispatch: sdk.ComputerDispatch.Unknown, code: "outcome_unknown" }]
 									: segment.actions.map((_, index) => ({
@@ -182,7 +207,7 @@ export function fixture(
 											dispatch: sdk.ComputerDispatch.Dispatched,
 											action: {
 												effect: sdk.ActionEffect.Unverifiable,
-												route: sdk.ActionRoute.SyntheticEvents,
+												route: crossDrag ? sdk.ActionRoute.GlobalInput : sdk.ActionRoute.SyntheticEvents,
 												delivery: { mode: sdk.ActionDeliveryMode.Foreground, deliveredCount: 1 },
 											},
 										})),
@@ -192,7 +217,7 @@ export function fixture(
 							elapsedMs: 7n,
 						});
 						sdk.validateComputerSegmentResult(segment, value); // Test-only genuine validator, no host.
-						done("segment", new sdk.ComputerResult.Segment({ value }), !paused);
+						done("segment", new sdk.ComputerResult.Segment({ value }), !paused || options.mode === "prepared");
 					},
 					startPlan: forbidden,
 					startClick: forbidden,
@@ -241,5 +266,19 @@ export function fixture(
 		await call({ op: "select", ref: "window" });
 		await call(image ? { op: "capture", maxDimension: 512 } : { op: "observe" });
 	}
-	return { host, session, desktop, messages, call, setup, events, segments, held, entered };
+	return {
+		host,
+		session,
+		desktop,
+		messages,
+		call,
+		setup,
+		events,
+		segments,
+		dragPeers,
+		captures,
+		closed,
+		held,
+		entered,
+	};
 }

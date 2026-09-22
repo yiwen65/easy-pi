@@ -10,6 +10,7 @@ export default mergeConfig(
 				fileURLToPath(new URL("./context.test.ts", import.meta.url)),
 				fileURLToPath(new URL("./loop.test.ts", import.meta.url)),
 				fileURLToPath(new URL("./compaction.test.ts", import.meta.url)),
+				fileURLToPath(new URL("./drag.test.ts", import.meta.url)),
 			],
 		},
 	}),

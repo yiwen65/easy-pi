@@ -1,15 +1,31 @@
-import type { DesktopGrant } from "./projection.ts";
+import type { ComputerDragInput } from "./drag-contracts.ts";
+import type { DesktopGrant, DesktopPairGrant } from "./projection.ts";
 import type { ComputerSegmentInput } from "./segment-contracts.ts";
 
 type Request = ComputerSegmentInput["request"];
 type Target = Extract<Request["actions"][number], { op: "focus" }>["target"];
 type Point = Extract<Request["actions"][number], { op: "pointer_move" }>["point"];
 
+export function validateDragEvidence(
+	request: ComputerDragInput["request"],
+	view: DesktopGrant | undefined,
+): asserts view is DesktopPairGrant {
+	if (!view || view.kind !== "pair") throw new Error("stale_image_pair");
+	for (const [point, image] of [
+		[request.from, view.source],
+		[request.to, view.destination],
+	] as const) {
+		if (point.ref !== image.ref) throw new Error("stale_image_pair");
+		if (point.x >= image.width || point.y >= image.height) throw new Error("image_coordinates_out_of_bounds");
+	}
+}
+
 export function validateSegmentEvidence(
 	request: Request,
 	view: DesktopGrant | undefined,
-): asserts view is Exclude<DesktopGrant, { kind: "windows" }> {
-	if (!view || view.kind === "windows" || view.ref !== request.ref) throw new Error("stale_observation");
+): asserts view is Extract<DesktopGrant, { kind: "semantic" | "image" }> {
+	if (!view || (view.kind !== "semantic" && view.kind !== "image") || view.ref !== request.ref)
+		throw new Error("stale_observation");
 	const reference = (ref: string) => {
 		if (view.kind !== "semantic" || !view.refs.has(ref)) throw new Error("stale_element_reference");
 	};

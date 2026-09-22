@@ -5,11 +5,12 @@ import { ComputerHostError, type ComputerSession } from "../../../packages/codin
 import type { ControlledComputerSession } from "../controlled/adapter.ts";
 import type { ComputerPlanApi } from "../controlled/tool.ts";
 import { DesktopInputSchema, parseDesktopInput } from "./contracts.ts";
+import { dragSegment } from "./drag-contracts.ts";
 import { DesktopIntents } from "./intent.ts";
 import { encodePlan, projectPlan, selectorKey } from "./legacy.ts";
-import { type DesktopGrant, projectImage, projectObservation, projectWindows } from "./projection.ts";
+import { type DesktopGrant, projectImage, projectImagePair, projectObservation, projectWindows } from "./projection.ts";
 import { type ComputerSegmentApi, encodeComputerSegment } from "./segment-codec.ts";
-import { validateSegmentEvidence } from "./segment-evidence.ts";
+import { validateDragEvidence, validateSegmentEvidence } from "./segment-evidence.ts";
 import { projectSegment, type SegmentResultApi, segmentCode } from "./segment-projection.ts";
 import { DesktopView } from "./view.ts";
 
@@ -25,9 +26,16 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 	const intents = new DesktopIntents();
 	let version = 0;
 	let selected: ControlledComputerSession | undefined;
+	let destination: ControlledComputerSession | undefined;
+	let pairOwner = {};
 	const target = () => {
 		if (!selected || selected.revoked) throw new Error("No selected Computer target");
 		return selected;
+	};
+	const dragTargets = () => {
+		const source = target();
+		if (!destination || destination.revoked) throw new Error("No selected Computer destination");
+		return [source, destination] as const;
 	};
 	const paused = (reason: string): never => {
 		throw new AgentToolError(`Computer paused: ${reason}; observe again.`, { status: "paused", code: reason });
@@ -40,6 +48,9 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
 			"Segment support requires the qualified native candidate; legacy execute/click/scroll/key routes remain available. " +
 			"Segments may automatically foreground the selected window with agent priority, without blocking physical input. " +
+			"For cross-window drag: keep the selected source, discover and select_destination using a new catalog ref, then capture_pair and drag_between using both images. " +
+			"Selecting a new source retires both old targets; selecting a destination replaces only that endpoint. Cross-window drag uses foreground global input and moves the system cursor. " +
+			"drag_foreground_prepared means activation only, no drag: judge the fresh pair before retrying. Cancellation releases owned input but cannot undo a drop. " +
 			"Use only current visible refs and output-image coordinates. Delivery is not effect confirmation; visual expectations need your judgement of fresh evidence. " +
 			"Never blindly replay uncertain input. After lost/partial input, use newer visible evidence to reconcile the effect; previousEffect:'observed' explicitly records your judgement before genuinely new work. " +
 			"For a fully delivered visual segment, different new work can proceed from fresh evidence; repeating it retains its intent unless explicitly reconciled. " +
@@ -53,6 +64,8 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 			const canPublish = () => generation === version && !session.revoked && !signal?.aborted;
 			const previous = view.consume();
 			const { request } = parseDesktopInput(input);
+			const segmentRequest =
+				request.op === "drag_between" ? dragSegment(request) : request.op === "segment" ? request : undefined;
 			if (session.revoked) return paused("session_revoked");
 			if (
 				intents.unresolved &&
@@ -78,12 +91,23 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 				}
 			}
 			let intentRef: string | undefined;
-			if (request.op === "segment") {
+			if (segmentRequest) {
 				const api = getApi();
 				if (!api.ComputerSegment || !api.ComputerResult.Segment) return paused("segment_unavailable");
 				try {
-					validateSegmentEvidence(request, previous);
-					intentRef = intents.begin(request, previous.revision, target(), previous.targetKey);
+					if (request.op === "drag_between") {
+						validateDragEvidence(request, previous);
+						dragTargets();
+						intentRef = intents.begin(
+							segmentRequest,
+							previous.revision,
+							pairOwner,
+							JSON.stringify([previous.source.targetKey, previous.destination.targetKey]),
+						);
+					} else {
+						validateSegmentEvidence(segmentRequest, previous);
+						intentRef = intents.begin(segmentRequest, previous.revision, target(), previous.targetKey);
+					}
 				} catch (error) {
 					return paused(error instanceof Error ? error.message : "stale_observation");
 				}
@@ -91,10 +115,14 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 				intents.uncertain &&
 				request.op !== "observe" &&
 				request.op !== "capture" &&
+				request.op !== "capture_pair" &&
 				request.op !== "discover"
 			)
 				return paused("previous_intent_unresolved");
-			if (request.op === "select" && (previous?.kind !== "windows" || !previous.refs.has(request.ref)))
+			if (
+				(request.op === "select" || request.op === "select_destination") &&
+				(previous?.kind !== "windows" || !previous.refs.has(request.ref))
+			)
 				return paused("stale_window_reference");
 			if (request.op === "click" || request.op === "scroll" || request.op === "key") {
 				if (previous?.kind !== "image" || previous.ref !== request.ref) return paused("stale_image");
@@ -102,13 +130,35 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					return paused("image_coordinates_out_of_bounds");
 			}
 			if (request.op !== "discover" && request.op !== "select") target();
+			const capturePair = async (maxDimension: number) => {
+				const endpoints = dragTargets();
+				const images: CuaSdk.ComputerImage[] = [];
+				for (const endpoint of endpoints) {
+					if (!canPublish() || endpoints.some((item) => item.revoked)) throw new Error("session_revoked");
+					const image = await session.run(
+						(_root, nativeSignal) =>
+							endpoint.callNative((operation) => operation.startCapture(maxDimension), nativeSignal),
+						signal,
+					);
+					if (!getApi().ComputerResult.Image.instanceOf(image)) throw new Error("Unexpected evidence result");
+					images.push(image.inner.value);
+				}
+				if (!canPublish() || endpoints.some((item) => item.revoked)) throw new Error("session_revoked");
+				return projectImagePair(images[0]!, images[1]!);
+			};
 			const freshEvidence = async (
 				details: object,
 				content: Awaited<ReturnType<typeof tool.execute>>["content"],
 			) => {
 				// Each read uses the same existing host and outer tool scheduler permit, after segment terminal.
-				if (canPublish() && !target().revoked) {
+				if (canPublish() && selected && !selected.revoked) {
 					try {
+						if (request.op === "drag_between") {
+							const projection = await capturePair(2048);
+							content.push(...projection.content);
+							if (canPublish()) view.publish(id, content, { ...projection.grant, revision: ++revision });
+							return { content, details: { ...details, evidence: projection.details } };
+						}
 						const api = getApi();
 						const fresh = await session.run(
 							(_root, nativeSignal) =>
@@ -143,49 +193,77 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 			};
 
 			try {
+				if (request.op === "capture_pair") {
+					const projection = await capturePair(request.maxDimension);
+					if (canPublish()) view.publish(id, projection.content, { ...projection.grant, revision: ++revision });
+					return { content: projection.content, details: projection.details };
+				}
 				const outcome = await session.run((root, nativeSignal) => {
 					const api = getApi();
-					const owner = request.op === "discover" || request.op === "select" ? root : target();
-					const call = owner.callNative((operation) => {
-						switch (request.op) {
-							case "segment":
-								if (typeof operation.startSegment !== "function")
-									throw new Error("Segment candidate unavailable");
-								operation.startSegment(encodeComputerSegment(api, request, intentRef!));
-								break;
-							case "observe":
-								operation.startObserve(512, 32);
-								break;
-							case "execute":
-								operation.startPlan(encodePlan(api, request));
-								break;
-							case "discover":
-								operation.startListWindows();
-								break;
-							case "select":
-								operation.startSelectWindow(request.ref);
-								break;
-							case "capture":
-								operation.startCapture(request.maxDimension);
-								break;
-							case "click":
-								operation.startImageClick(request.ref, request.x, request.y);
-								break;
-							case "scroll": {
-								const directions = {
-									up: api.ScrollDirection.Up,
-									down: api.ScrollDirection.Down,
-									left: api.ScrollDirection.Left,
-									right: api.ScrollDirection.Right,
-								};
-								operation.startImageScroll(request.ref, request.x, request.y, directions[request.direction]);
-								break;
-							}
-							case "key":
-								operation.startImageKey(request.ref, api.ComputerKey[request.key]);
-								break;
-						}
-					}, nativeSignal);
+					const owner =
+						request.op === "discover" || request.op === "select" || request.op === "select_destination"
+							? root
+							: target();
+					const call =
+						request.op === "drag_between"
+							? owner.callNativeWithDestination(
+									dragTargets()[1],
+									(operation, peer) => {
+										if (typeof operation.startCrossWindowDrag !== "function")
+											throw new Error("Drag candidate unavailable");
+										operation.startCrossWindowDrag(
+											peer,
+											encodeComputerSegment(api, segmentRequest!, intentRef!),
+										);
+									},
+									nativeSignal,
+								)
+							: owner.callNative((operation) => {
+									switch (request.op) {
+										case "segment":
+											if (typeof operation.startSegment !== "function")
+												throw new Error("Segment candidate unavailable");
+											operation.startSegment(encodeComputerSegment(api, request, intentRef!));
+											break;
+										case "observe":
+											operation.startObserve(512, 32);
+											break;
+										case "execute":
+											operation.startPlan(encodePlan(api, request));
+											break;
+										case "discover":
+											operation.startListWindows();
+											break;
+										case "select":
+										case "select_destination":
+											operation.startSelectWindow(request.ref);
+											break;
+										case "capture":
+											operation.startCapture(request.maxDimension);
+											break;
+										case "click":
+											operation.startImageClick(request.ref, request.x, request.y);
+											break;
+										case "scroll": {
+											const directions = {
+												up: api.ScrollDirection.Up,
+												down: api.ScrollDirection.Down,
+												left: api.ScrollDirection.Left,
+												right: api.ScrollDirection.Right,
+											};
+											operation.startImageScroll(
+												request.ref,
+												request.x,
+												request.y,
+												directions[request.direction],
+											);
+											break;
+										}
+										case "key":
+											operation.startImageKey(request.ref, api.ComputerKey[request.key]);
+											break;
+									}
+								}, nativeSignal);
 					return {
 						cancel: call.cancel,
 						terminal: call.terminal,
@@ -194,9 +272,15 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 								if (api.ComputerResult.WindowSelected.instanceOf(value)) {
 									// Retain every genuine returned child, including a late result after revoke.
 									const child = root.adoptChild(value.inner.session);
-									const old = selected;
-									selected = child;
-									await old?.close();
+									const oldDestination = destination;
+									destination = request.op === "select_destination" ? child : undefined;
+									pairOwner = {};
+									if (request.op !== "select_destination") {
+										const old = selected;
+										selected = child;
+										await old?.close();
+									}
+									await oldDestination?.close();
 								}
 								return { value, receipt: await call.receipt };
 							})
@@ -210,7 +294,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 									: cancelled
 										? "cancelled"
 										: refused
-											? request.op === "segment"
+											? segmentRequest
 												? segmentCode(error.inner.reason)
 												: "native_refused"
 											: "native_fault";
@@ -226,17 +310,17 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					};
 				}, signal);
 				if ("failure" in outcome) {
-					if (request.op === "segment") {
+					if (segmentRequest) {
 						intents.finish(outcome.failure.status, outcome.failure.status === "outcome_unknown");
 						return freshEvidence(
 							{
 								...outcome.failure,
-								...(request.previousEffect ? { priorEffectResolution: "model_judgement" } : {}),
+								...(segmentRequest.previousEffect ? { priorEffectResolution: "model_judgement" } : {}),
 							},
 							[
 								{
 									type: "text",
-									text: `Computer ${outcome.failure.code}; do not replay input. Native result unavailable; attempted prefix and effect unknown. ${request.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation." : ""}`,
+									text: `Computer ${outcome.failure.code}; do not replay input. Native result unavailable; attempted prefix and effect unknown. ${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation." : ""}`,
 								},
 							],
 						);
@@ -256,19 +340,20 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					if (details.status !== "completed") throw new AgentToolError(text, details);
 					return { content: [{ type: "text", text }], details };
 				}
-				if (request.op === "segment" && api.ComputerResult.Segment.instanceOf(result)) {
+				if (segmentRequest && api.ComputerResult.Segment.instanceOf(result)) {
 					const details = {
 						...projectSegment(
 							api,
 							result.inner.value,
-							request.actions.length,
-							request.expected.kind === "visual",
+							segmentRequest.actions.length,
+							segmentRequest.expected.kind === "visual",
 						),
 						terminal: { inputCommitted: outcome.receipt?.inputCommitted, cancelled: outcome.receipt?.cancelled },
-						...(request.previousEffect ? { priorEffectResolution: "model_judgement" } : {}),
+						...(segmentRequest.previousEffect ? { priorEffectResolution: "model_judgement" } : {}),
 					};
 					const incomplete =
-						details.firstUnfinishedAction !== undefined || details.attemptedActions !== request.actions.length;
+						details.firstUnfinishedAction !== undefined ||
+						details.attemptedActions !== segmentRequest.actions.length;
 					intents.finish(
 						details.status,
 						incomplete && details.actions.some((row) => row.dispatch !== "not_dispatched"),
@@ -276,7 +361,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					const content: Awaited<ReturnType<typeof tool.execute>>["content"] = [
 						{
 							type: "text",
-							text: `Segment facts: ${JSON.stringify(details)}. Delivery is not business success. ${request.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation. " : ""}Do not replay uncertain input.`,
+							text: `Segment facts: ${JSON.stringify(details)}. Delivery is not business success. ${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation. " : ""}Do not replay uncertain input.`,
 						},
 					];
 					if (details.status !== "confirmed" && details.status !== "cancelled")
@@ -293,10 +378,21 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					if (canPublish()) view.publish(id, projection.content, { ...projection.grant, revision: ++revision });
 					return { content: projection.content, details: projection.details };
 				}
-				if (request.op === "select" && api.ComputerResult.WindowSelected.instanceOf(result))
+				if (
+					(request.op === "select" || request.op === "select_destination") &&
+					api.ComputerResult.WindowSelected.instanceOf(result)
+				)
 					return {
-						content: [{ type: "text", text: "Window selected. Observe or capture before input." }],
-						details: { status: "selected" },
+						content: [
+							{
+								type: "text",
+								text:
+									request.op === "select_destination"
+										? "Destination selected; source retained. Capture_pair before drag_between."
+										: "Source window selected; old destination retired. Observe or capture before input.",
+							},
+						],
+						details: { status: request.op === "select_destination" ? "destination_selected" : "selected" },
 					};
 				if (
 					(request.op === "click" || request.op === "scroll" || request.op === "key") &&

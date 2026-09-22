@@ -4,7 +4,7 @@ This is T-070 evidence, **not production cross-window drag delivery**. Task stat
 
 ## Boundary
 
-Current production segments still bind one selected window and one image. The standalone Swift diagnostic has no `ComputerOperation`, does not acquire the canonical lease, and cannot supply driver-owned terminal evidence. Its explicit foreground route moves the system cursor; it is not a background route.
+At this T-070 checkpoint, production segments bound one selected window and one image. The standalone Swift diagnostic has no `ComputerOperation`, does not acquire the canonical lease, and cannot supply driver-owned terminal evidence. Its explicit foreground route moves the system cursor; it is not a background route.
 
 The fixture uses real `NSDraggingSession` / `NSDraggingDestination`, a fresh UUID and a private drag pasteboard type (`org.easy-pi.t070.private-drag`). No general clipboard replacement or borrowed file is involved. Child process parent/start/executable, window identity, visibility and geometry are checked. Borrowed applications are not signaled or reconfigured.
 
@@ -43,4 +43,4 @@ All original preparation, geometry, receipt-bound, module-cache and compile fail
 - Public ABI/call reference: [yabai extern.h](https://raw.githubusercontent.com/koekeishiya/yabai/master/src/misc/extern.h) and [window_manager.c](https://raw.githubusercontent.com/koekeishiya/yabai/master/src/window_manager.c), retrieved anonymously into `general/cross-drag-public-ref/`. Only the default topmost query was used; yabai-specific overlay exclusions were not copied. These are untrusted implementation references, not a public SPI stability guarantee.
 - Browser retrieval failed with `ERR_TUNNEL_CONNECTION_FAILED`; no successful `scan_complete` or whole-page capture is claimed. The subsequent raw HTTP retrieval supplied source text, not an executed program.
 
-T-072 must still implement dual live capabilities, both current model-visible images, bounded foreground transport, cancellation/revocation/close integration and genuine generated bindings. Installed original AgentSession and real Finder file-operation qualification remain required under T-047.
+Subsequent T-072 implementation and installed qualification are documented in [`../../../native/computer/patches/g02-cross-window-drag.md`](../../../native/computer/patches/g02-cross-window-drag.md). Unlike this mechanism-only diagnostic, that candidate has dual capabilities/images, genuinely generated bindings, original AgentSession delivery, mid-gesture lifecycle tests and a real Finder file-move oracle. These later results do not change the limits or failures of the T-070 experiments above.

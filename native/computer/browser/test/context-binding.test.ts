@@ -101,6 +101,7 @@ async function fixture() {
 				},
 				startClick: forbidden,
 				startSegment: forbidden,
+				startCrossWindowDrag: forbidden,
 				startPrepare: forbidden,
 				startNavigate: forbidden,
 				startCapture: forbidden,

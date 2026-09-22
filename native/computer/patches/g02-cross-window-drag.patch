@@ -1,0 +1,1936 @@
+diff --git a/libs/cua-driver/python/src/cua_driver/_native.py b/libs/cua-driver/python/src/cua_driver/_native.py
+--- a/libs/cua-driver/python/src/cua_driver/_native.py
++++ b/libs/cua-driver/python/src/cua_driver/_native.py
+@@ -516,6 +516,8 @@
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+     if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click() != 41423:
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
++    if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag() != 49914:
++        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+     if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_click() != 59976:
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+     if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_key() != 64308:
+@@ -1172,6 +1174,13 @@
+     ctypes.POINTER(_UniffiRustCallStatus),
+ )
+ _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_click.restype = None
++_UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_cross_window_drag.argtypes = (
++    ctypes.c_uint64,
++    ctypes.c_uint64,
++    cua_driver._native_contract._UniffiRustBuffer,
++    ctypes.POINTER(_UniffiRustCallStatus),
++)
++_UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_cross_window_drag.restype = None
+ _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_click.argtypes = (
+     ctypes.c_uint64,
+     _UniffiRustBuffer,
+@@ -1719,6 +1728,9 @@
+ _UniffiLib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click.argtypes = (
+ )
+ _UniffiLib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click.restype = ctypes.c_uint16
++_UniffiLib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag.argtypes = (
++)
++_UniffiLib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag.restype = ctypes.c_uint16
+ _UniffiLib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_click.argtypes = (
+ )
+ _UniffiLib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_click.restype = ctypes.c_uint16
+@@ -4837,6 +4849,13 @@
+         raise NotImplementedError
+     def start_click(self, element_token: str) -> None:
+         raise NotImplementedError
++    def start_cross_window_drag(self, destination: ComputerSession,segment: cua_driver._native_contract.ComputerSegment) -> None:
++        """
++        Exactly one drag, bound to two genuine selected sessions/current images.
++        A necessary activation posts no drag: it returns fresh-evidence-required
++        facts instead of carrying old pixel coordinates across focus changes.
++"""
++        raise NotImplementedError
+     def start_image_click(self, image_id: str,x: int,y: int) -> None:
+         """
+         One single left click at a pixel center in the last returned native
+@@ -4949,6 +4968,29 @@
+         _uniffi_ffi_result = _uniffi_rust_call_with_error(
+             _uniffi_error_converter,
+             _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_click,
++            *_uniffi_lowered_args,
++        )
++        return _uniffi_lift_return(_uniffi_ffi_result)
++    def start_cross_window_drag(self, destination: ComputerSession,segment: cua_driver._native_contract.ComputerSegment) -> None:
++        """
++        Exactly one drag, bound to two genuine selected sessions/current images.
++        A necessary activation posts no drag: it returns fresh-evidence-required
++        facts instead of carrying old pixel coordinates across focus changes.
++"""
++
++        _UniffiFfiConverterTypeComputerSession.check_lower(destination)
++
++        cua_driver._native_contract._UniffiFfiConverterTypeComputerSegment.check_lower(segment)
++        _uniffi_lowered_args = (
++            self._uniffi_clone_handle(),
++            _UniffiFfiConverterTypeComputerSession.lower(destination),
++            cua_driver._native_contract._UniffiFfiConverterTypeComputerSegment.lower(segment),
++        )
++        _uniffi_lift_return = lambda val: None
++        _uniffi_error_converter = _UniffiFfiConverterTypeComputerError
++        _uniffi_ffi_result = _uniffi_rust_call_with_error(
++            _uniffi_error_converter,
++            _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_cross_window_drag,
+             *_uniffi_lowered_args,
+         )
+         return _uniffi_lift_return(_uniffi_ffi_result)
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+@@ -100,7 +100,7 @@
+     authority_live: Arc<dyn Fn() -> bool + Send + Sync>,
+     scope: SessionScope,
+     preparation_claimed: AtomicBool,
+-    recovery: Mutex<std::collections::HashMap<String, (u8, bool, bool)>>,
++    recovery: Mutex<std::collections::HashMap<String, segment_budget::IntentState>>,
+     snapshot: Mutex<Option<u32>>,
+     pub snapshots: Arc<SnapshotOwner>,
+     pub resources: Arc<SessionResources>,
+@@ -447,6 +447,9 @@
+     pub fn reset_snapshot(&self) {
+         let _gate = self.session.gate.guard();
+         *lock(&self.session.snapshot) = None;
++        if let Some(destination) = &self.state().drag_destination {
++            *lock(&destination.snapshot) = None;
++        }
+     }
+
+     pub fn remember_snapshot(
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/dependency_tests.rs
+@@ -267,3 +267,42 @@
+     op.finish();
+     assert_eq!(op.terminal().await, Err("quarantined"));
+ }
++
++#[test]
++fn controlled_drag_dependency_endpoint_membership_does_not_grant_foreign_capture() {
++    let (_, source, destination) = endpoints();
++    let op = source.new_operation().unwrap();
++    let target = destination.native_window().unwrap();
++    assert!(op.owns_native_window(source.native_window().unwrap()));
++    assert!(!op.owns_native_window(target));
++    op.bind_drag_destination(destination.clone()).unwrap();
++    assert!(op.owns_native_window(target));
++    assert!(!op.owns_native_window(NativeWindowTarget {
++        process_stamp: Some((2, 2)),
++        ..target
++    }));
++    assert!(!op.owns_native_window(NativeWindowTarget {
++        window_id: 9,
++        ..target
++    }));
++    destination.revoke();
++    assert!(
++        op.owns_native_window(target),
++        "immutable membership is not liveness"
++    );
++    assert!(op.checkpoint().is_err());
++    op.cancel();
++}
++
++#[test]
++fn controlled_drag_dependency_consumption_clears_both_snapshot_tokens() {
++    let (_, source, destination) = endpoints();
++    *source.snapshot.lock().unwrap() = Some(1);
++    *destination.snapshot.lock().unwrap() = Some(2);
++    let op = source.new_operation().unwrap();
++    op.bind_drag_destination(destination.clone()).unwrap();
++    op.reset_snapshot();
++    assert!(source.snapshot.lock().unwrap().is_none());
++    assert!(destination.snapshot.lock().unwrap().is_none());
++    op.cancel();
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/drag_dependency.rs
+@@ -1,6 +1,6 @@
+ //! One additional immutable capability for a dedicated cross-window drag.
+ //! This binds lifetime only; it neither changes window scope nor authorizes input.
+-use super::{Operation, Session, State};
++use super::{NativeWindowTarget, Operation, Session, State};
+ use std::sync::Arc;
+
+ impl Operation {
+@@ -42,6 +42,24 @@
+         Ok(())
+     }
+
++    /// Exact immutable endpoint membership for capture/geometry producers.
++    /// Membership alone is not admission; each producer still checkpoints and
++    /// enters primary under both live dependencies before any platform call.
++    pub fn owns_native_window(&self, target: NativeWindowTarget) -> bool {
++        self.session
++            .native_window()
++            .is_ok_and(|source| source == target)
++            || self
++                .state()
++                .drag_destination
++                .as_ref()
++                .is_some_and(|destination| {
++                    destination
++                        .native_window()
++                        .is_ok_and(|bound| bound == target)
++                })
++    }
++
+     /// Called with the common gate AND this operation's state already held.
+     pub(super) fn dependencies_live(&self, state: &State) -> bool {
+         self.session.live()
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
+@@ -1,5 +1,13 @@
+-use super::{Operation, Session};
++use super::{NativeWindowTarget, Operation, Session};
+ use std::time::{Duration, Instant};
++
++#[derive(Default)]
++pub(super) struct IntentState {
++    attempts: u8,
++    uncertain: bool,
++    confirmed: bool,
++    drag_destination: Option<NativeWindowTarget>,
++}
+
+ impl Session {
+     pub fn intent_state(&self, intent: &str) -> Result<(u8, bool, bool), &'static str> {
+@@ -13,7 +21,8 @@
+         if !states.contains_key(intent) && states.len() >= 256 {
+             return Err("unresolved_intent_limit");
+         }
+-        Ok(*states.entry(intent.into()).or_default())
++        let state = states.entry(intent.into()).or_default();
++        Ok((state.attempts, state.uncertain, state.confirmed))
+     }
+
+     pub fn recover_intent(&self, intent: &str) -> Result<u8, &'static str> {
+@@ -23,11 +32,11 @@
+             .lock()
+             .map_err(|_| "recovery_state_poisoned")?;
+         let state = states.get_mut(intent).ok_or("invalid_intent_reference")?;
+-        if state.0 >= 2 {
++        if state.attempts >= 2 {
+             return Err("recovery_exhausted");
+         }
+-        state.0 += 1;
+-        Ok(state.0)
++        state.attempts += 1;
++        Ok(state.attempts)
+     }
+
+     pub fn record_intent(
+@@ -41,8 +50,29 @@
+             .lock()
+             .map_err(|_| "recovery_state_poisoned")?;
+         let state = states.get_mut(intent).ok_or("invalid_intent_reference")?;
+-        state.1 |= committed;
+-        state.2 |= confirmed;
++        state.uncertain |= committed;
++        state.confirmed |= confirmed;
++        Ok(())
++    }
++
++    fn bind_intent_destination(
++        &self,
++        intent: &str,
++        destination: Option<NativeWindowTarget>,
++    ) -> Result<(), &'static str> {
++        let mut states = self
++            .recovery
++            .lock()
++            .map_err(|_| "recovery_state_poisoned")?;
++        let state = states.get_mut(intent).ok_or("invalid_intent_reference")?;
++        if state.drag_destination.is_some() && state.drag_destination != destination
++            || state.drag_destination.is_none()
++                && destination.is_some()
++                && (state.uncertain || state.confirmed)
++        {
++            return Err("intent_target_mismatch");
++        }
++        state.drag_destination = destination;
+         Ok(())
+     }
+ }
+@@ -55,6 +85,12 @@
+         {
+             return Err("invalid_segment_intent");
+         }
++        let destination = state
++            .drag_destination
++            .as_ref()
++            .map(|session| session.native_window())
++            .transpose()?;
++        self.session.bind_intent_destination(intent, destination)?;
+         state.segment_intent = Some(intent.into());
+         Ok(())
+     }
+@@ -228,3 +264,6 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod drag_tests;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs
+@@ -0,0 +1,93 @@
++use super::*;
++use crate::controlled::Gate;
++use std::sync::Arc;
++
++fn configured(
++    source: &Arc<Session>,
++    destination: Option<Arc<Session>>,
++    intent: &str,
++) -> Result<Arc<Operation>, &'static str> {
++    let op = source.new_operation()?;
++    if let Some(destination) = destination {
++        op.bind_drag_destination(destination)?;
++    }
++    op.configure_segment(vec![2], Duration::from_secs(1))?;
++    op.bind_segment_intent(intent)?;
++    Ok(op)
++}
++
++#[test]
++fn controlled_drag_intent_binds_destination_incarnation_not_image_versions() {
++    let gate = Gate::new();
++    let source = gate
++        .session(None, Arc::new(|| true), 42, 7, Some((1, 2)))
++        .unwrap();
++    let b = gate
++        .session(None, Arc::new(|| true), 42, 8, Some((1, 2)))
++        .unwrap();
++    let c = gate
++        .session(None, Arc::new(|| true), 42, 9, Some((1, 2)))
++        .unwrap();
++    configured(&source, Some(b.clone()), "same")
++        .unwrap()
++        .cancel();
++    configured(&source, Some(b), "same").unwrap().cancel();
++    assert!(matches!(
++        configured(&source, Some(c.clone()), "same"),
++        Err("intent_target_mismatch")
++    ));
++    assert!(matches!(
++        configured(&source, None, "same"),
++        Err("intent_target_mismatch")
++    ));
++    configured(&source, Some(c), "new").unwrap().cancel();
++    assert_eq!(source.intent_state("same"), Ok((0, false, false)));
++}
++
++#[tokio::test]
++async fn controlled_drag_intent_cannot_relabel_uncertain_single_target_input() {
++    let gate = Gate::new();
++    let source = gate
++        .session(None, Arc::new(|| true), 42, 7, Some((1, 2)))
++        .unwrap();
++    let destination = gate
++        .session(None, Arc::new(|| true), 42, 8, Some((1, 2)))
++        .unwrap();
++    let prior = configured(&source, None, "used").unwrap();
++    prior.begin().unwrap();
++    prior.begin_segment_action(0).unwrap();
++    prior.segment_primary(|| ()).unwrap();
++    prior.finish();
++    assert!(prior.terminal().await.unwrap().input_committed);
++    assert!(matches!(
++        configured(&source, Some(destination), "used"),
++        Err("intent_target_mismatch")
++    ));
++    assert_eq!(source.intent_state("used"), Ok((0, true, false)));
++}
++
++#[tokio::test]
++async fn controlled_drag_intent_keeps_unknown_and_recovery_across_pair_operations() {
++    let gate = Gate::new();
++    let source = gate
++        .session(None, Arc::new(|| true), 42, 7, Some((1, 2)))
++        .unwrap();
++    let destination = gate
++        .session(None, Arc::new(|| true), 42, 8, Some((1, 2)))
++        .unwrap();
++    let prior = configured(&source, Some(destination.clone()), "pair").unwrap();
++    prior.begin().unwrap();
++    prior.begin_segment_action(0).unwrap();
++    prior.segment_primary(|| ()).unwrap();
++    prior.finish();
++    assert!(prior.terminal().await.unwrap().input_committed);
++    source.recover_intent("pair").unwrap();
++    configured(&source, Some(destination), "pair")
++        .unwrap()
++        .cancel();
++    assert_eq!(
++        source.intent_state("pair"),
++        Ok((1, true, false)),
++        "binding does not clear uncertain effects or budget"
++    );
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+@@ -1,5 +1,6 @@
+ //! Pi-owned controlled facade. Native sequential plans retain the same gate and drain proof.
+ mod browser;
++mod cross_drag_native;
+ mod discovery;
+ mod drag_dependency;
+ pub use discovery::ComputerDiscoveredWindow;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs
+@@ -0,0 +1,361 @@
++//! A dedicated two-capability entry; ordinary segments remain single-window.
++use super::{
++    refused, segment::*, ComputerCondition, ComputerDispatch, ComputerError, ComputerOperation,
++    ComputerResult, ComputerSession,
++};
++use std::{
++    sync::Arc,
++    time::{Duration, Instant},
++};
++
++fn shape(segment: &ComputerSegment) -> Result<(&ComputerPoint, &ComputerPoint, u32), &'static str> {
++    super::segment::validate(segment)?;
++    let [ComputerInput::Drag {
++        from,
++        to,
++        duration_ms,
++    }] = segment.actions.as_slice()
++    else {
++        return Err("invalid_cross_window_drag");
++    };
++    if !matches!(segment.postcondition, ComputerPostcondition::Visual { .. })
++        || from.image_ref != segment.observation_ref
++        || from.image_ref == to.image_ref
++    {
++        return Err("invalid_cross_window_drag");
++    }
++    Ok((from, to, *duration_ms))
++}
++
++#[uniffi::export]
++impl ComputerOperation {
++    /// Exactly one drag, bound to two genuine selected sessions/current images.
++    /// A necessary activation posts no drag: it returns fresh-evidence-required
++    /// facts instead of carrying old pixel coordinates across focus changes.
++    pub fn start_cross_window_drag(
++        self: Arc<Self>,
++        destination: Arc<ComputerSession>,
++        segment: ComputerSegment,
++    ) -> Result<(), ComputerError> {
++        let (_, _, duration_ms) = shape(&segment).map_err(refused)?;
++        #[cfg(not(target_os = "macos"))]
++        {
++            let _ = (destination, duration_ms);
++            Err(refused("unsupported_platform"))
++        }
++        #[cfg(target_os = "macos")]
++        {
++            self.bind_drag_destination(destination.clone())?;
++            let timeout = Duration::from_millis(u64::from(segment.max_duration_ms));
++            let limits = vec![8 + (duration_ms / 16).max(1)];
++            let worker = self.clone();
++            self.launch_bounded(None, Some((limits, timeout)), async move {
++                worker.execute_cross_window_drag(destination, segment).await
++            })
++        }
++    }
++}
++
++#[cfg(target_os = "macos")]
++impl ComputerOperation {
++    pub(super) fn take_drag_images(
++        &self,
++        destination: &ComputerSession,
++        from: &ComputerPoint,
++        to: &ComputerPoint,
++    ) -> Result<[Arc<cua_driver_core::controlled::ImageReference>; 2], ComputerError> {
++        // Consume BOTH slots before checking either ref; never restore a half
++        // pair on refusal. The common scheduler owns this operation, and close
++        // waits its core dependency before retiring either session's caches.
++        let source = self
++            .session
++            .image_reference
++            .lock()
++            .map_err(|_| self.session.host.quarantine())?
++            .take();
++        let target = destination
++            .image_reference
++            .lock()
++            .map_err(|_| self.session.host.quarantine())?
++            .take();
++        *self
++            .session
++            .observation
++            .lock()
++            .map_err(|_| self.session.host.quarantine())? = None;
++        *destination
++            .observation
++            .lock()
++            .map_err(|_| self.session.host.quarantine())? = None;
++        self.core.reset_snapshot();
++        let source = source.ok_or_else(|| refused("stale_image_observation"))?;
++        let target = target.ok_or_else(|| refused("stale_image_observation"))?;
++        source
++            .addresses(&from.image_ref, from.x as u32, from.y as u32)
++            .map_err(refused)?;
++        target
++            .addresses(&to.image_ref, to.x as u32, to.y as u32)
++            .map_err(refused)?;
++        Ok([source, target])
++    }
++
++    async fn execute_cross_window_drag(
++        &self,
++        destination: Arc<ComputerSession>,
++        segment: ComputerSegment,
++    ) -> Result<ComputerResult, ComputerError> {
++        use platform_macos::input::controlled::cross_drag::{self, Endpoint};
++        let started = Instant::now();
++        let (from, to, duration_ms) = shape(&segment).map_err(refused)?;
++        let [source_image, destination_image] = self.take_drag_images(&destination, from, to)?;
++        let source_target = self.session.gate.native_window().map_err(refused)?;
++        let destination_target = destination.gate.native_window().map_err(refused)?;
++        for (native, target) in [
++            (&self.session.native, source_target),
++            (&destination.native, destination_target),
++        ] {
++            native.computer_segment_authorize("get_window_state", &serde_json::json!({"pid":target.pid,"window_id":target.window_id,"include_accessibility_tree":false,"include_screenshot":true})).map_err(refused)?;
++            native
++                .computer_segment_authorize(
++                    "drag",
++                    &serde_json::json!({"pid":target.pid,"window_id":target.window_id}),
++                )
++                .map_err(refused)?;
++        }
++        let prior = self
++            .core
++            .session
++            .intent_state(&segment.intent_ref)
++            .map_err(refused)?;
++        if prior.1 || prior.2 {
++            let code = self
++                .core
++                .session
++                .recover_intent(&segment.intent_ref)
++                .map(|_| "intent_outcome_unknown")
++                .unwrap_or_else(|code| code);
++            let value = result(
++                &segment,
++                Some(code),
++                false,
++                false,
++                self.core.is_cancelled(),
++                0,
++                self.core
++                    .session
++                    .intent_state(&segment.intent_ref)
++                    .map(|state| state.0)
++                    .unwrap_or(prior.0),
++                started.elapsed().as_millis() as u64,
++            )?;
++            return Ok(ComputerResult::Segment { value });
++        }
++        let state = self
++            .session
++            .native
++            .computer_state()
++            .ok_or_else(|| refused("controlled_state_unavailable"))?;
++        let renderer = self
++            .session
++            .host
++            .renderer
++            .as_ref()
++            .map(|renderer| renderer.channel.clone());
++        let context = platform_macos::tools::computer::segment::Context {
++            renderer: renderer.clone(),
++            operation: self.core.clone(),
++            state,
++            observation_ref: segment.observation_ref.clone(),
++            intent_ref: segment.intent_ref.clone(),
++            image: Some(source_image.clone()),
++        };
++        let endpoints = [
++            Endpoint {
++                target: source_target,
++                image: source_image,
++                point: from.clone(),
++            },
++            Endpoint {
++                target: destination_target,
++                image: destination_image,
++                point: to.clone(),
++            },
++        ];
++        let core = self.core.clone();
++        let native = self.session.native.clone();
++        let intent = segment.intent_ref.clone();
++        let attempt = self.segment_blocking(move || -> Result<bool, &'static str> {
++            let prepared = cross_drag::prepare(&core, endpoints)?;
++            if !context.foreground() {
++                core.session.recover_intent(&intent)?;
++                native.computer_segment_authorize("bring_to_front", &serde_json::json!({"pid":source_target.pid,"window_id":source_target.window_id}))?;
++                core.begin_segment_action(0)?;
++                // Preparation is distinct from requested drag input. A successful
++                // activation requires NEW images/points, not an automatic replay.
++                if let Err(code) = context.activate() {
++                    if core.input_committed() && core.session.record_intent(&intent, true, false).is_err() { core.quarantine(); }
++                    return Err(code);
++                }
++                return Ok(false);
++            }
++            core.bind_segment_intent(&intent)?; // records the ordered target pair
++            core.begin_segment_action(0)?;
++            prepared.run(core, renderer, duration_ms)?;
++            Ok(true)
++        }).await.map_err(|_| ComputerError::Quarantined)?;
++        let delivered = matches!(attempt, Ok(true));
++        let preparation = matches!(attempt, Ok(false));
++        let code = match attempt {
++            Ok(true) => None,
++            Ok(false) => Some("drag_foreground_prepared"),
++            Err(code) => Some(code),
++        };
++        let value = result(
++            &segment,
++            code,
++            delivered,
++            !preparation && self.core.input_committed(),
++            self.core.is_cancelled(),
++            self.core.segment_action_inputs(),
++            self.core
++                .session
++                .intent_state(&segment.intent_ref)
++                .map(|state| state.0)
++                .unwrap_or(prior.0),
++            started.elapsed().as_millis() as u64,
++        )?;
++        Ok(ComputerResult::Segment { value })
++    }
++}
++
++fn result(
++    segment: &ComputerSegment,
++    code: Option<&'static str>,
++    delivered: bool,
++    committed: bool,
++    cancelled: bool,
++    count: u32,
++    attempts: u8,
++    elapsed_ms: u64,
++) -> Result<ComputerSegmentResult, ComputerError> {
++    use cua_driver_contract::{
++        ActionDelivery, ActionDeliveryMode, ActionEffect, ActionResult, ActionRoute,
++    };
++    let value = ComputerSegmentResult {
++        status: if cancelled {
++            ComputerSegmentStatus::Cancelled
++        } else if committed && !delivered {
++            ComputerSegmentStatus::OutcomeUnknown
++        } else {
++            ComputerSegmentStatus::NeedsObservation
++        },
++        actions: vec![ComputerInputResult {
++            index: 0,
++            dispatch: if delivered {
++                ComputerDispatch::Dispatched
++            } else if committed {
++                ComputerDispatch::Unknown
++            } else {
++                ComputerDispatch::NotDispatched
++            },
++            action: delivered.then_some(ActionResult {
++                effect: ActionEffect::Unverifiable,
++                route: ActionRoute::GlobalInput,
++                delivery: Some(ActionDelivery {
++                    mode: ActionDeliveryMode::Foreground,
++                    delivered_count: Some(count),
++                }),
++                evidence: None,
++                escalation: None,
++            }),
++            code: code.map(str::to_owned),
++        }],
++        condition: ComputerCondition::Unknown,
++        first_unfinished_action: (!delivered).then_some(0),
++        recovery_attempts: attempts,
++        elapsed_ms,
++    };
++    super::segment::validate_result(segment, &value).map_err(refused)?;
++    Ok(value)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn input() -> ComputerSegment {
++        ComputerSegment {
++            intent_ref: "intent".into(),
++            observation_ref: "source".into(),
++            actions: vec![ComputerInput::Drag {
++                from: ComputerPoint {
++                    image_ref: "source".into(),
++                    x: 1.0,
++                    y: 1.0,
++                },
++                to: ComputerPoint {
++                    image_ref: "destination".into(),
++                    x: 2.0,
++                    y: 2.0,
++                },
++                duration_ms: 240,
++            }],
++            postcondition: ComputerPostcondition::Visual {
++                description: "Verify the dedicated drop".into(),
++            },
++            max_duration_ms: 30_000,
++        }
++    }
++    #[test]
++    fn controlled_cross_drag_shape_is_one_visual_two_image_action() {
++        assert!(shape(&input()).is_ok());
++        for mode in 0..5 {
++            let mut input = input();
++            match mode {
++                0 => input.actions.push(input.actions[0].clone()),
++                1 => input.postcondition = ComputerPostcondition::WindowFocused,
++                2 => input.observation_ref = "wrong".into(),
++                3 => {
++                    if let ComputerInput::Drag { from, to, .. } = &mut input.actions[0] {
++                        to.image_ref = from.image_ref.clone();
++                    }
++                }
++                _ => {
++                    if let ComputerInput::Drag { from, .. } = &mut input.actions[0] {
++                        from.x = f64::NAN;
++                    }
++                }
++            }
++            assert!(shape(&input).is_err());
++        }
++    }
++    #[test]
++    fn controlled_cross_drag_preparation_is_not_drag_delivery_or_confirmation() {
++        let segment = input();
++        let prepared = result(
++            &segment,
++            Some("drag_foreground_prepared"),
++            false,
++            false,
++            false,
++            2,
++            1,
++            10,
++        )
++        .unwrap();
++        assert_eq!(
++            prepared.actions[0].dispatch,
++            ComputerDispatch::NotDispatched
++        );
++        assert!(prepared.actions[0].action.is_none());
++        assert_eq!(prepared.first_unfinished_action, Some(0));
++        let delivered = result(&segment, None, true, true, false, 14, 1, 250).unwrap();
++        assert_eq!(delivered.status, ComputerSegmentStatus::NeedsObservation);
++        assert_eq!(
++            delivered.actions[0].action.as_ref().unwrap().route,
++            cua_driver_contract::ActionRoute::GlobalInput
++        );
++        let interrupted = result(&segment, Some("cancelled"), false, true, true, 3, 0, 20).unwrap();
++        assert_eq!(interrupted.status, ComputerSegmentStatus::Cancelled);
++        assert_eq!(interrupted.actions[0].dispatch, ComputerDispatch::Unknown);
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests.rs
+@@ -8,6 +8,8 @@
+ use std::task::{Context, Poll, Waker};
+ use std::time::Duration;
+
++#[cfg(target_os = "macos")]
++mod cross_drag;
+ mod discovery;
+ mod drag_dependency;
+ mod images;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/cross_drag.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/cross_drag.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/cross_drag.rs
+@@ -0,0 +1,71 @@
++use super::*;
++use cua_driver_contract::{
++    computer_image::{ComputerImage, ComputerImageGeometry},
++    computer_segment::ComputerPoint,
++};
++use cua_driver_core::controlled::ImageReference;
++
++fn image(window: u64, id: &str) -> Arc<ImageReference> {
++    Arc::new(
++        ImageReference::from_image(&ComputerImage {
++            image_id: id.into(),
++            pid: 42,
++            window_id: window,
++            geometry: ComputerImageGeometry {
++                desktop_x: 0.0,
++                desktop_y: 0.0,
++                window_width: 1.0,
++                window_height: 1.0,
++                source_width: 1,
++                source_height: 1,
++                crop_x: 0,
++                crop_y: 0,
++                crop_width: 1,
++                crop_height: 1,
++                output_width: 1,
++                output_height: 1,
++            },
++            png: cua_driver_core::image_utils::encode_rgba_to_png(&[1, 2, 3, 255], 1, 1).unwrap(),
++        })
++        .unwrap(),
++    )
++}
++
++#[tokio::test]
++async fn controlled_cross_drag_consumes_both_images_even_when_one_reference_fails() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    for mode in 0..4 {
++        let host = host();
++        let source = session_target(&host, None, 7, Some((1, 2)));
++        let destination = session_target(&host, None, 8, Some((1, 2)));
++        if mode != 0 {
++            *source.image_reference.lock().unwrap() = Some(image(7, "source"));
++        }
++        *destination.image_reference.lock().unwrap() = Some(image(8, "destination"));
++        for target in [&source, &destination] {
++            *target.observation.lock().unwrap()=Some(serde_json::from_value(serde_json::json!({"pid":42,"window_id":target.gate.native_window().unwrap().window_id})).unwrap());
++        }
++        let op = source.clone().new_operation().unwrap();
++        op.bind_drag_destination(destination.clone()).unwrap();
++        op.core.begin().unwrap();
++        let from = ComputerPoint {
++            image_ref: if mode == 1 { "wrong" } else { "source" }.into(),
++            x: 0.0,
++            y: 0.0,
++        };
++        let to = ComputerPoint {
++            image_ref: if mode == 2 { "wrong" } else { "destination" }.into(),
++            x: 0.0,
++            y: 0.0,
++        };
++        let result = op.take_drag_images(&destination, &from, &to);
++        assert_eq!(result.is_ok(), mode == 3);
++        assert!(source.image_reference.lock().unwrap().is_none());
++        assert!(destination.image_reference.lock().unwrap().is_none());
++        assert!(source.observation.lock().unwrap().is_none());
++        assert!(destination.observation.lock().unwrap().is_none());
++        op.core.finish();
++        assert!(!op.terminal().await.unwrap().input_committed);
++        host.close().await.unwrap();
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs b/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/capture/controlled.rs
+@@ -5,7 +5,7 @@
+     ComputerImage, ComputerImageGeometry, COMPUTER_IMAGE_MAX_OUTPUT_EDGE,
+     COMPUTER_IMAGE_MAX_SOURCE_EDGE,
+ };
+-use cua_driver_core::controlled::Operation;
++use cua_driver_core::controlled::{NativeWindowTarget, Operation};
+ use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
+
+ fn output_dimensions(width: u32, height: u32, maximum: u32) -> Result<(u32, u32), &'static str> {
+@@ -33,6 +33,20 @@
+ pub(crate) fn capture(operation: &Operation, maximum: u32) -> Result<ComputerImage, &'static str> {
+     operation.checkpoint()?;
+     let target = operation.session.native_window()?;
++    capture_bound(operation, maximum, target)
++}
++
++/// The dedicated drag producer authorizes each endpoint canonically, then may
++/// capture either retained capability without swapping the operation's scope.
++pub(crate) fn capture_bound(
++    operation: &Operation,
++    maximum: u32,
++    target: NativeWindowTarget,
++) -> Result<ComputerImage, &'static str> {
++    operation.checkpoint()?;
++    if !operation.owns_native_window(target) {
++        return Err("controlled_target_stale");
++    }
+     if maximum == 0 || maximum > COMPUTER_IMAGE_MAX_OUTPUT_EDGE {
+         return Err("image_dimensions_unproved");
+     }
+@@ -173,6 +187,51 @@
+     }
+
+     #[tokio::test]
++    async fn controlled_capture_refuses_unbound_endpoint_before_native_capture() {
++        let gate = Gate::new();
++        let source = gate
++            .session(None, Arc::new(|| true), 1, 2, Some((1, 1)))
++            .unwrap();
++        let operation = source.new_operation().unwrap();
++        operation.begin().unwrap();
++        let foreign = NativeWindowTarget {
++            pid: 1,
++            window_id: 3,
++            process_stamp: Some((1, 1)),
++        };
++        assert_eq!(
++            capture_bound(&operation, 1024, foreign).unwrap_err(),
++            "controlled_target_stale"
++        );
++        operation.finish();
++        assert!(!operation.terminal().await.unwrap().input_committed);
++    }
++
++    #[tokio::test]
++    async fn controlled_capture_bound_destination_revocation_prevents_native_capture() {
++        let gate = Gate::new();
++        let source = gate
++            .session(None, Arc::new(|| true), 1, 2, Some((1, 1)))
++            .unwrap();
++        let destination = gate
++            .session(None, Arc::new(|| true), 1, 3, Some((1, 1)))
++            .unwrap();
++        let target = destination.native_window().unwrap();
++        let operation = source.new_operation().unwrap();
++        operation
++            .bind_drag_destination(destination.clone())
++            .unwrap();
++        operation.begin().unwrap();
++        destination.revoke();
++        assert_eq!(
++            capture_bound(&operation, 1024, target).unwrap_err(),
++            "cancelled"
++        );
++        operation.finish();
++        assert!(!operation.terminal().await.unwrap().input_committed);
++    }
++
++    #[tokio::test]
+     async fn controlled_capture_refuses_browser_scope_before_native_capture() {
+         let gate = Gate::new();
+         let session = gate.browser_session(Arc::new(|| true)).unwrap();
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
+@@ -1,5 +1,6 @@
+ //! Image-bound native pointer input. No global HID, fallback, duplicate
+ //! transport, queued event batch or authority derived from caller geometry.
++pub mod cross_drag;
+ pub mod general;
+ mod keyboard;
+ use core_graphics::{
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/cross_drag.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/cross_drag.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/cross_drag.rs
+@@ -0,0 +1,493 @@
++//! Dedicated global drag transport. Two retained capabilities, one tracked
++//! worker, no PID/global double-post, and only owned matching-up cleanup.
++mod observer;
++use super::general::OwnedRelease;
++use crate::computer_renderer::{Channel, Cue, Kind};
++use core_graphics::{
++    event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
++    event_source::{CGEventSource, CGEventSourceStateID},
++    geometry::CGPoint,
++};
++use cua_driver_contract::{computer_image::ComputerImageGeometry, computer_segment::ComputerPoint};
++use cua_driver_core::controlled::{ImageReference, NativeWindowTarget, Operation};
++use foreign_types::ForeignType;
++use std::{cell::Cell, ffi::c_void, rc::Rc, sync::Arc, time::Duration};
++
++#[link(name = "CoreGraphics", kind = "framework")]
++unsafe extern "C" {
++    fn CGEventSetTimestamp(event: *mut c_void, timestamp: u64);
++    fn CGEventSourceSetLocalEventsSuppressionInterval(source: *mut c_void, seconds: f64);
++    fn CGEventSourceGetLocalEventsSuppressionInterval(source: *mut c_void) -> f64;
++    fn CGEventSourceSetLocalEventsFilterDuringSuppressionState(
++        source: *mut c_void,
++        mask: u32,
++        state: u32,
++    );
++    fn CGEventSourceGetLocalEventsFilterDuringSuppressionState(
++        source: *mut c_void,
++        state: u32,
++    ) -> u32;
++}
++
++type Point = (f64, f64);
++pub struct Endpoint {
++    pub target: NativeWindowTarget,
++    pub image: Arc<ImageReference>,
++    pub point: ComputerPoint,
++}
++
++pub struct Prepared {
++    endpoints: [Endpoint; 2],
++    points: [Point; 2],
++}
++fn admit_down<T>(
++    operation: &Operation,
++    owned: &mut Option<OwnedRelease<T>>,
++    up: T,
++    release: Box<dyn Fn(T) -> Result<(), &'static str>>,
++    down: impl FnOnce(),
++) -> Result<(), &'static str> {
++    operation.segment_primary(|| {
++        *owned = Some(OwnedRelease {
++            value: Some(up),
++            release,
++        });
++        down();
++    })
++}
++
++fn contains(g: &ComputerImageGeometry, p: Point) -> bool {
++    p.0 >= g.desktop_x
++        && p.1 >= g.desktop_y
++        && p.0 < g.desktop_x + g.window_width
++        && p.1 < g.desktop_y + g.window_height
++}
++
++/// Called after both endpoints' canonical capture/drag policy admission, inside
++/// the same operation's blocking worker. Opaque Prepared cannot replace a ref
++/// with caller-supplied geometry or bypass fresh image checks.
++pub fn prepare(operation: &Operation, endpoints: [Endpoint; 2]) -> Result<Prepared, &'static str> {
++    operation.checkpoint()?;
++    if !operation.primary(false, || unsafe {
++        crate::ax::bindings::AXIsProcessTrusted()
++    })? {
++        return Err("accessibility_permission_denied");
++    }
++    let mut points = [(0.0, 0.0); 2];
++    for (index, endpoint) in endpoints.iter().enumerate() {
++        if !operation.owns_native_window(endpoint.target)
++            || !endpoint.image.target_matches(
++                endpoint.target.pid as u32,
++                u64::from(endpoint.target.window_id),
++            )
++            || ![endpoint.point.x, endpoint.point.y]
++                .iter()
++                .all(|n| n.is_finite() && (0.0..2048.0).contains(n))
++        {
++            return Err("controlled_target_stale");
++        }
++        endpoint.image.addresses(
++            &endpoint.point.image_ref,
++            endpoint.point.x as u32,
++            endpoint.point.y as u32,
++        )?;
++        let g = endpoint.image.geometry();
++        let fresh = crate::capture::controlled::capture_bound(
++            operation,
++            g.output_width.max(g.output_height),
++            endpoint.target,
++        )?;
++        if !endpoint.image.matches(&fresh) {
++            return Err("stale_image_observation");
++        }
++        points[index] = g.desktop_pixel_center(endpoint.point.x as u32, endpoint.point.y as u32)?;
++    }
++    if endpoints[0].target.window_id == endpoints[1].target.window_id {
++        return Err("invalid_drag_destination");
++    }
++    Ok(Prepared { endpoints, points })
++}
++
++fn trajectory(
++    from: Point,
++    to: Point,
++    source: &ComputerImageGeometry,
++    destination: &ComputerImageGeometry,
++    duration_ms: u32,
++) -> Result<Vec<Point>, &'static str> {
++    if !(1..=5000).contains(&duration_ms)
++        || !contains(source, from)
++        || !contains(destination, to)
++        || source.window_width < 10.0
++        || source.window_height < 10.0
++    {
++        return Err("invalid_drag_geometry");
++    }
++    // Start movement inside source so a normal AppKit drag threshold is crossed
++    // before jumping a gap. No sampled event is sent over an unrelated window.
++    let delta = (to.0 - from.0, to.1 - from.1);
++    let length = delta.0.hypot(delta.1);
++    if !length.is_finite() || length < 1.0 {
++        return Err("invalid_drag_geometry");
++    }
++    let offset = (delta.0 * 8.0 / length, delta.1 * 8.0 / length);
++    let clamp = |sign: f64| {
++        (
++            (from.0 + sign * offset.0).clamp(
++                source.desktop_x + 1.0,
++                source.desktop_x + source.window_width - 1.0,
++            ),
++            (from.1 + sign * offset.1).clamp(
++                source.desktop_y + 1.0,
++                source.desktop_y + source.window_height - 1.0,
++            ),
++        )
++    };
++    let mut kickoff = clamp(1.0);
++    if (kickoff.0 - from.0).hypot(kickoff.1 - from.1) < 4.0 {
++        kickoff = clamp(-1.0);
++    }
++    if (kickoff.0 - from.0).hypot(kickoff.1 - from.1) < 4.0 {
++        return Err("invalid_drag_geometry");
++    }
++    let steps = (duration_ms / 16).max(1);
++    let mut result = Vec::new();
++    result
++        .try_reserve(steps as usize + 1)
++        .map_err(|_| "event_allocation_failed")?;
++    result.push(kickoff);
++    for index in 1..=steps {
++        let f = f64::from(index) / f64::from(steps);
++        let point = (from.0 + delta.0 * f, from.1 + delta.1 * f);
++        if contains(source, point) || contains(destination, point) {
++            result.push(point);
++        }
++    }
++    if result.last() != Some(&to) {
++        result.push(to);
++    }
++    Ok(result)
++}
++
++impl Prepared {
++    fn live(&self, operation: &Operation) -> Result<(), &'static str> {
++        operation.checkpoint()?;
++        let windows = crate::windows::general_windows_with_space_snapshot();
++        for endpoint in &self.endpoints {
++            if crate::tools::computer_process_stamp(endpoint.target.pid)
++                != endpoint.target.process_stamp
++            {
++                return Err("controlled_target_stale");
++            }
++            let g = endpoint.image.geometry();
++            crate::windows::general_point_window_in(
++                &windows.windows,
++                endpoint.target.pid,
++                endpoint.target.window_id,
++                [g.desktop_x, g.desktop_y, g.window_width, g.window_height],
++            )?;
++        }
++        Ok(())
++    }
++    fn hit(&self, point: Point, exact: Option<usize>) -> Result<usize, &'static str> {
++        let hit = crate::input::skylight::hit_test::window_at(point.0, point.1)?;
++        self.endpoints
++            .iter()
++            .enumerate()
++            .find_map(|(index, endpoint)| {
++                (exact.is_none_or(|expected| expected == index)
++                    && endpoint.target.pid == hit.pid
++                    && endpoint.target.window_id == hit.window_id
++                    && contains(endpoint.image.geometry(), point))
++                .then_some(index)
++            })
++            .ok_or("drag_target_occluded")
++    }
++    fn cue(&self, point: Point, endpoint: usize, kind: Kind) -> Cue {
++        let target = &self.endpoints[endpoint];
++        let g = target.image.geometry();
++        Cue {
++            target_pid: target.target.pid,
++            window_id: target.target.window_id,
++            x: point.0 - g.desktop_x,
++            y: point.1 - g.desktop_y,
++            kind,
++        }
++    }
++    /// Source must already be exactly foreground. A preparatory activation
++    /// invalidates image evidence and exits to fresh model-visible observations.
++    pub fn run(
++        self,
++        operation: Arc<Operation>,
++        renderer: Option<Arc<Channel>>,
++        duration_ms: u32,
++    ) -> Result<(), &'static str> {
++        self.live(&operation)?;
++        let target = self.endpoints[0].target;
++        if crate::input::skylight::front_process_matches(target.pid, target.window_id) != Some(true)
++        {
++            return Err("foreground_target_changed");
++        }
++        let route = trajectory(
++            self.points[0],
++            self.points[1],
++            self.endpoints[0].image.geometry(),
++            self.endpoints[1].image.geometry(),
++            duration_ms,
++        )?;
++        self.hit(self.points[0], Some(0))?;
++        self.hit(self.points[1], Some(1))?;
++        self.hit(route[0], Some(0))?;
++        for code in 0..128 {
++            if code != 57 && unsafe { super::CGEventSourceKeyState(0, code) } {
++                return Err("physical_input_held_at_target");
++            }
++        }
++        if (0..3).any(|button| unsafe { super::CGEventSourceButtonState(0, button) }) {
++            return Err("physical_input_held_at_target");
++        }
++        let source = CGEventSource::new(CGEventSourceStateID::Private)
++            .map_err(|_| "event_source_unavailable")?;
++        let source_ptr = source.as_ptr() as *mut c_void;
++        unsafe {
++            CGEventSourceSetLocalEventsSuppressionInterval(source_ptr, 0.0);
++            for state in [0, 1] {
++                CGEventSourceSetLocalEventsFilterDuringSuppressionState(source_ptr, 7, state);
++            }
++            if CGEventSourceGetLocalEventsSuppressionInterval(source_ptr) != 0.0
++                || [0, 1].iter().any(|state| {
++                    CGEventSourceGetLocalEventsFilterDuringSuppressionState(source_ptr, *state) != 7
++                })
++            {
++                return Err("local_input_policy_unproved");
++            }
++        }
++        let tag = (uuid::Uuid::new_v4().as_u128() as i64) | 1;
++        let make = |kind, point: Point, count| {
++            let event = CGEvent::new_mouse_event(
++                source.clone(),
++                kind,
++                CGPoint::new(point.0, point.1),
++                CGMouseButton::Left,
++            )
++            .map_err(|_| "event_allocation_failed")?;
++            event.set_flags(CGEventFlags::empty());
++            event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, count);
++            event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, tag);
++            Ok::<_, &'static str>(event)
++        };
++        let down = make(CGEventType::LeftMouseDown, self.points[0], 1)?;
++        let up = make(CGEventType::LeftMouseUp, self.points[0], 1)?;
++        let last_up = up.clone();
++        let moves = route
++            .iter()
++            .map(|point| make(CGEventType::LeftMouseDragged, *point, 0))
++            .collect::<Result<Vec<_>, _>>()?;
++        let observer = observer::Observer::new(tag)?;
++        let last_cue = Rc::new(Cell::new(Some(self.cue(self.points[0], 0, Kind::Down))));
++        let release_operation = operation.clone();
++        let release_renderer = renderer.clone();
++        let release_cue = last_cue.clone();
++        let release: Box<dyn Fn(CGEvent) -> Result<(), &'static str>> = Box::new(move |up| {
++            // Matching cleanup never depends on target/process existence,
++            // foreground, observer health, cancellation or new primary admission.
++            let timestamp = observer::now();
++            if let Ok(timestamp) = timestamp {
++                unsafe { CGEventSetTimestamp(up.as_ptr() as _, timestamp) };
++            }
++            up.post(CGEventTapLocation::HID);
++            if let (Some(renderer), Some(mut cue)) = (&release_renderer, release_cue.get()) {
++                cue.kind = Kind::Up;
++                renderer.publish(cue);
++            }
++            if timestamp.is_err() {
++                release_operation.quarantine();
++                return Err("event_clock_unavailable");
++            }
++            Ok(())
++        });
++        let check = || {
++            if let Some(renderer) = &renderer {
++                renderer.check()?;
++            }
++            self.live(&operation)?;
++            observer.check()?;
++            if !self.endpoints.iter().any(|endpoint| {
++                crate::input::skylight::front_process_matches(
++                    endpoint.target.pid,
++                    endpoint.target.window_id,
++                ) == Some(true)
++            }) {
++                return Err("foreground_target_changed");
++            }
++            Ok(())
++        };
++        observer.arm()?;
++        check()?;
++        self.hit(self.points[0], Some(0))?;
++        unsafe { CGEventSetTimestamp(down.as_ptr() as _, observer::now()?) };
++        let mut owned = None;
++        admit_down(&operation, &mut owned, up, release, || {
++            down.post(CGEventTapLocation::HID);
++            if let (Some(renderer), Some(cue)) = (&renderer, last_cue.get()) {
++                renderer.publish(cue);
++            }
++        })?;
++        let delay = Duration::from_millis(u64::from(duration_ms)) / moves.len() as u32;
++        let mut previous = self.points[0];
++        for (index, (point, event)) in route.iter().zip(&moves).enumerate() {
++            std::thread::sleep(delay);
++            check()?;
++            let endpoint = self.hit(
++                *point,
++                if index == 0 {
++                    Some(0)
++                } else if index + 1 == moves.len() {
++                    Some(1)
++                } else {
++                    None
++                },
++            )?;
++            event.set_integer_value_field(
++                EventField::MOUSE_EVENT_DELTA_X,
++                (point.0.round() - previous.0.round()) as i64,
++            );
++            event.set_integer_value_field(
++                EventField::MOUSE_EVENT_DELTA_Y,
++                (point.1.round() - previous.1.round()) as i64,
++            );
++            unsafe { CGEventSetTimestamp(event.as_ptr() as _, observer::now()?) };
++            operation.segment_primary(|| {
++                unsafe { super::CGEventSetLocation(last_up.as_ptr() as _, point.0, point.1) };
++                event.post(CGEventTapLocation::HID);
++                let cue = self.cue(*point, endpoint, Kind::Move);
++                last_cue.set(Some(cue));
++                if let Some(renderer) = &renderer {
++                    renderer.publish(cue);
++                }
++            })?;
++            previous = *point;
++        }
++        check()?;
++        self.hit(self.points[1], Some(1))?;
++        owned.as_mut().expect("admitted down owns release").run()?;
++        observer.check()?;
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    #[tokio::test]
++    async fn controlled_cross_drag_owned_up_survives_stop_destination_revoke_and_unwind() {
++        use cua_driver_core::controlled::Gate;
++        for mode in 0..5 {
++            let gate = Gate::new();
++            let source = gate
++                .session(None, Arc::new(|| true), 42, 7, Some((1, 2)))
++                .unwrap();
++            let destination = gate
++                .session(None, Arc::new(|| true), 42, 8, Some((1, 2)))
++                .unwrap();
++            let op = source.new_operation().unwrap();
++            op.bind_drag_destination(destination.clone()).unwrap();
++            op.configure_segment(vec![2], Duration::from_secs(1))
++                .unwrap();
++            op.begin().unwrap();
++            op.begin_segment_action(0).unwrap();
++            let work = op.track().unwrap();
++            let downs = AtomicUsize::new(0);
++            let ups = Arc::new(AtomicUsize::new(0));
++            let released = ups.clone();
++            let release_op = op.clone();
++            let release = Box::new(move |_: ()| {
++                released.fetch_add(1, Ordering::SeqCst);
++                if mode == 4 {
++                    release_op.quarantine();
++                    Err("release_failure")
++                } else {
++                    Ok(())
++                }
++            });
++            if mode == 0 {
++                op.cancel();
++            }
++            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                let mut owned = None;
++                let result = admit_down(&op, &mut owned, (), release, || {
++                    downs.fetch_add(1, Ordering::SeqCst);
++                    if mode == 1 {
++                        destination.revoke();
++                    }
++                    if mode == 2 {
++                        op.cancel();
++                    }
++                    if mode == 3 {
++                        panic!("after admitted down");
++                    }
++                });
++                assert_eq!(result.is_ok(), mode != 0);
++                if mode == 1 || mode == 2 {
++                    assert!(op
++                        .segment_primary(|| panic!("new input after stop"))
++                        .is_err());
++                }
++            }));
++            assert_eq!(outcome.is_err(), mode == 3);
++            assert_eq!(downs.load(Ordering::SeqCst), usize::from(mode != 0));
++            assert_eq!(ups.load(Ordering::SeqCst), usize::from(mode != 0));
++            drop(work);
++            op.finish();
++            if mode == 4 {
++                assert_eq!(op.terminal().await, Err("quarantined"));
++            } else {
++                assert_eq!(op.terminal().await.unwrap().input_committed, mode != 0);
++            }
++        }
++    }
++    fn geometry(x: f64) -> ComputerImageGeometry {
++        ComputerImageGeometry {
++            desktop_x: x,
++            desktop_y: 0.0,
++            window_width: 280.0,
++            window_height: 180.0,
++            source_width: 560,
++            source_height: 360,
++            crop_x: 0,
++            crop_y: 0,
++            crop_width: 560,
++            crop_height: 360,
++            output_width: 560,
++            output_height: 360,
++        }
++    }
++    #[test]
++    fn controlled_cross_drag_trajectory_crosses_threshold_then_skips_unrelated_gap() {
++        for gap in [0.0, 100.0, 5000.0] {
++            let source = geometry(-400.0);
++            let destination = geometry(-120.0 + gap);
++            let from = (-260.0, 90.0);
++            let to = (20.0 + gap, 90.0);
++            let points = trajectory(from, to, &source, &destination, 240).unwrap();
++            assert!(contains(&source, points[0]));
++            assert!((points[0].0 - from.0).hypot(points[0].1 - from.1) >= 4.0);
++            assert_eq!(points.last(), Some(&to));
++            assert!(points
++                .iter()
++                .all(|p| contains(&source, *p) || contains(&destination, *p)));
++            assert!(points.len() <= 17);
++        }
++    }
++    #[test]
++    fn controlled_cross_drag_trajectory_edges_and_budget_refuse_before_events() {
++        let source = geometry(0.0);
++        let destination = geometry(500.0);
++        let points = trajectory((279.5, 90.0), (640.0, 90.0), &source, &destination, 1).unwrap();
++        assert!(points[0].0 < 279.5);
++        assert_eq!(points.last(), Some(&(640.0, 90.0)));
++        assert!(trajectory((0.0, 0.0), (640.0, 90.0), &source, &destination, 0).is_err());
++        assert!(trajectory((-1.0, 0.0), (640.0, 90.0), &source, &destination, 5001).is_err());
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/cross_drag/observer.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/cross_drag/observer.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/cross_drag/observer.rs
+@@ -0,0 +1,240 @@
++//! Foreground-only interference detection. Listen-only, never filters events;
++//! no characters, key codes, coordinates or per-event history are retained.
++use core_foundation::{
++    base::TCFType,
++    mach_port::{CFMachPort, CFMachPortInvalidate, CFMachPortRef},
++    runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult, CFRunLoopSource},
++};
++use core_graphics::event::CGEventType;
++use std::{cell::Cell, ffi::c_void, marker::PhantomData, rc::Rc, time::Duration};
++
++#[link(name = "CoreGraphics", kind = "framework")]
++unsafe extern "C" {
++    fn CGPreflightListenEventAccess() -> bool;
++    fn CGEventTapCreate(
++        tap: u32,
++        place: u32,
++        options: u32,
++        mask: u64,
++        callback: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
++        info: *mut c_void,
++    ) -> CFMachPortRef;
++    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
++    fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
++    fn CGEventGetTimestamp(event: *mut c_void) -> u64;
++    fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
++}
++
++pub(super) fn now() -> Result<u64, &'static str> {
++    let mut time = libc::timespec {
++        tv_sec: 0,
++        tv_nsec: 0,
++    };
++    if unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &mut time) } != 0
++        || time.tv_sec < 0
++        || !(0..1_000_000_000).contains(&time.tv_nsec)
++    {
++        return Err("event_clock_unavailable");
++    }
++    (time.tv_sec as u64)
++        .checked_mul(1_000_000_000)
++        .and_then(|value| value.checked_add(time.tv_nsec as u64))
++        .ok_or("event_clock_unavailable")
++}
++
++#[derive(Default)]
++struct State {
++    tag: i64,
++    active: Cell<bool>,
++    started: Cell<u64>,
++    own: Cell<u32>,
++    external: Cell<u32>,
++    unavailable: Cell<bool>,
++}
++impl State {
++    fn note(&self, timestamp: u64, tag: i64) {
++        if !self.active.get() || (timestamp != 0 && timestamp < self.started.get()) {
++            return;
++        }
++        let count = if tag == self.tag {
++            &self.own
++        } else {
++            &self.external
++        };
++        if count.get() >= 10_000 {
++            self.unavailable.set(true);
++        } else {
++            count.set(count.get() + 1);
++        }
++    }
++}
++
++unsafe extern "C" fn callback(
++    _proxy: *mut c_void,
++    kind: u32,
++    event: *mut c_void,
++    info: *mut c_void,
++) -> *mut c_void {
++    if !info.is_null() {
++        let state = unsafe { &*(info as *const State) };
++        if kind == 0xffff_fffe || kind == 0xffff_ffff || event.is_null() {
++            state.unavailable.set(true);
++        } else {
++            state.note(unsafe { CGEventGetTimestamp(event) }, unsafe {
++                CGEventGetIntegerValueField(event, 42)
++            });
++        }
++    }
++    event // Original event always passes through unchanged, including disabled/null notifications.
++}
++
++pub(super) struct Observer {
++    tap: CFMachPort,
++    source: CFRunLoopSource,
++    run_loop: CFRunLoop,
++    state: Box<State>,
++    _thread_bound: PhantomData<Rc<()>>,
++}
++impl Observer {
++    pub(super) fn new(tag: i64) -> Result<Self, &'static str> {
++        if !unsafe { CGPreflightListenEventAccess() } {
++            return Err("input_monitoring_permission_denied");
++        }
++        let state = Box::new(State {
++            tag,
++            ..State::default()
++        });
++        let kinds = [
++            CGEventType::LeftMouseDown,
++            CGEventType::LeftMouseUp,
++            CGEventType::RightMouseDown,
++            CGEventType::RightMouseUp,
++            CGEventType::OtherMouseDown,
++            CGEventType::OtherMouseUp,
++            CGEventType::MouseMoved,
++            CGEventType::LeftMouseDragged,
++            CGEventType::RightMouseDragged,
++            CGEventType::OtherMouseDragged,
++            CGEventType::ScrollWheel,
++            CGEventType::KeyDown,
++            CGEventType::KeyUp,
++            CGEventType::FlagsChanged,
++        ];
++        let mask = kinds
++            .iter()
++            .fold(0u64, |mask, kind| mask | (1u64 << (*kind as u32)));
++        // Session=1, head insert=0, listen-only=1 from the installed SDK header.
++        let raw = unsafe {
++            CGEventTapCreate(
++                1,
++                0,
++                1,
++                mask,
++                callback,
++                (&*state as *const State).cast_mut().cast(),
++            )
++        };
++        if raw.is_null() {
++            return Err("input_observer_unavailable");
++        }
++        let tap = unsafe { CFMachPort::wrap_under_create_rule(raw) };
++        let source = match tap.create_runloop_source(0) {
++            Ok(source) => source,
++            Err(()) => {
++                unsafe { CFMachPortInvalidate(raw) };
++                return Err("input_observer_unavailable");
++            }
++        };
++        let run_loop = CFRunLoop::get_current();
++        run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
++        let result = Self {
++            tap,
++            source,
++            run_loop,
++            state,
++            _thread_bound: PhantomData,
++        };
++        unsafe { CGEventTapEnable(raw, true) };
++        result.check()?;
++        Ok(result)
++    }
++    fn pump(&self) {
++        for _ in 0..32 {
++            if CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::ZERO, true)
++                != CFRunLoopRunResult::HandledSource
++            {
++                return;
++            }
++        }
++        self.state.unavailable.set(true);
++    }
++    pub(super) fn arm(&self) -> Result<(), &'static str> {
++        self.check()?;
++        self.state.started.set(now()?);
++        self.state.own.set(0);
++        self.state.external.set(0);
++        self.state.active.set(true);
++        Ok(())
++    }
++    pub(super) fn check(&self) -> Result<(), &'static str> {
++        self.pump();
++        if self.state.unavailable.get()
++            || !unsafe { CGEventTapIsEnabled(self.tap.as_concrete_TypeRef()) }
++        {
++            Err("input_observer_unavailable")
++        } else if self.state.external.get() != 0 {
++            Err("foreground_input_conflict")
++        } else {
++            Ok(())
++        }
++    }
++}
++impl Drop for Observer {
++    fn drop(&mut self) {
++        self.state.active.set(false);
++        self.run_loop
++            .remove_source(&self.source, unsafe { kCFRunLoopDefaultMode });
++        // Invalidate before state/callback storage dies, on this same worker's
++        // run loop. No detached callback/observer survives operation drain.
++        unsafe { CFMachPortInvalidate(self.tap.as_concrete_TypeRef()) };
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn controlled_global_observer_counts_only_current_interval_and_never_records_contents() {
++        let state = State {
++            tag: 7,
++            ..State::default()
++        };
++        state.note(11, 3);
++        assert_eq!(state.external.get(), 0);
++        state.started.set(10);
++        state.active.set(true);
++        state.note(9, 3);
++        state.note(10, 7);
++        state.note(11, 3);
++        state.note(0, 3);
++        assert_eq!(state.own.get(), 1);
++        assert_eq!(state.external.get(), 2);
++        state.own.set(10_000);
++        state.note(12, 7);
++        assert!(state.unavailable.get());
++    }
++    #[test]
++    fn controlled_global_observer_disabled_null_callback_is_pass_through_and_unavailable() {
++        let state = State::default();
++        let event = unsafe {
++            callback(
++                std::ptr::null_mut(),
++                0xffff_fffe,
++                std::ptr::null_mut(),
++                (&state as *const State).cast_mut().cast(),
++            )
++        };
++        assert!(event.is_null());
++        assert!(state.unavailable.get());
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/general.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/general.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/general.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/general.rs
+@@ -24,12 +24,12 @@
+     Button(ComputerMouseButton),
+ }
+
+-struct OwnedRelease<T> {
+-    value: Option<T>,
+-    release: Box<dyn Fn(T) -> Result<(), &'static str>>,
++pub(super) struct OwnedRelease<T> {
++    pub(super) value: Option<T>,
++    pub(super) release: Box<dyn Fn(T) -> Result<(), &'static str>>,
+ }
+ impl<T> OwnedRelease<T> {
+-    fn run(&mut self) -> Result<(), &'static str> {
++    pub(super) fn run(&mut self) -> Result<(), &'static str> {
+         match self.value.take() {
+             Some(value) => (self.release)(value),
+             None => Ok(()),
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight.rs
+@@ -712,6 +712,7 @@
+     )
+ }
+
++pub(crate) mod hit_test;
+ mod key_pair;
+
+ /// Tool-agnostic foreground-assist: briefly front `window_id`, wait for the
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/hit_test.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/hit_test.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/skylight/hit_test.rs
+@@ -0,0 +1,107 @@
++//! Default topmost WindowServer hit query. Never skip an external surface by
++//! process name, layer or connection. Qualified against intercept/pass-through
++//! owned panels in T-070; unavailable SPI or uncertain ownership fails closed.
++use core_graphics::geometry::CGPoint;
++use std::sync::OnceLock;
++
++// ABI from yabai src/misc/extern.h; actual local default query was qualified.
++type Find =
++    unsafe extern "C" fn(u32, i32, i32, i32, *mut CGPoint, *mut CGPoint, *mut u32, *mut u32) -> i32;
++type GetPid = unsafe extern "C" fn(u32, *mut libc::pid_t) -> i32;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct WindowHit {
++    pub pid: libc::pid_t,
++    pub window_id: u32,
++}
++
++fn decoded(
++    status: i32,
++    window: u32,
++    pid_status: i32,
++    pid: libc::pid_t,
++) -> Result<WindowHit, &'static str> {
++    if status != 0 || pid_status != 0 || window == 0 || pid <= 0 {
++        return Err("pointer_hit_unknown");
++    }
++    Ok(WindowHit {
++        pid,
++        window_id: window,
++    })
++}
++
++pub(crate) fn window_at(x: f64, y: f64) -> Result<WindowHit, &'static str> {
++    if !x.is_finite() || !y.is_finite() {
++        return Err("invalid_pointer_position");
++    }
++    static FIND: OnceLock<Option<Find>> = OnceLock::new();
++    static PID: OnceLock<Option<GetPid>> = OnceLock::new();
++    let find = FIND
++        .get_or_init(|| {
++            super::find_sym(b"SLSFindWindowAndOwner\0").map(|p| unsafe { super::as_fn(p) })
++        })
++        .ok_or("pointer_hit_unavailable")?;
++    let get_pid = PID
++        .get_or_init(|| {
++            super::find_sym(b"SLSConnectionGetPID\0").map(|p| unsafe { super::as_fn(p) })
++        })
++        .ok_or("pointer_hit_unavailable")?;
++    let connection = super::main_connection_id()
++        .filter(|id| *id != 0)
++        .ok_or("pointer_hit_unavailable")?;
++    let mut screen = CGPoint::new(x, y);
++    let mut local = CGPoint::new(0.0, 0.0);
++    let mut window = 0;
++    let mut owner = 0;
++    let mut pid = 0;
++    let status = unsafe {
++        find(
++            connection,
++            0,
++            1,
++            0,
++            &mut screen,
++            &mut local,
++            &mut window,
++            &mut owner,
++        )
++    };
++    let pid_status = if status == 0 && window != 0 && owner != 0 {
++        unsafe { get_pid(owner, &mut pid) }
++    } else {
++        -1
++    };
++    decoded(status, window, pid_status, pid)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn controlled_hit_test_unknown_is_not_an_empty_or_owned_target() {
++        assert_eq!(
++            decoded(0, 42, 0, 9),
++            Ok(WindowHit {
++                pid: 9,
++                window_id: 42
++            })
++        );
++        for (status, window, pid_status, pid) in [
++            (-1, 42, 0, 9),
++            (0, 42, -1, 9),
++            (0, 0, 0, 9),
++            (0, 42, 0, 0),
++            (0, 42, 0, -1),
++        ] {
++            assert_eq!(
++                decoded(status, window, pid_status, pid),
++                Err("pointer_hit_unknown")
++            );
++        }
++        assert_eq!(window_at(f64::NAN, 0.0), Err("invalid_pointer_position"));
++        assert_eq!(
++            window_at(0.0, f64::INFINITY),
++            Err("invalid_pointer_position")
++        );
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -98,7 +98,7 @@
+ }
+
+ impl Context {
+-    fn foreground(&self) -> bool {
++    pub fn foreground(&self) -> bool {
+         self.foreground_state() == Some(true)
+     }
+
+@@ -118,7 +118,7 @@
+         crate::ax::general_surface::keyboard_window(target.pid) == Some(target.window_id)
+     }
+
+-    fn activate(&self) -> Result<(), &'static str> {
++    pub fn activate(&self) -> Result<(), &'static str> {
+         self.live()?;
+         focus::activate_unless_current(self.foreground(), || self.activate_unfocused())
+     }
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts b/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts
+@@ -433,6 +433,11 @@
+       ret: FfiType.Void,
+       hasRustCallStatus: true,
+     },
++    "uniffi_cua_driver_sdk_fn_method_computeroperation_start_cross_window_drag": {
++      args: [FfiType.Handle, FfiType.Handle, FfiType.RustBuffer],
++      ret: FfiType.Void,
++      hasRustCallStatus: true,
++    },
+     "uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_click": {
+       args: [FfiType.Handle, FfiType.RustBuffer, FfiType.UInt32, FfiType.UInt32],
+       ret: FfiType.Void,
+@@ -989,6 +994,11 @@
+       hasRustCallStatus: false,
+     },
+     "uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click": {
++      args: [],
++      ret: FfiType.UInt16,
++      hasRustCallStatus: false,
++    },
++    "uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag": {
+       args: [],
+       ret: FfiType.UInt16,
+       hasRustCallStatus: false,
+@@ -1613,6 +1623,7 @@
+     uniffi_cua_driver_sdk_fn_method_computeroperation_result(uniffiSelf: bigint): bigint;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_capture(uniffiSelf: bigint, maxDimension: number, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_click(uniffiSelf: bigint, elementToken: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
++    uniffi_cua_driver_sdk_fn_method_computeroperation_start_cross_window_drag(uniffiSelf: bigint, destination: bigint, segment: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_click(uniffiSelf: bigint, imageId: Uint8Array, x: number, y: number, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_key(uniffiSelf: bigint, imageId: Uint8Array, key: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_scroll(uniffiSelf: bigint, imageId: Uint8Array, x: number, y: number, direction: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+@@ -1725,6 +1736,7 @@
+     uniffi_cua_driver_sdk_checksum_method_computeroperation_result(): number;
+     uniffi_cua_driver_sdk_checksum_method_computeroperation_start_capture(): number;
+     uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click(): number;
++    uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag(): number;
+     uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_click(): number;
+     uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_key(): number;
+     uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_scroll(): number;
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts b/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
+@@ -2431,6 +2431,12 @@
+     startCapture(maxDimension: number) /*throws*/: void;
+     startClick(elementToken: string) /*throws*/: void;
+ /**
++ * Exactly one drag, bound to two genuine selected sessions/current images.
++ * A necessary activation posts no drag: it returns fresh-evidence-required
++ * facts instead of carrying old pixel coordinates across focus changes.
++ */
++    startCrossWindowDrag(destination: ComputerSessionLike, segment: ComputerSegment) /*throws*/: void;
++/**
+  * One single left click at a pixel center in the last returned native
+  * image. A fresh image/geometry comparison is required before dispatch.
+  */
+@@ -2532,6 +2538,23 @@
+             /*caller:*/ (callStatus) => { nativeModule().uniffi_cua_driver_sdk_fn_method_computeroperation_start_click(
+                 uniffiTypeComputerOperationObjectFactory.clonePointer(this),
+         FfiConverterString.lower(elementToken, nativeModule().rustbuffer_alloc),
++                callStatus);
++            },
++            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
++    );
++    }
++
++/**
++ * Exactly one drag, bound to two genuine selected sessions/current images.
++ * A necessary activation posts no drag: it returns fresh-evidence-required
++ * facts instead of carrying old pixel coordinates across focus changes.
++ */
++    startCrossWindowDrag(destination: ComputerSessionLike, segment: ComputerSegment): void /*throws*/ {uniffiCaller.rustCallWithError(
++            /*liftError:*/ FfiConverterTypeComputerError.lift.bind(FfiConverterTypeComputerError),
++            /*caller:*/ (callStatus) => { nativeModule().uniffi_cua_driver_sdk_fn_method_computeroperation_start_cross_window_drag(
++                uniffiTypeComputerOperationObjectFactory.clonePointer(this),
++        FfiConverterTypeComputerSession.lower(destination, nativeModule().rustbuffer_alloc),
++        FfiConverterTypeComputerSegment.lower(segment, nativeModule().rustbuffer_alloc),
+                 callStatus);
+             },
+             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+@@ -7378,6 +7401,9 @@
+     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click() !== 41423) {
+         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_computeroperation_start_click");
+     }
++    if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag() !== 49914) {
++        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_computeroperation_start_cross_window_drag");
++    }
+     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_click() !== 59976) {
+         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_click");
+     }

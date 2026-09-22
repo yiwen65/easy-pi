@@ -134,6 +134,7 @@ function fixture(refuse = false) {
 					startImageScroll: action,
 					startClick: forbidden,
 					startSegment: forbidden,
+					startCrossWindowDrag: forbidden,
 					startObserve() {
 						assert.equal(serial, 2, "semantic observation must use the selected child");
 						finish(

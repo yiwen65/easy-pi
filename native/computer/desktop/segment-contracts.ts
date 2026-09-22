@@ -20,6 +20,11 @@ const selector = Type.Union([
 const target = Type.Union([Type.Object({ ref: reference }, closed), Type.Object({ selector }, closed)]);
 const coordinate = Type.Number({ minimum: 0, exclusiveMaximum: 2048 });
 const point = Type.Object({ ref: reference, x: coordinate, y: coordinate }, closed);
+export const ComputerPointSchema = point;
+export const ComputerVisualExpectationSchema = Type.Object(
+	{ kind: Type.Literal("visual"), description: Type.String({ minLength: 1, maxLength: 1024 }) },
+	closed,
+);
 const button = Type.Union([Type.Literal("left"), Type.Literal("right"), Type.Literal("middle")]);
 const key = Type.String({ minLength: 1, maxLength: 32, pattern: "^[ -~]+(?![\\s\\S])" });
 const text = Type.String({ maxLength: 16 * 1024 });
@@ -112,10 +117,7 @@ export const ComputerSegmentInputSchema = Type.Object(
 					Type.Object({ kind: Type.Literal("present"), selector, present: Type.Boolean() }, closed),
 					Type.Object({ kind: Type.Literal("window_focused") }, closed),
 					Type.Object({ kind: Type.Literal("window_bounds"), ...bounds }, closed),
-					Type.Object(
-						{ kind: Type.Literal("visual"), description: Type.String({ minLength: 1, maxLength: 1024 }) },
-						closed,
-					),
+					ComputerVisualExpectationSchema,
 				]),
 			},
 			closed,

@@ -791,3 +791,151 @@ test("runtime owns and drains a session returned after reentrant close during na
 	assert.ok(f.events.indexOf("session close") < f.events.indexOf("host close"));
 	assert.equal(f.events.at(-1), "destroy");
 });
+
+test("a dual-target call blocks destination close until the same genuine terminal", async () => {
+	const f = fixture();
+	const source = f.runtime.openSession();
+	const destination = f.runtime.openSession();
+	const op = f.operation();
+	let destinationClosed = false;
+	const close = f.sessions[1]!.close;
+	f.sessions[1]!.close = async () => {
+		destinationClosed = true;
+		await close();
+	};
+	const call = source.callNativeWithDestination(destination, (operation, nativeDestination) => {
+		assert.strictEqual(nativeDestination, f.sessions[1]);
+		operation.startClick("opaque-drag-stimulus");
+	});
+	await op.started.promise;
+	op.result.resolve(action);
+	await call.result;
+	const closing = destination.close();
+	await nextTurn();
+	assert.equal(op.cancellations, 1);
+	assert.equal(destinationClosed, false);
+	assert.equal(source.revoked, false);
+	op.terminal.resolve({ ...receipt, cancelled: true, inputCommitted: true });
+	await call.terminal;
+	await closing;
+	assert.equal(destinationClosed, true);
+	assert.equal(f.events.filter((event) => event === "allocate").length, 1);
+	await f.runtime.close();
+});
+
+test("destination close before queued allocation cancels a dual-target call without a receipt", async () => {
+	const f = fixture();
+	const source = f.runtime.openSession();
+	const destination = f.runtime.openSession();
+	const call = source.callNativeWithDestination(destination, () => assert.fail("start after destination close"));
+	const closing = destination.close();
+	await assert.rejects(call.result, { name: "AbortError" });
+	assert.equal(await call.receipt, undefined);
+	await closing;
+	assert.equal(f.events.includes("allocate"), false);
+	assert.equal(source.revoked, false);
+	await f.runtime.close();
+});
+
+test("destination close reentered during allocation retains the inert operation through drain", async () => {
+	const f = fixture();
+	const source = f.runtime.openSession();
+	const destination = f.runtime.openSession();
+	const op = f.operation();
+	const allocate = f.sessions[0]!.newOperation;
+	let closing: Promise<void> | undefined;
+	f.sessions[0]!.newOperation = () => {
+		closing = destination.close();
+		assert.equal(op.cancellations, 0);
+		return allocate();
+	};
+	const call = source.callNativeWithDestination(destination, () => assert.fail("inert operation started"));
+	await nextTurn();
+	assert.ok(closing);
+	assert.equal(op.cancellations, 1);
+	assert.equal(f.events.includes("session close"), false);
+	op.result.reject(new Error("native cancelled before start"));
+	await assert.rejects(call.result, /cancelled before start/);
+	op.terminal.resolve({ ...receipt, cancelled: true });
+	await closing;
+	await call.terminal;
+	await f.runtime.close();
+});
+
+test("either endpoint ancestor revokes a dual-target call exactly once", async () => {
+	for (const endpoint of ["source", "destination"] as const) {
+		const f = fixture();
+		const sourceParent = f.runtime.openSession();
+		const destinationParent = f.runtime.openSession();
+		const source = f.runtime.openSession(sourceParent);
+		const destination = f.runtime.openSession(destinationParent);
+		const op = f.operation();
+		const call = source.callNativeWithDestination(destination, (operation) => operation.startClick("drag"));
+		await op.started.promise;
+		(endpoint === "source" ? sourceParent : destinationParent).revoke();
+		assert.equal(op.cancellations, 1);
+		op.result.resolve(action);
+		op.terminal.resolve({ ...receipt, cancelled: true, inputCommitted: true });
+		await call.terminal;
+		await f.runtime.close();
+		assert.equal(op.cancellations, 1);
+	}
+});
+
+test("foreign, forged and identical destinations never reach native allocation", async () => {
+	const f = fixture();
+	const other = fixture();
+	const source = f.runtime.openSession();
+	const destination = f.runtime.openSession();
+	const foreign = other.runtime.openSession();
+	const forged = new ControlledComputerSession(f.runtime, f.sessions[1]!);
+	for (const invalid of [source, foreign, forged]) {
+		const call = source.callNativeWithDestination(invalid, () => assert.fail("foreign start"));
+		await assert.rejects(call.result, /foreign, identical or unowned/);
+		assert.equal(await call.receipt, undefined);
+	}
+	assert.equal(f.events.includes("allocate"), false);
+	assert.equal(destination.revoked, false);
+	assert.equal(f.runtime.quarantined, false);
+	await Promise.all([f.runtime.close(), other.runtime.close()]);
+});
+
+test("dual-target terminal failure retains both endpoints and never invents close", async () => {
+	const f = fixture();
+	const source = f.runtime.openSession();
+	const destination = f.runtime.openSession();
+	const op = f.operation();
+	const call = source.callNativeWithDestination(destination, (operation) => operation.startClick("drag"));
+	await op.started.promise;
+	const failure = new Error("dual-target terminal unavailable");
+	op.terminal.reject(failure);
+	await assert.rejects(call.terminal, (error: unknown) => error === failure);
+	await assert.rejects(source.close(), (error: unknown) => error === failure);
+	await assert.rejects(destination.close(), (error: unknown) => error === failure);
+	assert.equal(op.cancellations, 1);
+	assert.equal(f.events.includes("session close"), false);
+	assert.equal(f.events.includes("destroy"), false);
+});
+
+test("terminal health may close destination after both pending registrations retire", async () => {
+	const f = fixture();
+	const source = f.runtime.openSession();
+	const destination = f.runtime.openSession();
+	let closing: Promise<void> | undefined;
+	Object.assign(f.owned, {
+		onTerminal: () => {
+			closing = destination.close();
+		},
+	});
+	const op = f.operation();
+	const call = source.callNativeWithDestination(destination, (operation) => operation.startClick("drag"));
+	await op.started.promise;
+	op.terminal.resolve(receipt);
+	await call.terminal;
+	assert.ok(closing);
+	await closing;
+	assert.equal(op.cancellations, 0);
+	op.result.resolve(action);
+	assert.strictEqual(await call.result, action);
+	await f.runtime.close();
+});
