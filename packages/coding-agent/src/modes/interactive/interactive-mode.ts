@@ -1476,9 +1476,10 @@ export class InteractiveMode {
 				}
 			});
 
-		// Check tmux keyboard setup asynchronously
+		// Check tmux keyboard setup asynchronously; show each unique warning only once
 		this.checkTmuxKeyboardSetup().then((warning) => {
-			if (warning) {
+			if (warning && this.settingsManager.getTmuxKeyboardWarningShown() !== warning) {
+				this.settingsManager.setTmuxKeyboardWarningShown(warning);
 				this.showWarning(warning);
 			}
 		});

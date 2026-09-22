@@ -90,6 +90,8 @@ export type PackageSource =
 
 export interface Settings {
 	lastChangelogVersion?: string;
+	/** Last tmux keyboard setup warning already shown; suppresses repeats of the same message. */
+	tmuxKeyboardWarningShown?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
@@ -684,6 +686,16 @@ export class SettingsManager {
 	setLastChangelogVersion(version: string): void {
 		this.globalSettings.lastChangelogVersion = version;
 		this.markModified("lastChangelogVersion");
+		this.save();
+	}
+
+	getTmuxKeyboardWarningShown(): string | undefined {
+		return this.settings.tmuxKeyboardWarningShown;
+	}
+
+	setTmuxKeyboardWarningShown(warning: string): void {
+		this.globalSettings.tmuxKeyboardWarningShown = warning;
+		this.markModified("tmuxKeyboardWarningShown");
 		this.save();
 	}
 
