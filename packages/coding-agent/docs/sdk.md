@@ -552,6 +552,73 @@ const { session } = await createAgentSession({
 });
 ```
 
+#### Optional native Computer
+
+Computer is an explicit capability, not a default coding tool. It requires the
+matching optional `computer/` assets and the qualified Node 24.15.0/macOS arm64
+runtime. There is no runtime build/download or silent non-native fallback.
+See [native packaging](../../../native/computer/PACKAGING.md) and the
+[desktop contract](../../../native/computer/desktop/README.md) for installation
+and qualification limits.
+
+The CLI enables it with `pi --computer`. The default desktop route uses existing
+applications and prefers background input, with automatic foreground fallback
+when required. Foreground work can interrupt the user; physical input is not
+suppressed. `--computer-browser <bundle>` explicitly selects the separate isolated
+browser profile; it is not required to use an existing browser window.
+
+```typescript
+import {
+  type AgentSession,
+  createAgentSession,
+  createNativeComputerFeature,
+} from "@earendil-works/pi-coding-agent";
+
+const computer = createNativeComputerFeature();
+let session: AgentSession | undefined;
+try {
+  ({ session } = await createAgentSession({
+    computer: computer.binding,
+    tools: ["computer"],
+  }));
+  await session.prompt("Inspect the application window for my task.");
+} finally {
+  try {
+    await session?.shutdown();
+  } finally {
+    await computer.close();
+  }
+}
+```
+
+Feature construction is native-inert; the first Computer operation starts the
+native host and its owned cursor helper. Session/child shutdown releases that
+capability, not the shared host. The embedding owner must await `computer.close()`
+after all sessions finish. `AgentSessionRuntime` embeddings can provide
+`closeComputerHost: () => computer.close()` for final runtime disposal. Do not
+replace awaited shutdown with synchronous `dispose()` or a timeout.
+
+`excludeTools: ["computer"]` always excludes it. `noTools: "all"` suppresses it
+unless an explicit `tools` allowlist includes it, following the existing tool
+policy. Removing Computer revokes its current capability; reload, history,
+compaction and child creation do not restore removed authority. Image/element
+references require current model-visible evidence and cannot be recovered from
+old messages.
+
+The default emergency chord is `ctrl+alt+escape`, read from
+`app.computer.emergencyStop` in trusted application keybindings. SDK callers can
+supply `emergencyChord: "super+shift+a"`. It is fixed for that feature's lifetime;
+see [keybindings](keybindings.md#application). Emergency stop or renderer failure
+latches the whole feature, including descendants. Create an explicitly new
+feature only after the old one has genuinely closed. Never clear a dirty native
+lease or replay an action whose effect is unknown.
+
+Full Access needs no per-action capability manifest. A trusted embedding may
+optionally supply an absolute `manifestPath` to restrict authority. OS
+Accessibility/Screen Recording permissions still apply. Delivery, native
+termination and confirmed application state are distinct facts in tool results;
+a successful API return alone is not business success.
+
 #### Bash contract and migration
 
 Bash accepts `{ command: string, cwd?: string, timeout?: number }`. `cwd` defaults to the session working directory; `timeout` is in seconds with no default deadline. Working-directory resolution and validation use the execution environment and applicable workspace policy, or the native capture adapter for host-specific paths. Custom `BashOperations` owns its path semantics: without an explicit workspace policy, its `cwd` is passed through rather than expanded using the local home directory or path separators. A working directory is not a sandbox.

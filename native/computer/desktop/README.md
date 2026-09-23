@@ -1,8 +1,49 @@
 # Optional desktop bridge
 
 Explicit Node/macOS activation and packaging are documented in [PACKAGING.md](../PACKAGING.md).
-The loader selects the qualified P06 fast profile; historical P04 loaders remain separate.
 Status authority: `docs/tasks/2026-09-18-computer-native-implementation-task.md`.
+
+## General Computer contract
+
+The current source uses host interface 2, genuine generated General Computer
+bindings, and an owned renderer with lifetime protocol 3. **Root production pins
+still identify the historical P06 build.** Use a matching qualified installation;
+do not combine the new bridge with old binaries. Final promotion/delivery is
+tracked only by the task authority.
+
+One `computer` tool provides window discovery/selection, bounded semantic
+observation, exact-window screenshots, information-dependent action segments,
+and explicit two-window drag targeting. Segments include Unicode text, field
+replacement, focus, keys/chords and paired holds/releases, pointer movement,
+clicks, dragging, two-axis scrolling, and window actions. The closed schemas in
+`contracts.ts`, `segment-contracts.ts` and `drag-contracts.ts` define accepted
+requests; this is not an arbitrary script interface.
+
+The desktop route works with existing applications/browser profiles. Native
+routing prefers background delivery and automatically prepares or uses foreground
+delivery when needed; results report the actual route. Foreground work may
+interrupt the user. Physical input is not suppressed. The optional isolated
+browser profile remains separate, not a prerequisite for existing-browser use.
+
+An action dispatch is not business success. Segment results separate dispatched
+prefixes, condition confirmation, unknown effects and remaining recovery budget.
+Fresh evidence is required across relevant changes; unknown input is never
+blindly replayed. Recovery stays in the original Agent loop and shared scheduler,
+with a bounded native budget, not a second planner or recording/replay system.
+
+Only current model-visible tool results grant image/element refs. Filtering,
+compaction, renewal and capability removal invalidate old evidence. Children get
+fresh bindings sharing the original host/scheduler; disposing a child does not
+close that host. Final owners must await feature close. Missing or failed
+rendering and emergency stop latch the feature, revoke descendants and stop the
+original loop without fabricating terminal settlement. See
+[SDK ownership](../../../packages/coding-agent/docs/sdk.md#optional-native-computer)
+and [emergency keybindings](../../../packages/coding-agent/docs/keybindings.md#application).
+
+## Historical P06 bridge and qualification
+
+The following records describe the narrower P06 interface, not the General
+contract above. Historical P04 loaders remain separate.
 
 - `loadDesktopSdk()` explicitly loads the separately pinned P06 candidate. Importing the bridge does not load native code. P04 loaders/pins remain unchanged.
 - A trusted host constructs `ControlledComputerRuntime` with a genuine `openDiscoverySession` factory and passes its existing `ComputerSession` to `createDesktopBinding`. Metadata selection does not grant native content/input authorization.
