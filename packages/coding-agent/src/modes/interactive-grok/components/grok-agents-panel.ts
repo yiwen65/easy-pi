@@ -90,6 +90,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 	private readonly input = new Input();
 	private readonly cancellation = new AbortController();
 	private selected = 0;
+	private listStart = 0;
 	private watching = false;
 	private composing: "send" | "followup" | "interrupt" | undefined;
 	private scroll = 0;
@@ -257,6 +258,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 		width: number,
 		now: number,
 		hint: (id: Parameters<KeybindingsManager["getKeys"]>[0]) => string,
+		room: number,
 	): string[] {
 		const th = this.theme;
 		const rows = this.monitor.list();
@@ -264,19 +266,21 @@ export class GrokAgentsPanel implements Component, Focusable {
 		const running = rows.filter((row) => row.state === "running").length;
 		const idle = rows.filter((row) => row.state === "idle" || row.state === "pending").length;
 		const settled = rows.length - running - idle;
+		if (room <= 0) return [];
 		const lines: string[] = [];
-		lines.push(
-			th.fg(
-				"dim",
-				`${running} running · ${idle} idle · ${settled} settled — ${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} inspect · ${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt`,
-			),
-		);
+		if (room > 1)
+			lines.push(
+				th.fg(
+					"dim",
+					`${running} running · ${idle} idle · ${settled} settled — ${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} inspect · ${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt`,
+				),
+			);
 		if (rows.length === 1) {
 			lines.push("");
 			lines.push(th.fg("muted", "No child agents yet. Ask root to delegate with spawn_agent."));
 		}
 		const compact = width < COMPACT_WIDTH;
-		for (const [index, row] of rows.entries()) {
+		const entries = rows.map((row, index) => {
 			const presentation = STATE_PRESENTATION[row.state];
 			const selectedRow = index === this.selected;
 			const marker = selectedRow ? "›" : " ";
@@ -285,11 +289,22 @@ export class GrokAgentsPanel implements Component, Focusable {
 			const text = compact
 				? `${marker} ${presentation.icon} ${row.task_name} ${presentation.word} ${time}`
 				: `${marker} ${presentation.icon} ${pad(row.task_name, 22)} ${pad(presentation.word, 12)} ${pad(time, 12)} ${suffix}`;
-			lines.push(th.fg(selectedRow ? "accent" : presentation.color, text));
+			const entry = [th.fg(selectedRow ? "accent" : presentation.color, text)];
 			const summary = row.resultSummary ?? row.objective;
-			if (summary && row.task_name !== "/root") {
-				lines.push(th.fg("dim", `    ${oneLine(summary)}`));
-			}
+			if (summary && row.task_name !== "/root") entry.push(th.fg("dim", `    ${oneLine(summary)}`));
+			return entry;
+		});
+		const rowRoom = room - lines.length;
+		if (rowRoom <= 0) return lines.slice(0, room);
+		this.listStart = Math.min(this.listStart, this.selected);
+		let preceding = entries.slice(this.listStart, this.selected).reduce((sum, entry) => sum + entry.length, 0);
+		const selectedHeight = Math.min(entries[this.selected]?.length ?? 1, rowRoom);
+		while (preceding + selectedHeight > rowRoom && this.listStart < this.selected) {
+			preceding -= entries[this.listStart].length;
+			this.listStart++;
+		}
+		for (let index = this.listStart; index < entries.length && lines.length < room; index++) {
+			lines.push(...entries[index].slice(0, room - lines.length));
 		}
 		return lines;
 	}
@@ -311,8 +326,30 @@ export class GrokAgentsPanel implements Component, Focusable {
 			th.fg("accent", th.bold("Agents — shared workspace")),
 			th.fg("warning", `${hint("tui.select.cancel")}: ${cancelTarget} · Main editor inactive`),
 		];
+		const footer: string[] = [];
+		if (this.composing) {
+			const target = this.path();
+			footer.push(
+				th.fg(
+					"warning",
+					this.composing === "interrupt"
+						? `Interrupt ${target}? Its current turn stops; history is kept. ${hint("tui.select.confirm")} confirm · ${hint("tui.select.cancel")} cancel`
+						: this.composing === "send"
+							? `Message → ${target} (won't start an idle agent)`
+							: `New task → ${target} (starts if idle, keeps context) — JSON: {task, tools?}`,
+				),
+			);
+			if (this.composing !== "interrupt") footer.push(...this.input.render(contentWidth));
+		}
+		footer.push(...notice.map((line) => th.fg(this.noticeError ? "error" : "success", line)));
 		if (!this.watching) {
-			lines.push(...this.renderList(contentWidth, Date.now(), hint));
+			// On short terminals keep the selection and essential action lines ahead of
+			// extra notice text and decorative headers. The draft itself stays untouched.
+			if (notice.length > 1 && footer.length + 1 > maxHeight) footer.pop();
+			while (lines.length > 0 && lines.length + footer.length + 1 > maxHeight) lines.pop();
+			lines.push(
+				...this.renderList(contentWidth, Date.now(), hint, Math.max(0, maxHeight - lines.length - footer.length)),
+			);
 		} else {
 			const view = this.monitor.view(this.path());
 			const presentation = STATE_PRESENTATION[view.state];
@@ -346,7 +383,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 			const body = wrapTextWithAnsi(safe(view.text || "Waiting for session activity…"), contentWidth).map((line) =>
 				roleLine(line, th),
 			);
-			const room = Math.max(1, maxHeight - lines.length - 1 - (this.composing ? 2 : 0) - notice.length);
+			const room = Math.max(1, maxHeight - lines.length - 1 - footer.length);
 			this.scroll = Math.min(this.scroll, Math.max(0, body.length - room));
 			if (this.follow) this.scroll = 0;
 			const end = Math.max(room, body.length - this.scroll);
@@ -361,21 +398,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 			lines.push(th.fg("dim", divider));
 			lines.push(...body.slice(top, end));
 		}
-		if (this.composing) {
-			const target = this.path();
-			lines.push(
-				th.fg(
-					"warning",
-					this.composing === "interrupt"
-						? `Interrupt ${target}? Its current turn stops; history is kept. ${hint("tui.select.confirm")} confirm · ${hint("tui.select.cancel")} cancel`
-						: this.composing === "send"
-							? `Message → ${target} (won't start an idle agent)`
-							: `New task → ${target} (starts if idle, keeps context) — JSON: {task, tools?}`,
-				),
-			);
-			if (this.composing !== "interrupt") lines.push(...this.input.render(contentWidth));
-		}
-		lines.push(...notice.map((line) => th.fg(this.noticeError ? "error" : "success", line)));
+		lines.push(...footer);
 		// Fill the viewport, including empty rows: this is a focused modal, not
 		// transcript output. Never leave a usable-looking root editor underneath.
 		const body = Array.from({ length: maxHeight }, (_, index) => {

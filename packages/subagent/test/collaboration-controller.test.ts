@@ -79,7 +79,10 @@ test("reserves duplicate names and execution slots atomically across concurrent 
 	);
 	expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(capacity);
 	expect(outcomes[1]).toMatchObject({ status: "rejected", reason: { code: "busy" } });
-	expect(outcomes.at(-1)).toMatchObject({ status: "rejected", reason: { code: "limit_reached" } });
+	expect(outcomes.at(-1)).toMatchObject({
+		status: "rejected",
+		reason: { code: "limit_reached", reason: "execution_slots_full" },
+	});
 	expect(f.runs.sort()).toEqual(names.slice(0, capacity).sort());
 	expect(f.controller.list(caller)).toHaveLength(capacity);
 	await f.controller.interrupt(caller, names[0]);
@@ -183,7 +186,10 @@ test("completed agents still count toward the total limit and preserve max effor
 		f.finishes.get(`/root/a${index}`)?.({ status: "completed", text: "done" });
 		await f.controller.settled();
 	}
-	await expect(f.controller.spawn(caller, "over", "task", model)).rejects.toThrow(/agent limit/);
+	await expect(f.controller.spawn(caller, "over", "task", model)).rejects.toMatchObject({
+		code: "limit_reached",
+		reason: "team_agents_full",
+	});
 	expect(f.store.read().agents.every((agent) => agent.model.thinkingLevel === "max")).toBe(true);
 });
 
@@ -392,8 +398,14 @@ test("completion reserves mailbox capacity before admission, so a full inbox can
 	const f = fixture();
 	await f.controller.spawn(caller, "a", "task", model);
 	for (let index = 0; index < 63; index++) await f.controller.send(caller, "/root", `message ${index}`);
-	await expect(f.controller.send(caller, "/root", "overflow")).rejects.toThrow(/full/);
-	await expect(f.controller.spawn(caller, "b", "task", model)).rejects.toThrow(/full/);
+	await expect(f.controller.send(caller, "/root", "overflow")).rejects.toMatchObject({
+		code: "limit_reached",
+		reason: "mailbox_full",
+	});
+	await expect(f.controller.spawn(caller, "b", "task", model)).rejects.toMatchObject({
+		code: "limit_reached",
+		reason: "mailbox_full",
+	});
 	f.finishes.get("/root/a")?.({ status: "completed", text: "retained result" });
 	await f.controller.settled();
 	expect(f.controller.pending(caller)).toHaveLength(64);
@@ -902,6 +914,32 @@ test("close retires a settled descendant, releases its slot and session, and nev
 	await f.controller.spawn(caller, "extra", "task", model);
 	await expect(f.controller.spawn(caller, "a5", "task", model)).rejects.toThrow(/already exists/);
 	await expect(f.controller.spawn(caller, "another", "task", model)).rejects.toThrow(/agent limit/);
+});
+
+test("retained history exhaustion rejects a new child without poisoning the team", async () => {
+	const f = fixture();
+	const snapshot = f.store.read();
+	for (let index = 0; index < COLLABORATION_LIMITS.maxRetainedAgents - 1; index++) {
+		snapshot.agents.push({
+			id: randomUUID(),
+			path: `/root/retired${index}`,
+			parent: "/root",
+			status: "closed",
+			model,
+			turnId: randomUUID(),
+		});
+	}
+	f.store.commit(snapshot);
+	await f.controller.spawn(caller, "last", "task", model);
+	f.finishes.get("/root/last")?.({ status: "completed", text: "done" });
+	await f.controller.settled();
+	await f.controller.close(caller, "last");
+	await expect(f.controller.spawn(caller, "extra", "task", model)).rejects.toMatchObject({
+		code: "limit_reached",
+		reason: "team_history_full",
+	});
+	expect(await f.controller.send(caller, "/root", "team still works")).toEqual(expect.any(String));
+	expect(f.store.read().agents).toHaveLength(COLLABORATION_LIMITS.maxRetainedAgents);
 });
 
 test("close requires a settled child and stays idempotent and terminal", async () => {

@@ -251,7 +251,13 @@ export class CollaborationController {
 				throw new CollaborationError("busy", "Agent name already exists", undefined, [taskName]);
 			// Closed records are retained for audit but free their team slot; names are never reused.
 			if (snapshot.agents.filter((agent) => agent.status !== "closed").length >= COLLABORATION_LIMITS.maxAgents - 1)
-				throw new CollaborationError("limit_reached", "Team agent limit reached");
+				throw new CollaborationError("limit_reached", "Team agent limit reached", "team_agents_full");
+			if (snapshot.agents.length >= COLLABORATION_LIMITS.maxRetainedAgents)
+				throw new CollaborationError(
+					"limit_reached",
+					"Team retained-agent history limit reached",
+					"team_history_full",
+				);
 			this.checkCapacity();
 			this.checkMailboxCapacity(snapshot, caller.agentPath);
 			const record: StoredCollaborationAgent = {
@@ -354,7 +360,11 @@ export class CollaborationController {
 		const pending = (snapshot.messages ?? []).filter((message) => message.to === target).length;
 		const reserved = snapshot.agents.filter((agent) => agent.parent === target && agent.completionPending).length;
 		if (pending + reserved >= COLLABORATION_LIMITS.maxPendingMessages)
-			throw new CollaborationError("limit_reached", "Mailbox is full, including reserved completion notifications");
+			throw new CollaborationError(
+				"limit_reached",
+				"Mailbox is full, including reserved completion notifications",
+				"mailbox_full",
+			);
 	}
 
 	send(caller: ChildSessionIdentity, target: string, text: string, signal?: AbortSignal): Promise<string> {
@@ -425,7 +435,7 @@ export class CollaborationController {
 
 	private checkCapacity(): void {
 		if (new Set([...this.active.keys(), ...this.loading.keys()]).size >= COLLABORATION_LIMITS.maxActiveSessions - 1)
-			throw new CollaborationError("limit_reached", "Team execution limit reached");
+			throw new CollaborationError("limit_reached", "Team execution limit reached", "execution_slots_full");
 	}
 
 	/** A reserved turn owns capacity until startup settles, even if its host ignores cancellation. */
@@ -491,7 +501,12 @@ export class CollaborationController {
 			const idle = [...this.sessions].find(
 				([path, session]) => !this.active.has(path) && !this.loading.has(path) && session.sessionFile,
 			);
-			if (!idle) throw new CollaborationError("limit_reached", "No idle child session can be unloaded");
+			if (!idle)
+				throw new CollaborationError(
+					"limit_reached",
+					"No idle child session can be unloaded",
+					"loaded_sessions_full",
+				);
 			await idle[1].dispose();
 			this.sessions.delete(idle[0]);
 			this.changed();
