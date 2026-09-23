@@ -74,6 +74,13 @@ func selfTest() throws {
     let selfTarget = third.replacingOccurrences(of: "\"target_pid\":42", with: "\"target_pid\":\(ProcessInfo.processInfo.processIdentifier)")
     try expect(!targetSwitch.ingest(Data(selfTarget.utf8), now: 3) && targetSwitch.lastSequence == 2)
 
+    for level: Int64 in [0, 3, 8, 24, 101, 1000, Int64(Int32.min), Int64(Int32.max)] {
+        try expect(Geometry.cursorLevel(level) == Int(level))
+    }
+    for level in [Int64.min, Int64(Int32.min) - 1, Int64(Int32.max) + 1, Int64.max] {
+        try expect(Geometry.cursorLevel(level) == nil)
+    }
+
     // Primary is 1440x900 points. Left display has negative X; upper display
     // has negative Quartz Y. These are independent hand-computed expectations.
     let left = CGRect(x: -1800, y: 100, width: 700, height: 500)

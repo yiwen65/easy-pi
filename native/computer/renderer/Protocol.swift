@@ -151,6 +151,11 @@ struct RenderState {
 }
 
 enum Geometry {
+    // WindowServer layers are signed 32-bit levels, not model-provided values.
+    static func cursorLevel(_ layer: Int64) -> Int? {
+        Int32(exactly: layer).map(Int.init)
+    }
+
     // Quartz global points use primary-display top-left; AppKit uses its
     // bottom-left. Never use NSScreen.main (it follows keyboard focus), total
     // desktop height, screenshot pixels, or a per-display scale multiplier.

@@ -182,16 +182,18 @@ AppKit runs on the main thread with accessory activation policy; it never
 calls application activation. Prohibited policy forbids windows and was rejected
 by the real GUI startup test, despite passing headless tests. The panel is
 borderless, nonactivating, cannot become key/main, ignores mouse events, has no
-shadow and stays at normal window level. Drawing is a small vector view and
-adapts to AppKit backing scale; no screenshot-to-point scale guesses.
+shadow and starts at normal window level. Before ordering it matches the exact
+target's current WindowServer layer, including independently selected menus and
+other high-layer application surfaces. Drawing is a small vector view and adapts
+to AppKit backing scale; no screenshot-to-point scale guesses.
 
 Each render tick re-reads onscreen window metadata and display frames. Exact
-PID/window ID must match a visible normal-layer window. Conversion uses the
+PID/window ID must match a visible window with a signed32-bit layer. Conversion uses the
 primary screen's top edge: `appKitY = primaryTop - (windowQuartzY + localY)`;
 X is `windowQuartzX + localX`. This handles negative monitor origins and window
 movement without using the focus-following `NSScreen.main`. The panel frame is
 the cursor footprint intersected with target bounds; drawing also clips to the
-display union. Invisible/minimized/missing/wrong-PID/unsupported-layer targets
+display union. Invisible/minimized/missing/wrong-PID/unrepresentable-layer targets
 and off-display points hide the panel.
 
 The panel orders immediately above the exact target window, never globally

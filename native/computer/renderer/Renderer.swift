@@ -148,7 +148,8 @@ final class Renderer: NSObject, NSApplicationDelegate {
               let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               let targetIndex = windows.firstIndex(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == cue.windowID }),
               let pid = windows[targetIndex][kCGWindowOwnerPID as String] as? NSNumber, pid.int32Value == cue.targetPID,
-              let layer = windows[targetIndex][kCGWindowLayer as String] as? NSNumber, layer.intValue == 0,
+              let layer = windows[targetIndex][kCGWindowLayer as String] as? NSNumber,
+              let level = Geometry.cursorLevel(layer.int64Value),
               let alpha = windows[targetIndex][kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue > 0,
               let dictionary = windows[targetIndex][kCGWindowBounds as String] as? [String: Double],
               let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
@@ -170,6 +171,9 @@ final class Renderer: NSObject, NSApplicationDelegate {
                   let otherBounds = CGRect(dictionaryRepresentation: otherDictionary as CFDictionary) else { panel.orderOut(nil); return }
             if Geometry.appKitRect(otherBounds, primaryTop: primary.frame.maxY).intersects(footprint) { panel.orderOut(nil); return }
         }
+        // Match this exact target's layer, then retain relative ordering and
+        // occlusion checks. Never raise the cue globally above other surfaces.
+        if panel.level.rawValue != level { panel.level = NSWindow.Level(rawValue: level) }
         panel.setFrame(footprint, display: false)
         cursor.tip = CGPoint(x: point.x - footprint.minX, y: point.y - footprint.minY)
         cursor.pressed = state.pressed
