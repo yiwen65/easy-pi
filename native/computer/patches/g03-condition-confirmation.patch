@@ -1,0 +1,148 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -1,4 +1,5 @@
+ //! Native segment execution under one tracked worker and one native scheduler.
++mod confirmation;
+ mod focus;
+ #[cfg(test)]
+ mod order_tests;
+@@ -792,16 +793,17 @@
+             }
+         }
+         drop(events); // release obligations precede postcondition and terminal
+-        let mut condition = self.condition(&segment.postcondition);
+-        // Read only the requested condition, never re-observe the whole tree
+-        // after every known action. A visual predicate always exits to Agent.
+-        for _ in 0..2 {
+-            if condition != Some(false) || self.operation.checkpoint().is_err() {
+-                break;
+-            }
+-            std::thread::sleep(Duration::from_millis(20));
+-            condition = self.condition(&segment.postcondition);
+-        }
++        let condition = confirmation::wait(
++            actions.len() == segment.actions.len() && actions.iter().all(|row| row.complete),
++            || self.condition(&segment.postcondition),
++            || {
++                if self.operation.checkpoint().is_err() {
++                    return false;
++                }
++                std::thread::sleep(Duration::from_millis(20));
++                self.operation.checkpoint().is_ok()
++            },
++        );
+         if self
+             .operation
+             .session
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/confirmation.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/confirmation.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment/confirmation.rs
+@@ -0,0 +1,106 @@
++//! Read-only condition confirmation. No input dispatch or snapshot replacement.
++pub(super) fn wait(
++    complete: bool,
++    mut read: impl FnMut() -> Option<bool>,
++    mut pause: impl FnMut() -> bool,
++) -> Option<bool> {
++    let mut condition = read();
++    // A paused action prefix needs new information, not a wait for work that
++    // was never sent. Unknown (including visual-only) also returns immediately.
++    // The caller's existing operation deadline/cancellation bounds each pause.
++    while complete && condition == Some(false) && pause() {
++        condition = read();
++    }
++    condition
++}
++
++#[cfg(test)]
++mod tests {
++    use super::wait;
++    use std::cell::Cell;
++
++    #[test]
++    fn controlled_confirmation_waits_for_actual_delayed_value() {
++        let elapsed = Cell::new(0);
++        let reads = Cell::new(0);
++        let result = wait(
++            true,
++            || {
++                reads.set(reads.get() + 1);
++                Some(elapsed.get() >= 750)
++            },
++            || {
++                elapsed.set(elapsed.get() + 20);
++                elapsed.get() < 30_000
++            },
++        );
++        assert_eq!(result, Some(true));
++        assert_eq!(elapsed.get(), 760);
++        assert_eq!(reads.get(), 39);
++    }
++
++    #[test]
++    fn controlled_confirmation_true_and_unknown_never_wait() {
++        for condition in [Some(true), None] {
++            assert_eq!(
++                wait(true, || condition, || panic!("unneeded wait")),
++                condition
++            );
++        }
++    }
++
++    #[test]
++    fn controlled_confirmation_stops_at_shared_budget_without_false_success() {
++        let pauses = Cell::new(0);
++        assert_eq!(
++            wait(
++                true,
++                || Some(false),
++                || {
++                    pauses.set(pauses.get() + 1);
++                    pauses.get() < 5
++                }
++            ),
++            Some(false)
++        );
++        assert_eq!(pauses.get(), 5);
++    }
++
++    #[test]
++    fn controlled_confirmation_unknown_after_cancel_or_target_loss_stops_reads() {
++        let live = Cell::new(true);
++        let reads = Cell::new(0);
++        assert_eq!(
++            wait(
++                true,
++                || {
++                    reads.set(reads.get() + 1);
++                    live.get().then_some(false)
++                },
++                || {
++                    assert!(live.replace(false), "waited again after loss");
++                    true
++                }
++            ),
++            None
++        );
++        assert_eq!(reads.get(), 2);
++    }
++
++    #[test]
++    fn controlled_confirmation_incomplete_actions_return_for_new_evidence() {
++        assert_eq!(
++            wait(
++                false,
++                || Some(false),
++                || panic!("tail action was not dispatched")
++            ),
++            Some(false)
++        );
++        // A condition can be satisfied even when the action prefix is unfinished.
++        assert_eq!(
++            wait(false, || Some(true), || panic!("unneeded wait")),
++            Some(true)
++        );
++    }
++}

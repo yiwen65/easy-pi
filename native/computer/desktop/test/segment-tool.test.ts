@@ -250,6 +250,35 @@ test(
 );
 
 test(
+	"satisfied condition with an unfinished prefix still publishes fresh dependency evidence",
+	{ skip: !enabled },
+	async () => {
+		const f = fixture({ mode: "confirmed_boundary" });
+		try {
+			await f.setup();
+			const result = await f.call({
+				...segment(),
+				actions: [
+					{ op: "key", key: "a" },
+					{ op: "fill", target: { ref: "field" }, text: "remaining" },
+				],
+				expected: { kind: "value", target: { ref: "field" }, value: "a" },
+			});
+			assert.match(JSON.stringify(result.details), /"status":"confirmed"/);
+			assert.match(JSON.stringify(result.details), /"firstUnfinishedAction":1/);
+			assert.match(JSON.stringify(result.details), /"observationRef":"snapshot-2"/);
+			assert.equal(f.events.filter((event) => event === "observe").length, 2);
+			assert.ok(f.events.indexOf("segment:terminal") < f.events.lastIndexOf("observe"));
+			assert.ok(!f.events.includes("capture"));
+			await assert.rejects(f.call(segment()), /stale_observation/);
+			assert.equal(f.segments.length, 1);
+		} finally {
+			await f.host.close();
+		}
+	},
+);
+
+test(
 	"native-confirmed local condition needs no hidden read and admits genuinely subsequent work",
 	{ skip: !enabled },
 	async () => {

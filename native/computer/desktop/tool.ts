@@ -364,7 +364,9 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 							text: `Segment facts: ${JSON.stringify(details)}. Delivery is not business success. ${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation. " : ""}Do not replay uncertain input.`,
 						},
 					];
-					if (details.status !== "confirmed" && details.status !== "cancelled")
+					// Condition truth does not imply every action was delivered. A dependency
+					// boundary still needs a fresh view before choosing the remaining work.
+					if (details.status !== "cancelled" && (details.status !== "confirmed" || incomplete))
 						return freshEvidence(details, content);
 					return { content, details };
 				}

@@ -5,7 +5,7 @@
 - Mode: execute
 - Overall status: in_progress
 - Source: /Users/w/Projects/easy-pi/docs/EASY_PI_COMPUTER_IMPLEMENTATION_PLAN.md；P00–P08限定交付已完成；2026-09-20用户确认通用Computer修订需求并要求“制定实现方案并更新 task 文档”。
-- Current scope: G00–G07通用化执行；T-042–T-048、T-057–T-073 done，T-049 in_progress/coordinator，T-050–T-056按依赖推进。远控共存按用户确认验收；本机直连硬件未测单列。coordinator独占生产native/GUI；没有活跃worker，继续分段确认、恢复与最终交付门禁。用户于方案后明确完全授权并要求自主完成及验证，不停在计划/失败尝试。
+- Current scope: G00–G07通用化执行；T-042–T-048、T-057–T-073 done，T-049/T-074 in_progress/coordinator，T-050–T-056按依赖推进。远控共存按用户确认验收；本机直连硬件未测单列。coordinator独占生产native/GUI；没有活跃worker，继续分段确认、恢复与最终交付门禁。用户于方案后明确完全授权并要求自主完成及验证，不停在计划/失败尝试。
 
 <!-- task-doc-section:background-goal -->
 ## Background and goal
@@ -151,7 +151,7 @@
 
 - G00 T-042（基线/可行性）→ G01 T-043（契约）、T-044（精简策略）→ G02 T-045（定位/既有应用）→ T-046（文本/键盘）→ T-047（鼠标/窗口）→ T-048（后台/前台路由）→ G03 T-049（依赖分段/确认）→ T-050（恢复）→ G05 T-052（产品闭环）→ G06 T-053（真实工作流）→ T-054（正式性能）→ G07 T-055（独立交付）→ T-056（最终验收）。
 - G04 T-051（虚拟鼠标）依赖T-043/T-048，汇入T-052；逻辑上可与T-049/T-050的纯TS测试准备分开，但实际native源、Cargo feature、ABI生成、helper构建由同一owner串行；没有共享输出的并行构建。
-- T-042–T-048已done；T-049由coordinator继续，T-050–T-056按依赖pending；T-070机制/T-072双目标安装/T-071输入来源区分与真实远控共存完成。T-071没有本机硬件正向声明，该未测项按用户确认不阻塞交付。已使用两个真实Codex编码子代理（只读native审计、限定TS契约实现），均已收回并复核；不是产品GUI推理请求。
+- T-042–T-048已done；T-049由coordinator继续，新增T-074为其目标局部模态门禁；T-050–T-056按依赖pending；T-070机制/T-072双目标安装/T-071输入来源区分与真实远控共存完成。T-071没有本机硬件正向声明，该未测项按用户确认不阻塞交付。已使用两个真实Codex编码子代理（只读native审计、限定TS契约实现），均已收回并复核；不是产品GUI推理请求。
 - writer约束：coordinator独占本文件和最终集成；native source/patch/锁/生成/pins只有一个owner；共享AgentSession/main/sdk若再次改变先保存每个Computer hunk的前后来源，不能整文件覆盖并发修改。既有成功stage及归档只读，新输出使用独立general目录。
 - 调度约束：所有合成输入仍经同一现有外层desktop scheduler；用户并发能力不等于放开多Agent互相穿插按键。native内部不再次acquire同一外层lease，恢复不能递归调用模型工具造成死锁。
 
@@ -992,11 +992,11 @@ T-001–T-041保留历史限定交付；新增T-042–T-056位于本节末，状
 - Inputs and prerequisites: T-045局部观察/版本与T-048路由。
 - Scope or files: N/cua-driver-sdk/src/computer/plan.rs、plan_native.rs及拟新增segment/confirmation实现；controlled/desktop协议投影与integration tests。
 - Expected output: 段末/关键条件确认、依赖未满足时返回新观察、区分executed和verified的结果。
-- Dependencies: T-045, T-048
+- Dependencies: T-045, T-048, T-074
 - Execution steps: 已知目标操作可合并；下一步依赖新页面/弹窗时停止并取证；优先局部状态/事件，有界轮询补缺，截图仅信息不足时；移除多余Fill后的全树再读和每个assert重复观察；保持低层取消/对象存活检查。
 - Acceptance criteria: 不用fixed-N决定业务确认；不会为了少轮次跨未知UI继续执行；API/terminal成功不能冒充condition satisfied；观察/模型请求数有可复查变化，不能只修改描述。
 - Verification method: 真实AgentSession/faux分段轨迹断言（测试证据，不是回放产品）；同目标多字段、导航/弹窗边界、晚状态变化和伪成功回归；真实提交/结果显示oracle。
-- Validation evidence: Not run.
+- Validation evidence: 匹配installed-cross-drag原AgentSession基线已完成：C398一次12个AX Fill/一observe/一segment/8faux请求，对照C399相同最终四字段为12observe/12segment/52请求（不是性能结论）。C400实际一对a键后Fill被segment_boundary_required拒绝，当前条件Name=a仍可独立confirmed；fresh observe与明确reconciliation后仅填City，最终[a,remaining-only,空,空]/无重打。C401延迟条件回归整轮失败：一对键已收，native88ms返回paused/unsatisfied，真实counter在effect-scheduled后0.7869s才变1；五terminal/两自然退出/clean，不补造成功。segments/baseline-verification.json独立封存四轮43terminal/8自然退出、源与安装库hash。604source/lock输入及SDK457/NAPI0f44冻结不变。确认seam原2pass/3fail→5pass、Computer58/SDK92/core98通过；改为已完成prefix按原operation预算条件轮询，视觉/未知/未完prefix立即返回，不重发输入。root另修condition satisfied但prefix未完时漏fresh evidence（1fail→31pass，再新candidate53tests），保持condition与delivery独立。完整g03cf check0/1459无修复/drift0、两层types/build/offline独立安装1425资产通过；新SDK5e9e117f/NAPIfaef6d22/helpere17，安装EBHtDY。C402延迟实际约0.7874s后确认836ms、C403立即28ms、C404 boundary自动fresh并仅剩余Fill、C405长12动作、C406无效果30s真实budget cancel、C407等待中Stop只1faux请求无续跑；after-verification.json独立28terminal/12自然退出/无forced。原AgentSession context/compaction/drag10pass，loop3在root历史pins正确拒绝，匹配candidate pins的隔离snapshot重跑3pass；不改production pins。首次新TS mock错误写Object.freeze记录导致测试未收敛，停止仅无host测试进程后改为生成器create不可变副本；不是产品回归before证据。随后C408实际modal-boundary失败：pre-modal current ref的AXFill仍写父字段并confirmed；四terminal/两自然退出/clean。新增T-074修目标局部模态失效，T-049保持in_progress，不把上述确认增量算整个G03完成。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -1361,6 +1361,21 @@ T-001–T-041保留历史限定交付；新增T-042–T-056位于本节末，状
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-074 — G03 新模态表面使父窗口动作证据失效
+- Status: in_progress
+- Owner: coordinator
+- Objective: 在新模态表面阻挡选中父窗口后停止使用旧semantic ref，不把同PID其它正常窗口全面视为冲突，也不丢失显式选择独立子表面的能力。
+- Inputs and prerequisites: T-045/T-048；C408原安装AgentSession和独立fixture已复现父字段被写；确认候选5e9e117f及原始证据冻结。
+- Scope or files: General platform-macos segment/target与observation/native局部surface检查；必要pure/安装fixture回归、匹配生成及独立增量补丁；不改输入抑制或借用应用。
+- Expected output: 目标局部模态gate、明确未投递/新观察事实、独立子表面和同PID正常目标邻接。
+- Dependencies: T-045, T-048
+- Execution steps: 先核实AXSheets/当前selected根的真实证据；将局部失效检查放在有实际AX目标的输入/确认边界，不恢复legacy任意同PID弹窗全拒绝或image-only AX准备依赖；pure先红后绿后构建新独立候选并复测。
+- Acceptance criteria: C408同刺激零父字段写入/明确拒绝；未知surface读取不当作无modal；显式选择当前子表面、无关窗口后台工作与已owned释放保持；旧失败不改写。
+- Verification method: 实际AX父/child身份、production seam正负测试、当前SDK/core/Computer邻接；原安装AgentSession及字段/terminal/close独立oracle。
+- Validation evidence: C408的installed-segment-modal-boundary-01在observe后显示专用sheet，旧ref AXFill真实将Name写为must-not-cross-modal，native21ms/confirmed/inputCommitted=true；4terminal/2自然exit0/无forced/clean C408。源码general_window有意不沿用legacy全PID modal拒绝，segment.reference/member只重验owner/membership，尚无selected-parent AXSheets检查；这是已复现行为与静态定位，不是修复通过。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -1401,7 +1416,7 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 
 ### 通用化当前风险
 
-- 当前为execute，T-042–T-047 done，T-048/T-071按确认的真实远控边界done，T-049 in_progress/coordinator，T-050–T-056 pending；没有新的产品偏好待确认。技术风险由对应任务验证，不用“平台可能不支持”提前缩成fixture-only交付。
+- 当前为execute，T-042–T-047 done，T-048/T-071按确认的真实远控边界done，T-049/T-074 in_progress/coordinator，T-050–T-056 pending；没有新的产品偏好待确认。技术风险由对应任务验证，不用“平台可能不支持”提前缩成fixture-only交付。
 - 任意应用后台输入不是macOS天然保证；尤其同PID多窗口、Web AX回声、输入法与用户修饰键。后台不成立时走已批准前台；前台也不能确定结果时如实停止，不重复副作用。
 - 去固定等待、整图相等和整树检查必须有替代的目标/状态证据；只把guard删除可能更快，但不能证明准确性。反过来，继续要求所有用户停止键鼠会直接违背已确认的后台目标。
 - 现有浏览器通常不能假定DOM接入；不能靠关闭/重启个人浏览器、复制profile或另开空白CfT满足“使用现有登录态”。DOM为有条件加速，AX/像素/前台是必须交付的兼容路线。
@@ -1443,6 +1458,10 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
+
+- 2026-09-23: T-049确认子集两路径increment5696e64c严格apply/bytes/reverse，真实genuine链与独立安装EBHtDY通过；C402–C407六case独立28terminal/12自然退出。随后依赖矩阵C408明确暴露新sheet后旧semantic ref仍写父窗口；原生terminal与close完整，clean C408，未重放/清锁。新增T-074并纳入T-049依赖，coordinator继续目标局部模态失效，不把确认修复或fixture矩阵当整体完成。所有真实provider统计不变。
+
+- 2026-09-23: T-049原安装基线C398–C401独立验证：长12动作与逐动作对照、真实依赖边界/仅剩余Fill通过；750ms延迟fixture复现固定两次20ms重读提前结束，native88ms未满足、应用0.7869s后实际生效。43terminal/8自然退出/clean C401，无重放/新provider或marker恢复。coordinator冻结604native source/lock输入，独占native/build；仅将原确认循环抽为可测试seam，先运行延迟/预算/未知/未完前缀回归，再实施既有operation期限内的条件等待，不新增任意sleep或第二Agent loop。
 
 - 2026-09-22: C397原安装AgentSession完成单独pixel后台臂：12click/12真实down-up/counter12、前台17对真实远控按键，逐步输入焦点与系统光标保持，39terminal/3自然退出/无forced。独立remote-coexistence-verification将其与C396已证AX子集聚合为66terminal/7自然退出；C396旧整体失败、IOHID零计数、本机硬件未测均保留。T-048/T-071按用户确认边界done，通知用户恢复正常操作；T-049进入in_progress/coordinator，继续分段/条件/恢复资格。源审计已确认core支持64动作而恢复目前只有跨operation次数、operation deadline每次重设；后者作为T-050既有时间预算范围的待实施差距，未虚称已经具备。
 
@@ -1879,7 +1898,7 @@ P00 必跑 `npm run build:offline`、`npm run check`、`./test.sh`；先读脚�
 ## Final validation result
 
 - Result: partial
-- Planning validation: 通用化需求和依赖已确认，Mode=execute；T-042–T-048 done，T-057–T-073按各自边界done（T-071为用户确认的真实远控资格，本机硬件未测），T-049 in_progress/coordinator、T-050–T-056 pending；T-057–T-069狭义增量按各自记录验收。规划/协议子集完成不等于运行验收通过。
+- Planning validation: 通用化需求和依赖已确认，Mode=execute；T-042–T-048 done，T-057–T-073按各自边界done（T-071为用户确认的真实远控资格，本机硬件未测），T-049/T-074 in_progress/coordinator、T-050–T-056 pending；T-057–T-069狭义增量按各自记录验收。规划/协议子集完成不等于运行验收通过。
 - Evidence: T-001—T-041全部done仅表示历史P00–P08限定Node24.15.0/macOS26.5.1 arm64交付完成；新增G00基线、G01协议契约T-043和T-044限定精简门禁通过；通用化目标未交付。实际原生/安装/真实vision/compaction与P08性能、cancel/revoke和browser门禁均有独立证据。最新delivery-final-check完整0（1420文件无修复）/204pass+5skip/controller38/drift0；两层native类型0、context7/7、desktop21/21。完整无密钥套件仍同历史九失败，不是全仓绿灯；Bun未支持。最终交付迁移、离线重装、hash/internal-link与真实no-host/smoke通过，见p08/delivery-verification.json。
 - Historical delivery: .artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz，40449085B，SHA256 b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb；manifest SHA256 7ddfbf6edaf09e894c9bf9c7220d18545f90fd5058c97b5841fde7394c55072c，14215文件/8内部links。仓库外验证位置/private/tmp/epi-computer-delivery-h859lqzg/node24.15.0-darwin-arm64；另reinstall目录offline npm ci使用此前hydrated缓存，原交付payload未变。所有测量及GUI任务已结束，最后clean C237，无活跃GUI/assertion，不是未来准入承诺。源码提交d84c2af438e31eb4720c2d3782199cfdebbba14d；工作树无关改动完整保留，构建来源如实标记既有dirty snapshot，不冒称clean commit可复现。真实provider仍5attempts/2success，未push/publication。
 - Historical evidence: T-030 done：native两修复before101/after4pass、49/43/66及生成/全部离线check通过，probe幂等回归before2fail/after2pass；fixed-2 fresh owner21507/Chrome21547/window150完成真实prepare→terminal→close→destroy、两自然0/EOF、私有files清理、C27。独立prepare-qualified-verification核对通过。完整browser观察/输入/计划仍待，P04–P08未交付。以下历史：D25诊断给出10窗口/唯一几何114及resource0:image_catalog_changed，两个原因已被先红后绿4case修复；platform49/SDK43/core66/生成/check/stage/header/nohost/full isolated check均0，193pass+5skip/controller38/drift0，四Rust patch655ba915。三个新的native只读image目录快照均0live，无lease/signal/delete；D25行政恢复尚未批准/执行，真实修复GUI尚待。D24已按一次授权在新boot同inode恢复C24，历史D24不补造terminal。以下历史：T-030已完成诊断/恢复准备：opt-in两文件diag patchdd84611e，diagnostic1+2/platform45/SDK43/core66、生成/check/N-API/header/nohost/隔离全check均0，193pass+5skip/controller38/drift0；旧16原生产物归档，605源边界/原失败raw核对0。私有D24恢复20/20，不代表canonical执行；等待用户手动重启，尚无confirmed-boot.txt/恢复archive或新GUI。真实失败原因仍未唯一证明，未声称行为修复。此前browser SDK prepare facade/registry/pool/初始绑定的platform45/SDK43/core66/生成及--check/N-API/header/strictTS/nohost load全部通过，七Rust增量patch1d0ebe4c/605源；新isolated check0及193pass/5skip/controller38/drift0。但prepare-live-2实际CfT启动后browser_window_ambiguous，资源close Quarantined，无clean host receipt；Node自然1/fixture自然0/EOF，无forced、无page输入，同inodeD24未清除，私有profile保留。T-029已修正严格TCC形态判断，9/9及fresh93502两服务完整Allowed通过。根因诊断/恢复门禁归T-030。以下历史：最新launcher内部装配platform42/SDK41/core66/fmt和isolated check全0（193pass/5skip、controller38、drift0），三文件incremental patch59cd9c41/602源边界核对；未注册/未公开ABI/未执行真实浏览器，详见launcher-report.md。最新授权允许必要权限/任意版本自主选择；官方CfT153.0.8010.52的供应商签名失败事实保留，经明确授权后完整官方归档/346文件/5links内容校验0，content-manifest81c3f5a8、未执行浏览器。此前T-027 image事实子集5/五轮5/platform33/SDK41/core66及fmt全0，incremental patch24584ae5/600源与历史输入核对0；browser-image-observer-check完整0/1376files无修复、193pass/5skip、38/38、drift0。Chrome153只私有复制验证，未执行或创建profile；外部code-sign clone/helper生命周期尚未覆盖，观察事实不作terminal/ownership。此前T-027 process-group子集process11/五轮10/platform28（含11 process）/SDK41/core66及fmt全0，natural-exit EPERM回归before101/after0，incremental process.patch bd351bd1及历史输入核对0；browser-process-check完整0/1376files无修复、193pass/5skip、38/38、drift0。仅group proof，不含escaped Chrome helpers；无Chrome/profile/GUI/public ABI/产品切换。此前T-027 distinct scope子集core66/registry70/authorization40/manifest15/SDK41/platform17及fmt通过，incremental scope.patch41e97239/历史输入核对0；browser-scope-check完整0/1376files无修复、193pass/5skip、38/38、drift0，无profile/GUI/public ABI/产品切换，T-027仍未验收。此前T-027异步生命周期子集core56/CDP33（19重叠）/SDK40/platform16通过，foreign pool/首失败握手两回归before101/after0，incremental patch27a67104及历史输入核对0；browser-lifecycle-check完整0/1376files无修复、193pass/5skip、38/38、drift0。T-027整体仍未验收，无profile/GUI/ABI/产物切换。此前T-028独立transport40/CDP25/SDK33/platform16通过、两回归before101/after0、patch9b6df0b6 apply/hash/reverse及历史输入核对0；browser-transport-check完整0（1376files无修复）、193pass/5skip、38/38、drift0，未切换产品pins或运行browser GUI。此前真实八步表单/十AppKit场景通过；T-026两回归before101/after0、SDK33/33，生成/header/strict types/load-only通过；tool8/8、真实AgentSession/faux4/4。modal-check完整npm check0（1376files，只格式化任务pin JSON已审查回写）、193pass/5skip、controller38/38，检查期live drift0。最后C23同inode，native terminal/close/destroy/自然exit0/EOF，未强制清理。T-024提交8779ac9ff仅三AI测试，无新提交；完整suite未重跑，历史9失败不是当前全绿声明。

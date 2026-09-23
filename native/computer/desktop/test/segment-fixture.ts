@@ -21,7 +21,7 @@ function deferred<T>() {
 }
 export function fixture(
 	options: {
-		mode?: "partial" | "lost" | "paused" | "confirmed" | "prepared";
+		mode?: "partial" | "lost" | "paused" | "confirmed" | "prepared" | "confirmed_boundary";
 		hold?: "segment" | "capture" | "pair_capture";
 		terminalFailure?: boolean;
 		failCapture?: number;
@@ -183,8 +183,8 @@ export function fixture(
 						}
 						const partial = options.mode === "partial";
 						const paused = options.mode === "paused" || options.mode === "prepared";
-						const confirmed = options.mode === "confirmed";
-						const value = sdk.ComputerSegmentResult.create({
+						const confirmed = options.mode === "confirmed" || options.mode === "confirmed_boundary";
+						let value = sdk.ComputerSegmentResult.create({
 							status: confirmed
 								? sdk.ComputerSegmentStatus.Confirmed
 								: options.mode === "paused"
@@ -216,6 +216,18 @@ export function fixture(
 							recoveryAttempts: paused ? Math.min(segments.length, 2) : 0,
 							elapsedMs: 7n,
 						});
+						if (options.mode === "confirmed_boundary") {
+							assert.ok(segment.actions.length > 1);
+							const index = segment.actions.length - 1;
+							value = sdk.ComputerSegmentResult.create({
+								...value,
+								firstUnfinishedAction: index,
+								actions: [
+									...value.actions.slice(0, index),
+									{ index, dispatch: sdk.ComputerDispatch.NotDispatched, code: "segment_boundary_required" },
+								],
+							});
+						}
 						sdk.validateComputerSegmentResult(segment, value); // Test-only genuine validator, no host.
 						done("segment", new sdk.ComputerResult.Segment({ value }), !paused || options.mode === "prepared");
 					},
