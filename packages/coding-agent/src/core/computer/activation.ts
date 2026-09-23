@@ -35,9 +35,9 @@ export function shouldActivateComputer(options: {
 }
 
 /**
- * Explicit SDK/CLI activation of the separately installed Computer capability.
- * Ordinary coding never calls this or reads native assets. The bridge itself is
- * inert: native loading and desktop ownership remain lazy until tool execution.
+ * Explicit SDK activation; the CLI enables this capability by default unless filtered.
+ * Construction loads only the installed JS bridge. Native loading, renderer startup
+ * and desktop ownership remain lazy until the first Computer tool execution.
  */
 export function createNativeComputerFeature(options: NativeComputerOptions = {}): NativeComputerFeature {
 	if (options.manifestPath !== undefined && !isAbsolute(options.manifestPath)) {

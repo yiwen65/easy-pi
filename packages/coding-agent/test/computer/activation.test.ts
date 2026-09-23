@@ -25,7 +25,7 @@ function assets(source?: string): string {
 	return directory;
 }
 
-describe("explicit Computer activation", () => {
+describe("CLI-default and explicit SDK Computer activation", () => {
 	it("resolves the trusted application emergency binding without dropping secondary keys", () => {
 		const directory = assets(
 			"exports.computerFeatureVersion = 2; exports.createComputerFeature = options => { throw Error(JSON.stringify(options)); };",
@@ -42,8 +42,11 @@ describe("explicit Computer activation", () => {
 			expect(() => KeybindingsManager.create(directory)).toThrow("exactly one");
 		}
 	});
-	it("parses only explicit opt-in and leaves ordinary arguments unchanged", () => {
-		expect(parseArgs(["hello"]).computer).toBeUndefined();
+	it("enables Computer by default for CLI arguments without changing messages", () => {
+		expect(parseArgs([]).computer).toBe(true);
+		expect(parseArgs(["hello"]).computer).toBe(true);
+		expect(parseArgs(["hello"]).messages).toEqual(["hello"]);
+		expect(shouldActivateComputer({})).toBe(false); // Non-CLI callers still opt in explicitly.
 		const args = parseArgs(["--computer", "--computer-manifest", "/trusted/capabilities.yaml", "hello"]);
 		expect(args.computer).toBe(true);
 		expect(args.computerManifest).toBe("/trusted/capabilities.yaml");
@@ -51,7 +54,7 @@ describe("explicit Computer activation", () => {
 		expect(args.unknownFlags.size).toBe(0);
 		expect(args.diagnostics).toEqual([]);
 		expect(parseArgs(["--computer-manifest"]).diagnostics).toHaveLength(1);
-		expect(parseArgs(["--computer-manifest", "/trusted/policy"]).diagnostics).toHaveLength(1);
+		expect(parseArgs(["--computer-manifest", "/trusted/policy"]).diagnostics).toEqual([]);
 		const browser = parseArgs(["--computer-browser", "/trusted/Chrome for Testing.app"]);
 		expect(browser.computer).toBe(true);
 		expect(browser.computerBrowser).toBe("/trusted/Chrome for Testing.app");
@@ -69,8 +72,13 @@ describe("explicit Computer activation", () => {
 
 	it("uses existing allowlist/exclusion precedence and suppresses metadata-only activation", () => {
 		for (const args of [
-			[],
-			["--tools", "computer"],
+			["--no-tools"],
+			["--tools", "read"],
+			["--tools", ""],
+			["--exclude-tools", "computer"],
+			["--no-tools", "--tools", "computer", "--exclude-tools", "computer"],
+			["--help"],
+			["--list-models"],
 			["--computer", "--no-tools"],
 			["--computer", "--tools", "read"],
 			["--computer", "--exclude-tools", "computer"],
@@ -82,6 +90,11 @@ describe("explicit Computer activation", () => {
 			expect(shouldActivateComputer(parseArgs(args)), args.join(" ")).toBe(false);
 		}
 		for (const args of [
+			[],
+			["hello"],
+			["--tools", "computer"],
+			["--no-builtin-tools"],
+			["--no-tools", "--tools", "computer"],
 			["--computer"],
 			["--computer", "--no-builtin-tools"],
 			["--computer", "--no-tools", "--tools", "computer"],

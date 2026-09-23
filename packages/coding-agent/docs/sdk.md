@@ -554,14 +554,16 @@ const { session } = await createAgentSession({
 
 #### Optional native Computer
 
-Computer is an explicit capability, not a default coding tool. It requires the
-matching optional `computer/` assets and the qualified Node 24.15.0/macOS arm64
+Computer remains an explicit capability in the SDK; `createAgentSession()` does
+not enable it unless a binding is supplied. The CLI provides it by default. Both
+require the matching `computer/` assets and the qualified Node 24.15.0/macOS arm64
 runtime. There is no runtime build/download or silent non-native fallback.
 See [native packaging](../../../native/computer/PACKAGING.md) and the
 [desktop contract](../../../native/computer/desktop/README.md) for installation
 and qualification limits.
 
-The CLI enables it with `pi --computer`. The default desktop route uses existing
+The CLI needs no `--computer` flag; disable it with `--exclude-tools computer`.
+Tool allowlists and `--no-tools` retain their usual precedence. The desktop route uses existing
 applications and prefers background input, with automatic foreground fallback
 when required. Foreground work can interrupt the user; physical input is not
 suppressed. `--computer-browser <bundle>` explicitly selects the separate isolated
@@ -613,8 +615,9 @@ latches the whole feature, including descendants. Create an explicitly new
 feature only after the old one has genuinely closed. Never clear a dirty native
 lease or replay an action whose effect is unknown.
 
-Full Access needs no per-action capability manifest. A trusted embedding may
-optionally supply an absolute `manifestPath` to restrict authority. OS
+General segments use default Full Access without a per-action capability manifest.
+A trusted embedding may supply an absolute `manifestPath` for the narrower bounded
+legacy operations, not an equivalent General profile. OS
 Accessibility/Screen Recording permissions still apply. Delivery, native
 termination and confirmed application state are distinct facts in tool results;
 a successful API return alone is not business success.

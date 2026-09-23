@@ -88,7 +88,7 @@ pi
 /login  # Then select provider
 ```
 
-Then just talk to pi. By default, pi gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
+Then just talk to pi. The default coding tools are `read`, `write`, `edit`, and `bash`. This fork's CLI also provides `computer` by default with its matching Node/macOS assets; native components and the cursor helper start only on the first Computer call. Use `--exclude-tools computer` to disable it. The SDK remains explicitly opt-in. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -585,6 +585,11 @@ cat README.md | pi -p "Summarize this text"
 | `--exclude-tools <list>`, `-xt <list>` | Disable specific tool names across built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
+| `--computer` | Computer is already enabled by default; native components load on first use |
+| `--computer-manifest <path>` | Trusted bounded legacy profile, not General segments |
+| `--computer-browser <bundle>` | Separate isolated-browser profile using a trusted CfT bundle |
+
+Computer uses existing applications with default Full Access and can move focus or the system pointer when foreground input is necessary. Physical input is not suppressed. `--exclude-tools computer` always wins; an explicit `--tools` allowlist must include it. Matching [native assets](../../native/computer/PACKAGING.md) are required; missing assets produce an explicit error rather than a runtime download. The default emergency chord is `ctrl+alt+escape`. SDK embeddings still [opt in explicitly](docs/sdk.md#optional-native-computer).
 
 The built-in tools are `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The V2 profile and `--tool-profile` option have been removed; use the standard tools and existing tool filters.
 

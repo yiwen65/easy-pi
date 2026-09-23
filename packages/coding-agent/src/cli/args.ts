@@ -76,6 +76,7 @@ export function normalizeSessionName(value: string): string | undefined {
 
 export function parseArgs(args: string[]): Args {
 	const result: Args = {
+		computer: true,
 		messages: [],
 		fileArgs: [],
 		unknownFlags: new Map(),
@@ -295,9 +296,6 @@ export function parseArgs(args: string[]): Args {
 		}
 	}
 
-	if (result.computerManifest !== undefined && !result.computer) {
-		result.diagnostics.push({ type: "error", message: "--computer-manifest requires --computer" });
-	}
 	if (result.jsonProfile !== undefined && result.mode !== "json") {
 		result.diagnostics.push({ type: "error", message: "--json-profile requires --mode json" });
 	}
@@ -356,9 +354,10 @@ ${chalk.bold("Options:")}
                                  Applies to built-in, extension, and custom tools
   --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
                                  Applies to built-in, extension, and custom tools
-  --computer                    Enable the optional native Computer tool for this GUI session
-  --computer-manifest <path>     Restrict Computer to a trusted absolute capability manifest
-  --computer-browser <bundle>    Enable isolated-browser Computer using a trusted CfT bundle instead
+  --computer                    Computer is enabled by default; native components load on first use
+  --computer-manifest <path>     Select a trusted bounded legacy profile (not General segments)
+  --computer-browser <bundle>    Use isolated-browser Computer with a trusted CfT bundle instead
+                                 Disable Computer with --exclude-tools computer
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh, max
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)

@@ -77,7 +77,7 @@ The installation layout below is shared with the historical product. General
 functional/performance and independent-install evidence is indexed by the task
 authority; historical P07 evidence alone does not establish General acceptance.
 
-Computer is opt-in. Its qualified native build targets **Node 24.15.0, macOS arm64**. Other runtimes/platforms are rejected, not redirected to MCP, a CLI, global input or a foreground fallback. Ordinary Node coding does not need these assets.
+The CLI provides Computer by default; SDK embeddings still opt in explicitly. Its qualified native build targets **Node 24.15.0, macOS arm64**. Other runtimes/platforms are rejected, not redirected to another backend. Use `--exclude-tools computer` (or an allowlist without it) to run ordinary CLI coding without these assets. Native components and the renderer are not started until a Computer call.
 
 ## Build the asset directory
 
@@ -119,7 +119,9 @@ Install the **matching built coding-agent product** and its dependencies first. 
 The bridge imports the installed product's `dist/core/computer/{host,binding}.js` and existing shared packages. It is not a standalone plugin and must not be relocated away from that product. Do not point production installation at monorepo symlinks. No Rust toolchain or native download is needed at runtime.
 
 ```sh
-epi --computer
+epi                            # Computer available; native starts on first use
+# Disable Computer while retaining ordinary tools:
+epi --exclude-tools computer
 # Explicit bounded legacy profile, not General segments; never from model output:
 epi --computer --computer-manifest /absolute/capabilities.yaml
 # Alternative DOM-only profile, with a separately trusted CfT bundle:
