@@ -1,33 +1,45 @@
-# Computer delivery handoff
+# General Computer delivery handoff
 
 ## Local product
 
-Delivery root: `.artifacts/computer/delivery/node24.15.0-darwin-arm64` in the source repository. This is an unpublished, source-snapshot-matched local product; version0.84.2 alone does not identify these bytes. Use `delivery-manifest.json` and `product/computer/manifest.json`, not same-version registry replacements. Node is not bundled.
+Ready directory: `.artifacts/computer/general-delivery/node24.15.0-darwin-arm64`.
+Archive: the same path plus `.tar.gz`, with a sibling `.sha256` file. Final acceptance and exact evidence are recorded in the [task authority](../../tasks/2026-09-18-computer-native-implementation-task.md); do not infer acceptance from a directory's existence.
+
+Node24.15.0 is required and is not bundled. macOS arm64 only; Bun is unsupported.
 
 ```sh
 ./epi --version
 ./epi --help
-./epi --computer --computer-manifest /absolute/path/to/reviewed-capabilities.yaml
-# Owned isolated browser profile instead of desktop discovery:
-./epi --computer-browser "/absolute/path/Google Chrome for Testing.app" \
-  --computer-manifest /absolute/path/to/reviewed-browser-capabilities.yaml
+./epi --computer
+# Disable Computer without removing its files:
+./epi --exclude-tools computer
 ```
 
-Configure the usual model/provider separately. No credentials, proxy values, personal profiles or Chrome binary are included. Runtime needs neither Rust nor a native download/npm lifecycle hook. The shipped `product/computer` comes from qualified assets-v3, not the experimental installed tree containing benchmark/probe helpers. Twelve exact local workspace tarballs and a relative installation shrinkwrap are retained; external dependencies are fixed by their existing lock/integrity records. Running the ready directory does not require reinstalling.
+Configure the normal provider separately and grant Accessibility/Screen Recording to the actual hosting application. No credentials, browser profiles, Chrome binary, Rust compiler or runtime download is bundled/required. General uses existing apps/profile state and default Full Access. Explicit bounded manifests support the narrower legacy operations, not General segments.
 
-For SDK use, import `createNativeComputerFeature` from the matching installed product, pass its `binding` as the session `computer`, and await feature `close()` at final host shutdown. See the source repository's `native/computer/PACKAGING.md` for packaging inputs and `native/computer/desktop/README.md` for the bridge. Custom SDK hosts must configure their normal provider HTTP routing; CLI routing is not automatically inherited by arbitrary scripts.
+The visible renderer provides task feedback and the default global emergency chord is Ctrl+Alt+Escape (configurable by the host). Foreground work can interrupt the user, but input is not suppressed. A stop latches the feature and releases owned inputs; do not turn a JS timeout into a terminal receipt or revive a stopped binding.
 
-## Qualified outcome
+For SDK use, import `createNativeComputerFeature` from this matching product, provide its binding to the existing AgentSession, await `session.shutdown()` and then await `feature.close()` at final shared-host shutdown. A child/session close does not own the whole shared host. See `native/computer/desktop/README.md`, `native/computer/PACKAGING.md` and the SDK ownership documentation.
 
-- Native discovery, exact selection, semantic plans, owned images, click/scroll and limited keys use the existing Agent loop and shared scheduler; no hidden planner, arbitrary script tool, reconnect or replay fallback.
-- Installed Node CLI modes, native child lifecycle, actual AgentSession desktop/browser fixtures and bounded real vision-provider click passed their documented gates.
-- P08:30 paired forms, median32.6682s→19.0869s (**41.57% reduction**,95% paired interval41.41–41.76%); requests9→3. Disabled-Computer startup300 pairs passed the5% p95 regression gate. Cancellation/revocation stress:200 refused attempts, zero input. Last GUI receipt: clean C237, not a standing grant for future GUI work.
-- Full check/offline build and targeted regressions passed in isolated snapshots. Full `./test.sh` retains the same nine historical failing names; do not describe the repository as all green.
+## Qualified scope
 
-Read [platform support](platform-support.md), [rollback](rollback.md), [benchmark summary](benchmark-summary.md), [P07 packaging](p07-packaging.md) and [P07 qualification](p07-qualification.md) before use. Bun and other platforms are not qualified; 11 of13 keys remain mapping-only. No formal task-p95, universal performance, zero-copy, external-effect rollback or reproducible-build claim.
+[Workflow qualification](general-workflow-qualification.md) documents existing Chrome Canvas/iframe/Unicode, TextEdit/VS Code, GUI Terminal checksums, Finder rename/menu/doubleclick/scroll/drag, bounded recovery, cursor and stop. Most workflow planning uses faux; C482 separately verifies one real `gpt-6-astra/low` image decision. Real remote-input coexistence is accepted; local hardware is untested/nonblocking.
 
-## Provenance and evidence
+[Formal General measurements](general-benchmark-results.md):100 equivalent eight-step AX form pairs, median18.8425→4.5582s (75.81% reduction), p9519.0040→4.8026s, three timed faux requests in each arm. General has four additional discover/select preparation requests outside the warm-selected timing boundary. This is not universal GUI/model speed. Observation and disabled-startup gates passed; original failed pilots, interrupted1× cohort and renderer RSS failure remain recorded.
 
-The sole task/status authority is `docs/tasks/2026-09-18-computer-native-implementation-task.md`; stage navigation is [progress](progress.md). `.artifacts/computer/p08/delivery-verification.json` records successful repository-external extraction, exact manifest/internal-link verification, CLI/inert/native-load/faux smoke checks, and a separate offline `npm ci --ignore-scripts --omit=dev` with unchanged lock. The npm cache was previously hydrated; no cold-cache offline installation claim is made. The archive is `.artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz`, with a sibling `.sha256` file. The ready payload contains14,215 manifest-hashed files; tests do not leave probe scripts in it. Full raw evidence remains under `.artifacts/computer/{p00,p01,p02,p03,p04,p04-browser,p05,p06,p06-trim,p07,p08}` and related incident directories. Do not publish raw desktop/provider evidence without separate review. Failed attempts and old unknown terminal states are retained, not converted into success by later runs.
+No arbitrary script tool, second Agent loop, recording/replay system, automatic dirty-lease recovery or unknown-input replay is introduced. Some targets cannot be operated safely without foreground access or a fresh observation. See [platform support](platform-support.md) and [rollback](rollback.md).
 
-The source worktree contains unrelated concurrent work. The delivery records its actual build snapshot rather than claiming it came solely from a clean Git revision. Computer-owned source commits must not absorb those unrelated changes. This handoff does not initiate an npm release, push, tag or public publication.
+## Source and artifact integrity
+
+Version0.84.2 alone does not identify these fork bytes. Use `delivery-manifest.json`, `product/computer/manifest.json`, and the archive checksum. Twelve exact workspace tarballs and a relative-path shrinkwrap support reinstallation; never replace them with same-version upstream registry packages. The ready directory needs no install command. Offline reinstall verification uses a previously hydrated cache, not a cold-cache promise.
+
+Final native selection:
+
+- SDK `b7e0ad955c1fcf7808842bc10286fb76ad3fbb6829ea78172fb4c1e6db66217b`
+- N-API `93ffdcc7fbba3437af84c61d60d5d6a8cbf231129f5b1ad4c947abeb8a5aed5a`
+- Renderer `1195e23ecdad946a7090f338357e41042ceaa1333daa18203ea7bfc0ee8c2fa3`
+- Consolidated General source patch `3ba3ff7a7fef9d8ec1c3b944ea50667a721a4ce19319faa146b6a43d6c1b2d35`, after the documented qualified P06 fast base.
+
+The source snapshot includes contemporaneous unrelated repository work; provenance records actual bytes, not a fictional clean-only build. Raw evidence remains under `.artifacts/computer/general/`; it is not bundled for public release. Repository-wide test failures and their historical comparison are reported by the final audit, not suppressed. Test probes must not be left in the ready payload.
+
+Historical P08 remains unchanged at `.artifacts/computer/delivery/node24.15.0-darwin-arm64.tar.gz`, SHA256 `b2a0012b035a8d1e5e75a475df9f5211dcb70973a5b46fd5265a0d02f96871bb`. It is a narrower, separately matched rollback product, not an interchangeable SDK for General. No npm publication, push or tag is implied by this local delivery.

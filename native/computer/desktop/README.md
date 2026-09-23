@@ -6,10 +6,11 @@ Status authority: `docs/tasks/2026-09-18-computer-native-implementation-task.md`
 ## General Computer contract
 
 The current source uses host interface 2, genuine generated General Computer
-bindings, and an owned renderer with lifetime protocol 3. **Root production pins
-still identify the historical P06 build.** Use a matching qualified installation;
-do not combine the new bridge with old binaries. Final promotion/delivery is
-tracked only by the task authority.
+bindings, and an owned renderer with lifetime protocol 3. Root production pins
+select the functionally and performance-qualified General candidate documented in
+[general-desktop.md](../patches/general-desktop.md). Use a matching installation;
+never combine the General bridge with historical P06 binaries. Final delivery
+status remains in the task authority.
 
 One `computer` tool provides window discovery/selection, bounded semantic
 observation, exact-window screenshots, information-dependent action segments,

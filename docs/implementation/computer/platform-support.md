@@ -1,27 +1,33 @@
 # Computer platform support
 
-This is a qualified local Node delivery, not a general release or an OS sandbox.
+General Computer is qualified for the local Node/macOS scope below. This is not an OS sandbox, universal application guarantee or public release. Final delivery status is recorded only in the [task authority](../../tasks/2026-09-18-computer-native-implementation-task.md).
 
 | Surface | Qualification |
-| --- | --- |
-| Node 24.15.0 / macOS 26.5.1 (25F80) / arm64 | Qualified on Apple M5; genuine Cua/UniFFI/N-API |
-| Other Node/macOS versions, Intel Mac, Linux, Windows | Unqualified; no support claim |
-| Bun 1.3.11 | Unsupported. Computer explicitly refuses; ordinary CLI also fails on `node:sqlite`; binary build separately fails resolving `@easy-pi/web-search` |
-| TUI, print, JSON, RPC, SDK | Installed-product activation/filter/lifecycle tested with faux provider; GUI tested through actual installed AgentSession, not separately repeated in every mode |
-| Discovery / AX | Bounded window metadata, exact selection, complete AX observation, 1–8-step Fill/Press/AssertValue plans |
-| Pixel | Owned PNG, current-image single-use click/scroll references, background fixture delivery at qualified scales |
-| Keyboard | 13 closed non-text keys implemented; only Tab/Return have actual delivery qualification; other 11 are mapping/compile coverage |
-| Browser | Owned blank CfT profile, exact PID/start/window/origin/frame/loader binding, top-level DOM operations; not trusted keyboard events, personal profiles or subframes |
-| Vision model | Explicitly opted-in `openai-codex` / `gpt-6-astra`, low; two successful responses and one independently verified fixture click |
+|---|---|
+| Node24.15.0 / macOS26.5.1 / arm64 | Genuine Cua/UniFFI/N-API and owned protocol3 renderer; tested on Apple M5 |
+| Other runtime versions/platforms | Unqualified; no support claim |
+| Bun1.3.11 | Unsupported: Computer refuses; historical ordinary CLI `node:sqlite` and binary `@easy-pi/web-search` failures remain |
+| CLI modes / SDK / children | Existing AgentSession, shared host/scheduler, filters, renewal, compaction and awaited close; real installed GUI through SDK/AgentSession, not independently repeated in every CLI mode |
+| Existing applications | TextEdit, VS Code, Finder, Terminal and existing Chrome profile; exact task contents and independent file/HTTP/viewport oracles |
+| Input | Unicode, thirteen named keys, chords/paired holds, pointer/right/double click, two-axis scroll, window actions and explicit two-target foreground drag |
+| Routing | Background preference; guarded foreground preparation/delivery where needed. Unnamed OS popup-level clicks use guarded global input; ordinary/named high-layer targets retain background routing |
+| Observation/recovery | Bounded filtered discovery, partial AX metadata, exact-window images, explicit surface selection, information boundaries and shared recovery budgets; unknown input never blindly replayed |
+| Cursor/stop | Nonactivating click-through feedback, image exclusion, tested1×/2×, movement/occlusion/fullscreen Space; global emergency chord and owned release/close |
+| Input coexistence | User-confirmed real remote-input coexistence for AX and directed pixel background paths; local hardware explicitly untested/nonblocking |
+| Real model | Historical and current bounded `gpt-6-astra/low` fixture-image decisions; broader workflow matrix uses faux. No personal/browser full-window PNG sent to provider |
 
-## Preconditions and boundaries
+See [workflow qualification](general-workflow-qualification.md) for exact versions, failed attempts, setup assistance and limits. Not every application accepts background events. Foreground fallback moves the actual pointer or focus and may interrupt the user; physical input is never suppressed. Non-ABC shortcut layouts and arbitrary simultaneous edits to the same document are not qualified.
 
-Grant Accessibility and Screen Recording to the actual application hosting Node through macOS settings. A different terminal/host may require different grants. Locked desktops, uncertain targets, modal surfaces, stale references and conflicting user input can refuse operations. Metadata discovery is not permission to read or control every window. Full Access remains process authority, not OS isolation.
+## Activation and authority
 
-Use a reviewed capability manifest when authorization must be bounded. Omitting it explicitly selects the unrestricted profile; a supplied empty or missing file must not silently downgrade to unrestricted. Browser executable paths are trusted host inputs, not model parameters. The separately supplied qualified CfT is **153.0.8010.52 mac-arm64**, revision1681091. Its official archive SHA256 is `6f67faa4b34dd551b53abb6fee24edeae470ab695b0b100ddc4885ff0be6724a`; content-manifest SHA256 `81c3f5a8de3998165d7fa0b8142bbb55a46420a01163bc03f48c9aac0084a872`. It is ad-hoc/linker signed, **not vendor signed**. No Chrome binary or personal profile is shipped. `--use-mock-keychain` avoids personal keychain access in the isolated profile.
+Use `--computer` with default Full Access for General segments. Accessibility and Screen Recording must be granted through macOS to the actual Node host. A different terminal/application may need different grants. Locked desktops, stale references, lost foreground or an occluding input target can refuse work; no quiet-period guarantee is assumed.
 
-Driver-owned terminal acknowledgement proves that owned work can no longer submit input; it does not undo or prove completion of external application effects. Unknown outcomes must not be replayed. A dirty lease stays quarantined until separately reviewed administrative recovery; timeout, process disappearance and reboot are not retroactive terminal receipts. See [rollback](rollback.md).
+General segments require unrestricted/no-manifest authority. Explicit bounded manifests remain available for the narrower legacy controlled operations, not as an equivalent General profile. Missing/empty supplied manifest paths never silently become unrestricted. Metadata discovery is not permission to read or manipulate arbitrary contents.
 
-## Evidence limits
+Existing-browser work needs no copied profile, CDP connection or browser restart. The separate legacy isolated-browser option uses the previously qualified CfT153.0.8010.52/mac-arm64 with its historical source/hash restrictions; it is not required for normal Chrome use, and no browser binary/profile/credential is shipped.
 
-See [P07 qualification](p07-qualification.md) and [P08 measurements](benchmark-summary.md). The 41.57% median speedup is a deterministic AX form with faux inference, not a universal desktop/browser/model result or formal task-p95 claim. Full-suite verification retains exactly nine historical failures; the repository is not entirely green. Native buffer experiments show the tested consumer-released buffers were collected, not zero-copy or global leak freedom. No cold-cache, byte-reproducible-build or public-release qualification is claimed.
+## Outcome and measurement limits
+
+Dispatch, driver-owned terminal and application business success are distinct. A terminal proves owned work cannot submit further input, not external event consumption or rollback. Preserve uncertain effects and dirty leases; see [rollback](rollback.md).
+
+[General measurements](general-benchmark-results.md) cover the fixed warm-selected AX form, observation and disabled startup, not universal GUI or real-network latency. Renderer RSS qualification is narrow and retains its original failed gate. Full-suite historical failures are compared during final audit; no all-green repository claim, cold-cache install, byte-reproducible build, zero-copy or global leak guarantee is made. Historical P08 support/results remain in the archived P08 delivery and its stage documents.

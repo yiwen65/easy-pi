@@ -4,11 +4,11 @@
 
 The current bridge requires the genuine `ComputerHost.createWithRenderer(options,
 new ComputerRendererConfig.Required(...))` API and lifetime protocol v3. It never
-falls back to diagnostic-disabled rendering. **Root production pins remain the
-historical P06 set. They do not qualify this new bridge.** A coordinator must
-qualify and promote the matching SDK, N-API, helper and source materials before
-building/installing a usable interface-2 product. Historical packages/materials
-remain separate; interface-1 assets are refused by this host.
+falls back to diagnostic-disabled rendering. Root production pins now select the
+qualified General SDK/N-API and matching protocol3 helper. See
+[General source provenance](patches/general-desktop.md) and the
+[delivery handoff](../../docs/implementation/computer/handoff.md).
+Historical P06 packages/materials remain separate; interface-1 assets are refused.
 
 The materials manifest additionally requires:
 
@@ -73,14 +73,15 @@ fatal state or feature close, and ends before facade destruction. A status read
 or timer is never input-release, terminal, process-reap or main-thread-liveness
 proof. Protocol 3 adds actual GUI-main-loop heartbeats at 250 ms; a missing heartbeat for one second revokes the native host with `renderer_heartbeat_timeout`. The timeout does not prove operation drain or child reap. Stopped bindings cannot renew; no reload/restart/lease recovery is added.
 
-The remaining sections describe the historical installation layout and workflow;
-their prior qualification does not establish interface-2 acceptance.
+The installation layout below is shared with the historical product. General
+functional/performance and independent-install evidence is indexed by the task
+authority; historical P07 evidence alone does not establish General acceptance.
 
 Computer is opt-in. Its qualified native build targets **Node 24.15.0, macOS arm64**. Other runtimes/platforms are rejected, not redirected to MCP, a CLI, global input or a foreground fallback. Ordinary Node coding does not need these assets.
 
 ## Build the asset directory
 
-Use the qualified P06 `transport-hostfixed` SDK (`dist/computer.js`), its runtime packages, and corresponding source/license materials. The exact inputs are in `desktop/pinned-inputs.json`. Older P04/P06 SDKs are not interchangeable.
+Use the qualified General SDK (`dist/computer.js`), its runtime packages, protocol3 renderer and corresponding source/license materials. The exact inputs are in `desktop/pinned-inputs.json`; the consolidated source increment is `patches/general-desktop.patch`. Older P04/P06 SDKs are not interchangeable.
 
 ```sh
 node native/computer/scripts/package.mjs \
@@ -119,13 +120,13 @@ The bridge imports the installed product's `dist/core/computer/{host,binding}.js
 
 ```sh
 epi --computer
-# Explicit trusted manifest; never taken from model output:
+# Explicit bounded legacy profile, not General segments; never from model output:
 epi --computer --computer-manifest /absolute/capabilities.yaml
 # Alternative DOM-only profile, with a separately trusted CfT bundle:
 epi --computer-browser '/absolute/Google Chrome for Testing.app'
 ```
 
-Desktop mode discovers/selects windows and exposes semantic observation, bounded plans and image operations. Browser mode uses a new isolated profile and typed DOM operations; it is not the desktop/pixel profile. Browser binaries are not bundled. Only the separately qualified CfT build is covered by current evidence.
+General desktop mode discovers/selects existing windows and exposes semantic/image observation, full input segments and explicit two-target drag. General segments require default Full Access without a manifest; bounded manifests retain the narrower legacy operations. Browser mode uses a new isolated profile and typed DOM operations; it is not the desktop/pixel profile. Browser binaries are not bundled. Only the separately qualified CfT build is covered by current evidence.
 
 `--tools`, `--exclude-tools`, and `--no-tools` retain their existing selection rules; exclusion wins. An explicit allowlist can enable `computer` despite `--no-tools`. Help and model listing do not activate Computer. Missing assets are an explicit activation error; there is no automatic install.
 

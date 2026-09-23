@@ -17,8 +17,8 @@ test(
 		const directory = process.env.COMPUTER_EMERGENCY_SDK;
 		assert.ok(directory && isAbsolute(directory));
 		for (const [name, hash] of [
-			["libcua_driver_sdk.dylib", "7d3b2adcbe60f9b4560584dd40026d4f2c05e71286839b86691983c292c6f615"],
-			["cua_driver_node_runtime.node", "70d6b9216c55c44fd6111d4119b0e3557110e2d779fe7a4043056aa471a65710"],
+			["libcua_driver_sdk.dylib", "b7e0ad955c1fcf7808842bc10286fb76ad3fbb6829ea78172fb4c1e6db66217b"],
+			["cua_driver_node_runtime.node", "93ffdcc7fbba3437af84c61d60d5d6a8cbf231129f5b1ad4c947abeb8a5aed5a"],
 		] as const)
 			assert.equal(
 				createHash("sha256")
