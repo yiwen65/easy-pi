@@ -210,6 +210,20 @@ test(
 	},
 );
 
+for (const mode of ["paused", "refused", "lost_empty"] as const)
+	test(`no-input ${mode} retargeting retains the same native recovery budget`, { skip: !enabled }, async () => {
+		const f = fixture({ mode });
+		try {
+			await f.setup(true);
+			await f.call({ ...segment("image-1"), actions: [{ op: "click", point: { ref: "image-1", x: 1, y: 1 } }] });
+			await f.call({ ...segment("image-2"), actions: [{ op: "click", point: { ref: "image-2", x: 0, y: 2 } }] });
+			assert.equal(f.segments.length, 2);
+			assert.equal(f.segments[0]!.intentRef, f.segments[1]!.intentRef);
+		} finally {
+			await f.host.close();
+		}
+	});
+
 test("filtered fresh image never grants resolution or resurrects old references", { skip: !enabled }, async () => {
 	const f = fixture({ mode: "partial" });
 	try {
@@ -270,13 +284,58 @@ test(
 			assert.equal(f.events.filter((event) => event === "observe").length, 2);
 			assert.ok(f.events.indexOf("segment:terminal") < f.events.lastIndexOf("observe"));
 			assert.ok(!f.events.includes("capture"));
-			await assert.rejects(f.call(segment()), /stale_observation/);
+			await assert.rejects(
+				f.call({
+					...segment("snapshot-2"),
+					actions: [
+						{ op: "key", key: "a" },
+						{ op: "fill", target: { ref: "field" }, text: "remaining" },
+					],
+					expected: { kind: "value", target: { ref: "field" }, value: "a" },
+				}),
+				/previous_intent_unresolved/,
+			);
 			assert.equal(f.segments.length, 1);
 		} finally {
 			await f.host.close();
 		}
 	},
 );
+
+test("exhausted native recovery performs no automatic follow-up read", { skip: !enabled }, async () => {
+	for (const visual of [false, true]) {
+		const f = fixture({ mode: "exhausted" });
+		try {
+			await f.setup();
+			const result = await f.call({
+				...segment(),
+				expected: visual ? { kind: "visual", description: "Do not retry" } : { kind: "window_focused" },
+			});
+			assert.match(JSON.stringify(result.details), /"code":"recovery_exhausted"/);
+			assert.match(JSON.stringify(result.details), /"inputCommitted":false/);
+			assert.equal(f.events.filter((event) => event === "observe").length, 1);
+			assert.ok(!f.events.includes("capture"));
+			assert.equal(f.segments.length, 1);
+			await assert.rejects(f.call(segment()), /stale_observation/);
+		} finally {
+			await f.host.close();
+		}
+	}
+});
+
+test("exhausted in-segment route recovery also stops automatic evidence reads", { skip: !enabled }, async () => {
+	const f = fixture({ mode: "exhausted_result" });
+	try {
+		await f.setup();
+		const result = await f.call(segment());
+		assert.match(JSON.stringify(result.details), /"code":"recovery_exhausted"/);
+		assert.match(JSON.stringify(result.details), /"inputCommitted":false/);
+		assert.equal(f.events.filter((event) => event === "observe").length, 1);
+		assert.ok(!f.events.includes("capture"));
+	} finally {
+		await f.host.close();
+	}
+});
 
 test(
 	"native-confirmed local condition needs no hidden read and admits genuinely subsequent work",

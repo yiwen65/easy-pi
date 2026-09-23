@@ -21,7 +21,17 @@ function deferred<T>() {
 }
 export function fixture(
 	options: {
-		mode?: "partial" | "lost" | "paused" | "confirmed" | "prepared" | "confirmed_boundary";
+		mode?:
+			| "partial"
+			| "lost"
+			| "lost_empty"
+			| "refused"
+			| "paused"
+			| "confirmed"
+			| "prepared"
+			| "confirmed_boundary"
+			| "exhausted"
+			| "exhausted_result";
 		hold?: "segment" | "capture" | "pair_capture";
 		terminalFailure?: boolean;
 		failCapture?: number;
@@ -177,12 +187,21 @@ export function fixture(
 					startSegment(segment) {
 						assert.ok(child, "segment uses selected child");
 						segments.push(segment);
-						if (options.mode === "lost") {
-							done("segment", new Error("PRIVATE lost result"), true);
+						if (options.mode === "lost" || options.mode === "lost_empty") {
+							done("segment", new Error("PRIVATE lost result"), options.mode === "lost");
+							return;
+						}
+						if (options.mode === "refused") {
+							done("segment", new sdk.ComputerError.Refused({ reason: "stale_image_observation" }));
+							return;
+						}
+						if (options.mode === "exhausted") {
+							done("segment", new sdk.ComputerError.Refused({ reason: "recovery_exhausted" }));
 							return;
 						}
 						const partial = options.mode === "partial";
-						const paused = options.mode === "paused" || options.mode === "prepared";
+						const paused =
+							options.mode === "paused" || options.mode === "prepared" || options.mode === "exhausted_result";
 						const confirmed = options.mode === "confirmed" || options.mode === "confirmed_boundary";
 						let value = sdk.ComputerSegmentResult.create({
 							status: confirmed
@@ -197,7 +216,12 @@ export function fixture(
 										{
 											index: 0,
 											dispatch: sdk.ComputerDispatch.NotDispatched,
-											code: options.mode === "prepared" ? "drag_foreground_prepared" : "target_missing",
+											code:
+												options.mode === "prepared"
+													? "drag_foreground_prepared"
+													: options.mode === "exhausted_result"
+														? "recovery_exhausted"
+														: "target_missing",
 										},
 									]
 								: partial
@@ -214,6 +238,7 @@ export function fixture(
 							condition: confirmed ? sdk.ComputerCondition.Satisfied : sdk.ComputerCondition.Unknown,
 							...(partial || paused ? { firstUnfinishedAction: 0 } : {}),
 							recoveryAttempts: paused ? Math.min(segments.length, 2) : 0,
+							remainingDurationMs: 29_993,
 							elapsedMs: 7n,
 						});
 						if (options.mode === "confirmed_boundary") {

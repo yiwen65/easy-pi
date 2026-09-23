@@ -1,0 +1,826 @@
+diff --git a/libs/cua-driver/python/src/cua_driver/_native.py b/libs/cua-driver/python/src/cua_driver/_native.py
+--- a/libs/cua-driver/python/src/cua_driver/_native.py
++++ b/libs/cua-driver/python/src/cua_driver/_native.py
+@@ -3294,19 +3294,20 @@
+
+ @dataclass
+ class ComputerSegmentResult:
+-    def __init__(self, *, status:ComputerSegmentStatus, actions:typing.List[ComputerInputResult], condition:ComputerCondition, first_unfinished_action:typing.Optional[int], recovery_attempts:int, elapsed_ms:int):
++    def __init__(self, *, status:ComputerSegmentStatus, actions:typing.List[ComputerInputResult], condition:ComputerCondition, first_unfinished_action:typing.Optional[int], recovery_attempts:int, remaining_duration_ms:int, elapsed_ms:int):
+         self.status = status
+         self.actions = actions
+         self.condition = condition
+         self.first_unfinished_action = first_unfinished_action
+         self.recovery_attempts = recovery_attempts
++        self.remaining_duration_ms = remaining_duration_ms
+         self.elapsed_ms = elapsed_ms
+
+
+
+
+     def __str__(self):
+-        return "ComputerSegmentResult(status={}, actions={}, condition={}, first_unfinished_action={}, recovery_attempts={}, elapsed_ms={})".format(self.status, self.actions, self.condition, self.first_unfinished_action, self.recovery_attempts, self.elapsed_ms)
++        return "ComputerSegmentResult(status={}, actions={}, condition={}, first_unfinished_action={}, recovery_attempts={}, remaining_duration_ms={}, elapsed_ms={})".format(self.status, self.actions, self.condition, self.first_unfinished_action, self.recovery_attempts, self.remaining_duration_ms, self.elapsed_ms)
+     def __eq__(self, other):
+         if self.status != other.status:
+             return False
+@@ -3317,6 +3318,8 @@
+         if self.first_unfinished_action != other.first_unfinished_action:
+             return False
+         if self.recovery_attempts != other.recovery_attempts:
++            return False
++        if self.remaining_duration_ms != other.remaining_duration_ms:
+             return False
+         if self.elapsed_ms != other.elapsed_ms:
+             return False
+@@ -3331,6 +3334,7 @@
+             condition=_UniffiFfiConverterTypeComputerCondition.read(buf),
+             first_unfinished_action=_UniffiFfiConverterOptionalUInt32.read(buf),
+             recovery_attempts=_UniffiFfiConverterUInt8.read(buf),
++            remaining_duration_ms=_UniffiFfiConverterUInt32.read(buf),
+             elapsed_ms=_UniffiFfiConverterUInt64.read(buf),
+         )
+
+@@ -3341,6 +3345,7 @@
+         _UniffiFfiConverterTypeComputerCondition.check_lower(value.condition)
+         _UniffiFfiConverterOptionalUInt32.check_lower(value.first_unfinished_action)
+         _UniffiFfiConverterUInt8.check_lower(value.recovery_attempts)
++        _UniffiFfiConverterUInt32.check_lower(value.remaining_duration_ms)
+         _UniffiFfiConverterUInt64.check_lower(value.elapsed_ms)
+
+     @staticmethod
+@@ -3350,6 +3355,7 @@
+         _UniffiFfiConverterTypeComputerCondition.write(value.condition, buf)
+         _UniffiFfiConverterOptionalUInt32.write(value.first_unfinished_action, buf)
+         _UniffiFfiConverterUInt8.write(value.recovery_attempts, buf)
++        _UniffiFfiConverterUInt32.write(value.remaining_duration_ms, buf)
+         _UniffiFfiConverterUInt64.write(value.elapsed_ms, buf)
+
+ @dataclass
+diff --git a/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_segment.rs b/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_segment.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_segment.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-contract/src/computer_segment.rs
+@@ -139,6 +139,9 @@
+     pub observation_ref: String,
+     pub actions: Vec<ComputerInput>,
+     pub postcondition: ComputerPostcondition,
+-    /// Trusted execution limit. The model-facing default does not expose it.
++    /// Trusted per-operation limit. The first attempt also sets the total
++    /// native execution time available to this intent; later operations cannot
++    /// replenish it. Model/user judgement outside native work is not charged.
++    /// The model-facing default does not expose this caller-owned budget.
+     pub max_duration_ms: u32,
+ }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled.rs
+@@ -201,6 +201,8 @@
+     step_input_limit: Option<u32>,
+     plan_steps: Option<u32>,
+     segment_limits: Option<Vec<u32>>,
++    segment_started: Option<std::time::Instant>,
++    segment_recovery_intent: Option<String>,
+     segment_intent: Option<String>,
+     next_step: u32,
+     deadline: Option<std::time::Instant>,
+@@ -358,6 +360,13 @@
+             let live = self.dependencies_live(state);
+             let cancelled = closed || !live || state.cancelled;
+             if !self.session.gate.is_quarantined() {
++                if let Some(intent) = &state.segment_recovery_intent {
++                    if self.session.finish_intent_time(intent, &self.id, std::time::Instant::now()).is_err() {
++                        state.quarantine = true;
++                        self.session.gate.quarantined.store(true, Ordering::Release);
++                        return;
++                    }
++                }
+                 state.terminal = Some(Terminal {
+                     cancelled,
+                     input_committed: state.input_committed,
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget.rs
+@@ -7,6 +7,31 @@
+     uncertain: bool,
+     confirmed: bool,
+     drag_destination: Option<NativeWindowTarget>,
++    time: Option<IntentTime>,
++    preparation_continuation: Option<NativeWindowTarget>,
++}
++
++struct IntentTime {
++    remaining: Duration,
++    active: Option<(String, Instant)>,
++}
++
++impl IntentTime {
++    fn remaining_at(&self, now: Instant) -> Duration {
++        self.remaining.saturating_sub(
++            self.active.as_ref().map_or(Duration::ZERO, |(_, started)| now.saturating_duration_since(*started)),
++        )
++    }
++}
++
++impl IntentState {
++    fn charge_retry(&mut self) -> Result<u8, &'static str> {
++        if self.attempts >= 2 {
++            return Err("recovery_exhausted");
++        }
++        self.attempts += 1;
++        Ok(self.attempts)
++    }
+ }
+
+ impl Session {
+@@ -32,11 +57,55 @@
+             .lock()
+             .map_err(|_| "recovery_state_poisoned")?;
+         let state = states.get_mut(intent).ok_or("invalid_intent_reference")?;
+-        if state.attempts >= 2 {
++        if state.time.as_ref().is_some_and(|time| time.remaining_at(Instant::now()).is_zero()) {
+             return Err("recovery_exhausted");
+         }
+-        state.attempts += 1;
+-        Ok(state.attempts)
++        state.charge_retry()
++    }
++
++    fn reserve_intent_time(
++        &self,
++        intent: &str,
++        operation: &str,
++        destination: Option<NativeWindowTarget>,
++        started: Instant,
++        timeout: Duration,
++        now: Instant,
++    ) -> Result<Instant, &'static str> {
++        let mut states = self.recovery.lock().map_err(|_| "recovery_state_poisoned")?;
++        let state = states.get_mut(intent).ok_or("invalid_intent_reference")?;
++        if state.time.as_ref().is_some_and(|time| time.active.is_some()) {
++            return Err("native_busy");
++        }
++        let remaining = state.time.as_ref().map_or(timeout, |time| time.remaining);
++        if remaining <= now.saturating_duration_since(started) {
++            state.time = Some(IntentTime { remaining: Duration::ZERO, active: None });
++            return Err("recovery_exhausted");
++        }
++        let continuation = destination.is_some() && state.preparation_continuation == destination;
++        if state.time.is_some() && !continuation {
++            state.charge_retry()?;
++        }
++        state.preparation_continuation = None;
++        state.time = Some(IntentTime { remaining, active: Some((operation.into(), started)) });
++        Ok(started + remaining)
++    }
++
++    // Called only at genuine terminal settlement, after all owned work drained.
++    pub(super) fn finish_intent_time(
++        &self,
++        intent: &str,
++        operation: &str,
++        now: Instant,
++    ) -> Result<(), &'static str> {
++        let mut states = self.recovery.lock().map_err(|_| "recovery_state_poisoned")?;
++        let time = states.get_mut(intent).and_then(|state| state.time.as_mut()).ok_or("invalid_segment_intent")?;
++        if !time.active.as_ref().is_some_and(|(id, _)| id == operation) {
++            return Err("invalid_segment_intent");
++        }
++        time.remaining = time.remaining_at(now);
++        time.active = None;
++        Ok(())
+     }
+
+     pub fn record_intent(
+@@ -78,9 +147,82 @@
+ }
+
+ impl Operation {
++    /// Counts native work only. Time outside an operation (including model or
++    /// user judgement and separate captures) cannot expire session authority or
++    /// renew the remaining allowance. This does not mark requested input sent.
++    pub fn bind_recovery_budget(&self, intent: &str) -> Result<(), &'static str> {
++        self.session.intent_state(intent)?;
++        let closed = self.session.gate.guard();
++        let mut state = self.state();
++        if *closed || !self.dependencies_live(&state) || state.producer_done {
++            return Err("cancelled");
++        }
++        // A worker may first run after its configured deadline. Account that
++        // elapsed work instead of allowing the next operation a fresh budget;
++        // this accounting never reopens cancelled primary admission.
++        if state.cancelled && !state.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
++            return Err("cancelled");
++        }
++        self.bind_recovery_budget_locked(&mut state, intent)
++    }
++
++    fn bind_recovery_budget_locked(&self, state: &mut super::State, intent: &str) -> Result<(), &'static str> {
++        if let Some(bound) = &state.segment_recovery_intent {
++            return if bound == intent { Ok(()) } else { Err("invalid_segment_intent") };
++        }
++        if state.segment_limits.is_none() || state.next_step != 0 {
++            return Err("invalid_segment_intent");
++        }
++        let started = state.segment_started.ok_or("invalid_segment_intent")?;
++        let deadline = state.deadline.ok_or("invalid_segment_intent")?;
++        let destination = state.drag_destination.as_ref().map(|session| session.native_window()).transpose()?;
++        let shared = self.session.reserve_intent_time(
++            intent, &self.id, destination, started, deadline.saturating_duration_since(started), Instant::now(),
++        )?;
++        state.deadline = Some(deadline.min(shared));
++        state.segment_recovery_intent = Some(intent.into());
++        self.session.gate.notify();
++        Ok(())
++    }
++
++    /// Activation-only cross-window preparation already consumed a recovery
++    /// attempt. Its one fresh-pair continuation is that attempt, not a new one.
++    pub fn continue_after_drag_preparation(&self) -> Result<(), &'static str> {
++        let closed = self.session.gate.guard();
++        let state = self.state();
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
++            return Err("cancelled");
++        }
++        if state.drag_destination.is_none() || state.segment_intent.is_some() || state.next_step != 1 {
++            return Err("invalid_segment_intent");
++        }
++        let intent = state.segment_recovery_intent.as_ref().ok_or("invalid_segment_intent")?;
++        let mut states = self.session.recovery.lock().map_err(|_| "recovery_state_poisoned")?;
++        let recovery = states.get_mut(intent).ok_or("invalid_intent_reference")?;
++        if recovery.uncertain || recovery.confirmed || recovery.attempts == 0
++            || !recovery.time.as_ref().and_then(|time| time.active.as_ref()).is_some_and(|(id, _)| id == &self.id)
++        {
++            return Err("invalid_segment_intent");
++        }
++        recovery.preparation_continuation = Some(state.drag_destination.as_ref().ok_or("invalid_drag_destination")?.native_window()?);
++        Ok(())
++    }
++
++    pub fn recovery_remaining_ms(&self) -> Result<u32, &'static str> {
++        let state = self.state();
++        let intent = state.segment_recovery_intent.as_ref().ok_or("invalid_segment_intent")?;
++        let states = self.session.recovery.lock().map_err(|_| "recovery_state_poisoned")?;
++        let time = states.get(intent).and_then(|state| state.time.as_ref()).ok_or("invalid_segment_intent")?;
++        Ok(time.remaining_at(Instant::now()).as_millis().min(30_000) as u32)
++    }
++
+     pub fn bind_segment_intent(&self, intent: &str) -> Result<(), &'static str> {
+         self.session.intent_state(intent)?;
++        let closed = self.session.gate.guard();
+         let mut state = self.state();
++        if *closed || !self.dependencies_live(&state) || state.cancelled || state.producer_done {
++            return Err("cancelled");
++        }
+         if state.segment_limits.is_none() || state.next_step != 0 || state.segment_intent.is_some()
+         {
+             return Err("invalid_segment_intent");
+@@ -91,6 +233,7 @@
+             .map(|session| session.native_window())
+             .transpose()?;
+         self.session.bind_intent_destination(intent, destination)?;
++        self.bind_recovery_budget_locked(&mut state, intent)?;
+         state.segment_intent = Some(intent.into());
+         Ok(())
+     }
+@@ -119,8 +262,10 @@
+         {
+             return Err("invalid_segment_budget");
+         }
++        let started = Instant::now();
+         state.segment_limits = Some(limits);
+-        state.deadline = Some(Instant::now() + timeout);
++        state.segment_started = Some(started);
++        state.deadline = Some(started + timeout);
+         Ok(())
+     }
+
+@@ -267,3 +412,5 @@
+
+ #[cfg(test)]
+ mod drag_tests;
++#[cfg(test)]
++mod recovery_tests;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/drag_tests.rs
+@@ -41,7 +41,7 @@
+         Err("intent_target_mismatch")
+     ));
+     configured(&source, Some(c), "new").unwrap().cancel();
+-    assert_eq!(source.intent_state("same"), Ok((0, false, false)));
++    assert_eq!(source.intent_state("same"), Ok((1, false, false)));
+ }
+
+ #[tokio::test]
+@@ -87,7 +87,7 @@
+         .cancel();
+     assert_eq!(
+         source.intent_state("pair"),
+-        Ok((1, true, false)),
+-        "binding does not clear uncertain effects or budget"
++        Ok((2, true, false)),
++        "the new operation consumes a retry without clearing uncertain effects"
+     );
+ }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/recovery_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/recovery_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/segment_budget/recovery_tests.rs
+@@ -0,0 +1,219 @@
++use super::*;
++use crate::controlled::Gate;
++use std::sync::Arc;
++
++#[tokio::test]
++async fn controlled_recovery_deadline_cannot_be_renewed_by_a_new_operation() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    let first = session.new_operation().unwrap();
++    first
++        .configure_segment(vec![1], Duration::from_millis(50))
++        .unwrap();
++    first.bind_segment_intent("same-intent").unwrap();
++    // Native deadline notification is the stimulus, not an arbitrary sleep or
++    // an assumed timeout receipt. Begin may already observe that real deadline.
++    if let Err(code) = first.begin() {
++        assert_eq!(code, "cancelled");
++    }
++    first.cancelled().await;
++    first.finish();
++    assert!(first.terminal().await.unwrap().cancelled);
++    let next = session.new_operation().unwrap();
++    next.configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    assert_eq!(
++        next.bind_segment_intent("same-intent"),
++        Err("recovery_exhausted")
++    );
++    next.cancel();
++    assert!(!next.terminal().await.unwrap().input_committed);
++}
++
++#[tokio::test]
++async fn controlled_recovery_expiry_before_worker_binding_still_spends_the_first_budget() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    let first = session.new_operation().unwrap();
++    first.configure_segment(vec![1], Duration::from_millis(50)).unwrap();
++    if let Err(code) = first.begin() { assert_eq!(code, "cancelled"); }
++    first.cancelled().await;
++    let _ = first.bind_recovery_budget("late-worker");
++    first.finish();
++    first.terminal().await.unwrap();
++    let next = session.new_operation().unwrap();
++    next.configure_segment(vec![1], Duration::from_secs(30)).unwrap();
++    assert_eq!(next.bind_recovery_budget("late-worker"), Err("recovery_exhausted"));
++    next.cancel();
++    next.terminal().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_recovery_no_progress_operations_share_the_two_retry_limit() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    for attempt in 0..4 {
++        let operation = session.new_operation().unwrap();
++        operation
++            .configure_segment(vec![1], Duration::from_secs(30))
++            .unwrap();
++        let bound = operation.bind_segment_intent("unchanged-missing-target");
++        if attempt < 3 {
++            assert_eq!(bound, Ok(()));
++            operation.begin().unwrap();
++            // Models/native callers may supply fresh observations, but a
++            // refused action that makes no progress must not spin forever.
++            operation.finish();
++        } else {
++            assert_eq!(bound, Err("recovery_exhausted"));
++            operation.cancel();
++        }
++        assert!(!operation.terminal().await.unwrap().input_committed);
++    }
++}
++
++#[tokio::test]
++async fn controlled_recovery_budget_is_not_available_until_real_work_drains() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    let first = session.new_operation().unwrap();
++    first
++        .configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    first.bind_segment_intent("draining").unwrap();
++    first.begin().unwrap();
++    let work = first.track().unwrap();
++    first.finish();
++    assert!(!first.is_proven_terminal());
++    let next = session.new_operation().unwrap();
++    next.configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    assert_eq!(next.bind_segment_intent("draining"), Err("native_busy"));
++    drop(work);
++    first.terminal().await.unwrap();
++    assert_eq!(next.bind_segment_intent("draining"), Ok(()));
++    next.cancel();
++    next.terminal().await.unwrap();
++}
++
++#[test]
++fn controlled_recovery_only_native_work_spends_time_and_later_timeouts_cannot_expand_it() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    session.intent_state("time").unwrap();
++    let start = Instant::now();
++    assert_eq!(
++        session.reserve_intent_time("time", "a", None, start, Duration::from_secs(30), start),
++        Ok(start + Duration::from_secs(30))
++    );
++    session
++        .finish_intent_time("time", "a", start + Duration::from_secs(12))
++        .unwrap();
++    // An hour spent outside native execution (e.g. model/user judgement) is not
++    // an authorization TTL and does not restore the already spent 12 seconds.
++    let later = start + Duration::from_secs(3600);
++    assert_eq!(
++        session.reserve_intent_time("time", "b", None, later, Duration::from_secs(30), later),
++        Ok(later + Duration::from_secs(18))
++    );
++    session
++        .finish_intent_time("time", "b", later + Duration::from_secs(18))
++        .unwrap();
++    assert_eq!(
++        session.reserve_intent_time("time", "c", None, later, Duration::from_secs(30), later),
++        Err("recovery_exhausted")
++    );
++    assert!(
++        session.new_operation().is_ok(),
++        "work budget does not revoke session authority"
++    );
++}
++
++#[tokio::test]
++async fn controlled_recovery_internal_route_and_external_retry_use_one_counter() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    let first = session.new_operation().unwrap();
++    first
++        .configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    first.bind_segment_intent("shared").unwrap();
++    first.begin().unwrap();
++    assert_eq!(session.recover_intent("shared"), Ok(1));
++    first.finish();
++    first.terminal().await.unwrap();
++    let next = session.new_operation().unwrap();
++    next.configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    next.bind_segment_intent("shared").unwrap();
++    assert_eq!(session.intent_state("shared"), Ok((2, false, false)));
++    assert_eq!(session.recover_intent("shared"), Err("recovery_exhausted"));
++    next.cancel();
++    next.terminal().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_recovery_prepared_pair_continues_one_attempt_without_marking_drag_sent() {
++    let gate = Gate::new();
++    let source = gate.session(None, Arc::new(|| true), 1, 2, Some((1, 2))).unwrap();
++    let destination = gate.session(None, Arc::new(|| true), 1, 3, Some((1, 2))).unwrap();
++    let first = source.new_operation().unwrap();
++    first.bind_drag_destination(destination.clone()).unwrap();
++    first
++        .configure_segment(vec![2], Duration::from_secs(30))
++        .unwrap();
++    first.bind_recovery_budget("prepared").unwrap();
++    first.begin().unwrap();
++    first.begin_segment_action(0).unwrap();
++    assert_eq!(source.recover_intent("prepared"), Ok(1));
++    first.segment_primary(|| ()).unwrap(); // activation, not requested drag
++    first.continue_after_drag_preparation().unwrap();
++    first.finish();
++    assert!(first.terminal().await.unwrap().input_committed);
++    assert_eq!(source.intent_state("prepared"), Ok((1, false, false)));
++    let next = source.new_operation().unwrap();
++    next.bind_drag_destination(destination).unwrap();
++    next.configure_segment(vec![2], Duration::from_secs(30))
++        .unwrap();
++    next.bind_recovery_budget("prepared").unwrap();
++    next.bind_segment_intent("prepared").unwrap();
++    assert_eq!(source.intent_state("prepared"), Ok((1, false, false)));
++    assert!(next.recovery_remaining_ms().unwrap() <= 30_000);
++    next.begin().unwrap();
++    next.begin_segment_action(0).unwrap();
++    next.segment_primary(|| ()).unwrap();
++    assert_eq!(source.intent_state("prepared"), Ok((1, true, false)));
++    next.finish();
++    next.terminal().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_recovery_cancelled_or_quarantined_work_cannot_renew_its_binding() {
++    let gate = Gate::new();
++    let session = gate.session(None, Arc::new(|| true), 1, 2, None).unwrap();
++    let cancelled = session.new_operation().unwrap();
++    cancelled
++        .configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    cancelled.cancel();
++    assert_eq!(
++        cancelled.bind_recovery_budget("cancelled"),
++        Err("cancelled")
++    );
++    assert_eq!(cancelled.bind_segment_intent("cancelled"), Err("cancelled"));
++    let unknown = session.new_operation().unwrap();
++    unknown
++        .configure_segment(vec![1], Duration::from_secs(30))
++        .unwrap();
++    unknown.bind_recovery_budget("unknown").unwrap();
++    unknown.begin().unwrap();
++    unknown.quarantine();
++    unknown.finish();
++    assert!(unknown.terminal().await.is_err());
++    assert!(session.recovery.lock().unwrap()["unknown"]
++        .time
++        .as_ref()
++        .unwrap()
++        .active
++        .is_some());
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/cross_drag_native.rs
+@@ -107,7 +107,11 @@
+         use platform_macos::input::controlled::cross_drag::{self, Endpoint};
+         let started = Instant::now();
+         let (from, to, duration_ms) = shape(&segment).map_err(refused)?;
+-        let [source_image, destination_image] = self.take_drag_images(&destination, from, to)?;
++        let budget = self.core.bind_recovery_budget(&segment.intent_ref);
++        // Both evidence slots still retire together, including budget refusal.
++        let images = self.take_drag_images(&destination, from, to);
++        budget.map_err(refused)?;
++        let [source_image, destination_image] = images?;
+         let source_target = self.session.gate.native_window().map_err(refused)?;
+         let destination_target = destination.gate.native_window().map_err(refused)?;
+         for (native, target) in [
+@@ -128,15 +132,9 @@
+             .intent_state(&segment.intent_ref)
+             .map_err(refused)?;
+         if prior.1 || prior.2 {
+-            let code = self
+-                .core
+-                .session
+-                .recover_intent(&segment.intent_ref)
+-                .map(|_| "intent_outcome_unknown")
+-                .unwrap_or_else(|code| code);
+             let value = result(
+                 &segment,
+-                Some(code),
++                Some("intent_outcome_unknown"),
+                 false,
+                 false,
+                 self.core.is_cancelled(),
+@@ -147,6 +145,7 @@
+                     .map(|state| state.0)
+                     .unwrap_or(prior.0),
+                 started.elapsed().as_millis() as u64,
++                self.remaining_recovery_ms()?,
+             )?;
+             return Ok(ComputerResult::Segment { value });
+         }
+@@ -196,6 +195,7 @@
+                     if core.input_committed() && core.session.record_intent(&intent, true, false).is_err() { core.quarantine(); }
+                     return Err(code);
+                 }
++                core.continue_after_drag_preparation()?;
+                 return Ok(false);
+             }
+             core.bind_segment_intent(&intent)?; // records the ordered target pair
+@@ -223,6 +223,7 @@
+                 .map(|state| state.0)
+                 .unwrap_or(prior.0),
+             started.elapsed().as_millis() as u64,
++            self.remaining_recovery_ms()?,
+         )?;
+         Ok(ComputerResult::Segment { value })
+     }
+@@ -237,6 +238,7 @@
+     count: u32,
+     attempts: u8,
+     elapsed_ms: u64,
++    remaining_duration_ms: u32,
+ ) -> Result<ComputerSegmentResult, ComputerError> {
+     use cua_driver_contract::{
+         ActionDelivery, ActionDeliveryMode, ActionEffect, ActionResult, ActionRoute,
+@@ -273,6 +275,7 @@
+         condition: ComputerCondition::Unknown,
+         first_unfinished_action: (!delivered).then_some(0),
+         recovery_attempts: attempts,
++        remaining_duration_ms,
+         elapsed_ms,
+     };
+     super::segment::validate_result(segment, &value).map_err(refused)?;
+@@ -340,6 +343,7 @@
+             2,
+             1,
+             10,
++            29_990,
+         )
+         .unwrap();
+         assert_eq!(
+@@ -348,13 +352,13 @@
+         );
+         assert!(prepared.actions[0].action.is_none());
+         assert_eq!(prepared.first_unfinished_action, Some(0));
+-        let delivered = result(&segment, None, true, true, false, 14, 1, 250).unwrap();
++        let delivered = result(&segment, None, true, true, false, 14, 1, 250, 29_750).unwrap();
+         assert_eq!(delivered.status, ComputerSegmentStatus::NeedsObservation);
+         assert_eq!(
+             delivered.actions[0].action.as_ref().unwrap().route,
+             cua_driver_contract::ActionRoute::GlobalInput
+         );
+-        let interrupted = result(&segment, Some("cancelled"), false, true, true, 3, 0, 20).unwrap();
++        let interrupted = result(&segment, Some("cancelled"), false, true, true, 3, 0, 20, 29_980).unwrap();
+         assert_eq!(interrupted.status, ComputerSegmentStatus::Cancelled);
+         assert_eq!(interrupted.actions[0].dispatch, ComputerDispatch::Unknown);
+     }
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment.rs
+@@ -35,6 +35,9 @@
+     pub condition: ComputerCondition,
+     pub first_unfinished_action: Option<u32>,
+     pub recovery_attempts: u8,
++    /// Remaining same-intent native work budget at result construction. Time
++    /// spent outside a segment does not consume it; it is not an authority TTL.
++    pub remaining_duration_ms: u32,
+     pub elapsed_ms: u64,
+ }
+
+@@ -205,6 +208,7 @@
+     let invalid = || Err("invalid_segment_result");
+     if result.actions.len() > segment.actions.len()
+         || result.recovery_attempts > MAX_SEGMENT_RECOVERY_ATTEMPTS
++        || result.remaining_duration_ms > MAX_SEGMENT_DURATION_MS
+     {
+         return invalid();
+     }
+@@ -350,6 +354,7 @@
+             condition: ComputerCondition::Unknown,
+             first_unfinished_action: None,
+             recovery_attempts: 0,
++            remaining_duration_ms: 29_988,
+             elapsed_ms: 12,
+         }
+     }
+@@ -437,6 +442,10 @@
+         output.recovery_attempts = 3;
+         assert!(validate_result(&input, &output).is_err());
+         output.recovery_attempts = 0;
++        output.remaining_duration_ms = 30_001;
++        assert!(validate_result(&input, &output).is_err());
++        output.remaining_duration_ms = 0;
++        assert_eq!(validate_result(&input, &output), Ok(()));
+         for code in ["", "private input text", "<tool>"] {
+             output.actions[0].code = Some(code.into());
+             assert!(validate_result(&input, &output).is_err());
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
+@@ -43,10 +43,18 @@
+             .await
+     }
+
++    pub(super) fn remaining_recovery_ms(&self) -> Result<u32, ComputerError> {
++        self.core.recovery_remaining_ms().map_err(|_| {
++            self.core.quarantine();
++            ComputerError::Quarantined
++        })
++    }
++
+     async fn execute_segment(
+         &self,
+         segment: ComputerSegment,
+     ) -> Result<ComputerResult, ComputerError> {
++        self.core.bind_recovery_budget(&segment.intent_ref).map_err(refused)?;
+         let state = self
+             .session
+             .native
+@@ -167,6 +175,7 @@
+             condition,
+             first_unfinished_action,
+             recovery_attempts: execution.recovery_attempts,
++            remaining_duration_ms: self.remaining_recovery_ms()?,
+             elapsed_ms: execution.elapsed_ms,
+         };
+         super::segment::validate_result(&segment, &value).map_err(refused)?;
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/segments.rs
+@@ -62,6 +62,7 @@
+         condition: ComputerCondition::Unknown,
+         first_unfinished_action: Some(0),
+         recovery_attempts: 1,
++        remaining_duration_ms: 999,
+         elapsed_ms: 1,
+     };
+     validate_result(&input(), &result).unwrap();
+@@ -75,6 +76,25 @@
+     assert_eq!(value.status, ComputerSegmentStatus::OutcomeUnknown);
+     assert_eq!(value.first_unfinished_action, Some(0));
+     assert_eq!(value.actions[0].dispatch, ComputerDispatch::Unknown);
++    host.close().await.unwrap();
++}
++
++#[tokio::test]
++async fn controlled_segment_direct_sdk_missing_evidence_does_not_reset_recovery() {
++    let _test = TEST_RUNTIME_LOCK.lock().unwrap();
++    let host = host();
++    let session = session(&host, None);
++    for attempt in 0..4 {
++        let operation = session.clone().new_operation().unwrap();
++        operation.clone().start_segment(input()).unwrap();
++        let expected = if attempt < 3 { "stale_session_observation" } else { "recovery_exhausted" };
++        assert!(matches!(operation.result().await, Err(ComputerError::Refused { reason }) if reason == expected));
++        assert!(!operation.terminal().await.unwrap().input_committed);
++        // Observe the real native lane release, not an arbitrary delay. No
++        // input is queued on this test-only wait.
++        drop(host.scheduler.clone().lock_owned().await);
++    }
++    assert_eq!(session.gate.intent_state("intent"), Ok((2, false, false)));
+     host.close().await.unwrap();
+ }
+
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -644,13 +644,9 @@
+             let code = if condition == Some(true) {
+                 "condition_already_satisfied"
+             } else {
+-                match self.operation.session.recover_intent(&segment.intent_ref) {
+-                    Ok(attempts) => {
+-                        recovery_attempts = attempts;
+-                        "intent_outcome_unknown"
+-                    }
+-                    Err(code) => code,
+-                }
++                // Binding this new operation already consumed its shared retry.
++                // This read cannot authorize replay or charge that retry twice.
++                "intent_outcome_unknown"
+             };
+             let _ = self.operation.session.record_intent(
+                 &segment.intent_ref,
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_contract.ts b/libs/cua-driver/typescript/src/native/cua_driver_contract.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_contract.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_contract.ts
+@@ -2856,7 +2856,10 @@
+     actions: Array<ComputerInput>,
+     postcondition: ComputerPostcondition,
+     /**
+-     * Trusted execution limit. The model-facing default does not expose it.
++     * Trusted per-operation limit. The first attempt also sets the total
++     * native execution time available to this intent; later operations cannot
++     * replenish it. Model/user judgement outside native work is not charged.
++     * The model-facing default does not expose this caller-owned budget.
+      */
+     maxDurationMs: number
+ }
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts b/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
+@@ -966,6 +966,11 @@
+     condition: ComputerCondition,
+     firstUnfinishedAction?: number,
+     recoveryAttempts: number,
++    /**
++     * Remaining same-intent native work budget at result construction. Time
++     * spent outside a segment does not consume it; it is not an authority TTL.
++     */
++    remainingDurationMs: number,
+     elapsedMs: bigint
+ }
+
+@@ -995,6 +1000,7 @@
+                 condition: FfiConverterTypeComputerCondition.read(from),
+                 firstUnfinishedAction: FfiConverterOptionalUInt32.read(from),
+                 recoveryAttempts: FfiConverterUInt8.read(from),
++                remainingDurationMs: FfiConverterUInt32.read(from),
+                 elapsedMs: FfiConverterUInt64.read(from)
+             };
+         }
+@@ -1004,6 +1010,7 @@
+             FfiConverterTypeComputerCondition.write(value.condition, into);
+             FfiConverterOptionalUInt32.write(value.firstUnfinishedAction, into);
+             FfiConverterUInt8.write(value.recoveryAttempts, into);
++            FfiConverterUInt32.write(value.remainingDurationMs, into);
+             FfiConverterUInt64.write(value.elapsedMs, into);
+         }
+         allocationSize(value: TypeName): number {
+@@ -1012,6 +1019,7 @@
+              FfiConverterTypeComputerCondition.allocationSize(value.condition) +
+              FfiConverterOptionalUInt32.allocationSize(value.firstUnfinishedAction) +
+              FfiConverterUInt8.allocationSize(value.recoveryAttempts) +
++             FfiConverterUInt32.allocationSize(value.remainingDurationMs) +
+              FfiConverterUInt64.allocationSize(value.elapsedMs);
+
+         }

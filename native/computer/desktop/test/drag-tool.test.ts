@@ -114,7 +114,11 @@ test(
 			assert.match(JSON.stringify(result.details), /not_dispatched/);
 			assert.match(JSON.stringify(result.details), /"inputCommitted":true/);
 			assert.equal(result.content.filter((item) => item.type === "image").length, 2);
-			await f.call(drag("image-3", "image-4"));
+			await f.call({
+				...drag("image-3", "image-4"),
+				from: { ref: "image-3", x: 0, y: 2 },
+				to: { ref: "image-4", x: 0, y: 0 },
+			});
 			assert.equal(f.segments[0]!.intentRef, f.segments[1]!.intentRef);
 		} finally {
 			await f.host.close();

@@ -24,6 +24,7 @@ test("one Computer parser accepts segments but rejects model intent IDs, budgets
 		{ intentRef: "new-id" },
 		{ maxDurationMs: 1 },
 		{ recoveryAttempts: 0 },
+		{ remainingDurationMs: 30_000 },
 		{ previousEffect: "native_confirmed" },
 	])
 		assert.throws(() => parseDesktopInput({ request: { ...request(), ...extra } }));
@@ -109,12 +110,14 @@ test(
 			firstUnfinishedAction: 0,
 			condition: sdk.ComputerCondition.Unknown,
 			recoveryAttempts: 2,
+			remainingDurationMs: 19_000,
 			elapsedMs: 11n,
 		});
 		const result = projectSegment(sdk, value, 3, false);
 		assert.equal(result.attemptedActions, 1);
 		assert.equal(result.firstUnfinishedAction, 0);
 		assert.equal(result.recoveryAttempts, 2);
+		assert.equal(result.remainingDurationMs, 19_000);
 		assert.equal(result.elapsedMs, "11");
 		assert.equal(result.actions[0]!.action?.effect, "partial");
 		assert.equal(result.actions[0]!.action?.delivery?.mode, "foreground");
@@ -125,6 +128,9 @@ test(
 			{ ...value, condition: 999 },
 			{ ...value, actions: [{ ...value.actions[0]!, dispatch: 999 }] },
 			{ ...value, recoveryAttempts: 3 },
+			{ ...value, remainingDurationMs: -1 },
+			{ ...value, remainingDurationMs: 30_001 },
+			{ ...value, remainingDurationMs: NaN },
 			{ ...value, firstUnfinishedAction: 1 },
 			{ ...value, actions: [value.actions[0]!, { ...value.actions[0]!, index: 1 }] },
 		])
@@ -143,6 +149,7 @@ test(
 			actions: [],
 			firstUnfinishedAction: 0,
 			recoveryAttempts: 0,
+			remainingDurationMs: 29_999,
 			elapsedMs: 1n,
 		});
 		assert.equal(projectSegment(sdk, value, 1, false).status, "confirmed");

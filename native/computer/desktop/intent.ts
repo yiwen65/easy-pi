@@ -4,7 +4,9 @@ import type { ComputerSegmentInput } from "./segment-contracts.ts";
 type Request = ComputerSegmentInput["request"];
 interface Intent {
 	id: string;
+	key: string;
 	evidence: number;
+	noRequestedInput: boolean;
 	uncertain: boolean;
 	resolved: boolean;
 	owner: object;
@@ -60,21 +62,47 @@ export class DesktopIntents {
 		} else if (this.current?.uncertain) throw new Error("previous_intent_unresolved");
 		let intent = this.intents.get(key);
 		if (!intent || intent.resolved) {
+			// Search the bounded ledger, not just the last window: unrelated
+			// work cannot hide an unresolved no-input recovery on this target.
+			const retry = [...this.intents.values()].find(
+				(prior) => prior.noRequestedInput && !prior.resolved && sameTarget(prior),
+			);
+			if (retry) {
+				if (retry.owner !== owner) throw new Error("unresolved_intent_target_changed");
+				this.intents.delete(retry.key);
+				retry.key = key;
+				this.intents.set(key, retry);
+				intent = retry;
+			}
+		}
+		if (!intent || intent.resolved) {
 			if (this.count >= 256) throw new Error("intent_capacity_reached");
 			this.count++;
-			intent = { id: randomUUID(), evidence, uncertain: true, resolved: false, owner, target };
+			intent = {
+				id: randomUUID(),
+				key,
+				evidence,
+				noRequestedInput: false,
+				uncertain: true,
+				resolved: false,
+				owner,
+				target,
+			};
 			this.intents.set(key, intent);
 		} else {
 			if (intent.owner !== owner) throw new Error("unresolved_intent_target_changed");
 			intent.evidence = evidence;
 			intent.uncertain = true;
 		}
+		intent.noRequestedInput = false;
 		this.current = intent;
 		return intent.id;
 	}
-	finish(status: string, incomplete: boolean): void {
+	finish(status: string, incomplete: boolean, noRequestedInput = false): void {
 		if (!this.current) return;
-		this.current.resolved = status === "confirmed";
-		this.current.uncertain = status !== "confirmed" && (status === "outcome_unknown" || incomplete);
+		this.current.resolved = status === "confirmed" && !incomplete;
+		this.current.noRequestedInput = !this.current.resolved && noRequestedInput;
+		this.current.uncertain =
+			!this.current.resolved && !noRequestedInput && (status === "outcome_unknown" || incomplete);
 	}
 }

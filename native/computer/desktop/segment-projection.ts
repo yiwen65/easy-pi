@@ -64,6 +64,7 @@ const codes = new Set([
 	"permission_denied",
 	"session_revoked",
 	"desktop_busy",
+	"native_busy",
 	"desktop_quarantined",
 	"native_unavailable",
 	"native_fault",
@@ -103,6 +104,9 @@ export function projectSegment(
 		!Number.isInteger(value.recoveryAttempts) ||
 		value.recoveryAttempts < 0 ||
 		value.recoveryAttempts > 2 ||
+		!Number.isInteger(value.remainingDurationMs) ||
+		value.remainingDurationMs < 0 ||
+		value.remainingDurationMs > 30_000 ||
 		typeof value.elapsedMs !== "bigint" ||
 		value.elapsedMs < 0n ||
 		(value.firstUnfinishedAction !== undefined &&
@@ -180,6 +184,7 @@ export function projectSegment(
 		...(value.firstUnfinishedAction !== undefined ? { firstUnfinishedAction: value.firstUnfinishedAction } : {}),
 		condition,
 		recoveryAttempts: value.recoveryAttempts,
+		remainingDurationMs: value.remainingDurationMs,
 		elapsedMs: value.elapsedMs.toString(),
 	};
 }

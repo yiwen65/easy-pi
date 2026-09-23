@@ -99,6 +99,7 @@ test("genuine result codec preserves actual routes without claiming business suc
 			],
 			condition: api.ComputerCondition.Unknown,
 			recoveryAttempts: 0,
+			remainingDurationMs: 29_990,
 			elapsedMs: 10n,
 		});
 		assert.doesNotThrow(() => api.validateComputerSegmentResult(encoded, result));
@@ -127,11 +128,13 @@ test("genuine result codec rejects contradictory delivery, prefix and recovery f
 		condition: api.ComputerCondition.Unknown,
 		firstUnfinishedAction: 0,
 		recoveryAttempts: 0,
+		remainingDurationMs: 30_000,
 		elapsedMs: 0n,
 	});
 	assert.doesNotThrow(() => api.validateComputerSegmentResult(encoded, result));
 	for (const invalid of [
 		{ ...result, recoveryAttempts: 3 },
+		{ ...result, remainingDurationMs: 30_001 },
 		{ ...result, firstUnfinishedAction: 1 },
 		{ ...result, actions: [{ ...row, index: 1 }] },
 		{ ...result, actions: [row, row] },
