@@ -35,14 +35,14 @@ Model and operator calls use the flat wire contract below; old `message`/`fork_t
 {
   "task_name": "parser-check",
   "task": {
-    "relationship": "verify",
     "objective": "Check parser handling of empty input. Inspect src/parser.ts and test/parser.test.ts only; do not change files. Report concrete findings with file/line evidence and distinguish verified findings from untested risks."
   },
+  "relationship": "verify",
   "tools": ["read"]
 }
 ```
 
-`relationship` belongs **inside `task`**, not alongside it; `task.objective` is the only required task field, and omitted `relationship` defaults to `continue`. `verify` derives isolated context when `context` is omitted. The objective identifies task data and boundaries; it does not automatically read inputs or enforce filesystem confinement. Select tools that can actually perform the task: this example cannot run tests, and must report them as not run. `tools: "inherit"` captures the caller's allowed active tools as an upper ceiling; an explicit list can only reduce it. Exclude bash and arbitrary side-effecting extension tools when requesting read-only work. Do not assume that hiding write/edit makes bash read-only. Trusted extensions themselves execute with process permissions and are not sandboxed by this tool gate.
+`relationship` belongs **beside `task`**, not inside it; `task.objective` is the only required task field, and omitted `relationship` defaults to `continue`. Old nested wire calls are rejected; stored canonical delegations still use `delegation.task.relationship`. `verify` derives isolated context when `context` is omitted. The objective identifies task data and boundaries; it does not automatically read inputs or enforce filesystem confinement. Select tools that can actually perform the task: this example cannot run tests, and must report them as not run. `tools: "inherit"` captures the caller's allowed active tools as an upper ceiling; an explicit list can only reduce it. Exclude bash and arbitrary side-effecting extension tools when requesting read-only work. Do not assume that hiding write/edit makes bash read-only. Trusted extensions themselves execute with process permissions and are not sandboxed by this tool gate.
 
 `task.objective` is capped at 40,000 Unicode characters; the complete delegation has a 256 KiB serialization guard. Child model and reasoning effort resolve independently: global `subagentModel` / `subagentThinkingLevel` > live caller.
 
@@ -72,7 +72,7 @@ The collaboration system addition is identity-neutral for root and children. Roo
 
 ### Followups and automatic results
 
-`followup_task` requires `target` and `task` (with `objective` and optional `relationship` inside it); optional `tools` narrows the ceiling. It retains the child's existing context, not a fresh isolated one. The Grok Ctrl+F editor accepts the same JSON; the selected agent overrides/pins `target`. Malformed drafts remain editable and are not retried. A followup retains the child's history and can only narrow its tool ceiling. Its runtime envelope explicitly says `contextUse: "existing"`; the stored `delegation.context` remains the creation recipe, not a claim of fresh isolation. To obtain a new independent judgment, spawn a fresh agent.
+`followup_task` requires `target` and `task` (with only `objective` inside it); optional top-level `relationship` and `tools` select the relationship and narrow the ceiling. It retains the child's existing context, not a fresh isolated one. The Grok Ctrl+F editor accepts the same JSON; the selected agent overrides/pins `target`. Malformed drafts remain editable and are not retried. A followup retains the child's history and can only narrow its tool ceiling. Its runtime envelope explicitly says `contextUse: "existing"`; the stored `delegation.context` remains the creation recipe, not a claim of fresh isolation. To obtain a new independent judgment, spawn a fresh agent.
 
 Children are asked to deliver one JSON object by calling the child-side `deliver_result` protocol tool exactly once; a later call replaces the delivered result, and an oversized call is rejected with a hint to compact it and deliver again:
 

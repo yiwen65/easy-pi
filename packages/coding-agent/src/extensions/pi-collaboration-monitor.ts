@@ -371,7 +371,7 @@ export class PiCollaborationMonitor {
 			} catch {
 				throw new CollaborationError(
 					"invalid_arguments",
-					"Paste followup_task JSON with task, context=existing and capabilities",
+					"Paste followup_task JSON with task, optional top-level relationship, and optional tools",
 					"invalid_followup",
 				);
 			}
@@ -380,6 +380,7 @@ export class PiCollaborationMonitor {
 			const args = parseCollaborationArguments("followup_task", { ...input, target: path });
 			const delegation = validateDelegation({
 				task: args.task,
+				relationship: args.relationship,
 				tools: args.tools,
 				context: record.delegation?.context ?? { mode: "fork", turns: "all", prefix: "rebuild" },
 			});
