@@ -96,9 +96,13 @@ export function identifyProviderContext(input: ProviderContextIdentityInput): Pr
 		0,
 		Math.min(input.messages.length, input.historicalMessageCount ?? input.messages.length),
 	);
+	const fullHash = sha256Hex(canonicalJson(contextView(input)));
 	return {
-		fullHash: sha256Hex(canonicalJson(contextView(input))),
-		historicalPrefixHash: sha256Hex(canonicalJson(contextView(input, historicalMessageCount))),
+		fullHash,
+		historicalPrefixHash:
+			historicalMessageCount === input.messages.length
+				? fullHash
+				: sha256Hex(canonicalJson(contextView(input, historicalMessageCount))),
 		messageCount: input.messages.length,
 		historicalMessageCount,
 	};
@@ -110,7 +114,17 @@ export function preservesProviderContextPrefix(
 	next: ProviderContextIdentityInput,
 ): boolean {
 	if (next.messages.length < previous.messages.length) return false;
-	return canonicalJson(contextView(previous)) === canonicalJson(contextView(next, previous.messages.length));
+	// Compare fixed fields and individual messages without allocating two full
+	// image histories. Keep the array wrapper so sparse slots retain JSON null semantics.
+	if (canonicalJson(contextView(previous, 0)) !== canonicalJson(contextView(next, 0))) return false;
+	for (let index = 0; index < previous.messages.length; index++) {
+		if (
+			canonicalJson(previous.messages.slice(index, index + 1).map(providerMessageView)) !==
+			canonicalJson(next.messages.slice(index, index + 1).map(providerMessageView))
+		)
+			return false;
+	}
+	return true;
 }
 
 /** Return the first canonical logical-request path that differs, for cache-miss diagnostics. */
