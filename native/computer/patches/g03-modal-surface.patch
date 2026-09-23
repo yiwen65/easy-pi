@@ -1,0 +1,196 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation.rs
+@@ -4,6 +4,7 @@
+ use serde_json::{json, Value};
+
+ mod native;
++mod surface_gate;
+ pub(super) use native::{string_attr, Native};
+
+ #[derive(Clone, Default)]
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+@@ -296,6 +296,32 @@
+
+     pub fn general_window(&self) -> Result<RetainedElement, &'static str> {
+         self.resolve_window(true)
++    }
++
++    /// Semantic input/confirmation cannot keep using a parent blocked by a new
++    /// attached sheet. Observation remains available, including explicit child
++    /// selection. Inspect only role/subrole/modal metadata of immediate children.
++    pub fn general_input_window(&self) -> Result<RetainedElement, &'static str> {
++        let root = self.general_window()?;
++        let ptr = root.as_ptr() as AXUIElementRef;
++        super::surface_gate::require_clear(
++            || {
++                self.checkpoint()?;
++                Ok(!unsafe { elements(ptr, "AXSheets")? }.is_empty())
++            },
++            || {
++                self.checkpoint()?;
++                unsafe { elements(ptr, "AXChildren")? }
++                    .into_iter()
++                    .map(|child| {
++                        let ptr = child.as_ptr() as AXUIElementRef;
++                        self.bound(ptr)?;
++                        unsafe { identity(ptr) }
++                    })
++                    .collect()
++            },
++        )?;
++        Ok(root)
+     }
+
+     fn resolve_window(&self, general: bool) -> Result<RetainedElement, &'static str> {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/surface_gate.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/surface_gate.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/observation/surface_gate.rs
+@@ -0,0 +1,91 @@
++use super::Data;
++
++/// Only the selected root's attached surfaces, never all windows of its PID.
++pub(super) fn require_clear(
++    sheets: impl FnOnce() -> Result<bool, &'static str>,
++    children: impl FnOnce() -> Result<Vec<Data>, &'static str>,
++) -> Result<(), &'static str> {
++    // AXSheets is optional even on AppKit windows with a real attached sheet.
++    // Their immediate AXChildren expose the relation and AXSheet role instead.
++    if sheets()? || children()?.iter().any(Data::unexpected_surface) {
++        Err("unexpected_modal_surface")
++    } else {
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn controlled_selected_surface_explicit_sheet_blocks_before_children() {
++        assert_eq!(
++            require_clear(|| Ok(true), || panic!("unnecessary content read")),
++            Err("unexpected_modal_surface")
++        );
++    }
++
++    #[test]
++    fn controlled_selected_surface_children_detect_sheet_when_axsheets_unsupported() {
++        for data in [
++            Data {
++                role: "AXSheet".into(),
++                ..Default::default()
++            },
++            Data {
++                role: "AXWindow".into(),
++                subrole: Some("AXDialog".into()),
++                ..Default::default()
++            },
++            Data {
++                role: "AXGroup".into(),
++                modal: true,
++                ..Default::default()
++            },
++        ] {
++            assert_eq!(
++                require_clear(|| Ok(false), || Ok(vec![data])),
++                Err("unexpected_modal_surface")
++            );
++        }
++    }
++
++    #[test]
++    fn controlled_selected_surface_unknown_queries_are_not_empty() {
++        for code in [
++            "cancelled",
++            "accessibility_permission_denied",
++            "observation_read_failed",
++        ] {
++            assert_eq!(
++                require_clear(|| Err(code), || panic!("read after failure")),
++                Err(code)
++            );
++            assert_eq!(require_clear(|| Ok(false), || Err(code)), Err(code));
++        }
++    }
++
++    #[test]
++    fn controlled_selected_surface_normal_children_and_explicit_child_root_are_allowed() {
++        // Do not test the selected root's own modal role: explicitly selecting
++        // a sheet/menu grants that surface, not its blocked parent.
++        assert_eq!(require_clear(|| Ok(false), || Ok(vec![])), Ok(()));
++        assert_eq!(
++            require_clear(
++                || Ok(false),
++                || Ok(vec![
++                    Data {
++                        role: "AXTextField".into(),
++                        ..Default::default()
++                    },
++                    Data {
++                        role: "AXGroup".into(),
++                        ..Default::default()
++                    },
++                ])
++            ),
++            Ok(())
++        );
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -198,6 +198,14 @@
+             return None;
+         }
+         readiness::before_condition(condition, || self.prepare_accessibility()).ok()?;
++        if matches!(
++            condition,
++            ComputerPostcondition::Value { .. } | ComputerPostcondition::Present { .. }
++        ) {
++            (Native { operation: &self.operation })
++                .general_input_window()
++                .ok()?;
++        }
+         match condition {
+             ComputerPostcondition::Visual { .. } => None,
+             ComputerPostcondition::WindowFocused => self.foreground_state(),
+@@ -328,6 +336,14 @@
+         if requires_semantic_boundary(action, events.dispatched) {
+             return Err("segment_boundary_required");
+         }
++        let semantic_root = if matches!(
++            action,
++            ComputerInput::Focus { .. } | ComputerInput::Fill { .. } | ComputerInput::Window { .. }
++        ) {
++            Some((Native { operation: &self.operation }).general_input_window()?)
++        } else {
++            None
++        };
+         match action {
+             ComputerInput::Focus { target } | ComputerInput::Fill { target, .. } => {
+                 let element = self.resolve(target)?;
+@@ -390,10 +406,7 @@
+                     self.activate()?;
+                     return Ok((ActionRoute::SystemApi, self.foreground()));
+                 }
+-                let root = (Native {
+-                    operation: &self.operation,
+-                })
+-                .general_window()?;
++                let root = semantic_root.as_ref().ok_or("controlled_target_unproven")?;
+                 let ptr = root.as_ptr() as bindings::AXUIElementRef;
+                 let error = unsafe {
+                     match action {
+@@ -461,6 +474,7 @@
+                                 && unsafe { bindings::is_attribute_settable(ptr, "AXSelectedText") }
+                             {
+                                 self.member(&element)?;
++                                (Native { operation: &self.operation }).general_input_window()?;
+                                 if unsafe { bindings::set_string_attr(ptr, "AXSelectedText", text) }
+                                     != bindings::kAXErrorSuccess
+                                 {

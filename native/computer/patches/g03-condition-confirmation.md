@@ -64,4 +64,5 @@ This is a qualified confirmation increment, **not T-049 or whole-goal completion
 C408 then reproduced a separate missing modal dependency check: a pre-sheet
 semantic ref still wrote the selected parent window. Four terminals/two natural
 exits/clean C408 are preserved in `general/installed-segment-modal-boundary-01`.
-T-074 owns that repair; T-049 remains open in the sole task authority.
+The following [selected-parent modal increment](g03-modal-surface.md) qualifies
+that repair. Current task status is recorded only in the task authority.
