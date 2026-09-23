@@ -182,6 +182,8 @@ export function applyReplacementsPreservingUnchangedLines(
 	return result;
 }
 
+export type EditMatchTier = "exact" | "normalized" | "blank-lines" | "loose-lines" | "similar-block";
+
 export interface FuzzyMatchResult {
 	/** Whether a match was found */
 	found: boolean;
@@ -196,6 +198,242 @@ export interface FuzzyMatchResult {
 	 * When exact match: original content. When fuzzy match: normalized content.
 	 */
 	contentForReplacement: string;
+	/** Which matching tier produced this result. */
+	matchTier?: EditMatchTier;
+	/** Occurrences of oldText in the matched tier's space (>1 means the match is not unique). */
+	occurrenceCount?: number;
+	/** 1-indexed start lines of the occurrences (capped). */
+	occurrenceLines?: number[];
+	/** 1-indexed start lines of disjoint similar regions when similar-block matching is ambiguous. */
+	ambiguousLines?: number[];
+}
+
+/** Collapse whitespace runs and trim; used for line-oriented loose comparisons. */
+function normalizeLineLoose(line: string): string {
+	return line.replace(/[\t ]+/g, " ").trim();
+}
+
+function toNonBlankLooseLines(text: string): string[] {
+	return text
+		.split("\n")
+		.map(normalizeLineLoose)
+		.filter((line) => line !== "");
+}
+
+interface LineMatch {
+	/** Char offset of the first matched line's start */
+	index: number;
+	/** Length through the last matched line's content (excluding its line terminator) */
+	length: number;
+	/** 1-indexed line number where the match starts */
+	startLine: number;
+	/** Index into the non-blank line array (for clustering) */
+	nonBlankStart: number;
+	/** Number of non-blank lines covered (for clustering) */
+	nonBlankCount: number;
+}
+
+function toLineMatch(
+	spans: LineSpan[],
+	contentLines: string[],
+	nonBlank: number[],
+	nonBlankStart: number,
+	nonBlankCount: number,
+): LineMatch {
+	const firstLineIndex = nonBlank[nonBlankStart];
+	const lastLineIndex = nonBlank[nonBlankStart + nonBlankCount - 1];
+	const lastText = contentLines[lastLineIndex];
+	const lastHasTerminator = lastText.endsWith("\n");
+	const start = spans[firstLineIndex].start;
+	return {
+		index: start,
+		length: spans[lastLineIndex].end - (lastHasTerminator ? 1 : 0) - start,
+		startLine: firstLineIndex + 1,
+		nonBlankStart,
+		nonBlankCount,
+	};
+}
+
+/**
+ * Line-oriented loose matching. Blank lines are ignored on both sides and each
+ * line is compared after collapsing whitespace runs and trimming, so drift in
+ * indentation, alignment padding (e.g. markdown tables), and blank-line counts
+ * is tolerated. Matches span whole lines.
+ */
+function findLooseLineMatches(content: string, oldText: string): LineMatch[] {
+	const oldNonBlank = toNonBlankLooseLines(oldText);
+	if (oldNonBlank.length === 0) return [];
+	const contentLines = splitLinesWithEndings(content);
+	const spans = getLineSpans(content);
+	const nonBlank: number[] = [];
+	for (let i = 0; i < contentLines.length; i++) {
+		if (normalizeLineLoose(contentLines[i]) !== "") nonBlank.push(i);
+	}
+	const matches: LineMatch[] = [];
+	outer: for (let j = 0; j + oldNonBlank.length <= nonBlank.length; j++) {
+		for (let k = 0; k < oldNonBlank.length; k++) {
+			if (normalizeLineLoose(contentLines[nonBlank[j + k]]) !== oldNonBlank[k]) continue outer;
+		}
+		matches.push(toLineMatch(spans, contentLines, nonBlank, j, oldNonBlank.length));
+	}
+	return matches;
+}
+
+function bigramCounts(text: string): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (let i = 0; i < text.length - 1; i++) {
+		const gram = text.slice(i, i + 2);
+		counts.set(gram, (counts.get(gram) ?? 0) + 1);
+	}
+	return counts;
+}
+
+/** Sørensen–Dice coefficient over character bigrams; O(n) and robust for near-identical strings. */
+function bigramSimilarity(a: string, b: string, aCounts?: Map<string, number>): number {
+	if (a === b) return 1;
+	if (a.length < 2 || b.length < 2) return 0;
+	const counts = new Map(aCounts ?? bigramCounts(a));
+	let overlap = 0;
+	for (let i = 0; i < b.length - 1; i++) {
+		const gram = b.slice(i, i + 2);
+		const available = counts.get(gram);
+		if (available) {
+			overlap++;
+			counts.set(gram, available - 1);
+		}
+	}
+	return (2 * overlap) / (a.length - 1 + (b.length - 1));
+}
+
+const LEVENSHTEIN_MAX_CELLS = 2_000_000;
+
+/**
+ * Levenshtein similarity (1 - distance / max length). Returns 0 when the
+ * inputs are too large to compare within the cell budget; matching callers
+ * treat that as no match, diagnostic callers fall back to coarser signals.
+ */
+function levenshteinSimilarity(a: string, b: string): number {
+	if (a === b) return 1;
+	const maxLength = Math.max(a.length, b.length);
+	if (maxLength === 0) return 1;
+	if (a.length * b.length > LEVENSHTEIN_MAX_CELLS) return 0;
+	let previous: number[] = [];
+	for (let j = 0; j <= b.length; j++) previous.push(j);
+	for (let i = 1; i <= a.length; i++) {
+		const current: number[] = [i];
+		for (let j = 1; j <= b.length; j++) {
+			current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+		}
+		previous = current;
+	}
+	return 1 - previous[b.length] / maxLength;
+}
+
+const SIMILAR_BLOCK_MIN_NON_BLANK_LINES = 3;
+const SIMILAR_BLOCK_MAX_NON_BLANK_LINES = 200;
+const SIMILAR_BLOCK_THRESHOLD = 0.8;
+const SIMILAR_SINGLE_LINE_THRESHOLD = 0.9;
+
+interface SimilarBlockResult {
+	match: (LineMatch & { similarity: number }) | null;
+	/** 1-indexed start lines of disjoint accepted regions when more than one region qualifies */
+	ambiguousStartLines: number[];
+}
+
+/**
+ * Approximate block matching for oldText that drifts by a few characters or
+ * lines from the file (model transcription drift). Multi-line blocks require
+ * exact first/last non-blank line anchors plus a Levenshtein similarity of at
+ * least SIMILAR_BLOCK_THRESHOLD over the joined loose-normalized lines; a
+ * single line requires a bigram similarity of at least
+ * SIMILAR_SINGLE_LINE_THRESHOLD. Accepted windows must form exactly one
+ * overlapping cluster, otherwise the match is reported ambiguous.
+ */
+function findSimilarBlockMatch(content: string, oldText: string): SimilarBlockResult {
+	const none: SimilarBlockResult = { match: null, ambiguousStartLines: [] };
+	const oldNonBlank = toNonBlankLooseLines(oldText);
+	if (oldNonBlank.length === 0 || oldNonBlank.length > SIMILAR_BLOCK_MAX_NON_BLANK_LINES) return none;
+	const contentLines = splitLinesWithEndings(content);
+	const spans = getLineSpans(content);
+	const nonBlank: number[] = [];
+	for (let i = 0; i < contentLines.length; i++) {
+		if (normalizeLineLoose(contentLines[i]) !== "") nonBlank.push(i);
+	}
+	const nbLoose = nonBlank.map((lineIndex) => normalizeLineLoose(contentLines[lineIndex]));
+
+	type Accepted = LineMatch & { similarity: number };
+	const accepted: Accepted[] = [];
+
+	if (oldNonBlank.length === 1) {
+		const target = oldNonBlank[0];
+		const targetGrams = bigramCounts(target);
+		for (let j = 0; j < nbLoose.length; j++) {
+			const similarity = bigramSimilarity(target, nbLoose[j], targetGrams);
+			if (similarity >= SIMILAR_SINGLE_LINE_THRESHOLD) {
+				accepted.push({ ...toLineMatch(spans, contentLines, nonBlank, j, 1), similarity });
+			}
+		}
+	} else if (oldNonBlank.length >= SIMILAR_BLOCK_MIN_NON_BLANK_LINES) {
+		const first = oldNonBlank[0];
+		const last = oldNonBlank[oldNonBlank.length - 1];
+		const oldJoined = oldNonBlank.join("\n");
+		const counts = [oldNonBlank.length, oldNonBlank.length - 1, oldNonBlank.length + 1];
+		for (const count of counts) {
+			if (count < 2 || count > nbLoose.length) continue;
+			for (let j = 0; j + count <= nbLoose.length; j++) {
+				if (nbLoose[j] !== first || nbLoose[j + count - 1] !== last) continue;
+				const similarity = levenshteinSimilarity(oldJoined, nbLoose.slice(j, j + count).join("\n"));
+				if (similarity >= SIMILAR_BLOCK_THRESHOLD) {
+					accepted.push({ ...toLineMatch(spans, contentLines, nonBlank, j, count), similarity });
+				}
+			}
+		}
+	} else {
+		return none;
+	}
+
+	if (accepted.length === 0) return none;
+
+	// Cluster windows that overlap in non-blank line space; overlapping windows
+	// describe the same region, disjoint windows are competing regions.
+	accepted.sort((a, b) => a.nonBlankStart - b.nonBlankStart);
+	const clusters: Accepted[][] = [];
+	for (const candidate of accepted) {
+		const current = clusters[clusters.length - 1];
+		const currentEnd = current
+			? Math.max(...current.map((c) => c.nonBlankStart + c.nonBlankCount))
+			: -1;
+		if (current && candidate.nonBlankStart < currentEnd) {
+			current.push(candidate);
+		} else {
+			clusters.push([candidate]);
+		}
+	}
+	if (clusters.length > 1) {
+		return { match: null, ambiguousStartLines: clusters.map((cluster) => cluster[0].startLine) };
+	}
+	const best = clusters[0].reduce((a, b) => (b.similarity > a.similarity ? b : a));
+	return { match: best, ambiguousStartLines: [] };
+}
+
+/** Map char offsets to 1-indexed line numbers (line structure is shared across all matching tiers). */
+function offsetsToLines(content: string, offsets: number[], cap = 5): number[] {
+	const lines: number[] = [];
+	let lineStart = 0;
+	let lineNumber = 1;
+	let offsetIndex = 0;
+	const sorted = [...offsets].sort((a, b) => a - b);
+	while (offsetIndex < sorted.length && lines.length < cap) {
+		const nextNewline = content.indexOf("\n", lineStart);
+		if (nextNewline !== -1 && nextNewline < sorted[offsetIndex]) {
+			lineStart = nextNewline + 1;
+			lineNumber++;
+			continue;
+		}
+		lines.push(lineNumber);
+		offsetIndex++;
+	}
+	return lines;
 }
 
 export interface Edit {
@@ -208,11 +446,29 @@ export interface AppliedEditsResult {
 	newContent: string;
 }
 
+function countStringOccurrences(content: string, text: string): number {
+	return content.split(text).length - 1;
+}
+
+function findAllOccurrenceOffsets(content: string, text: string): number[] {
+	const offsets: number[] = [];
+	let index = content.indexOf(text);
+	while (index !== -1) {
+		offsets.push(index);
+		index = content.indexOf(text, index + 1);
+	}
+	return offsets;
+}
+
 /**
- * Find oldText in content, trying exact match first, then fuzzy match.
- * When fuzzy matching is used, the returned contentForReplacement is the
+ * Find oldText in content through a ladder of increasingly tolerant tiers:
+ * exact → Unicode/quote/trailing-whitespace normalized → blank-line tolerant →
+ * loose lines (whitespace runs and indentation ignored, whole-line spans) →
+ * similar block (anchored approximate match for small transcription drift).
+ * When a non-exact tier matches, the returned contentForReplacement is the
  * fuzzy-normalized version of the content (trailing whitespace stripped,
- * Unicode quotes/dashes normalized to ASCII).
+ * Unicode quotes/dashes normalized to ASCII); line structure is preserved, so
+ * callers can overlay replacements onto the original content.
  */
 export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
 	// Try exact match first
@@ -224,6 +480,9 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 			matchLength: oldText.length,
 			usedFuzzyMatch: false,
 			contentForReplacement: content,
+			matchTier: "exact",
+			occurrenceCount: countStringOccurrences(content, oldText),
+			occurrenceLines: offsetsToLines(content, findAllOccurrenceOffsets(content, oldText)),
 		};
 	}
 
@@ -242,20 +501,71 @@ export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResul
 			matchLength: fuzzyOldText.length,
 			usedFuzzyMatch: true,
 			contentForReplacement: fuzzyContent,
+			matchTier: "normalized",
+			occurrenceCount: countStringOccurrences(fuzzyContent, fuzzyOldText),
+			occurrenceLines: offsetsToLines(fuzzyContent, findAllOccurrenceOffsets(fuzzyContent, fuzzyOldText)),
 		};
 	}
 
 	// Models occasionally reproduce a recently read block with one blank line
 	// added or omitted. Treat blank-line runs as equivalent, while preserving all
 	// non-blank text and relying on the existing uniqueness check for safety.
-	const [blankLineMatch] = findBlankLineTolerantMatches(fuzzyContent, fuzzyOldText);
-	if (blankLineMatch?.index !== undefined) {
+	const blankLineMatches = findBlankLineTolerantMatches(fuzzyContent, fuzzyOldText);
+	if (blankLineMatches.length > 0 && blankLineMatches[0].index !== undefined) {
 		return {
 			found: true,
-			index: blankLineMatch.index,
-			matchLength: blankLineMatch[0].length,
+			index: blankLineMatches[0].index,
+			matchLength: blankLineMatches[0][0].length,
 			usedFuzzyMatch: true,
 			contentForReplacement: fuzzyContent,
+			matchTier: "blank-lines",
+			occurrenceCount: blankLineMatches.length,
+			occurrenceLines: offsetsToLines(
+				fuzzyContent,
+				blankLineMatches.map((m) => m.index).filter((index): index is number => index !== undefined),
+			),
+		};
+	}
+
+	// Loose line matching: tolerate whitespace-run and indentation drift plus
+	// blank-line drift; matches span whole lines.
+	const looseMatches = findLooseLineMatches(fuzzyContent, fuzzyOldText);
+	if (looseMatches.length > 0) {
+		return {
+			found: true,
+			index: looseMatches[0].index,
+			matchLength: looseMatches[0].length,
+			usedFuzzyMatch: true,
+			contentForReplacement: fuzzyContent,
+			matchTier: "loose-lines",
+			occurrenceCount: looseMatches.length,
+			occurrenceLines: looseMatches.map((m) => m.startLine),
+		};
+	}
+
+	// Approximate block matching: tolerate small transcription drift within an
+	// anchored, unique region.
+	const similar = findSimilarBlockMatch(fuzzyContent, fuzzyOldText);
+	if (similar.match) {
+		return {
+			found: true,
+			index: similar.match.index,
+			matchLength: similar.match.length,
+			usedFuzzyMatch: true,
+			contentForReplacement: fuzzyContent,
+			matchTier: "similar-block",
+			occurrenceCount: 1,
+			occurrenceLines: [similar.match.startLine],
+		};
+	}
+	if (similar.ambiguousStartLines.length > 0) {
+		return {
+			found: false,
+			index: -1,
+			matchLength: 0,
+			usedFuzzyMatch: false,
+			contentForReplacement: content,
+			ambiguousLines: similar.ambiguousStartLines,
 		};
 	}
 
@@ -273,72 +583,113 @@ export function stripBom(content: string): { bom: string; text: string } {
 	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
 
-function countOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	const exactOccurrences = fuzzyContent.split(fuzzyOldText).length - 1;
-	return exactOccurrences || findBlankLineTolerantMatches(fuzzyContent, fuzzyOldText).length;
-}
-
 const ERROR_PREVIEW_MAX = 80;
 const ERROR_MAX_ANCHORS = 50;
+const ERROR_SIMILAR_REGION_THRESHOLD = 0.5;
 
 function previewLine(line: string): string {
 	return line.length > ERROR_PREVIEW_MAX ? `${line.slice(0, ERROR_PREVIEW_MAX - 3)}...` : line;
 }
 
 /**
- * Explain why oldText matched nothing. Matching normalizes whitespace and
- * quote/dash variants, so a not-found failure means differences beyond those.
- * Locate the first diverging line against the file's actual lines.
+ * Explain why oldText matched nothing. First try to anchor oldText's first
+ * non-blank line (compared with the same loose normalization the loose
+ * matching tier uses) and report the first diverging line. If no anchor line
+ * exists at all, report the most similar region so the model can correct the
+ * text instead of re-reading blindly.
  */
 function diagnoseNoMatch(content: string, oldText: string): string {
 	const contentLines = content.split("\n");
 	const oldLines = oldText.split("\n");
-	const firstLine = oldLines[0] ?? "";
+	const firstOldIndex = oldLines.findIndex((line) => normalizeLineLoose(line) !== "");
+	const firstOldLine = firstOldIndex >= 0 ? normalizeLineLoose(oldLines[firstOldIndex]) : "";
 	const anchors: number[] = [];
-	for (let i = 0; i < contentLines.length && anchors.length < ERROR_MAX_ANCHORS; i++) {
-		if (contentLines[i] === firstLine) anchors.push(i);
-	}
-	if (anchors.length === 0) {
-		return `The first line of oldText ("${previewLine(firstLine)}") does not appear anywhere in the file. Re-read the file to verify the text.`;
-	}
-	let bestAnchor = anchors[0];
-	let bestMatched = 0;
-	for (const anchor of anchors) {
-		let matched = 0;
-		while (
-			matched < oldLines.length &&
-			anchor + matched < contentLines.length &&
-			contentLines[anchor + matched] === oldLines[matched]
-		) {
-			matched++;
-		}
-		if (matched > bestMatched) {
-			bestMatched = matched;
-			bestAnchor = anchor;
+	if (firstOldLine) {
+		for (let i = 0; i < contentLines.length && anchors.length < ERROR_MAX_ANCHORS; i++) {
+			if (normalizeLineLoose(contentLines[i]) === firstOldLine) anchors.push(i);
 		}
 	}
-	const divergeLine = bestAnchor + bestMatched;
-	const actual = divergeLine < contentLines.length ? `"${previewLine(contentLines[divergeLine])}"` : "end of file";
-	return (
-		`Nearest region starts at line ${bestAnchor + 1}; first difference at oldText line ${bestMatched + 1} ` +
-		`(file line ${divergeLine + 1}): oldText has "${previewLine(oldLines[bestMatched] ?? "")}", file has ${actual}. ` +
-		`Re-read that region and retry with the verbatim text.`
-	);
-}
+	if (anchors.length > 0) {
+		let bestAnchor = anchors[0];
+		let bestMatched = 0;
+		for (const anchor of anchors) {
+			let matched = 0;
+			while (
+				firstOldIndex + matched < oldLines.length &&
+				anchor + matched < contentLines.length &&
+				normalizeLineLoose(contentLines[anchor + matched]) === normalizeLineLoose(oldLines[firstOldIndex + matched])
+			) {
+				matched++;
+			}
+			if (matched > bestMatched) {
+				bestMatched = matched;
+				bestAnchor = anchor;
+			}
+		}
+		const divergeLine = bestAnchor + bestMatched;
+		const divergeOldLine = firstOldIndex + bestMatched;
+		const actual = divergeLine < contentLines.length ? `"${previewLine(contentLines[divergeLine])}"` : "end of file";
+		return (
+			`Nearest region starts at line ${bestAnchor + 1}; first difference at oldText line ${divergeOldLine + 1} ` +
+			`(file line ${divergeLine + 1}): oldText has "${previewLine(oldLines[divergeOldLine] ?? "")}", file has ${actual}. ` +
+			`Re-read that region and retry with the verbatim text.`
+		);
+	}
 
-/** 1-indexed starting line of each occurrence, computed in fuzzy-matching space (line structure is preserved). */
-function findOccurrenceLines(content: string, oldText: string, cap = 5): number[] {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	const lines: number[] = [];
-	let index = fuzzyContent.indexOf(fuzzyOldText);
-	while (index !== -1 && lines.length < cap) {
-		lines.push(fuzzyContent.slice(0, index).split("\n").length);
-		index = fuzzyContent.indexOf(fuzzyOldText, index + 1);
+	// No anchor line anywhere: locate the most similar region for the report.
+	const oldNonBlank = toNonBlankLooseLines(oldText);
+	let bestSimilarity = 0;
+	let bestStartLine = -1;
+	let bestWindow: string[] = [];
+	if (oldNonBlank.length > 0 && oldNonBlank.length <= SIMILAR_BLOCK_MAX_NON_BLANK_LINES) {
+		const contentNonBlank: Array<{ lineNumber: number; loose: string }> = [];
+		for (let i = 0; i < contentLines.length; i++) {
+			const loose = normalizeLineLoose(contentLines[i]);
+			if (loose !== "") contentNonBlank.push({ lineNumber: i + 1, loose });
+		}
+		const nbLoose = contentNonBlank.map((entry) => entry.loose);
+		if (oldNonBlank.length === 1) {
+			for (let j = 0; j < nbLoose.length; j++) {
+				const similarity = bigramSimilarity(oldNonBlank[0], nbLoose[j]);
+				if (similarity > bestSimilarity) {
+					bestSimilarity = similarity;
+					bestStartLine = contentNonBlank[j].lineNumber;
+					bestWindow = [nbLoose[j]];
+				}
+			}
+		} else {
+			const oldJoined = oldNonBlank.join("\n");
+			const count = Math.min(oldNonBlank.length, nbLoose.length);
+			for (let j = 0; j + count <= nbLoose.length; j++) {
+				const windowLines = nbLoose.slice(j, j + count);
+				const similarity = levenshteinSimilarity(oldJoined, windowLines.join("\n"));
+				if (similarity > bestSimilarity) {
+					bestSimilarity = similarity;
+					bestStartLine = contentNonBlank[j].lineNumber;
+					bestWindow = windowLines;
+				}
+			}
+		}
 	}
-	return lines;
+	const firstPreview = firstOldIndex >= 0 ? previewLine(oldLines[firstOldIndex]) : "";
+	if (bestSimilarity >= ERROR_SIMILAR_REGION_THRESHOLD && bestStartLine !== -1) {
+		let divergence = "";
+		for (let k = 0; k < Math.min(oldNonBlank.length, bestWindow.length); k++) {
+			if (oldNonBlank[k] !== bestWindow[k]) {
+				divergence = ` First difference inside it: oldText has "${previewLine(oldNonBlank[k])}", file has "${previewLine(bestWindow[k])}".`;
+				break;
+			}
+		}
+		return (
+			`No line of oldText (starting with "${firstPreview}") appears verbatim in the file. ` +
+			`The most similar region (~${Math.round(bestSimilarity * 100)}%) starts at line ${bestStartLine}.${divergence} ` +
+			`Re-read that region and retry with the verbatim text.`
+		);
+	}
+	return (
+		`No line of oldText (starting with "${firstPreview}") appears in the file and no similar region exists. ` +
+		`The text is likely outdated or belongs to a different file. Re-read the file before editing.`
+	);
 }
 
 function getNotFoundError(
@@ -350,9 +701,26 @@ function getNotFoundError(
 ): Error {
 	const diagnostic = diagnoseNoMatch(content, oldText);
 	if (totalEdits === 1) {
-		return new Error(`Could not find the exact text in ${path}. ${diagnostic}`);
+		return new Error(`Could not find the text in ${path}. ${diagnostic}`);
 	}
 	return new Error(`Could not find edits[${editIndex}] in ${path}. ${diagnostic}`);
+}
+
+function getIncrementalMatchError(path: string, editIndex: number, totalEdits: number): Error {
+	const target = totalEdits === 1 ? "The oldText" : `edits[${editIndex}]`;
+	return new Error(
+		`${target} in ${path} only matches after applying the earlier edits in this call. ` +
+			`All edits in one call are matched against the original file content, not applied incrementally. ` +
+			`Rewrite the oldText to match the original file text, or split the work into sequential edit calls.`,
+	);
+}
+
+function getAmbiguousSimilarError(path: string, editIndex: number, totalEdits: number, lines: number[]): Error {
+	const target = totalEdits === 1 ? "The oldText" : `edits[${editIndex}]`;
+	return new Error(
+		`${target} in ${path} approximately matches ${lines.length} different regions (starting near lines ${lines.join(", ")}). ` +
+			`Provide more surrounding context so the oldText identifies one unique region.`,
+	);
 }
 
 function getDuplicateError(
@@ -360,11 +728,12 @@ function getDuplicateError(
 	editIndex: number,
 	totalEdits: number,
 	occurrences: number,
-	content: string,
-	oldText: string,
+	occurrenceLines: number[],
 ): Error {
-	const lines = findOccurrenceLines(content, oldText);
-	const location = lines.length > 0 ? ` (lines ${lines.join(", ")}${occurrences > lines.length ? ", …" : ""})` : "";
+	const location =
+		occurrenceLines.length > 0
+			? ` (lines ${occurrenceLines.join(", ")}${occurrences > occurrenceLines.length ? ", …" : ""})`
+			: "";
 	if (totalEdits === 1) {
 		return new Error(
 			`Found ${occurrences} occurrences of the text in ${path}${location}. The text must be unique. Please provide more context to make it unique.`,
@@ -392,13 +761,15 @@ function getNoChangeError(path: string, totalEdits: number): Error {
 }
 
 /**
- * Apply one or more exact-text replacements to LF-normalized content.
+ * Apply one or more text replacements to LF-normalized content.
  *
- * All edits are matched against the same original content. Replacements are
- * then applied in reverse order so offsets remain stable. If any edit needs
- * fuzzy matching, the operation runs in fuzzy-normalized content space and then
- * overlays those line-level changes onto the original content so unchanged line
- * blocks keep their original bytes.
+ * All edits are matched against the same original content through the matching
+ * ladder in fuzzyFindText (exact → normalized → blank-line tolerant → loose
+ * lines → similar block). Replacements are then applied in reverse order so
+ * offsets remain stable. If any edit needs non-exact matching, the operation
+ * runs in fuzzy-normalized content space and then overlays those line-level
+ * changes onto the original content so unchanged line blocks keep their
+ * original bytes.
  */
 export function applyEditsToNormalizedContent(
 	normalizedContent: string,
@@ -425,19 +796,50 @@ export function applyEditsToNormalizedContent(
 		const edit = normalizedEdits[i];
 		const matchResult = fuzzyFindText(replacementBaseContent, edit.oldText);
 		if (!matchResult.found) {
+			if (matchResult.ambiguousLines && matchResult.ambiguousLines.length > 0) {
+				throw getAmbiguousSimilarError(path, i, normalizedEdits.length, matchResult.ambiguousLines);
+			}
+			// Detect edits written against the result of earlier edits in the same
+			// call (incremental intent); all edits match the original content, so
+			// report that instead of a bare not-found.
+			if (matchedEdits.length > 0) {
+				const simulated = applyReplacements(
+					replacementBaseContent,
+					[...matchedEdits].sort((a, b) => a.matchIndex - b.matchIndex),
+				);
+				if (fuzzyFindText(simulated, edit.oldText).found) {
+					throw getIncrementalMatchError(path, i, normalizedEdits.length);
+				}
+			}
 			throw getNotFoundError(path, i, normalizedEdits.length, normalizedContent, edit.oldText);
 		}
 
-		const occurrences = countOccurrences(replacementBaseContent, edit.oldText);
-		if (occurrences > 1) {
-			throw getDuplicateError(path, i, normalizedEdits.length, occurrences, replacementBaseContent, edit.oldText);
+		if ((matchResult.occurrenceCount ?? 1) > 1) {
+			throw getDuplicateError(
+				path,
+				i,
+				normalizedEdits.length,
+				matchResult.occurrenceCount ?? 0,
+				matchResult.occurrenceLines ?? [],
+			);
+		}
+
+		// Loose and similar-block matches span whole lines excluding the final
+		// line terminator; drop one trailing newline from newText so it cannot
+		// introduce an extra blank line.
+		let newText = edit.newText;
+		if (
+			(matchResult.matchTier === "loose-lines" || matchResult.matchTier === "similar-block") &&
+			newText.endsWith("\n")
+		) {
+			newText = newText.slice(0, -1);
 		}
 
 		matchedEdits.push({
 			editIndex: i,
 			matchIndex: matchResult.index,
 			matchLength: matchResult.matchLength,
-			newText: edit.newText,
+			newText,
 		});
 	}
 
