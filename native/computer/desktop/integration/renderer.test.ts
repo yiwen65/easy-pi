@@ -36,8 +36,8 @@ function fixture() {
 	const directory = process.env.COMPUTER_EMERGENCY_SDK!;
 	expect(isAbsolute(directory)).toBe(true);
 	for (const [name, hash] of [
-		["libcua_driver_sdk.dylib", "574acada8fd701ca5351e61abc7548ae515400dbedbc81d602afaeb3bcd675c1"],
-		["cua_driver_node_runtime.node", "2e13bfdb600b24dca7a03d9cdd295aedd857ea2f72a48ebab10f2e4954b8e423"],
+		["libcua_driver_sdk.dylib", "b7e0ad955c1fcf7808842bc10286fb76ad3fbb6829ea78172fb4c1e6db66217b"],
+		["cua_driver_node_runtime.node", "93ffdcc7fbba3437af84c61d60d5d6a8cbf231129f5b1ad4c947abeb8a5aed5a"],
 	] as const)
 		expect(
 			createHash("sha256")

@@ -29,6 +29,7 @@ const codes = new Set([
 	"invalid_drag_destination",
 	"invalid_drag_geometry",
 	"drag_target_occluded",
+	"pointer_target_occluded",
 	"pointer_hit_unknown",
 	"pointer_hit_unavailable",
 	"invalid_pointer_position",

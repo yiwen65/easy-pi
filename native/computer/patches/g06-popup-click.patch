@@ -1,0 +1,408 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled.rs
+@@ -1,7 +1,8 @@
+-//! Image-bound native pointer input. No global HID, fallback, duplicate
++//! Legacy image-bound native pointer input. No global HID, fallback, duplicate
+ //! transport, queued event batch or authority derived from caller geometry.
+ pub mod cross_drag;
+ pub mod general;
++pub(crate) mod popup_click;
+ mod keyboard;
+ use core_graphics::{
+     event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton, ScrollEventUnit},
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/popup_click.rs b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/popup_click.rs
+new file mode 100644
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/input/controlled/popup_click.rs
+@@ -0,0 +1,336 @@
++//! Screen-pointer clicks for unnamed popup-menu-level surfaces. AppKit menus
++//! can dismiss without selecting on PID-stamped clicks even while foreground.
++//! Ordinary/named high-layer windows retain their non-seizing PID transport.
++use super::general::OwnedRelease;
++use crate::computer_renderer::{Channel, Cue, Kind};
++use crate::input::skylight::hit_test::WindowHit;
++use core_graphics::{
++    event::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
++    event_source::{CGEventSource, CGEventSourceStateID},
++    geometry::CGPoint,
++};
++use cua_driver_contract::{
++    computer_image::ComputerImageGeometry, computer_segment::ComputerMouseButton,
++};
++use cua_driver_core::controlled::{NativeWindowTarget, Operation};
++use foreign_types::ForeignType;
++use std::{ffi::c_void, sync::Arc};
++
++#[link(name = "CoreGraphics", kind = "framework")]
++unsafe extern "C" {
++    fn CGWindowLevelForKey(key: i32) -> i32;
++    fn CGEventSourceSetLocalEventsSuppressionInterval(source: *mut c_void, seconds: f64);
++    fn CGEventSourceGetLocalEventsSuppressionInterval(source: *mut c_void) -> f64;
++    fn CGEventSourceSetLocalEventsFilterDuringSuppressionState(
++        source: *mut c_void,
++        mask: u32,
++        state: u32,
++    );
++    fn CGEventSourceGetLocalEventsFilterDuringSuppressionState(
++        source: *mut c_void,
++        state: u32,
++    ) -> u32;
++}
++
++pub(crate) fn use_screen_route(layer: i32, title: &str) -> bool {
++    // CGWindowLevel.h defines key 11 as kCGPopUpMenuWindowLevelKey. Query the
++    // current OS value instead of baking in 101. This is a conservative route
++    // policy, not authority inferred from a title or proof of an AXMenu role.
++    title.is_empty() && layer == unsafe { CGWindowLevelForKey(11) }
++}
++
++fn exact_hit(
++    target: NativeWindowTarget,
++    foreground: Option<bool>,
++    hit: WindowHit,
++) -> Result<(), &'static str> {
++    if foreground != Some(true) {
++        return Err("foreground_target_changed");
++    }
++    if hit.pid != target.pid || hit.window_id != target.window_id {
++        return Err("pointer_target_occluded");
++    }
++    Ok(())
++}
++
++fn admit_down<T>(
++    operation: &Operation,
++    owned: &mut Option<OwnedRelease<T>>,
++    up: T,
++    release: Box<dyn Fn(T) -> Result<(), &'static str>>,
++    down: impl FnOnce(),
++) -> Result<(), &'static str> {
++    operation.segment_primary(|| {
++        *owned = Some(OwnedRelease {
++            value: Some(up),
++            release,
++        });
++        down();
++    })
++}
++
++pub(crate) fn run(
++    operation: Arc<Operation>,
++    renderer: Option<Arc<Channel>>,
++    geometry: ComputerImageGeometry,
++    point: (f64, f64, f64, f64),
++    button: ComputerMouseButton,
++    count: u8,
++    check: impl Fn() -> Result<(), &'static str>,
++) -> Result<(), &'static str> {
++    if !(1..=2).contains(&count)
++        || ![point.0, point.1, point.2, point.3]
++            .iter()
++            .all(|v| v.is_finite())
++        || point.0 < geometry.desktop_x
++        || point.1 < geometry.desktop_y
++        || point.0 >= geometry.desktop_x + geometry.window_width
++        || point.1 >= geometry.desktop_y + geometry.window_height
++    {
++        return Err("invalid_pointer_position");
++    }
++    let target = operation.session.native_window()?;
++    let live = || {
++        check()?; // Original Context identity, renderer health and cancellation.
++        let windows = crate::windows::general_windows_with_space_snapshot();
++        let window = crate::windows::general_point_window_in(
++            &windows.windows,
++            target.pid,
++            target.window_id,
++            [
++                geometry.desktop_x,
++                geometry.desktop_y,
++                geometry.window_width,
++                geometry.window_height,
++            ],
++        )?;
++        if !use_screen_route(window.layer, &window.title) {
++            return Err("controlled_target_stale");
++        }
++        exact_hit(
++            target,
++            crate::input::skylight::front_process_matches(target.pid, target.window_id),
++            crate::input::skylight::hit_test::window_at(point.0, point.1)?,
++        )?;
++        if super::held_input(
++            (0..128).map(|key| (key, unsafe { super::CGEventSourceKeyState(0, key) })),
++            (0..3).map(|button| unsafe { super::CGEventSourceButtonState(0, button) }),
++        ) {
++            return Err("physical_input_held_at_target");
++        }
++        Ok(())
++    };
++    live()?;
++    // Do not front an ambiguous menu's parent or reuse pixels across activation.
++    // A lost foreground returns no input and fresh evidence to the original loop.
++    let source = CGEventSource::new(CGEventSourceStateID::Private)
++        .map_err(|_| "event_source_unavailable")?;
++    let ptr = source.as_ptr() as *mut c_void;
++    unsafe {
++        CGEventSourceSetLocalEventsSuppressionInterval(ptr, 0.0);
++        for state in [0, 1] {
++            CGEventSourceSetLocalEventsFilterDuringSuppressionState(ptr, 7, state);
++        }
++        if CGEventSourceGetLocalEventsSuppressionInterval(ptr) != 0.0
++            || [0, 1].iter().any(|state| {
++                CGEventSourceGetLocalEventsFilterDuringSuppressionState(ptr, *state) != 7
++            })
++        {
++            return Err("local_input_policy_unproved");
++        }
++    }
++    let (mouse, down_kind, up_kind) = match button {
++        ComputerMouseButton::Left => (
++            CGMouseButton::Left,
++            CGEventType::LeftMouseDown,
++            CGEventType::LeftMouseUp,
++        ),
++        ComputerMouseButton::Right => (
++            CGMouseButton::Right,
++            CGEventType::RightMouseDown,
++            CGEventType::RightMouseUp,
++        ),
++        ComputerMouseButton::Middle => (
++            CGMouseButton::Center,
++            CGEventType::OtherMouseDown,
++            CGEventType::OtherMouseUp,
++        ),
++    };
++    let make = |kind, click| {
++        let event =
++            CGEvent::new_mouse_event(source.clone(), kind, CGPoint::new(point.0, point.1), mouse)
++                .map_err(|_| "event_allocation_failed")?;
++        event.set_flags(CGEventFlags::empty());
++        event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click);
++        Ok::<_, &'static str>(event)
++    };
++    let pairs = (1..=count)
++        .map(|click| {
++            Ok((
++                make(down_kind, i64::from(click))?,
++                make(up_kind, i64::from(click))?,
++            ))
++        })
++        .collect::<Result<Vec<_>, &'static str>>()?;
++    let cue = Cue {
++        target_pid: target.pid,
++        window_id: target.window_id,
++        x: point.2,
++        y: point.3,
++        kind: Kind::Down,
++    };
++    for (down, up) in pairs {
++        live()?;
++        let release_renderer = renderer.clone();
++        let release = Box::new(move |up: CGEvent| {
++            // Matching up never depends on target existence, focus, cancel or
++            // new primary admission. Never leave the global button held.
++            up.post(CGEventTapLocation::HID);
++            if let Some(renderer) = &release_renderer {
++                renderer.publish(Cue {
++                    kind: Kind::Up,
++                    ..cue
++                });
++            }
++            Ok(())
++        });
++        let mut owned = None;
++        admit_down(&operation, &mut owned, up, release, || {
++            // No PID/window stamping and no second transport or fallback.
++            down.post(CGEventTapLocation::HID);
++            if let Some(renderer) = &renderer {
++                renderer.publish(cue);
++            }
++        })?;
++        owned
++            .as_mut()
++            .expect("admitted down owns matching up")
++            .run()?;
++        if let Some(renderer) = &renderer {
++            renderer.publish(Cue {
++                kind: Kind::Click,
++                ..cue
++            });
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::time::Duration;
++
++    #[test]
++    fn controlled_popup_click_route_preserves_named_high_layer_and_normal_background() {
++        let popup = unsafe { CGWindowLevelForKey(11) };
++        assert!(!use_screen_route(0, ""));
++        assert!(!use_screen_route(0, "Finder task"));
++        assert!(!use_screen_route(popup, "Owned high-layer fixture"));
++        assert!(!use_screen_route(popup + 1, ""));
++        assert!(
++            use_screen_route(popup, ""),
++            "PID stamps did not select the foreground Finder menu item"
++        );
++    }
++
++    #[test]
++    fn controlled_popup_click_never_hits_through_another_surface_or_unknown_foreground() {
++        let target = NativeWindowTarget {
++            pid: 42,
++            window_id: 7,
++            process_stamp: Some((1, 2)),
++        };
++        let own = WindowHit {
++            pid: 42,
++            window_id: 7,
++        };
++        assert_eq!(exact_hit(target, Some(true), own), Ok(()));
++        for foreground in [None, Some(false)] {
++            assert_eq!(
++                exact_hit(target, foreground, own),
++                Err("foreground_target_changed")
++            );
++        }
++        for hit in [
++            WindowHit {
++                pid: 43,
++                window_id: 7,
++            },
++            WindowHit {
++                pid: 42,
++                window_id: 8,
++            },
++        ] {
++            assert_eq!(
++                exact_hit(target, Some(true), hit),
++                Err("pointer_target_occluded")
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn controlled_popup_click_owned_release_survives_cancel_revoke_and_unwind() {
++        use cua_driver_core::controlled::Gate;
++        for mode in 0..5 {
++            let gate = Gate::new();
++            let session = gate
++                .session(None, Arc::new(|| true), 42, 7, Some((1, 2)))
++                .unwrap();
++            let op = session.new_operation().unwrap();
++            op.configure_segment(vec![1], Duration::from_secs(1))
++                .unwrap();
++            op.begin().unwrap();
++            op.begin_segment_action(0).unwrap();
++            let work = op.track().unwrap();
++            let downs = AtomicUsize::new(0);
++            let ups = Arc::new(AtomicUsize::new(0));
++            let released = ups.clone();
++            let release_op = op.clone();
++            if mode == 0 {
++                op.cancel();
++            }
++            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                let mut owned = None;
++                let release = Box::new(move |_: ()| {
++                    released.fetch_add(1, Ordering::SeqCst);
++                    if mode == 4 {
++                        release_op.quarantine();
++                        Err("release_failure")
++                    } else {
++                        Ok(())
++                    }
++                });
++                let result = admit_down(&op, &mut owned, (), release, || {
++                    downs.fetch_add(1, Ordering::SeqCst);
++                    if mode == 1 {
++                        op.cancel();
++                    }
++                    if mode == 2 {
++                        session.revoke();
++                    }
++                    if mode == 3 {
++                        panic!("after admitted down");
++                    }
++                });
++                assert_eq!(result.is_ok(), mode != 0);
++                if mode == 1 || mode == 2 {
++                    assert!(op
++                        .segment_primary(|| panic!("new input after stop"))
++                        .is_err());
++                }
++            }));
++            assert_eq!(outcome.is_err(), mode == 3);
++            assert_eq!(downs.load(Ordering::SeqCst), usize::from(mode != 0));
++            assert_eq!(ups.load(Ordering::SeqCst), usize::from(mode != 0));
++            drop(work);
++            op.finish();
++            if mode == 4 {
++                assert_eq!(op.terminal().await, Err("quarantined"));
++            } else {
++                assert_eq!(op.terminal().await.unwrap().input_committed, mode != 0);
++            }
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -173,6 +173,10 @@
+     }
+
+     fn point(&self, point: &ComputerPoint) -> Result<(f64, f64, f64, f64), &'static str> {
++        self.point_with_route(point).map(|(point, _)| point)
++    }
++
++    fn point_with_route(&self, point: &ComputerPoint) -> Result<((f64, f64, f64, f64), bool), &'static str> {
+         self.live()?;
+         let image = self.image.as_ref().ok_or("image_reference_required")?;
+         crate::input::controlled::revalidate(image, &self.operation)?;
+@@ -183,14 +187,15 @@
+         }
+         let g = image.geometry();
+         let windows = crate::windows::general_windows_with_space_snapshot();
+-        crate::windows::general_point_window_in(
++        let window = crate::windows::general_point_window_in(
+             &windows.windows, target.pid, target.window_id,
+             [g.desktop_x, g.desktop_y, g.window_width, g.window_height],
+         )?;
+         // Image addresses name pixels. Use the addressed pixel's center,
+         // including fractional model coordinates within the final edge pixel.
+         let (x, y) = g.desktop_pixel_center(point.x as u32, point.y as u32)?;
+-        Ok((x, y, x - g.desktop_x, y - g.desktop_y))
++        Ok(((x, y, x - g.desktop_x, y - g.desktop_y),
++            crate::input::controlled::popup_click::use_screen_route(window.layer, &window.title)))
+     }
+
+     fn condition(&self, condition: &ComputerPostcondition) -> Option<bool> {
+@@ -525,7 +530,20 @@
+                         button,
+                         count,
+                     } => {
+-                        events.move_pointer(self.point(point)?, &check)?;
++                        let (position, screen_route) = self.point_with_route(point)?;
++                        if screen_route {
++                            if events.held() {
++                                return Err("route_change_with_held_input");
++                            }
++                            crate::input::controlled::popup_click::run(
++                                self.operation.clone(), self.renderer.clone(),
++                                self.image.as_ref().ok_or("image_reference_required")?.geometry().clone(),
++                                position, *button, *count, || self.live(),
++                            )?;
++                            events.dispatched = true;
++                            return Ok((ActionRoute::GlobalInput, true));
++                        }
++                        events.move_pointer(position, &check)?;
+                         for click in 1..=*count {
+                             events.button_down(*button, i64::from(click), &check)?;
+                             events.button_up(*button)?;
