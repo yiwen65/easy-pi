@@ -632,6 +632,58 @@ test("the minimal delegation form spawns with canonical defaults persisted", asy
 	});
 });
 
+test("top-level verify derives isolated spawn context and survives an explicit followup", async () => {
+	const f = await fixture();
+	let childContext: Context | undefined;
+	let root = 0;
+	f.faux.setResponses(
+		Array.from({ length: 6 }, () => (context: Context) => {
+			if (currentCollaborationPath(context) === "/root/reviewer") {
+				childContext = context;
+				return fauxAssistantMessage("first review");
+			}
+			return root++ === 0
+				? tool("spawn_agent", {
+						task_name: "reviewer",
+						task: { objective: "first review" },
+						relationship: "verify",
+					})
+				: fauxAssistantMessage("root done");
+		}),
+	);
+	await f.session.prompt("PARENT_BELIEF_DO_NOT_COPY");
+	await f.controller.settled();
+	const record = f.store.read().agents[0];
+	expect(record.delegation).toMatchObject({
+		task: { objective: "first review", relationship: "verify" },
+		context: { mode: "isolated" },
+	});
+	expect(JSON.stringify(childContext?.messages)).not.toContain("PARENT_BELIEF_DO_NOT_COPY");
+
+	root = 0;
+	f.faux.setResponses(
+		Array.from(
+			{ length: 6 },
+			() => (context: Context) =>
+				currentCollaborationPath(context) === "/root/reviewer"
+					? fauxAssistantMessage("second review")
+					: root++ === 0
+						? tool("followup_task", {
+								target: "reviewer",
+								task: { objective: "second review" },
+								relationship: "verify",
+							})
+						: fauxAssistantMessage("root done"),
+		),
+	);
+	await f.session.prompt("explicit followup");
+	await f.controller.settled();
+	expect(f.store.read().agents[0]).toMatchObject({
+		status: "completed",
+		delegation: { task: { objective: "second review", relationship: "verify" } },
+	});
+});
+
 test("namespaced tool names normalize before the ceiling check; unknown names fail with the available list", async () => {
 	const f = await fixture();
 	let rootStep = 0;
@@ -673,7 +725,7 @@ test("isolated verifier sees its assignment but no parent goals and cannot invok
 	let childStep = 0;
 	let childContext: Context | undefined;
 	const args = spawnArgs("reviewer", "independent verification");
-	args.task.relationship = "verify";
+	args.relationship = "verify";
 	f.faux.setResponses(
 		Array.from({ length: 8 }, () => (context: Context) => {
 			if (currentCollaborationPath(context) === "/root/reviewer") {
@@ -860,7 +912,7 @@ test("curated spawn sends only pinned evidence and the current assignment, not p
 			{ path: "source.txt", sha256: createHash("sha256").update(text).digest("hex"), start_line: 2, end_line: 2 },
 		],
 	});
-	args.task.relationship = "verify";
+	args.relationship = "verify";
 	let root = 0;
 	let captured: Context | undefined;
 	f.faux.setResponses(

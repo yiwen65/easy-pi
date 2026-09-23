@@ -22,7 +22,8 @@ describe("collaboration contract", () => {
 	test("accepts six tool calls without coercing or retaining the caller's mutable input", () => {
 		const spawn = {
 			task_name: "inspect",
-			task: delegation().task,
+			task: { objective: delegation().task.objective },
+			relationship: "continue" as const,
 			context: { mode: "isolated" as const },
 			tools: "inherit" as const,
 		};
@@ -35,7 +36,8 @@ describe("collaboration contract", () => {
 		});
 		const followup = {
 			target: "/root/inspect",
-			task: delegation().task,
+			task: { objective: delegation().task.objective },
+			relationship: "continue" as const,
 			tools: "inherit" as const,
 		};
 		expect(parseCollaborationArguments("followup_task", followup)).toEqual(followup);
@@ -82,15 +84,52 @@ describe("collaboration contract", () => {
 		).toThrow(CollaborationError);
 	});
 
-	test("relationship must be nested in task; valid verify derives isolated context", () => {
-		const misplaced = { task_name: "worker", task: { objective: "Audit parser" }, relationship: "verify" };
-		expect(() => parseCollaborationArguments("spawn_agent", misplaced)).toThrow(/Invalid spawn_agent arguments/);
-
-		const parsed = parseCollaborationArguments("spawn_agent", {
+	test("relationship is top-level in both wire tools but remains nested in canonical delegations", () => {
+		const spawn = parseCollaborationArguments("spawn_agent", {
 			task_name: "worker",
-			task: { objective: "Audit parser", relationship: "verify" },
+			task: { objective: "Audit parser" },
+			relationship: "verify",
 		});
-		expect(validateDelegation({ task: parsed.task }).context).toEqual({ mode: "isolated" });
+		expect(validateDelegation({ task: spawn.task, relationship: spawn.relationship }).context).toEqual({
+			mode: "isolated",
+		});
+		expect(validateDelegation({ task: spawn.task, relationship: spawn.relationship }).task.relationship).toBe(
+			"verify",
+		);
+		expect(() => validateDelegation({ task: spawn.task, relationship: "verify", context: "fork" })).toThrow(
+			expect.objectContaining({ reason: "independent_needs_fresh_context" }),
+		);
+		expect(() =>
+			validateDelegation({ task: { objective: "x", relationship: "continue" }, relationship: "verify" }),
+		).toThrow(expect.objectContaining({ reason: "invalid_delegation" }));
+		expect(
+			parseCollaborationArguments("spawn_agent", { task_name: "worker", task: { objective: "x" } }),
+		).toMatchObject({
+			task: { objective: "x" },
+		});
+		expect(
+			parseCollaborationArguments("followup_task", {
+				target: "worker",
+				task: { objective: "Review" },
+				relationship: "verify",
+			}),
+		).toMatchObject({ relationship: "verify" });
+		for (const name of ["spawn_agent", "followup_task"] as const) {
+			const target = name === "spawn_agent" ? { task_name: "worker" } : { target: "worker" };
+			expect(() =>
+				parseCollaborationArguments(name, {
+					...target,
+					task: { objective: "x", relationship: "verify" },
+				}),
+			).toThrow(/Invalid/);
+			expect(() =>
+				parseCollaborationArguments(name, {
+					...target,
+					task: { objective: "x", relationship: "verify" },
+					relationship: "explore",
+				}),
+			).toThrow(/Invalid/);
+		}
 	});
 
 	test("child model and effort are not settable per call anymore", () => {
