@@ -61,6 +61,62 @@ describe("validateToolArguments", () => {
 		}
 	});
 
+	it("identifies unknown argument keys at the root and nested object", () => {
+		const tool: Tool = {
+			name: "echo",
+			description: "Echo tool",
+			parameters: Type.Object(
+				{
+					task: Type.Object(
+						{ objective: Type.String(), relationship: Type.Optional(Type.String()) },
+						{ additionalProperties: false },
+					),
+				},
+				{ additionalProperties: false },
+			),
+		};
+		const makeCall = (args: Record<string, unknown>): ToolCall => ({
+			type: "toolCall",
+			id: "tool-1",
+			name: "echo",
+			arguments: args,
+		});
+
+		expect(() =>
+			validateToolArguments(tool, makeCall({ task: { objective: "inspect" }, relationship: "verify" })),
+		).toThrow(/root\.relationship: must not have additional properties Did you mean task\.relationship\?/);
+		expect(() => validateToolArguments(tool, makeCall({ task: { objective: "inspect", typo: true } }))).toThrow(
+			/task\.typo: must not have additional properties/,
+		);
+		expect(() => validateToolArguments(tool, makeCall({ task: { objective: "inspect" }, foo: 1, bar: 2 }))).toThrow(
+			/root\.foo, root\.bar: must not have additional properties\n\nReceived arguments:/,
+		);
+	});
+
+	it("does not suggest an ambiguous nested property", () => {
+		const tool: Tool = {
+			name: "echo",
+			description: "Echo tool",
+			parameters: Type.Object(
+				{
+					task: Type.Object({ relationship: Type.Optional(Type.String()) }),
+					metadata: Type.Object({ relationship: Type.Optional(Type.String()) }),
+				},
+				{ additionalProperties: false },
+			),
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "tool-1",
+			name: "echo",
+			arguments: { task: {}, metadata: {}, relationship: "verify" },
+		};
+
+		expect(() => validateToolArguments(tool, toolCall)).toThrow(
+			/root\.relationship: must not have additional properties\n\nReceived arguments:/,
+		);
+	});
+
 	it("coerces serialized plain JSON schemas with AJV-compatible primitive rules", () => {
 		const passingCases: Array<{
 			schema: Tool["parameters"];
