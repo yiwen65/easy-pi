@@ -55,10 +55,13 @@ function fakeMode() {
 		flushPendingSkillMentions: () => {},
 		flushPendingSkillMentionsPopulateHistory: false,
 		pendingSkillMentions: [],
-		session: { extensionRunner: { getMessageRenderer: () => undefined } },
 		getMarkdownThemeWithSettings: () => ({}),
 		outputPad: 1,
 		showStatus: vi.fn(),
+		isInitialized: true,
+		footer: { invalidate: vi.fn() },
+		maybeShowCacheMissNotice: vi.fn(),
+		session: { extensionRunner: { getMessageRenderer: () => undefined }, retryAttempt: 0, autoRetryEnabled: false },
 	};
 	for (const name of [
 		"createToolExecutionComponent",
@@ -68,6 +71,7 @@ function fakeMode() {
 		"handleTranscriptContentClick",
 		"computeChatChildOffsets",
 		"setToolsExpanded",
+		"handleEvent",
 	]) {
 		mode[name] = proto[name];
 	}
@@ -82,9 +86,98 @@ function spawnTool(mode: any, name: string, id: string, args: unknown) {
 	return component;
 }
 
+function streamingMode() {
+	const mode = fakeMode();
+	mode.streamingComponent = { updateContent: vi.fn() };
+	return mode;
+}
+
+function toolCallMessage(id: string, name: string, args: unknown, stopReason = "toolUse") {
+	return { role: "assistant", content: [{ type: "toolCall", id, name, arguments: args }], stopReason };
+}
+
 describe("subagent transcript routing", () => {
 	beforeEach(() => initTheme("dark"));
 
+	it("routes send_message only after its final target is known", async () => {
+		const mode = streamingMode();
+		await mode.handleEvent({
+			type: "message_update",
+			message: toolCallMessage("c1", "send_message", { target: "/root/validate" }),
+		});
+		expect(mode.chatContainer.children).toHaveLength(0);
+		const args = { target: "/root/validate-extra-key", message: "Check status" };
+		await mode.handleEvent({ type: "message_end", message: toolCallMessage("c1", "send_message", args) });
+		const groups = mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent);
+		expect(groups).toHaveLength(1);
+		expect((groups[0] as SubagentGroupComponent).agentPath).toBe("/root/validate-extra-key");
+		expect(mode.pendingTools.has("c1")).toBe(true);
+		await mode.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "c1",
+			toolName: "send_message",
+			args,
+		});
+		await mode.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "c1",
+			result: { content: [{ type: "text", text: "Accepted" }] },
+			isError: false,
+		});
+		expect(
+			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent),
+		).toHaveLength(1);
+		expect(mode.pendingTools.has("c1")).toBe(false);
+		(groups[0] as SubagentGroupComponent).setExpanded(true);
+		const rendered = (groups[0] as SubagentGroupComponent).render(100).join("\n");
+		expect(rendered).toContain("/root/validate-extra-key");
+		expect(rendered).toContain("Accepted");
+	});
+
+	it("still streams ordinary tools and routes collaboration calls at execution start", async () => {
+		const mode = streamingMode();
+		await mode.handleEvent({
+			type: "message_update",
+			message: toolCallMessage("c1", "bash", { command: "ls" }),
+		});
+		expect(mode.pendingTools.has("c1")).toBe(true);
+		expect(mode.chatContainer.children.some((child: unknown) => child instanceof ToolExecutionComponent)).toBe(true);
+		await mode.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "c2",
+			toolName: "spawn_agent",
+			args: { task_name: "worker", task: { objective: "probe" } },
+		});
+		expect(mode.pendingTools.has("c2")).toBe(true);
+		expect(
+			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent),
+		).toHaveLength(1);
+	});
+
+	it("does not group abandoned partial collaboration targets", async () => {
+		const mode = streamingMode();
+		await mode.handleEvent({
+			type: "message_update",
+			message: toolCallMessage("c1", "followup_task", { target: "/root/validate" }),
+		});
+		await mode.handleEvent({
+			type: "message_end",
+			message: toolCallMessage("c1", "followup_task", { target: "/root/validate" }, "aborted"),
+		});
+		expect(mode.chatContainer.children).toHaveLength(0);
+		expect(mode.pendingTools.size).toBe(0);
+	});
+
+	it("omits collaboration tools without a final child target", async () => {
+		const mode = streamingMode();
+		await mode.handleEvent({
+			type: "message_update",
+			message: toolCallMessage("c1", "followup_task", { target: "/root/validate" }),
+		});
+		await mode.handleEvent({ type: "message_end", message: toolCallMessage("c1", "followup_task", { task: {} }) });
+		expect(mode.chatContainer.children).toHaveLength(0);
+		expect(mode.pendingTools.size).toBe(0);
+	});
 	it("groups child-bound tools under one block and hides team-scope operations", () => {
 		const mode = fakeMode();
 		spawnTool(mode, "spawn_agent", "c1", {

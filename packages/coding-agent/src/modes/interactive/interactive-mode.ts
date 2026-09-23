@@ -3484,6 +3484,8 @@ export class InteractiveMode {
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
+							// Collaboration targets may still be partial; route them only from final args.
+							if (SUBAGENT_TOOL_NAMES.has(content.name)) continue;
 							if (!this.pendingTools.has(content.id)) {
 								const component = this.createRoutedToolComponent(content.name, content.id, content.arguments);
 								if (component) {
@@ -3540,6 +3542,14 @@ export class InteractiveMode {
 						}
 						this.pendingTools.clear();
 					} else {
+						for (const content of this.streamingMessage.content) {
+							if (content.type !== "toolCall" || !SUBAGENT_TOOL_NAMES.has(content.name)) continue;
+							if (this.pendingTools.has(content.id)) continue;
+							const component = this.createRoutedToolComponent(content.name, content.id, content.arguments);
+							if (!component) continue;
+							this.addToolComponentToChat(component, content.name, content.arguments);
+							this.pendingTools.set(content.id, component);
+						}
 						// Args are now complete - trigger diff computation for edit tools
 						for (const [, component] of this.pendingTools.entries()) {
 							component.setArgsComplete();
