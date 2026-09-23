@@ -106,6 +106,7 @@ export function fixture(
 									},
 								],
 								omittedWindows: 0,
+								filteredOut: 0,
 							}),
 						);
 					},

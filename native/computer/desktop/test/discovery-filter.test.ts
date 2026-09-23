@@ -32,6 +32,18 @@ test("filter before the output byte budget so later known windows remain discove
 	assert.ok(!JSON.stringify(filtered.content).includes("padding"));
 });
 
+test("native filtered rows are separate from omissions and never grant references", () => {
+	const rows = [window("shown", "wanted"), window("defensive-drop", "different")];
+	const result = projectWindows(rows, 7, { title: "wanted" }, 500);
+	assert.equal(result.details.filteredOut, 501);
+	assert.equal(result.details.omittedWindows, 7);
+	assert.deepEqual([...result.grant.refs], ["shown"]);
+	assert.doesNotMatch(JSON.stringify(result.content), /defensive-drop/);
+	for (const count of [-1, NaN, Infinity, 1.5, 2 ** 32]) {
+		assert.throws(() => projectWindows([], 0, {}, count), /Invalid native window catalog/);
+	}
+});
+
 test("filters are literal conjunctions, never regex or authority to select hidden refs", () => {
 	const rows = [window("a", "[.*]"), window("b", "[.*]", "Other"), window("c", "ordinary")];
 	assert.deepEqual([...projectWindows(rows, 0, { app: "find", title: "[.*]" }).grant.refs], ["a"]);

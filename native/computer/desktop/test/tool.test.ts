@@ -21,10 +21,11 @@ if (allowed) {
 }
 const sdk = allowed ? candidateSdk() : undefined;
 
-function fixture(refuse = false) {
+function fixture(refuse = false, nativeFilteredOut = 0) {
 	assert.ok(sdk);
 	const api = sdk;
 	const events: string[] = [];
+	const queries: unknown[] = [];
 	let creates = 0;
 	let sessions = 0;
 	function nativeSession(): NativeSession {
@@ -69,7 +70,8 @@ function fixture(refuse = false) {
 					cancel() {
 						events.push("cancel");
 					},
-					startListWindows() {
+					startListWindows(query?: unknown) {
+						queries.push(query);
 						if (refuse) {
 							reject(new api.ComputerError.Refused({ reason: "discovery_changed" }));
 							proof({ operationId: "refused", cancelled: false, inputCommitted: false });
@@ -87,6 +89,7 @@ function fixture(refuse = false) {
 									},
 								],
 								omittedWindows: 0,
+								filteredOut: nativeFilteredOut,
 							}),
 							"discover",
 						);
@@ -223,11 +226,27 @@ function fixture(refuse = false) {
 		publish,
 		select,
 		events,
+		queries,
 		get creates() {
 			return creates;
 		},
 	};
 }
+
+test("discovery forwards bounded metadata narrowing before native catalog admission", { skip: !allowed }, async () => {
+	const f = fixture(false, 400);
+	try {
+		const result = await f.desktop.tool.execute("filtered", {
+			request: { op: "discover", app: "fixture", title: "TEST", focused: true },
+		});
+		assert.deepEqual(result.details, { status: "discovered", omittedWindows: 0, filteredOut: 401 });
+		assert.deepEqual(f.queries, [{ app: "fixture", title: "TEST", focused: true }]);
+		await f.desktop.tool.execute("unfiltered", { request: { op: "discover" } });
+		assert.deepEqual(f.queries[1], { focused: false });
+	} finally {
+		await f.host.close();
+	}
+});
 
 test(
 	"semantic plans reuse the selected child and require the actual visible observation",

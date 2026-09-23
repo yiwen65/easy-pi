@@ -73,6 +73,7 @@ describe.skipIf(!allowed)("desktop binding through actual AgentSession with faux
 										},
 									],
 									omittedWindows: 0,
+									filteredOut: 0,
 								}),
 							);
 						},

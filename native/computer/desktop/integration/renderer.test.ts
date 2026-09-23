@@ -36,8 +36,8 @@ function fixture() {
 	const directory = process.env.COMPUTER_EMERGENCY_SDK!;
 	expect(isAbsolute(directory)).toBe(true);
 	for (const [name, hash] of [
-		["libcua_driver_sdk.dylib", "7d3b2adcbe60f9b4560584dd40026d4f2c05e71286839b86691983c292c6f615"],
-		["cua_driver_node_runtime.node", "70d6b9216c55c44fd6111d4119b0e3557110e2d779fe7a4043056aa471a65710"],
+		["libcua_driver_sdk.dylib", "574acada8fd701ca5351e61abc7548ae515400dbedbc81d602afaeb3bcd675c1"],
+		["cua_driver_node_runtime.node", "2e13bfdb600b24dca7a03d9cdd295aedd857ea2f72a48ebab10f2e4954b8e423"],
 	] as const)
 		expect(
 			createHash("sha256")
@@ -59,7 +59,7 @@ function fixture() {
 			newOperation: () => ({
 				cancel() {},
 				startListWindows() {},
-				result: async () => new sdk.ComputerResult.Windows({ windows: [], omittedWindows: 0 }),
+				result: async () => new sdk.ComputerResult.Windows({ windows: [], omittedWindows: 0, filteredOut: 0 }),
 				terminal: async () => ({ operationId: "mock", inputCommitted: false, cancelled: false }),
 			}),
 		})),

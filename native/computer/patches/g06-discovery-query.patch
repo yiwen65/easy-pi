@@ -1,0 +1,930 @@
+diff --git a/libs/cua-driver/python/src/cua_driver/_native.py b/libs/cua-driver/python/src/cua_driver/_native.py
+--- a/libs/cua-driver/python/src/cua_driver/_native.py
++++ b/libs/cua-driver/python/src/cua_driver/_native.py
+@@ -524,7 +524,7 @@
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+     if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_scroll() != 56058:
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+-    if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_list_windows() != 33966:
++    if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_list_windows() != 38760:
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+     if lib.uniffi_cua_driver_sdk_checksum_method_computeroperation_start_navigate() != 9689:
+         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+@@ -1207,6 +1207,7 @@
+ _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_scroll.restype = None
+ _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_list_windows.argtypes = (
+     ctypes.c_uint64,
++    _UniffiRustBuffer,
+     ctypes.POINTER(_UniffiRustCallStatus),
+ )
+ _UniffiLib.uniffi_cua_driver_sdk_fn_method_computeroperation_start_list_windows.restype = None
+@@ -4845,6 +4846,33 @@
+
+
+
++
++class _UniffiFfiConverterOptionalTypeComputerWindowQuery(_UniffiConverterRustBuffer):
++    @classmethod
++    def check_lower(cls, value):
++        if value is not None:
++            cua_driver._native_contract._UniffiFfiConverterTypeComputerWindowQuery.check_lower(value)
++
++    @classmethod
++    def write(cls, value, buf):
++        if value is None:
++            buf.write_u8(0)
++            return
++
++        buf.write_u8(1)
++        cua_driver._native_contract._UniffiFfiConverterTypeComputerWindowQuery.write(value, buf)
++
++    @classmethod
++    def read(cls, buf):
++        flag = buf.read_u8()
++        if flag == 0:
++            return None
++        elif flag == 1:
++            return cua_driver._native_contract._UniffiFfiConverterTypeComputerWindowQuery.read(buf)
++        else:
++            raise InternalError("Unexpected flag byte for optional type")
++
++
+ class ComputerOperationProtocol(typing.Protocol):
+
+     def cancel(self, ) -> None:
+@@ -4876,7 +4904,7 @@
+         keyboard, AX-scroll or foreground fallback; effect remains unverified.
+ """
+         raise NotImplementedError
+-    def start_list_windows(self, ) -> None:
++    def start_list_windows(self, query: typing.Optional[cua_driver._native_contract.ComputerWindowQuery]) -> None:
+         raise NotImplementedError
+     def start_navigate(self, url: str) -> None:
+         raise NotImplementedError
+@@ -5071,9 +5099,12 @@
+             *_uniffi_lowered_args,
+         )
+         return _uniffi_lift_return(_uniffi_ffi_result)
+-    def start_list_windows(self, ) -> None:
+-        _uniffi_lowered_args = (
+-            self._uniffi_clone_handle(),
++    def start_list_windows(self, query: typing.Optional[cua_driver._native_contract.ComputerWindowQuery]) -> None:
++
++        _UniffiFfiConverterOptionalTypeComputerWindowQuery.check_lower(query)
++        _uniffi_lowered_args = (
++            self._uniffi_clone_handle(),
++            _UniffiFfiConverterOptionalTypeComputerWindowQuery.lower(query),
+         )
+         _uniffi_lift_return = lambda val: None
+         _uniffi_error_converter = _UniffiFfiConverterTypeComputerError
+@@ -5340,13 +5371,16 @@
+     @dataclass
+     class WINDOWS:
+
+-        def __init__(self, windows:typing.List[ComputerDiscoveredWindow], omitted_windows:int):
++        def __init__(self, windows:typing.List[ComputerDiscoveredWindow], omitted_windows:int, filtered_out:int):
+             self.windows = windows
+
+
+             self.omitted_windows = omitted_windows
+
+
++            self.filtered_out = filtered_out
++
++
+             pass
+
+
+@@ -5354,7 +5388,7 @@
+
+
+         def __str__(self):
+-            return "ComputerResult.WINDOWS(windows={}, omitted_windows={})".format(self.windows, self.omitted_windows)
++            return "ComputerResult.WINDOWS(windows={}, omitted_windows={}, filtered_out={})".format(self.windows, self.omitted_windows, self.filtered_out)
+         def __eq__(self, other):
+             if not isinstance(other, ComputerResult):
+                 return NotImplemented
+@@ -5363,6 +5397,8 @@
+             if self.windows != other.windows:
+                 return False
+             if self.omitted_windows != other.omitted_windows:
++                return False
++            if self.filtered_out != other.filtered_out:
+                 return False
+             return True
+
+@@ -5600,6 +5636,7 @@
+             return ComputerResult.WINDOWS(
+                 _UniffiFfiConverterSequenceTypeComputerDiscoveredWindow.read(buf),
+                 _UniffiFfiConverterUInt32.read(buf),
++                _UniffiFfiConverterUInt32.read(buf),
+             )
+         if variant == 2:
+             return ComputerResult.WINDOW_SELECTED(
+@@ -5637,6 +5674,7 @@
+         if value.is_WINDOWS():
+             _UniffiFfiConverterSequenceTypeComputerDiscoveredWindow.check_lower(value.windows)
+             _UniffiFfiConverterUInt32.check_lower(value.omitted_windows)
++            _UniffiFfiConverterUInt32.check_lower(value.filtered_out)
+             return
+         if value.is_WINDOW_SELECTED():
+             _UniffiFfiConverterTypeComputerSession.check_lower(value.session)
+@@ -5668,6 +5706,7 @@
+             buf.write_i32(1)
+             _UniffiFfiConverterSequenceTypeComputerDiscoveredWindow.write(value.windows, buf)
+             _UniffiFfiConverterUInt32.write(value.omitted_windows, buf)
++            _UniffiFfiConverterUInt32.write(value.filtered_out, buf)
+         if value.is_WINDOW_SELECTED():
+             buf.write_i32(2)
+             _UniffiFfiConverterTypeComputerSession.write(value.session, buf)
+diff --git a/libs/cua-driver/python/src/cua_driver/_native_contract.py b/libs/cua-driver/python/src/cua_driver/_native_contract.py
+--- a/libs/cua-driver/python/src/cua_driver/_native_contract.py
++++ b/libs/cua-driver/python/src/cua_driver/_native_contract.py
+@@ -4054,6 +4054,52 @@
+         _UniffiFfiConverterUInt32.write(value.max_duration_ms, buf)
+
+ @dataclass
++class ComputerWindowQuery:
++    """
++    Metadata-only narrowing for the controlled Computer catalog. It grants no
++    window authority and is not an extension of the legacy list_windows input.
++"""
++    def __init__(self, *, app:typing.Optional[str], title:typing.Optional[str], focused:bool):
++        self.app = app
++        self.title = title
++        self.focused = focused
++
++
++
++
++    def __str__(self):
++        return "ComputerWindowQuery(app={}, title={}, focused={})".format(self.app, self.title, self.focused)
++    def __eq__(self, other):
++        if self.app != other.app:
++            return False
++        if self.title != other.title:
++            return False
++        if self.focused != other.focused:
++            return False
++        return True
++
++class _UniffiFfiConverterTypeComputerWindowQuery(_UniffiConverterRustBuffer):
++    @staticmethod
++    def read(buf):
++        return ComputerWindowQuery(
++            app=_UniffiFfiConverterOptionalString.read(buf),
++            title=_UniffiFfiConverterOptionalString.read(buf),
++            focused=_UniffiFfiConverterBoolean.read(buf),
++        )
++
++    @staticmethod
++    def check_lower(value):
++        _UniffiFfiConverterOptionalString.check_lower(value.app)
++        _UniffiFfiConverterOptionalString.check_lower(value.title)
++        _UniffiFfiConverterBoolean.check_lower(value.focused)
++
++    @staticmethod
++    def write(value, buf):
++        _UniffiFfiConverterOptionalString.write(value.app, buf)
++        _UniffiFfiConverterOptionalString.write(value.title, buf)
++        _UniffiFfiConverterBoolean.write(value.focused, buf)
++
++@dataclass
+ class CursorMotionOutput:
+     def __init__(self, *, start_handle:float, end_handle:float, arc_size:float, arc_flow:float, spring:float, glide_duration_ms:float, dwell_after_click_ms:float, idle_hide_ms:float, turn_radius:float):
+         self.start_handle = start_handle
+@@ -8468,6 +8514,7 @@
+     "ComputerLocator",
+     "ComputerPoint",
+     "ComputerSegment",
++    "ComputerWindowQuery",
+     "CursorMotionOutput",
+     "CursorPointOutput",
+     "CursorThemeOutput",
+diff --git a/libs/cua-driver/rust/crates/cua-driver-contract/src/windows.rs b/libs/cua-driver/rust/crates/cua-driver-contract/src/windows.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-contract/src/windows.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-contract/src/windows.rs
+@@ -55,6 +55,45 @@
+             return Err("window discovery requires a positive process ID".into());
+         }
+         Ok(())
++    }
++}
++
++/// Metadata-only narrowing for the controlled Computer catalog. It grants no
++/// window authority and is not an extension of the legacy list_windows input.
++#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, uniffi::Record)]
++#[serde(deny_unknown_fields)]
++pub struct ComputerWindowQuery {
++    #[serde(default)]
++    pub app: Option<String>,
++    #[serde(default)]
++    pub title: Option<String>,
++    #[serde(default)]
++    pub focused: bool,
++}
++
++impl ComputerWindowQuery {
++    pub fn parse(value: &serde_json::Value) -> Result<Self, &'static str> {
++        // Serde's struct visitor also accepts sequences; this internal wire
++        // shape is deliberately a closed object, not positional arguments.
++        if !value.is_object() {
++            return Err("invalid_discovery_query");
++        }
++        let query: Self = serde_json::from_value(value.clone()).map_err(|_| "invalid_discovery_query")?;
++        query.validate()?;
++        Ok(query)
++    }
++
++    pub fn validate(&self) -> Result<(), &'static str> {
++        if self.app.iter().chain(self.title.iter()).any(|filter| filter.is_empty() || filter.len() > 256) {
++            return Err("invalid_discovery_query");
++        }
++        Ok(())
++    }
++
++    pub fn matches(&self, app: &str, title: &str, focused: Option<bool>) -> bool {
++        self.app.as_ref().is_none_or(|filter| app.to_lowercase().contains(&filter.to_lowercase()))
++            && self.title.as_ref().is_none_or(|filter| title.to_lowercase().contains(&filter.to_lowercase()))
++            && (!self.focused || focused == Some(true))
+     }
+ }
+
+@@ -322,6 +361,30 @@
+ mod tests {
+     use super::*;
+     use serde_json::json;
++
++    #[test]
++    fn computer_window_query_is_bounded_literal_conjunction_and_keeps_unknown_focus() {
++        let query = ComputerWindowQuery { app: Some("FIX.*".into()), title: Some("中文".into()), focused: true };
++        assert!(query.matches("Fix.* application", "文档 中文", Some(true)));
++        assert!(!query.matches("FixZZ application", "文档 中文", Some(true)));
++        assert!(!query.matches("Fix.* application", "other", Some(true)));
++        for focus in [None, Some(false)] {
++            assert!(!query.matches("Fix.* application", "文档 中文", focus));
++        }
++        let default: ComputerWindowQuery = serde_json::from_value(json!({})).unwrap();
++        assert!(default.validate().is_ok() && default.matches("anything", "", None));
++        for field in ["app", "title"] {
++            for text in ["".to_owned(), "x".repeat(257), "文".repeat(86)] {
++                let mut value = json!({}); value[field] = json!(text);
++                assert!(serde_json::from_value::<ComputerWindowQuery>(value).unwrap().validate().is_err());
++            }
++            let mut value = json!({}); value[field] = json!("文".repeat(85));
++            assert!(serde_json::from_value::<ComputerWindowQuery>(value).unwrap().validate().is_ok());
++        }
++        for invalid in [json!({"pid":42}), json!({"focused":"true"}), json!({"app":7}), json!([])] {
++            assert!(ComputerWindowQuery::parse(&invalid).is_err());
++        }
++    }
+
+     #[test]
+     fn native_app_success_shapes_allow_unavailable_metadata() {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope.rs
+@@ -142,10 +142,13 @@
+                 name == "list_windows"
+                     && args.as_object().is_some_and(|args| {
+                         args.keys()
+-                            .all(|key| matches!(key.as_str(), "on_screen_only" | "session"))
++                            .all(|key| matches!(key.as_str(), "on_screen_only" | "session" | "computer_query"))
+                             && args
+                                 .get("on_screen_only")
+                                 .is_none_or(|value| value == false)
++                            && args.get("computer_query").is_none_or(|value| {
++                                cua_driver_contract::ComputerWindowQuery::parse(value).is_ok()
++                            })
+                     })
+             }
+             SessionScope::NativeWindow(_) => {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/discovery_tests.rs b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/discovery_tests.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/discovery_tests.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/controlled/scope/discovery_tests.rs
+@@ -1,4 +1,33 @@
+ use super::*;
++
++#[test]
++fn controlled_discovery_query_is_only_bounded_metadata_narrowing() {
++    let gate = Gate::new();
++    let session = gate.discovery_session(None, Arc::new(|| true)).unwrap();
++    let operation = session.new_operation().unwrap();
++    for query in [
++        serde_json::json!({}),
++        serde_json::json!({"app":"Fixture","title":"中文","focused":true}),
++        serde_json::json!({"app":null,"focused":false}),
++    ] {
++        assert!(operation.permits_tool("list_windows", &serde_json::json!({"on_screen_only":false,"computer_query":query}), false));
++    }
++    for query in [
++        serde_json::json!({"app":""}),
++        serde_json::json!({"title":"文".repeat(86)}),
++        serde_json::json!({"pid":42}),
++        serde_json::json!({"focused":"true"}),
++        serde_json::json!([]),
++        serde_json::json!(null),
++    ] {
++        assert!(!operation.permits_tool("list_windows", &serde_json::json!({"computer_query":query}), false));
++    }
++    assert!(!operation.permits_tool("list_windows", &serde_json::json!({"computer_query":{},"pid":42}), false));
++    assert!(!operation.permits_tool("list_windows", &serde_json::json!({"computer_query":{},"on_screen_only":true}), false));
++    assert!(!operation.permits_tool("get_window_state", &serde_json::json!({"computer_query":{}}), false));
++    operation.cancel();
++}
++
+ #[tokio::test]
+ async fn controlled_discovery_scope_is_read_only_and_selection_remains_revocable_child() {
+     let gate = Gate::new();
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer.rs
+@@ -47,6 +47,7 @@
+     Windows {
+         windows: Vec<ComputerDiscoveredWindow>,
+         omitted_windows: u32,
++        filtered_out: u32,
+     },
+     WindowSelected {
+         session: Arc<ComputerSession>,
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/discovery.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/discovery.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/discovery.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/discovery.rs
+@@ -1,7 +1,7 @@
+ //! Metadata discovery and one-shot exact-window selection. No observation/input
+ //! authority is inferred from a title, position, reference or catalog entry.
+ use super::*;
+-use cua_driver_contract::{WindowBounds, WindowInfo};
++use cua_driver_contract::{ComputerWindowQuery, WindowBounds, WindowInfo};
+ use cua_driver_core::controlled::NativeWindowTarget;
+ use std::collections::HashMap;
+
+@@ -25,12 +25,16 @@
+
+ fn decode(
+     value: serde_json::Value,
+-) -> Result<(Catalog, Vec<ComputerDiscoveredWindow>, u32), ComputerError> {
++) -> Result<(Catalog, Vec<ComputerDiscoveredWindow>, u32, u32), ComputerError> {
+     let rows = value["windows"]
+         .as_array()
+         .filter(|rows| rows.len() <= 256)
+         .ok_or_else(|| refused("discovery_result_shape_unproved"))?;
+     let omitted = value["omitted_windows"]
++        .as_u64()
++        .filter(|count| u32::try_from(*count).is_ok())
++        .ok_or_else(|| refused("discovery_result_shape_unproved"))? as u32;
++    let filtered = value["filtered_out"]
+         .as_u64()
+         .filter(|count| u32::try_from(*count).is_ok())
+         .ok_or_else(|| refused("discovery_result_shape_unproved"))? as u32;
+@@ -76,7 +80,7 @@
+         });
+         catalog.insert(reference, (window, stamp));
+     }
+-    Ok((catalog, result, omitted))
++    Ok((catalog, result, omitted, filtered))
+ }
+
+ #[uniffi::export]
+@@ -160,10 +164,15 @@
+
+ #[uniffi::export]
+ impl ComputerOperation {
+-    pub fn start_list_windows(self: Arc<Self>) -> Result<(), ComputerError> {
++    pub fn start_list_windows(
++        self: Arc<Self>,
++        query: Option<ComputerWindowQuery>,
++    ) -> Result<(), ComputerError> {
+         if !self.session.gate.is_discovery() {
+             return Err(refused("unsupported_route"));
+         }
++        let query = query.unwrap_or_default();
++        query.validate().map_err(refused)?;
+         let worker = self.clone();
+         self.launch(None, async move {
+             *worker
+@@ -175,7 +184,7 @@
+             let raw = worker
+                 .session
+                 .native
+-                .invoke("list_windows", serde_json::json!({"on_screen_only":false}))
++                .invoke("list_windows", serde_json::json!({"on_screen_only":false,"computer_query":query}))
+                 .await
+                 .ok_or_else(|| refused("runtime_closed"))?;
+             if raw.is_error == Some(true) {
+@@ -191,7 +200,7 @@
+                         .unwrap_or("discovery_refused"),
+                 ));
+             }
+-            let (catalog, windows, omitted_windows) = decode(
++            let (catalog, windows, omitted_windows, filtered_out) = decode(
+                 raw.structured_content
+                     .ok_or_else(|| refused("discovery_metadata_unproved"))?,
+             )?;
+@@ -204,6 +213,7 @@
+             Ok(ComputerResult::Windows {
+                 windows,
+                 omitted_windows,
++                filtered_out,
+             })
+         })
+     }
+@@ -274,40 +284,46 @@
+         for expected in [None, Some(false), Some(true)] {
+             let mut value = row();
+             value["computer_is_focused"] = serde_json::json!(expected);
+-            let (_, rows, _) =
+-                decode(serde_json::json!({"windows":[value],"omitted_windows":0})).unwrap();
++            let (_, rows, _, _) =
++                decode(serde_json::json!({"windows":[value],"omitted_windows":0,"filtered_out":0})).unwrap();
+             assert_eq!(rows[0].is_focused, expected);
+         }
+-        let (_, rows, _) =
+-            decode(serde_json::json!({"windows":[row()],"omitted_windows":0})).unwrap();
++        let (_, rows, _, _) =
++            decode(serde_json::json!({"windows":[row()],"omitted_windows":0,"filtered_out":0})).unwrap();
+         assert_eq!(rows[0].is_focused, None);
+         let mut invalid = row();
+         invalid["computer_is_focused"] = serde_json::json!("true");
+-        assert!(decode(serde_json::json!({"windows":[invalid],"omitted_windows":0})).is_err());
++        assert!(decode(serde_json::json!({"windows":[invalid],"omitted_windows":0,"filtered_out":0})).is_err());
+     }
+     #[test]
+     fn controlled_discovery_omissions_are_counts_not_selected_rows() {
+-        let (catalog, rows, omitted) =
+-            decode(serde_json::json!({"windows":[row()],"omitted_windows":300})).unwrap();
++        let (catalog, rows, omitted, filtered) =
++            decode(serde_json::json!({"windows":[row()],"omitted_windows":300,"filtered_out":400})).unwrap();
+         assert_eq!(catalog.len(), 1);
+         assert_eq!(rows.len(), 1);
+         assert_eq!(omitted, 300);
+-        assert!(decode(serde_json::json!({"windows":[],"omitted_windows":u32::MAX})).is_ok());
+-        assert!(decode(serde_json::json!({"windows":vec![row();257],"omitted_windows":0})).is_err());
++        assert_eq!(filtered, 400);
++        assert!(decode(serde_json::json!({"windows":[],"omitted_windows":u32::MAX,"filtered_out":0})).is_ok());
++        assert!(decode(serde_json::json!({"windows":[],"omitted_windows":0,"filtered_out":u32::MAX})).is_ok());
++        assert!(decode(serde_json::json!({"windows":vec![row();257],"omitted_windows":0,"filtered_out":0})).is_err());
++        assert!(decode(serde_json::json!({"windows":[],"omitted_windows":0})).is_err());
++        for value in [serde_json::json!(-1), serde_json::json!("0"), serde_json::json!(null), serde_json::json!(u64::from(u32::MAX)+1)] {
++            assert!(decode(serde_json::json!({"windows":[],"omitted_windows":0,"filtered_out":value})).is_err());
++        }
+     }
+     #[test]
+     fn controlled_discovery_references_are_fresh_and_metadata_cannot_forge_a_target() {
+-        let (one, public, omitted) =
+-            decode(serde_json::json!({"windows":[row()],"omitted_windows":1})).unwrap();
++        let (one, public, omitted, _) =
++            decode(serde_json::json!({"windows":[row()],"omitted_windows":1,"filtered_out":10})).unwrap();
+         assert_eq!(omitted, 1);
+-        assert_eq!(one.len(), 1, "omitted metadata must never mint a reference");
+-        let (_, second, _) =
+-            decode(serde_json::json!({"windows":[row()],"omitted_windows":0})).unwrap();
+-        assert!(decode(serde_json::json!({"windows":[row()]})).is_err());
+-        assert!(decode(serde_json::json!({"windows":[row()],"omitted_windows":u64::from(u32::MAX)+1})).is_err());
++        assert_eq!(one.len(), 1, "omitted/filtered metadata must never mint a reference");
++        let (_, second, _, _) =
++            decode(serde_json::json!({"windows":[row()],"omitted_windows":0,"filtered_out":0})).unwrap();
++        assert!(decode(serde_json::json!({"windows":[row()],"filtered_out":0})).is_err());
++        assert!(decode(serde_json::json!({"windows":[row()],"omitted_windows":u64::from(u32::MAX)+1,"filtered_out":0})).is_err());
+         assert_ne!(public[0].reference, second[0].reference);
+         assert!(one.contains_key(&public[0].reference));
+-        assert!(decode(serde_json::json!({"windows":[row(),row()],"omitted_windows":0})).is_err());
++        assert!(decode(serde_json::json!({"windows":[row(),row()],"omitted_windows":0,"filtered_out":0})).is_err());
+         for (field, value) in [
+             ("pid", serde_json::json!(u32::MAX)),
+             ("window_id", serde_json::json!(1u64 << 40)),
+@@ -320,7 +336,7 @@
+         ] {
+             let mut invalid = row();
+             invalid[field] = value;
+-            assert!(decode(serde_json::json!({"windows":[invalid],"omitted_windows":0})).is_err());
+-        }
+-    }
+-}
++            assert!(decode(serde_json::json!({"windows":[invalid],"omitted_windows":0,"filtered_out":0})).is_err());
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/discovery.rs b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/discovery.rs
+--- a/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/discovery.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-sdk/src/computer/tests/discovery.rs
+@@ -11,7 +11,7 @@
+         .open_discovery_session(Some(native.clone()))
+         .is_err());
+     let wrong = native.new_operation().unwrap();
+-    assert!(wrong.clone().start_list_windows().is_err());
++    assert!(wrong.clone().start_list_windows(None).is_err());
+     wrong.cancel();
+     let operation = discovery.clone().new_operation().unwrap();
+     operation
+@@ -25,12 +25,21 @@
+     let cancelled = discovery.clone().new_operation().unwrap();
+     cancelled.cancel();
+     assert!(matches!(
+-        cancelled.clone().start_list_windows(),
++        cancelled.clone().start_list_windows(None),
+         Err(ComputerError::Cancelled {
+             input_committed: false
+         })
+     ));
+     assert!(!cancelled.terminal().await.unwrap().input_committed);
++    let invalid = discovery.new_operation().unwrap();
++    assert!(matches!(
++        invalid.clone().start_list_windows(Some(cua_driver_contract::ComputerWindowQuery {
++            title: Some("文".repeat(86)), ..Default::default()
++        })),
++        Err(ComputerError::Refused { reason }) if reason == "invalid_discovery_query"
++    ));
++    invalid.cancel();
++    assert!(!invalid.terminal().await.unwrap().input_committed);
+     owner.close().await.unwrap();
+ }
+
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/computer_discovery.rs
+@@ -17,16 +17,30 @@
+     Ok(value)
+ }
+
++#[cfg(test)]
+ fn catalog_rows(
+     windows: Vec<crate::windows::WindowInfo>,
++    stamp: impl FnMut(i32) -> Option<(u64, u64)>,
++    checkpoint: impl FnMut() -> Result<(), &'static str>,
++) -> Result<(Vec<Value>, u32), &'static str> {
++    query_catalog_rows(windows, &Default::default(), None, stamp, checkpoint)
++        .map(|(rows, omitted, _)| (rows, omitted))
++}
++
++fn query_catalog_rows(
++    windows: Vec<crate::windows::WindowInfo>,
++    query: &cua_driver_contract::ComputerWindowQuery,
++    focus: Option<(i32, u32, (u64, u64))>,
+     mut stamp: impl FnMut(i32) -> Option<(u64, u64)>,
+     mut checkpoint: impl FnMut() -> Result<(), &'static str>,
+-) -> Result<(Vec<Value>, u32), &'static str> {
+-    // The 256-entry bound protects selectable references, not the raw CG
+-    // catalog (which also contains cached/unknown accessory surfaces).
++) -> Result<(Vec<Value>, u32, u32), &'static str> {
++    // The bound protects returned selectable references, not nonmatching
++    // metadata or cached/unknown accessory surfaces in the raw CG catalog.
++    query.validate()?;
+     u32::try_from(windows.len()).map_err(|_| "discovery_limit_exceeded")?;
+     let mut rows = Vec::with_capacity(windows.len().min(256));
+     let mut omitted = 0;
++    let mut filtered = 0;
+     for window in windows {
+         checkpoint()?;
+         let Some(stamp) = stamp(window.pid) else {
+@@ -34,10 +48,18 @@
+             continue;
+         };
+         match row(&window, stamp) {
+-            Ok(row) => {
++            Ok(mut row) => {
++                let focused = focus.map(|(pid, id, birth)| {
++                    window.pid == pid && window.window_id == id && birth == stamp
++                });
++                if !query.matches(&window.app_name, &window.title, focused) {
++                    filtered += 1;
++                    continue;
++                }
+                 if rows.len() == 256 {
+                     return Err("discovery_limit_exceeded");
+                 }
++                row["computer_is_focused"] = json!(focused);
+                 rows.push(row);
+             },
+             // Metadata catalogs can include non-drawable/unproved surfaces.
+@@ -51,31 +73,31 @@
+             Err(reason) => return Err(reason),
+         }
+     }
+-    Ok((rows, omitted))
+-}
+-
+-pub(super) async fn list(operation: Arc<Operation>) -> ToolResult {
++    Ok((rows, omitted, filtered))
++}
++
++pub(super) async fn list(operation: Arc<Operation>, args: &Value) -> ToolResult {
+     if !operation.session.is_discovery() {
+         return refuse("unsupported_route");
+     }
++    let query = match args.get("computer_query") {
++        Some(value) => match cua_driver_contract::ComputerWindowQuery::parse(value) {
++            Ok(query) => query,
++            Err(reason) => return refuse(reason),
++        },
++        None => Default::default(),
++    };
+     let worker = operation.clone();
+     match operation.blocking(move || {
+         if worker.checkpoint().is_err() { return refuse("controlled_cancelled"); }
+         let enumeration=crate::windows::general_windows_with_space_snapshot();
+         let focus = crate::ax::general_surface::foreground_identity();
+-        let (mut rows,omitted) = match catalog_rows(enumeration.windows,super::computer_process_stamp,||worker.checkpoint()) {
++        let (rows,omitted,filtered) = match query_catalog_rows(enumeration.windows,&query,focus,super::computer_process_stamp,||worker.checkpoint()) {
+             Ok(rows)=>rows,Err(reason)=>return refuse(reason),
+         };
+-        for row in &mut rows {
+-            row["computer_is_focused"] = json!(focus.map(|(pid, window, stamp)| {
+-                row["pid"].as_i64() == Some(i64::from(pid))
+-                    && row["window_id"].as_u64() == Some(u64::from(window))
+-                    && row["computer_process_stamp"] == json!([stamp.0, stamp.1])
+-            }));
+-        }
+         if worker.checkpoint().is_err() { return refuse("controlled_cancelled"); }
+-        ToolResult::text("Observed selectable window metadata; unproved identity/geometry or over-budget metadata is counted as omitted, not absence. Selection grants no content/input permission")
+-            .with_structured(json!({"windows":rows,"omitted_windows":omitted,"current_space_id":enumeration.current_space_id}))
++        ToolResult::text("Observed matching selectable metadata; filtered and unproved/over-budget omitted rows are separate counts, not absence. Selection grants no content/input permission")
++            .with_structured(json!({"windows":rows,"omitted_windows":omitted,"filtered_out":filtered,"current_space_id":enumeration.current_space_id}))
+     }).await { Ok(result)=>result,Err(_)=>refuse("controlled_quarantined") }
+ }
+
+@@ -149,6 +171,50 @@
+         }
+     }
+     #[test]
++    fn controlled_discovery_query_precedes_returned_reference_budget() {
++        let mut windows: Vec<_> = (1..=257).map(|id| window(id, 100.0)).collect();
++        windows.last_mut().unwrap().title = "Wanted 中文".into();
++        let query = cua_driver_contract::ComputerWindowQuery {
++            app: Some("FIXTURE".into()), title: Some("wanted 中文".into()), focused: false,
++        };
++        let (rows, omitted, filtered) = query_catalog_rows(windows, &query, None, |_| Some((100, 2)), || Ok(())).unwrap();
++        assert_eq!((rows.len(), omitted, filtered), (1, 0, 256));
++        assert_eq!(rows[0]["window_id"], 257);
++    }
++
++    #[test]
++    fn controlled_discovery_query_focus_preserves_unknown_and_proved_identity() {
++        let query = cua_driver_contract::ComputerWindowQuery { focused: true, ..Default::default() };
++        for (focus, ids, filtered) in [
++            (None, vec![], 3),
++            (Some((42, 2, (100, 2))), vec![2], 2),
++            (Some((42, 2, (101, 2))), vec![], 3),
++        ] {
++            let (rows, omitted, actual) = query_catalog_rows((1..=3).map(|id| window(id, 100.0)).collect(), &query, focus, |_| Some((100, 2)), || Ok(())).unwrap();
++            assert_eq!(rows.iter().map(|r| r["window_id"].as_u64().unwrap()).collect::<Vec<_>>(), ids);
++            assert_eq!((omitted, actual), (0, filtered));
++            assert!(rows.iter().all(|r| r["computer_is_focused"] == true));
++        }
++    }
++
++    #[test]
++    fn controlled_discovery_query_keeps_matching_cap_omissions_and_cancel() {
++        let query = cua_driver_contract::ComputerWindowQuery { title: Some("wanted".into()), ..Default::default() };
++        let matching = |id| { let mut row = window(id, 100.0); row.title = "wanted".into(); row };
++        assert_eq!(query_catalog_rows((1..=257).map(matching).collect(), &query, None, |_| Some((100, 2)), || Ok(())), Err("discovery_limit_exceeded"));
++        let mut candidates: Vec<_> = (1..=300).map(|id| window(id, 100.0)).collect();
++        candidates.push(window(0, 100.0));
++        candidates.extend((301..=556).map(matching));
++        let (rows, omitted, filtered) = query_catalog_rows(candidates, &query, None, |_| Some((100, 2)), || Ok(())).unwrap();
++        assert_eq!((rows.len(), omitted, filtered), (256, 1, 300));
++        let mut calls = 0;
++        assert_eq!(query_catalog_rows((1..=3).map(|id| window(id, 100.0)).collect(), &query, None, |_| Some((100, 2)), || { calls += 1; if calls == 2 { Err("cancelled") } else { Ok(()) } }), Err("cancelled"));
++        assert_eq!(calls, 2, "filtered rows still checkpoint");
++        let invalid = cua_driver_contract::ComputerWindowQuery { app: Some(String::new()), ..Default::default() };
++        assert_eq!(query_catalog_rows(vec![window(1, 100.0)], &invalid, None, |_| panic!("invalid query read process metadata"), || Ok(())), Err("invalid_discovery_query"));
++    }
++
++    #[test]
+     fn controlled_discovery_unselectable_geometry_does_not_hide_valid_candidates() {
+         for width in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+             let (rows, omitted) = catalog_rows(
+@@ -228,7 +294,7 @@
+         let op = session.new_operation().unwrap();
+         op.begin().unwrap();
+         assert_eq!(
+-            list(op.clone()).await.structured_content.unwrap()["code"],
++            list(op.clone(), &json!({})).await.structured_content.unwrap()["code"],
+             "unsupported_route"
+         );
+         op.finish();
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/list_windows.rs
+@@ -53,7 +53,7 @@
+
+     async fn invoke(&self, args: Value) -> ToolResult {
+         if let Some(operation) = cua_driver_core::controlled::current() {
+-            return super::computer_discovery::list(operation).await;
++            return super::computer_discovery::list(operation, &args).await;
+         }
+         use cua_driver_core::tool_args::ArgsExt;
+         let pid_filter: Option<i32> = args.opt_i64("pid").map(|v| v as i32);
+diff --git a/libs/cua-driver/typescript/src/computer.ts b/libs/cua-driver/typescript/src/computer.ts
+--- a/libs/cua-driver/typescript/src/computer.ts
++++ b/libs/cua-driver/typescript/src/computer.ts
+@@ -34,6 +34,7 @@
+   ComputerAddress,
+   ComputerCondition,
+   ComputerDiscoveredWindow,
++  ComputerWindowQuery,
+   ComputerDispatch,
+   ComputerError,
+   ComputerHost,
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_contract.ts b/libs/cua-driver/typescript/src/native/cua_driver_contract.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_contract.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_contract.ts
+@@ -2911,6 +2911,57 @@
+     return new FFIConverter();
+ })();
+
++/**
++ * Metadata-only narrowing for the controlled Computer catalog. It grants no
++ * window authority and is not an extension of the legacy list_windows input.
++ */
++export type ComputerWindowQuery = {
++    app?: string,
++    title?: string,
++    focused: boolean
++}
++
++/**
++ * Generated factory for {@link ComputerWindowQuery} record objects.
++ */
++export const ComputerWindowQuery = (() => {
++    const defaults = () => ({
++    });
++    const create = (() => {
++        return uniffiCreateRecord<ComputerWindowQuery, ReturnType<typeof defaults>>(defaults);
++    })();
++    return Object.freeze({
++        create,
++        new: create,
++        defaults: () => Object.freeze(defaults()) as Partial<ComputerWindowQuery>,
++    });
++})();
++
++const FfiConverterTypeComputerWindowQuery = (() => {
++    type TypeName = ComputerWindowQuery;
++    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
++        read(from: RustBuffer): TypeName {
++            return {
++                app: FfiConverterOptionalString.read(from),
++                title: FfiConverterOptionalString.read(from),
++                focused: FfiConverterBool.read(from)
++            };
++        }
++        write(value: TypeName, into: RustBuffer): void {
++            FfiConverterOptionalString.write(value.app, into);
++            FfiConverterOptionalString.write(value.title, into);
++            FfiConverterBool.write(value.focused, into);
++        }
++        allocationSize(value: TypeName): number {
++            return FfiConverterOptionalString.allocationSize(value.app) +
++             FfiConverterOptionalString.allocationSize(value.title) +
++             FfiConverterBool.allocationSize(value.focused);
++
++        }
++    };
++    return new FFIConverter();
++})();
++
+ export type CursorMotionOutput = {
+     startHandle: number,
+     endHandle: number,
+@@ -6633,6 +6684,7 @@
+     FfiConverterTypeComputerScrollUnit,
+     FfiConverterTypeComputerSegment,
+     FfiConverterTypeComputerWindowAction,
++    FfiConverterTypeComputerWindowQuery,
+     FfiConverterTypeCursorAction,
+     FfiConverterTypeCursorMotionOutput,
+     FfiConverterTypeCursorPointOutput,
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts b/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_sdk-ffi.ts
+@@ -454,7 +454,7 @@
+       hasRustCallStatus: true,
+     },
+     "uniffi_cua_driver_sdk_fn_method_computeroperation_start_list_windows": {
+-      args: [FfiType.Handle],
++      args: [FfiType.Handle, FfiType.RustBuffer],
+       ret: FfiType.Void,
+       hasRustCallStatus: true,
+     },
+@@ -1627,7 +1627,7 @@
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_click(uniffiSelf: bigint, imageId: Uint8Array, x: number, y: number, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_key(uniffiSelf: bigint, imageId: Uint8Array, key: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_image_scroll(uniffiSelf: bigint, imageId: Uint8Array, x: number, y: number, direction: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+-    uniffi_cua_driver_sdk_fn_method_computeroperation_start_list_windows(uniffiSelf: bigint, uniffi_out_err: UniffiRustCallStatus): void;
++    uniffi_cua_driver_sdk_fn_method_computeroperation_start_list_windows(uniffiSelf: bigint, query: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_navigate(uniffiSelf: bigint, url: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_observe(uniffiSelf: bigint, maxElements: number, maxDepth: number, uniffi_out_err: UniffiRustCallStatus): void;
+     uniffi_cua_driver_sdk_fn_method_computeroperation_start_plan(uniffiSelf: bigint, plan: Uint8Array, uniffi_out_err: UniffiRustCallStatus): void;
+diff --git a/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts b/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
+--- a/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
++++ b/libs/cua-driver/typescript/src/native/cua_driver_sdk.ts
+@@ -6,12 +6,12 @@
+ import nativeModule from "./cua_driver_sdk-ffi.js";
+ import { type UniffiRustFutureContinuationCallback, type UniffiForeignFutureDroppedCallback, type UniffiForeignFutureDroppedCallbackStruct, type UniffiVTableCallbackInterfaceCuaDriverSdkDriverActivityObserver, type UniffiForeignFutureResultRustBuffer, type UniffiForeignFutureCompleterustBuffer, type UniffiVTableCallbackInterfaceCuaDriverSdkDriverAuthorizationHost,
+ } from "./cua_driver_sdk-ffi.js";
+-import { type ActionResult, type ClickInput, type ClipboardReadInput, type ClipboardWriteInput, type ComputerImage, type ComputerSegment, type DragInput, type EndSessionInput, type EndSessionOutput, type EscalateSessionInput, type GetAgentCursorStateInput, type GetCursorPositionInput, type GetDesktopStateInput, type GetScreenSizeInput, type GetSessionInput, type GetSessionStateInput, type GetWindowStateInput, type HotkeyInput, type InvokeMenuInput, type ListAppsInput, type ListAppsOutput, type ListSessionsInput, type ListSessionsOutput, type ListWindowsInput, type ListWindowsOutput, type MoveCursorInput, type PressKeyInput, type ScrollInput, type SessionOutput, type SessionStateOutput, type SetAgentCursorEnabledInput, type SetAgentCursorMotionInput, type SetAgentCursorThemeInput, type SetWindowFrameInput, type StartSessionInput, type StartSessionOutput, type TypeTextInput, type VerifyStateInput, type VerifyStateOutput, type WindowBounds, type WindowStateOutput, ComputerKey, ComputerModifier, ScrollDirection,
++import { type ActionResult, type ClickInput, type ClipboardReadInput, type ClipboardWriteInput, type ComputerImage, type ComputerSegment, type ComputerWindowQuery, type DragInput, type EndSessionInput, type EndSessionOutput, type EscalateSessionInput, type GetAgentCursorStateInput, type GetCursorPositionInput, type GetDesktopStateInput, type GetScreenSizeInput, type GetSessionInput, type GetSessionStateInput, type GetWindowStateInput, type HotkeyInput, type InvokeMenuInput, type ListAppsInput, type ListAppsOutput, type ListSessionsInput, type ListSessionsOutput, type ListWindowsInput, type ListWindowsOutput, type MoveCursorInput, type PressKeyInput, type ScrollInput, type SessionOutput, type SessionStateOutput, type SetAgentCursorEnabledInput, type SetAgentCursorMotionInput, type SetAgentCursorThemeInput, type SetWindowFrameInput, type StartSessionInput, type StartSessionOutput, type TypeTextInput, type VerifyStateInput, type VerifyStateOutput, type WindowBounds, type WindowStateOutput, ComputerKey, ComputerModifier, ScrollDirection,
+ } from "./cua_driver_contract.js";
+ import { type FfiConverter, type UniffiByteArray, type UniffiGcObject, type UniffiHandle, type UniffiObjectFactory, type UniffiReferenceHolder, type UniffiRustCallStatus, AbstractFfiConverterByteArray, FfiConverterArray, FfiConverterBool, FfiConverterInt32, FfiConverterObject, FfiConverterObjectWithCallbacks, FfiConverterOptional, FfiConverterUInt32, FfiConverterUInt64, FfiConverterUInt8, RustBuffer, UniffiAbstractObject, UniffiEnum, UniffiError, UniffiInternalError, UniffiResult, UniffiRustCaller, destructorGuardSymbol, pointerLiteralSymbol, uniffiCreateFfiConverterString, uniffiCreateRecord, uniffiRustCallAsync, uniffiTraitInterfaceCall, uniffiTraitInterfaceCallAsyncWithError, uniffiTypeNameSymbol, variantOrdinalSymbol,
+ } from "@ubjs/core";
+ import uniffiCuaDriverContractModule from "./cua_driver_contract.js";
+-const { FfiConverterTypeActionResult, FfiConverterTypeClickInput, FfiConverterTypeClipboardReadInput, FfiConverterTypeClipboardWriteInput, FfiConverterTypeComputerImage, FfiConverterTypeComputerKey, FfiConverterTypeComputerModifier, FfiConverterTypeComputerSegment, FfiConverterTypeDragInput, FfiConverterTypeEndSessionInput, FfiConverterTypeEndSessionOutput, FfiConverterTypeEscalateSessionInput, FfiConverterTypeGetAgentCursorStateInput, FfiConverterTypeGetCursorPositionInput, FfiConverterTypeGetDesktopStateInput, FfiConverterTypeGetScreenSizeInput, FfiConverterTypeGetSessionInput, FfiConverterTypeGetSessionStateInput, FfiConverterTypeGetWindowStateInput, FfiConverterTypeHotkeyInput, FfiConverterTypeInvokeMenuInput, FfiConverterTypeListAppsInput, FfiConverterTypeListAppsOutput, FfiConverterTypeListSessionsInput, FfiConverterTypeListSessionsOutput, FfiConverterTypeListWindowsInput, FfiConverterTypeListWindowsOutput, FfiConverterTypeMoveCursorInput, FfiConverterTypePressKeyInput, FfiConverterTypeScrollDirection, FfiConverterTypeScrollInput, FfiConverterTypeSessionOutput, FfiConverterTypeSessionStateOutput, FfiConverterTypeSetAgentCursorEnabledInput, FfiConverterTypeSetAgentCursorMotionInput, FfiConverterTypeSetAgentCursorThemeInput, FfiConverterTypeSetWindowFrameInput, FfiConverterTypeStartSessionInput, FfiConverterTypeStartSessionOutput, FfiConverterTypeTypeTextInput, FfiConverterTypeVerifyStateInput, FfiConverterTypeVerifyStateOutput, FfiConverterTypeWindowBounds, FfiConverterTypeWindowStateOutput } = uniffiCuaDriverContractModule.converters;
++const { FfiConverterTypeActionResult, FfiConverterTypeClickInput, FfiConverterTypeClipboardReadInput, FfiConverterTypeClipboardWriteInput, FfiConverterTypeComputerImage, FfiConverterTypeComputerKey, FfiConverterTypeComputerModifier, FfiConverterTypeComputerSegment, FfiConverterTypeComputerWindowQuery, FfiConverterTypeDragInput, FfiConverterTypeEndSessionInput, FfiConverterTypeEndSessionOutput, FfiConverterTypeEscalateSessionInput, FfiConverterTypeGetAgentCursorStateInput, FfiConverterTypeGetCursorPositionInput, FfiConverterTypeGetDesktopStateInput, FfiConverterTypeGetScreenSizeInput, FfiConverterTypeGetSessionInput, FfiConverterTypeGetSessionStateInput, FfiConverterTypeGetWindowStateInput, FfiConverterTypeHotkeyInput, FfiConverterTypeInvokeMenuInput, FfiConverterTypeListAppsInput, FfiConverterTypeListAppsOutput, FfiConverterTypeListSessionsInput, FfiConverterTypeListSessionsOutput, FfiConverterTypeListWindowsInput, FfiConverterTypeListWindowsOutput, FfiConverterTypeMoveCursorInput, FfiConverterTypePressKeyInput, FfiConverterTypeScrollDirection, FfiConverterTypeScrollInput, FfiConverterTypeSessionOutput, FfiConverterTypeSessionStateOutput, FfiConverterTypeSetAgentCursorEnabledInput, FfiConverterTypeSetAgentCursorMotionInput, FfiConverterTypeSetAgentCursorThemeInput, FfiConverterTypeSetWindowFrameInput, FfiConverterTypeStartSessionInput, FfiConverterTypeStartSessionOutput, FfiConverterTypeTypeTextInput, FfiConverterTypeVerifyStateInput, FfiConverterTypeVerifyStateOutput, FfiConverterTypeWindowBounds, FfiConverterTypeWindowStateOutput } = uniffiCuaDriverContractModule.converters;
+ const uniffiCaller = new UniffiRustCaller(() => ({ code: 0 }));
+
+ const uniffiIsDebug =
+@@ -2455,7 +2455,7 @@
+  * keyboard, AX-scroll or foreground fallback; effect remains unverified.
+  */
+     startImageScroll(imageId: string, x: number, y: number, direction: ScrollDirection) /*throws*/: void;
+-    startListWindows() /*throws*/: void;
++    startListWindows(query: ComputerWindowQuery | undefined) /*throws*/: void;
+     startNavigate(url: string) /*throws*/: void;
+     startObserve(maxElements: number, maxDepth: number) /*throws*/: void;
+     startPlan(plan: ComputerPlan) /*throws*/: void;
+@@ -2616,10 +2616,11 @@
+     );
+     }
+
+-    startListWindows(): void /*throws*/ {uniffiCaller.rustCallWithError(
++    startListWindows(query: ComputerWindowQuery | undefined): void /*throws*/ {uniffiCaller.rustCallWithError(
+             /*liftError:*/ FfiConverterTypeComputerError.lift.bind(FfiConverterTypeComputerError),
+             /*caller:*/ (callStatus) => { nativeModule().uniffi_cua_driver_sdk_fn_method_computeroperation_start_list_windows(
+                 uniffiTypeComputerOperationObjectFactory.clonePointer(this),
++        FfiConverterOptionalTypeComputerWindowQuery.lower(query, nativeModule().rustbuffer_alloc),
+                 callStatus);
+             },
+             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+@@ -2980,7 +2981,7 @@
+     type Windows__interface = {
+         tag: ComputerResult_Tags.Windows;
+         inner:
+-Readonly<{windows: Array<ComputerDiscoveredWindow>; omittedWindows: number}>
++Readonly<{windows: Array<ComputerDiscoveredWindow>; omittedWindows: number; filteredOut: number}>
+     };
+     class Windows_ extends UniffiEnum implements Windows__interface {
+         /**
+@@ -2990,15 +2991,15 @@
+         readonly [uniffiTypeNameSymbol] = "ComputerResult";
+         readonly tag = ComputerResult_Tags.Windows;
+         readonly inner:
+-Readonly<{windows: Array<ComputerDiscoveredWindow>; omittedWindows: number}>;
++Readonly<{windows: Array<ComputerDiscoveredWindow>; omittedWindows: number; filteredOut: number}>;
+         constructor(
+-inner: {windows: Array<ComputerDiscoveredWindow>; omittedWindows: number }) {
++inner: {windows: Array<ComputerDiscoveredWindow>; omittedWindows: number; filteredOut: number }) {
+             super("ComputerResult", "Windows");
+
+             this.inner = Object.freeze(inner);
+         }
+         static new(
+-inner: {windows: Array<ComputerDiscoveredWindow>; omittedWindows: number }): Windows_ {
++inner: {windows: Array<ComputerDiscoveredWindow>; omittedWindows: number; filteredOut: number }): Windows_ {
+             return new Windows_(inner);
+         }
+
+@@ -3253,7 +3254,7 @@
+     class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+         read(from: RustBuffer): TypeName {
+             switch (ordinalConverter.read(from)) {
+-                case 1: return new ComputerResult.Windows({windows: FfiConverterSequenceTypeComputerDiscoveredWindow.read(from), omittedWindows: FfiConverterUInt32.read(from) });
++                case 1: return new ComputerResult.Windows({windows: FfiConverterSequenceTypeComputerDiscoveredWindow.read(from), omittedWindows: FfiConverterUInt32.read(from), filteredOut: FfiConverterUInt32.read(from) });
+                 case 2: return new ComputerResult.WindowSelected({session: FfiConverterTypeComputerSession.read(from) });
+                 case 3: return new ComputerResult.BrowserPrepared({pid: FfiConverterUInt32.read(from), windowId: FfiConverterUInt64.read(from) });
+                 case 4: return new ComputerResult.Observation({value: FfiConverterTypeWindowStateOutput.read(from) });
+@@ -3271,6 +3272,7 @@
+                     const inner = value.inner;
+                     FfiConverterSequenceTypeComputerDiscoveredWindow.write(inner.windows, into);
+                     FfiConverterUInt32.write(inner.omittedWindows, into);
++                    FfiConverterUInt32.write(inner.filteredOut, into);
+                     return;
+                 }
+                 case ComputerResult_Tags.WindowSelected: {
+@@ -3328,6 +3330,7 @@
+                     let size = ordinalConverter.allocationSize(1);
+                     size += FfiConverterSequenceTypeComputerDiscoveredWindow.allocationSize(inner.windows);
+                     size += FfiConverterUInt32.allocationSize(inner.omittedWindows);
++                    size += FfiConverterUInt32.allocationSize(inner.filteredOut);
+                     return size;
+                 }
+                 case ComputerResult_Tags.WindowSelected: {
+@@ -7330,6 +7333,9 @@
+ // FfiConverter for Array<ComputerDiscoveredWindow>
+ const FfiConverterSequenceTypeComputerDiscoveredWindow = new FfiConverterArray(FfiConverterTypeComputerDiscoveredWindow);
+
++// FfiConverter for ComputerWindowQuery | undefined
++const FfiConverterOptionalTypeComputerWindowQuery = new FfiConverterOptional(FfiConverterTypeComputerWindowQuery);
++
+ // FfiConverter for ComputerSessionLike | undefined
+ const FfiConverterOptionalTypeComputerSession = new FfiConverterOptional(FfiConverterTypeComputerSession);
+
+@@ -7421,7 +7427,7 @@
+     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_scroll() !== 56058) {
+         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_computeroperation_start_image_scroll");
+     }
+-    if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_list_windows() !== 33966) {
++    if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_list_windows() !== 38760) {
+         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_method_computeroperation_start_list_windows");
+     }
+     if (nativeModule().uniffi_cua_driver_sdk_checksum_method_computeroperation_start_navigate() !== 9689) {

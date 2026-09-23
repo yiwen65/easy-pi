@@ -117,14 +117,22 @@ export function projectWindows(
 	windows: readonly ComputerDiscoveredWindow[],
 	omittedWindows: number,
 	filter: { app?: string; title?: string; focused?: true } = {},
+	nativeFilteredOut = 0,
 ) {
-	if (windows.length > 256 || !Number.isSafeInteger(omittedWindows) || omittedWindows < 0)
+	if (
+		windows.length > 256 ||
+		!Number.isSafeInteger(omittedWindows) ||
+		omittedWindows < 0 ||
+		!Number.isSafeInteger(nativeFilteredOut) ||
+		nativeFilteredOut < 0 ||
+		nativeFilteredOut > 0xffff_ffff
+	)
 		throw new Error("Invalid native window catalog");
 	const refs = new Set<string>();
 	const lines: string[] = [];
 	let bytes = 0;
 	let omitted = omittedWindows;
-	let filteredOut = 0;
+	let filteredOut = nativeFilteredOut;
 	const app = filter.app?.toLowerCase();
 	const title = filter.title?.toLowerCase();
 	for (const window of windows) {

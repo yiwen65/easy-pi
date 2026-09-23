@@ -233,7 +233,11 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 											operation.startPlan(encodePlan(api, request));
 											break;
 										case "discover":
-											operation.startListWindows();
+											operation.startListWindows({
+												...(request.app !== undefined ? { app: request.app } : {}),
+												...(request.title !== undefined ? { title: request.title } : {}),
+												focused: request.focused === true,
+											});
 											break;
 										case "select":
 										case "select_destination":
@@ -387,7 +391,12 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					return { content, details };
 				}
 				if (request.op === "discover" && api.ComputerResult.Windows.instanceOf(result)) {
-					const projection = projectWindows(result.inner.windows, result.inner.omittedWindows, request);
+					const projection = projectWindows(
+						result.inner.windows,
+						result.inner.omittedWindows,
+						request,
+						result.inner.filteredOut,
+					);
 					if (canPublish()) view.publish(id, projection.content, { ...projection.grant, revision: ++revision });
 					return { content: projection.content, details: projection.details };
 				}
