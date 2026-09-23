@@ -29,30 +29,22 @@ After an authorized product build, `node scripts/check-native-subagent-product.m
 
 ## Explicit delegation contract
 
-New model and operator calls require the new contract; old `message`/`fork_turns` spawn calls and free-text followups are rejected, not silently translated. Retained session files and version-1 team snapshots remain readable, including records without delegation metadata. Recovery never executes stored calls. Use a new explicit followup to continue a retained child, or a fresh child for independent work.
+Model and operator calls use the flat wire contract below; old `message`/`fork_turns` calls, the `delegation` wrapper and free-text followups are rejected. Retained session files and version-1 team snapshots remain readable, including records without delegation metadata. Recovery never executes stored calls. Use a new explicit followup to continue a retained child, or a fresh child for independent work.
 
 ```json
 {
   "task_name": "parser-check",
-  "delegation": {
-    "version": 1,
-    "task": {
-      "relationship": "verify",
-      "objective": "Check parser handling of empty input",
-      "scope": "Parser and parser tests only; do not change files",
-      "material": ["src/parser.ts", "test/parser.test.ts"],
-      "deliverables": ["Concrete findings with file/line evidence"],
-      "acceptance": ["Distinguish verified findings from untested risks"]
-    },
-    "context": { "mode": "isolated" },
-    "capabilities": { "tools": ["read"] }
-  }
+  "task": {
+    "relationship": "verify",
+    "objective": "Check parser handling of empty input. Inspect src/parser.ts and test/parser.test.ts only; do not change files. Report concrete findings with file/line evidence and distinguish verified findings from untested risks."
+  },
+  "tools": ["read"]
 }
 ```
 
-`material` identifies task data; it is not automatically read or permission-granting. `scope` is a task boundary, not enforced filesystem confinement. Select capabilities that can actually perform the task: this example cannot run tests, and must report them as not run. `tools: "inherit"` captures the caller's allowed active tools as an upper ceiling; an explicit list can only reduce it. Exclude bash and arbitrary side-effecting extension tools when requesting read-only work. Do not assume that hiding write/edit makes bash read-only. Trusted extensions themselves execute with process permissions and are not sandboxed by this tool gate.
+`relationship` belongs **inside `task`**, not alongside it; `task.objective` is the only required task field, and omitted `relationship` defaults to `continue`. `verify` derives isolated context when `context` is omitted. The objective identifies task data and boundaries; it does not automatically read inputs or enforce filesystem confinement. Select tools that can actually perform the task: this example cannot run tests, and must report them as not run. `tools: "inherit"` captures the caller's allowed active tools as an upper ceiling; an explicit list can only reduce it. Exclude bash and arbitrary side-effecting extension tools when requesting read-only work. Do not assume that hiding write/edit makes bash read-only. Trusted extensions themselves execute with process permissions and are not sandboxed by this tool gate.
 
-`delegation.task.objective` is capped at 40,000 Unicode characters; the complete delegation has a 256 KiB serialization guard. Other compact task fields retain their schema limits. Child model and reasoning effort resolve independently: global `subagentModel` / `subagentThinkingLevel` > live caller.
+`task.objective` is capped at 40,000 Unicode characters; the complete delegation has a 256 KiB serialization guard. Child model and reasoning effort resolve independently: global `subagentModel` / `subagentThinkingLevel` > live caller.
 
 Use `/settings` → **Subagent model** / **Subagent effort** to save global defaults; **Inherit caller** clears each field independently. These settings apply immediately to future children, including nested spawns, but never change the root or existing children/followups. They are global-only, not project overrides or cross-instance hot synchronization. Model selection uses the cached configured-provider catalog without network refresh. Unknown models and unsupported effort are rejected before reserving a child; there is no automatic model switch or effort downgrade. `preserve` still requires matching caller model/effort after defaults resolve. See [settings.md](settings.md#subagent-defaults).
 
@@ -61,7 +53,7 @@ Use `/settings` → **Subagent model** / **Subagent effort** to save global defa
 | `continue` | Continue a bounded line of work; fork is useful when its background is needed, not compulsory. |
 | `explore` | Use isolated or curated context; do not import the parent's conversation/conclusions. |
 | `verify` | Use isolated or curated evidence. An implementation/exploration child cannot become an independent reviewer via followup. |
-| `extract` | Name the dataset and coverage in scope/material; effective compacted history is not a raw-history dataset. |
+| `extract` | Supply curated references that name the dataset; effective compacted history is not a raw-history dataset. |
 
 ### Context selection and request prefixes
 
@@ -80,7 +72,7 @@ The collaboration system addition is identity-neutral for root and children. Roo
 
 ### Followups and automatic results
 
-`followup_task` requires `target`, a complete `task`, `context: "existing"`, and `capabilities`. The Grok Ctrl+F editor accepts the same JSON; the selected agent overrides/pins `target`. Malformed drafts remain editable and are not retried. A followup retains the child's history and can only narrow its tool ceiling. Its runtime envelope explicitly says `contextUse: "existing"`; the stored `delegation.context` remains the creation recipe, not a claim of fresh isolation. To obtain a new independent judgment, spawn a fresh agent.
+`followup_task` requires `target` and `task` (with `objective` and optional `relationship` inside it); optional `tools` narrows the ceiling. It retains the child's existing context, not a fresh isolated one. The Grok Ctrl+F editor accepts the same JSON; the selected agent overrides/pins `target`. Malformed drafts remain editable and are not retried. A followup retains the child's history and can only narrow its tool ceiling. Its runtime envelope explicitly says `contextUse: "existing"`; the stored `delegation.context` remains the creation recipe, not a claim of fresh isolation. To obtain a new independent judgment, spawn a fresh agent.
 
 Children are asked to deliver one JSON object by calling the child-side `deliver_result` protocol tool exactly once; a later call replaces the delivered result, and an oversized call is rejected with a hint to compact it and deliver again:
 

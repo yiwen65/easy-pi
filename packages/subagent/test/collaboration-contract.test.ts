@@ -82,6 +82,17 @@ describe("collaboration contract", () => {
 		).toThrow(CollaborationError);
 	});
 
+	test("relationship must be nested in task; valid verify derives isolated context", () => {
+		const misplaced = { task_name: "worker", task: { objective: "Audit parser" }, relationship: "verify" };
+		expect(() => parseCollaborationArguments("spawn_agent", misplaced)).toThrow(/Invalid spawn_agent arguments/);
+
+		const parsed = parseCollaborationArguments("spawn_agent", {
+			task_name: "worker",
+			task: { objective: "Audit parser", relationship: "verify" },
+		});
+		expect(validateDelegation({ task: parsed.task }).context).toEqual({ mode: "isolated" });
+	});
+
 	test("child model and effort are not settable per call anymore", () => {
 		expect(() =>
 			parseCollaborationArguments("spawn_agent", {

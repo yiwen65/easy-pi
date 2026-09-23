@@ -280,16 +280,32 @@ function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
 }
 
 function formatValidationPath(error: TLocalizedValidationError): string {
+	const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
 	if (error.keyword === "required") {
 		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
 		const requiredProperty = requiredProperties?.[0];
-		if (requiredProperty) {
-			const basePath = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
-			return basePath ? `${basePath}.${requiredProperty}` : requiredProperty;
-		}
+		if (requiredProperty) return path ? `${path}.${requiredProperty}` : requiredProperty;
 	}
-	const path = error.instancePath.replace(/^\//, "").replace(/\//g, ".");
+	if (error.keyword === "additionalProperties") {
+		const additionalProperties = (error.params as { additionalProperties?: string[] }).additionalProperties;
+		if (additionalProperties?.length)
+			return additionalProperties.map((property) => `${path || "root"}.${property}`).join(", ");
+	}
 	return path || "root";
+}
+
+function suggestNestedProperty(error: TLocalizedValidationError, schema: Tool["parameters"]): string {
+	if (error.keyword !== "additionalProperties" || error.instancePath !== "") return "";
+	const extras = (error.params as { additionalProperties?: string[] }).additionalProperties;
+	const properties = (schema as JsonSchemaObject).properties;
+	if (!extras?.length || !properties) return "";
+	const suggestions = extras.flatMap((extra) => {
+		const matches = Object.entries(properties).filter(
+			([, nested]) => nested.type === "object" && nested.properties && Object.hasOwn(nested.properties, extra),
+		);
+		return matches.length === 1 ? [`Did you mean ${matches[0]![0]}.${extra}?`] : [];
+	});
+	return suggestions.length ? ` ${suggestions.join(" ")}` : "";
 }
 
 /**
@@ -341,7 +357,10 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	const errors =
 		validator
 			.Errors(args)
-			.map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
+			.map(
+				(error) =>
+					`  - ${formatValidationPath(error)}: ${error.message}${suggestNestedProperty(error, tool.parameters)}`,
+			)
 			.join("\n") || "Unknown validation error";
 
 	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
