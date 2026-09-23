@@ -71,15 +71,20 @@ function fixture(file = false) {
 
 test("reserves duplicate names and execution slots atomically across concurrent spawns", async () => {
 	const f = fixture();
+	const capacity = COLLABORATION_LIMITS.maxActiveSessions - 1;
+	expect(capacity).toBe(15);
+	const names = Array.from({ length: capacity + 1 }, (_, index) => `a${index}`);
 	const outcomes = await Promise.allSettled(
-		["a", "a", "b", "c", "d"].map((name) => f.controller.spawn(caller, name, name, model)),
+		[names[0], names[0], ...names.slice(1)].map((name) => f.controller.spawn(caller, name, name, model)),
 	);
-	expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(3);
-	expect(f.runs.sort()).toEqual(["a", "b", "c"]);
-	expect(f.controller.list(caller)).toHaveLength(3);
-	await f.controller.interrupt(caller, "a");
+	expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(capacity);
+	expect(outcomes[1]).toMatchObject({ status: "rejected", reason: { code: "busy" } });
+	expect(outcomes.at(-1)).toMatchObject({ status: "rejected", reason: { code: "limit_reached" } });
+	expect(f.runs.sort()).toEqual(names.slice(0, capacity).sort());
+	expect(f.controller.list(caller)).toHaveLength(capacity);
+	await f.controller.interrupt(caller, names[0]);
 	await f.controller.shutdown();
-	expect(f.disposed).toHaveLength(3);
+	expect(f.disposed).toHaveLength(capacity);
 });
 
 test("task receipts accept 40,000-character objectives while ordinary messages remain bounded", async () => {
@@ -141,13 +146,14 @@ test("failed child creation releases execution admission and preserves inspectab
 
 test("idle persisted children are unloaded before more native sessions are loaded", async () => {
 	const f = fixture(true);
-	for (let count = 0; count < 4; count++) {
+	const capacity = COLLABORATION_LIMITS.maxActiveSessions - 1;
+	for (let count = 0; count <= capacity; count++) {
 		await f.controller.spawn(caller, `a${count}`, "task", model);
 		f.finishes.get(`/root/a${count}`)?.({ status: "completed", text: "done" });
 		await f.controller.settled();
 	}
 	expect(f.disposed).toEqual(["/root/a0"]);
-	expect(f.controller.list(caller).filter((agent) => agent.loaded)).toHaveLength(3);
+	expect(f.controller.list(caller).filter((agent) => agent.loaded)).toHaveLength(capacity);
 	await f.controller.followup(caller, "a0", "reload explicitly");
 	expect(f.loads.filter((path) => path === "/root/a0")).toHaveLength(2);
 });
@@ -528,7 +534,8 @@ test("an existing implementation child cannot become an independent reviewer", a
 
 test("failed cold followup retains one coherent failed task rather than mixing old and new turns", async () => {
 	const f = fixture(true);
-	for (let index = 0; index < 4; index++) {
+	const capacity = COLLABORATION_LIMITS.maxActiveSessions - 1;
+	for (let index = 0; index <= capacity; index++) {
 		await f.controller.spawn(caller, `a${index}`, "old task", model, [], undefined, {
 			delegation: delegation(),
 			tools: ["read"],
@@ -559,7 +566,7 @@ test("failed cold followup retains one coherent failed task rather than mixing o
 	expect(record.turnId).not.toBe(old.turnId);
 	expect(record.taskMessage?.turnId).toBe(record.turnId);
 	expect(record.result).not.toBe("old result");
-	expect(f.runs).toHaveLength(4);
+	expect(f.runs).toHaveLength(capacity + 1);
 });
 
 test("a stalled child load does not block another child's interrupt, messages or completion", async () => {
@@ -669,23 +676,26 @@ test("startup reservations bound capacity and reject duplicate followups even be
 	await ready;
 	const b = f.controller.spawn(caller, "b", "b", model);
 	const rejected = expect(b).rejects.toThrow(/cancelled/);
-	const c = f.controller.spawn(caller, "c", "c", model);
+	const capacity = COLLABORATION_LIMITS.maxActiveSessions - 1;
+	const remaining = Array.from({ length: capacity - 2 }, (_, index) => `c${index}`);
+	const admitted = remaining.map((name) => f.controller.spawn(caller, name, name, model));
 	try {
-		await expect(f.controller.spawn(caller, "d", "d", model)).rejects.toThrow(/execution limit/);
-		expect(f.controller.list(caller).map((agent) => agent.status)).toEqual(["pending", "pending", "pending"]);
+		await expect(f.controller.spawn(caller, "over", "over", model)).rejects.toThrow(/execution limit/);
+		expect(f.controller.list(caller).map((agent) => agent.status)).toEqual(Array(capacity).fill("pending"));
 		await expect(f.controller.followup(caller, "b", "duplicate")).rejects.toThrow(/follow-up/);
 		expect(await f.controller.interrupt(caller, "b")).toBe("pending");
-		await expect(f.controller.spawn(caller, "d", "still reserved", model)).rejects.toThrow(/execution limit/);
+		await expect(f.controller.spawn(caller, "over", "still reserved", model)).rejects.toThrow(/execution limit/);
 	} finally {
 		release();
-		await Promise.all([a, c, rejected]);
+		await Promise.all([a, ...admitted, rejected]);
 	}
-	expect(f.loads).toEqual(["/root/a", "/root/c"]);
-	expect(f.runs).toEqual(["a", "c"]);
+	expect(f.loads).toEqual(["/root/a", ...remaining.map((name) => `/root/${name}`)]);
+	expect(f.runs).toEqual(["a", ...remaining]);
 });
 
 test("idle unload may await a control operation without deadlocking admission", async () => {
 	const f = fixture(true);
+	const capacity = COLLABORATION_LIMITS.maxActiveSessions - 1;
 	const create = f.host.create;
 	f.host.create = async (options) => {
 		const session = await create(options);
@@ -696,7 +706,7 @@ test("idle unload may await a control operation without deadlocking admission", 
 		};
 		return session;
 	};
-	for (let index = 0; index < 4; index++) {
+	for (let index = 0; index <= capacity; index++) {
 		await f.controller.spawn(caller, `a${index}`, "task", model);
 		f.finishes.get(`/root/a${index}`)?.({ status: "completed", text: "done" });
 		await f.controller.settled();

@@ -4,7 +4,7 @@ import { Value } from "typebox/value";
 
 /** Product limits, not an OS sandbox or a guarantee against concurrent file edits. */
 export const COLLABORATION_LIMITS = Object.freeze({
-	maxActiveSessions: 4, // One slot is reserved for the root, even while it is idle.
+	maxActiveSessions: 16, // One slot is reserved for the root, even while it is idle.
 	maxAgents: 32, // Includes the root and unloaded agents until explicit cleanup.
 	maxDepth: 4,
 	maxMessageBytes: 8 * 1024,
