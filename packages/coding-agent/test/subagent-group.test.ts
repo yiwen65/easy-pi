@@ -71,7 +71,8 @@ describe("subagent display parsing", () => {
 		expect(collaborationToolTarget("interrupt_agent", { target: "/root/worker" })).toBe("/root/worker");
 		expect(collaborationToolTarget("wait_agent", { timeout_ms: 1000 })).toBeUndefined();
 		expect(collaborationToolTarget("list_agents", {})).toBeUndefined();
-		expect(spawnObjective({ delegation: { task: { objective: "First line\nSecond line" } } })).toBe("First line");
+		expect(spawnObjective({ task: { objective: "First line\nSecond line" } })).toBe("First line");
+		expect(spawnObjective({ task: { objective: "  " } })).toBeUndefined();
 	});
 });
 
@@ -146,6 +147,133 @@ describe("SubagentGroupComponent", () => {
 		// collapsed: only row 0 is actionable
 		expect(group.handleOverviewClick(3, 100)).toBe(false);
 	});
+
+	it("shows the flat spawn task objective in the collapsed and expanded transcript", () => {
+		const group = new SubagentGroupComponent("/root/w");
+		group.addTool("spawn_agent", makeTool("spawn_agent", {}), {
+			task: { objective: "Probe the parser\nThen report" },
+		});
+		expect(group.render(100).join("\n")).toContain("Probe the parser");
+		group.setExpanded(true);
+		expect(group.render(100).join("\n")).toContain("Task: Probe the parser");
+	});
+
+	it.each(["followup_task", "interrupt_agent", "close_agent"])(
+		"does not change the displayed state when %s is rejected or only partially updated",
+		(toolName) => {
+			const group = new SubagentGroupComponent("/root/w");
+			group.addMailboxResult({ ...ENVELOPE, status: "completed" });
+			const tool = makeTool(toolName, { target: "/root/w" });
+			group.addTool(toolName, tool, { target: "/root/w" });
+			tool.updateResult({ content: [{ type: "text", text: "pending" }], isError: false }, true);
+			expect(group.render(100).join("\n")).toContain("Done");
+			tool.updateResult({ content: [{ type: "text", text: "Collaboration tool failed: busy" }], isError: true });
+			const header = group.render(100).join("\n");
+			expect(header).toContain("Done");
+			expect(header).not.toContain("Running");
+			expect(header).not.toContain("Interrupted");
+			expect(header).not.toContain("Closed");
+		},
+	);
+
+	it("updates followup and close only after successful results", () => {
+		const group = new SubagentGroupComponent("/root/w");
+		group.addMailboxResult(ENVELOPE);
+		const followup = makeTool("followup_task", {});
+		group.addTool("followup_task", followup, {});
+		expect(group.render(100).join("\n")).toContain("Done");
+		followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
+		expect(group.render(100).join("\n")).toContain("Running");
+
+		const close = makeTool("close_agent", {});
+		group.addTool("close_agent", close, {});
+		expect(group.render(100).join("\n")).toContain("Running");
+		close.updateResult({ content: [{ type: "text", text: '{"previous_status":"interrupted"}' }], isError: false });
+		expect(group.render(100).join("\n")).toContain("Closed");
+	});
+
+	it("does not overwrite a fast followup result delivered before its tool receipt", () => {
+		const group = new SubagentGroupComponent("/root/w");
+		group.addMailboxResult(ENVELOPE);
+		const followup = makeTool("followup_task", {});
+		group.addTool("followup_task", followup, {});
+		group.addMailboxResult({ ...ENVELOPE, text: "Followup finished" });
+		followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
+		expect(group.render(100).join("\n")).toContain("Done");
+	});
+
+	it("interrupt uses the returned previous status rather than assuming it stopped running work", () => {
+		const running = new SubagentGroupComponent("/root/running");
+		const interruptedTool = makeTool("interrupt_agent", {});
+		running.addTool("interrupt_agent", interruptedTool, {});
+		expect(running.render(100).join("\n")).toContain("Running");
+		interruptedTool.updateResult({
+			content: [{ type: "text", text: '{"previous_status":"running"}' }],
+			isError: false,
+		});
+		expect(running.render(100).join("\n")).toContain("Interrupted");
+
+		const done = new SubagentGroupComponent("/root/done");
+		done.addMailboxResult(ENVELOPE);
+		const completedTool = makeTool("interrupt_agent", {});
+		done.addTool("interrupt_agent", completedTool, {});
+		completedTool.updateResult({
+			content: [{ type: "text", text: '{"previous_status":"completed"}' }],
+			isError: false,
+		});
+		const header = done.render(100).join("\n");
+		expect(header).toContain("Done");
+		expect(header).not.toContain("Interrupted");
+	});
+
+	it.each(["running", "completed", "closed"])(
+		"a rejected duplicate spawn preserves an established %s child's header",
+		(status) => {
+			const router = new SubagentTranscriptRouter(new Container(), () => false);
+			const original = makeTool("spawn_agent", { task_name: "w" });
+			const startedAt = Date.now() - 10_000;
+			router.handleTool(
+				"spawn_agent",
+				{ task_name: "w", task: { objective: "Original task" } },
+				original,
+				startedAt,
+			);
+			original.updateResult({ content: [{ type: "text", text: '{"task_name":"w"}' }], isError: false });
+			if (status !== "running") {
+				router.handleMailboxMessage({
+					customType: "epi-collaboration-message",
+					content: envelopeText({ ...ENVELOPE, from: "/root/w" }),
+					timestamp: startedAt + 5_000,
+				});
+			}
+			if (status === "closed") {
+				const close = makeTool("close_agent", { target: "/root/w" });
+				router.handleTool("close_agent", { target: "/root/w" }, close, startedAt + 6_000);
+				close.updateResult({
+					content: [{ type: "text", text: '{"previous_status":"completed"}' }],
+					isError: false,
+				});
+			}
+			const group = router.groupFor("/root/w");
+			const duplicate = makeTool("spawn_agent", { task_name: "w" });
+			router.handleTool(
+				"spawn_agent",
+				{ task_name: "w", task: { objective: "Unwanted task" } },
+				duplicate,
+				startedAt + 8_000,
+			);
+			duplicate.updateResult({
+				content: [{ type: "text", text: "Collaboration tool failed: busy" }],
+				isError: true,
+			});
+			const header = group.render(120).join("\n");
+			expect(header).toContain(status === "running" ? "Running" : status === "closed" ? "Closed" : "Done");
+			expect(header).toContain(status === "running" ? "Original task" : "no proven cost");
+			expect(header).not.toContain("Unwanted task");
+			expect(header).not.toContain("Collaboration tool failed");
+			if (status !== "running") expect(header).toContain(status === "closed" ? "6s" : "5s");
+		},
+	);
 
 	it("a rejected spawn shows Failed with the reason instead of hanging at Running", () => {
 		const group = new SubagentGroupComponent("/root/w");

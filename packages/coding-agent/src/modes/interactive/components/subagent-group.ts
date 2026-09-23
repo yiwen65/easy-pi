@@ -69,11 +69,9 @@ export function collaborationToolTarget(toolName: string, args: unknown): string
 
 /** Spawn objective preview from delegation args (first line of task.objective). */
 export function spawnObjective(args: unknown): string | undefined {
-	const delegation = (args as Record<string, unknown> | undefined)?.delegation as
-		| { task?: { objective?: string } }
-		| undefined;
-	const objective = delegation?.task?.objective;
-	if (!objective) return undefined;
+	const task = (args as { task?: { objective?: unknown } } | undefined)?.task;
+	const objective = task?.objective;
+	if (typeof objective !== "string") return undefined;
 	const line = objective.split("\n", 1)[0].trim();
 	return line.length > 96 ? `${line.slice(0, 93)}...` : line || undefined;
 }
@@ -164,6 +162,8 @@ export class SubagentGroupComponent extends Container {
 	private state: SubagentState = "running";
 	private objective: string | undefined;
 	private resultSummary: string | undefined;
+	/** A successful child admission or result means a same-name spawn cannot replace this group. */
+	private established = false;
 	/** Delegation time (spawn); injected from the persisted message timestamp when rebuilt from history. */
 	private startedAt: number | undefined;
 	/** Terminal time (result delivered, interrupted, or closed). */
@@ -178,33 +178,63 @@ export class SubagentGroupComponent extends Container {
 
 	/** Register a collaboration tool execution belonging to this child. */
 	addTool(toolName: string, component: ToolExecutionComponent, args: unknown, at?: number): void {
-		if (toolName === "spawn_agent") {
+		if (toolName === "spawn_agent" && !this.established) {
 			this.objective ??= spawnObjective(args);
 			this.startedAt = at ?? Date.now();
 			this.state = "running";
 			this.endedAt = undefined;
-		} else if (toolName === "interrupt_agent") {
-			this.state = "interrupted";
-			this.endedAt = at ?? Date.now();
-		} else if (toolName === "close_agent") {
-			this.state = "closed";
-			this.endedAt = at ?? Date.now();
-		} else if (toolName === "followup_task") {
-			if (this.state !== "running") {
-				this.state = "running";
-				this.endedAt = undefined;
-			}
 		}
-		// A rejected spawn never creates a child: reflect the tool failure instead of hanging at Running.
-		if (toolName === "spawn_agent") {
+		// Tool calls are pending until a final result; failed controls must not change the child's state.
+		if (["spawn_agent", "followup_task", "interrupt_agent", "close_agent"].includes(toolName)) {
+			const resultCountAtCall = this.results.length;
 			type UpdateResult = ToolExecutionComponent["updateResult"];
 			const original = component.updateResult.bind(component) as UpdateResult;
 			component.updateResult = ((result: Parameters<UpdateResult>[0], isPartial?: boolean) => {
-				if (!isPartial && result.isError) {
-					this.state = "failed";
-					this.endedAt = Date.now();
-					const text = (result.content ?? []).map((part) => part.text ?? "").join(" ");
-					this.resultSummary = oneLine(text).slice(0, 96) || "spawn failed";
+				if (!isPartial) {
+					if (toolName === "spawn_agent") {
+						if (!result.isError) this.established = true;
+						else if (!this.established) {
+							this.state = "failed";
+							this.endedAt = Date.now();
+							const text = (result.content ?? []).map((part) => part.text ?? "").join(" ");
+							this.resultSummary = oneLine(text).slice(0, 96) || "spawn failed";
+						}
+					} else if (
+						!result.isError &&
+						toolName === "followup_task" &&
+						this.results.length === resultCountAtCall
+					) {
+						this.established = true;
+						this.state = "running";
+						this.endedAt = undefined;
+					} else if (!result.isError && toolName === "close_agent") {
+						this.established = true;
+						this.state = "closed";
+						this.endedAt = at ?? Date.now();
+					} else if (!result.isError && toolName === "interrupt_agent") {
+						this.established = true;
+						// A successful interrupt can be a no-op for an already settled child.
+						let previousStatus = (result.details as { previous_status?: unknown } | undefined)?.previous_status;
+						if (typeof previousStatus !== "string") {
+							try {
+								const parsed = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "") as {
+									previous_status?: unknown;
+								};
+								previousStatus = parsed.previous_status;
+							} catch {
+								// Keep the last known state if the result has no status.
+							}
+						}
+						if (previousStatus === "running" || previousStatus === "pending") this.state = "interrupted";
+						else if (
+							previousStatus === "completed" ||
+							previousStatus === "failed" ||
+							previousStatus === "interrupted" ||
+							previousStatus === "closed"
+						)
+							this.state = previousStatus;
+						if (this.state !== "running") this.endedAt = at ?? Date.now();
+					}
 				}
 				return original(result, isPartial as never);
 			}) as ToolExecutionComponent["updateResult"];
@@ -215,6 +245,7 @@ export class SubagentGroupComponent extends Container {
 
 	/** Register a delivered mailbox result belonging to this child. */
 	addMailboxResult(envelope: MailboxEnvelope, at?: number): void {
+		this.established = true;
 		const { contract, raw } = parseDeliverResult(envelope.text);
 		if (envelope.status === "completed") this.state = "completed";
 		else if (envelope.status === "failed") this.state = "failed";

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { stripVTControlCharacters } from "node:util";
 import {
 	type AssistantMessage,
 	type Context,
@@ -25,7 +26,9 @@ import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBuiltInExtensions } from "../src/extensions/index.ts";
+import type { AgentListRow, PiCollaborationMonitor } from "../src/extensions/pi-collaboration-monitor.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { GrokAgentsPanel } from "../src/modes/interactive-grok/components/grok-agents-panel.ts";
 import { currentCollaborationPath, followupArgs, spawnArgs } from "./collaboration-fixture.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -179,6 +182,93 @@ function holdChild(f: Awaited<ReturnType<typeof fixture>>) {
 		},
 	};
 }
+
+test("long agents list keeps the selection, draft and action notice visible through resize and watch", async () => {
+	initTheme("dark");
+	const rows: AgentListRow[] = [
+		{ task_name: "/root", status: "idle", state: "idle", loaded: true, model: "root" },
+		...Array.from({ length: 15 }, (_, index) => ({
+			task_name: `/root/worker${index + 1}`,
+			status: "idle",
+			state: "idle" as const,
+			loaded: true,
+			model: "faux",
+			objective: `unique objective ${index + 1}`,
+		})),
+	];
+	const monitor = {
+		isClosed: false,
+		list: () => rows,
+		subscribe: () => () => {},
+		view: (path: string) => ({
+			path,
+			status: "idle",
+			state: "idle" as const,
+			loaded: true,
+			model: "faux",
+			text: "child history",
+		}),
+		readHistory: async () => {},
+		act: async () => {
+			throw new Error("simulated rejection");
+		},
+	} as unknown as PiCollaborationMonitor;
+	let height = 24;
+	const keys = new KeybindingsManager();
+	const panel = new GrokAgentsPanel({
+		monitor,
+		theme,
+		keybindings: keys,
+		height: () => height,
+		requestRender: () => {},
+		done: () => {},
+	});
+	panel.focused = true;
+	const screen = (width = 100) => stripVTControlCharacters(panel.render(width).join("\n"));
+	try {
+		for (let index = 0; index < 15; index++) panel.handleInput("\x1b[B");
+		expect(screen()).toContain("› ○ /root/worker15");
+		expect(screen()).toContain("unique objective 15");
+		panel.handleInput("\x13");
+		panel.handleInput("draft for worker15");
+		expect(screen()).toContain("draft for worker15");
+		expect(screen()).toContain("Message → /root/worker15");
+		panel.handleInput("\r");
+		await vi.waitFor(() => expect(screen()).toContain("Action rejected:"));
+		expect(screen()).toContain("draft for worker15");
+		expect(screen()).toContain("› ○ /root/worker15");
+		height = 16;
+		expect(screen()).toContain("Action rejected:");
+		expect(screen()).toContain("draft for worker15");
+		expect(screen()).toContain("› ○ /root/worker15");
+		expect(panel.render(40)).toHaveLength(16);
+		expect(panel.render(40).every((line) => visibleWidth(line) <= 40)).toBe(true);
+		expect(screen(40)).toContain("› ○ /root/worker15");
+		expect(screen(40)).toContain("draft for worker15");
+		expect(screen(40)).toContain("Action rejected:");
+		// Input is single-line even when a long, multiline draft is pasted; it scrolls horizontally.
+		panel.handleInput(`\x1b[200~${"x".repeat(140)}\nTAIL-DRAFT\x1b[201~`);
+		height = 9;
+		expect(screen()).toContain("› ○ /root/worker15");
+		expect(screen()).toContain("TAIL-DRAFT");
+		expect(screen()).toContain("Action rejected:");
+		height = 6;
+		expect(screen()).toContain("› ○ /root/worker15");
+		expect(screen()).toContain("TAIL-DRAFT");
+		expect(screen()).toContain("Action rejected:");
+		height = 16;
+		panel.handleInput("\x1b"); // cancel composition, then inspect the selected child
+		panel.handleInput("\r");
+		expect(screen()).toContain("child history");
+		panel.handleInput("\x1b");
+		expect(screen()).toContain("› ○ /root/worker15");
+		for (let index = 0; index < 15; index++) panel.handleInput("\x1b[A");
+		expect(screen()).toContain("› ○ /root");
+		expect(panel.focused).toBe(true);
+	} finally {
+		panel.dispose();
+	}
+});
 
 test("default Grok command observes live native child; message/busy/interrupt target only the selection", async () => {
 	const f = await fixture();

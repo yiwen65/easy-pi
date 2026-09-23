@@ -6,6 +6,7 @@ import { Value } from "typebox/value";
 export const COLLABORATION_LIMITS = Object.freeze({
 	maxActiveSessions: 16, // One slot is reserved for the root, even while it is idle.
 	maxAgents: 32, // Includes the root and unloaded agents until explicit cleanup.
+	maxRetainedAgents: 2048, // Closed records remain auditable; exhaustion must reject before persistence.
 	maxDepth: 4,
 	maxMessageBytes: 8 * 1024,
 	maxTaskCharacters: 40_000,
@@ -38,6 +39,26 @@ const ERROR_HINTS: Record<CollaborationErrorCode, string> = {
 	context_unavailable: "Refresh the evidence or choose an explicit compatible context policy.",
 };
 const ERROR_REASONS = {
+	team_agents_full: {
+		code: "limit_reached",
+		hint: "Close settled children to free team slots (the root counts toward the team limit).",
+	},
+	team_history_full: {
+		code: "limit_reached",
+		hint: "This root team has reached its retained-agent history limit. Start a new root session; closed names and records cannot be deleted automatically.",
+	},
+	execution_slots_full: {
+		code: "limit_reached",
+		hint: "All child execution slots are reserved or running. Wait for a turn or startup cleanup to settle.",
+	},
+	mailbox_full: {
+		code: "limit_reached",
+		hint: "The recipient mailbox is full, including reserved completion notices. Let the receiver ingest its messages before admitting more.",
+	},
+	loaded_sessions_full: {
+		code: "limit_reached",
+		hint: "No idle persisted child session can be unloaded. Wait for active turns or startup cleanup before loading another.",
+	},
 	model_unavailable: {
 		code: "invalid_arguments",
 		hint: "Select an available provider/model in Subagent settings, inherit the caller, or explicitly override model.",

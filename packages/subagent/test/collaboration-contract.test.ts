@@ -66,6 +66,24 @@ describe("collaboration contract", () => {
 		expect(formatCollaborationError(known)).toContain("storage_error");
 	});
 
+	test("limit diagnostics identify resources without exposing exception text", () => {
+		const cases = [
+			["team_agents_full", "Close settled children"],
+			["team_history_full", "new root session"],
+			["execution_slots_full", "execution slots"],
+			["mailbox_full", "mailbox"],
+			["loaded_sessions_full", "idle persisted child"],
+		] as const;
+		for (const [reason, hint] of cases) {
+			const error = new CollaborationError("limit_reached", "SYNTHETIC_PRIVATE_PAYLOAD");
+			Reflect.set(error, "reason", reason);
+			const formatted = formatCollaborationError(error);
+			expect(formatted).toContain(`limit_reached / ${reason}`);
+			expect(formatted).toContain(hint);
+			expect(formatted).not.toContain("SYNTHETIC_PRIVATE_PAYLOAD");
+		}
+	});
+
 	test("accepts objective text through 40,000 characters and rejects 40,001", () => {
 		const atLimit = "界".repeat(COLLABORATION_LIMITS.maxTaskCharacters);
 		expect(

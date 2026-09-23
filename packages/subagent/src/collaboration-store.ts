@@ -95,7 +95,7 @@ const SnapshotSchema = Type.Object(
 		revision: Type.Integer({ minimum: 0 }),
 		agents: Type.Array(AgentSchema, {
 			// Closed records are retained for audit; only open agents consume the live team slots.
-			maxItems: COLLABORATION_LIMITS.maxAgents * COLLABORATION_LIMITS.maxPendingMessages,
+			maxItems: COLLABORATION_LIMITS.maxRetainedAgents,
 		}),
 		messages: Type.Optional(
 			Type.Array(MessageSchema, {
