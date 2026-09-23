@@ -293,7 +293,7 @@ describe("Coding Agent Tools", () => {
 					path: testFile,
 					edits: [{ oldText: "nonexistent", newText: "testing" }],
 				}),
-			).rejects.toThrow(/Could not find the exact text/);
+			).rejects.toThrow(/Could not find the text/);
 		});
 
 		it("should report the first diverging line when text is not found", async () => {
@@ -308,7 +308,7 @@ describe("Coding Agent Tools", () => {
 			).rejects.toThrow(/first difference at oldText line 2 \(file line 3\): oldText has "GAMMA", file has "gamma"/);
 		});
 
-		it("should report when the first line of oldText is absent", async () => {
+		it("should report when no oldText line and no similar region exists", async () => {
 			const testFile = join(testDir, "edit-anchor.txt");
 			writeFileSync(testFile, "alpha\nbeta\n");
 
@@ -317,7 +317,28 @@ describe("Coding Agent Tools", () => {
 					path: testFile,
 					edits: [{ oldText: "nonexistent line\nbeta", newText: "x" }],
 				}),
-			).rejects.toThrow(/first line of oldText \("nonexistent line"\) does not appear/);
+			).rejects.toThrow(/No line of oldText \(starting with "nonexistent line"\) appears in the file and no similar region exists/);
+		});
+
+		it("should point at the most similar region when no oldText line is anchored", async () => {
+			const testFile = join(testDir, "edit-similar-region.txt");
+			writeFileSync(
+				testFile,
+				"unrelated header\nexport function renderDashboard(panel) {\n\tconst node = panel.querySelector('.dashboard');\n\treturn node;\n}\nfooter line\n",
+			);
+
+			await expect(
+				editTool.execute("test-call-similar-region", {
+					path: testFile,
+					edits: [
+						{
+							oldText:
+								"export function renderDashbord(panel) {\n\tconst node = panel.querySelector('.dashbord');\n\treturn node;\n}",
+							newText: "x",
+						},
+					],
+				}),
+			).rejects.toThrow(/most similar region \(~\d+%\) starts at line 2\..*First difference inside it: oldText has "export function renderDashbord\(panel\) {", file has "export function renderDashboard\(panel\) {"/);
 		});
 
 		it("should include occurrence line numbers for duplicate matches", async () => {
@@ -1094,7 +1115,7 @@ describe("edit tool fuzzy matching", () => {
 				path: testFile,
 				edits: [{ oldText: "this does not exist", newText: "replacement" }],
 			}),
-		).rejects.toThrow(/Could not find the exact text/);
+		).rejects.toThrow(/Could not find the text/);
 	});
 
 	it("should detect duplicates after fuzzy normalization", async () => {
@@ -1174,6 +1195,178 @@ describe("edit tool fuzzy matching", () => {
 		].join("\n");
 		expect(readFileSync(testFile, "utf-8")).toBe(expectedContent);
 		expect(applyPatch(originalContent, result.details?.patch ?? "")).toBe(expectedContent);
+	});
+
+	it("should tolerate whitespace-run and indentation drift (loose-lines tier)", async () => {
+		const testFile = join(testDir, "loose-table.md");
+		const originalContent = [
+			"| Name   | Description        |",
+			"| `handleInput(data)` | Receive keyboard input when component has focus. |",
+			"| `dispose()`         | Clean up resources.  |",
+			"",
+		].join("\n");
+		writeFileSync(testFile, originalContent);
+
+		const result = await editTool.execute("test-loose-table", {
+			path: testFile,
+			edits: [
+				{
+					oldText: "| `handleInput(data)` | Receive keyboard input when component has focus.  |",
+					newText: "| `handleInput(data)` | Receive keyboard and pointer input. |",
+				},
+			],
+		});
+
+		const expectedContent = [
+			"| Name   | Description        |",
+			"| `handleInput(data)` | Receive keyboard and pointer input. |",
+			"| `dispose()`         | Clean up resources.  |",
+			"",
+		].join("\n");
+		expect(readFileSync(testFile, "utf-8")).toBe(expectedContent);
+		expect(applyPatch(originalContent, result.details?.patch ?? "")).toBe(expectedContent);
+	});
+
+	it("should preserve bytes outside a loose-lines match", async () => {
+		const testFile = join(testDir, "loose-indent.txt");
+		const originalContent = "keep\u201Csmart\u201D quotes  \n\t\tif (ready) {\n\t\t\treturn true;\n\t\t}\ntrail  \n";
+		writeFileSync(testFile, originalContent);
+
+		await editTool.execute("test-loose-indent", {
+			path: testFile,
+			edits: [
+				{
+					// oldText lost one indentation level and uses spaces
+					oldText: "  if (ready) {\n    return true;\n  }",
+					newText: "\t\tif (ready) {\n\t\t\treturn false;\n\t\t}",
+				},
+			],
+		});
+
+		expect(readFileSync(testFile, "utf-8")).toBe(
+			"keep\u201Csmart\u201D quotes  \n\t\tif (ready) {\n\t\t\treturn false;\n\t\t}\ntrail  \n",
+		);
+	});
+
+	it("should reject loose-lines matches that are not unique", async () => {
+		const testFile = join(testDir, "loose-duplicate.md");
+		// Both rows differ from oldText only by internal cell padding
+		writeFileSync(testFile, "| foo  | bar |\n\n| foo |  bar |\n");
+
+		await expect(
+			editTool.execute("test-loose-duplicate", {
+				path: testFile,
+				edits: [{ oldText: "| foo | bar |", newText: "| baz | qux |" }],
+			}),
+		).rejects.toThrow(/Found 2 occurrences/);
+	});
+
+	it("should tolerate small transcription drift inside an anchored block (similar-block tier)", async () => {
+		const testFile = join(testDir, "similar-block.ts");
+		const originalContent = [
+			"export function load() {",
+			"\tconst config = readConfig();",
+			"\tconst session = openSession(config);",
+			"\treturn session;",
+			"}",
+			"",
+		].join("\n");
+		writeFileSync(testFile, originalContent);
+
+		await editTool.execute("test-similar-block", {
+			path: testFile,
+			edits: [
+				{
+					// middle line drifted: openSession -> openSesion typo in oldText
+					oldText:
+						"export function load() {\n\tconst config = readConfig();\n\tconst session = openSesion(config);\n\t\treturn session;\n}",
+					newText:
+						"export function load() {\n\tconst config = readConfig();\n\tconst session = openSession(config, { cache: true });\n\treturn session;\n}",
+				},
+			],
+		});
+
+		expect(readFileSync(testFile, "utf-8")).toBe(
+			"export function load() {\n\tconst config = readConfig();\n\tconst session = openSession(config, { cache: true });\n\treturn session;\n}\n",
+		);
+	});
+
+	it("should reject similar-block matches when multiple regions qualify", async () => {
+		const testFile = join(testDir, "similar-ambiguous.txt");
+		writeFileSync(
+			testFile,
+			"start alpha\nmiddle line with quite a lot of shared content one\nend omega\n\nstart alpha\nmiddle line with quite a lot of shared content two\nend omega\n",
+		);
+
+		await expect(
+			editTool.execute("test-similar-ambiguous", {
+				path: testFile,
+				edits: [
+					{
+						oldText: "start alpha\nmiddle line with quite a lot of shared content drft\nend omega",
+						newText: "start alpha\nmiddle line with quite a lot of shared content new\nend omega",
+					},
+				],
+			}),
+		).rejects.toThrow(/approximately matches 2 different regions \(starting near lines 1, 5\)/);
+	});
+
+	it("should rescue a unique near-identical single line", async () => {
+		const testFile = join(testDir, "similar-single.css");
+		writeFileSync(
+			testFile,
+			".a { color: red; }\n.session-dashboard .project-toggle .ui-icon-folder { width: 30px; height: 30px; }\n.b { color: blue; }\n",
+		);
+
+		await editTool.execute("test-similar-single", {
+			path: testFile,
+			edits: [
+				{
+					// leading dot dropped and padding drifted (real-world transcription drift);
+					// not an exact substring, so only the similar-block tier can match
+					oldText: "session-dashboard .project-toggle .ui-icon-folder { width: 30px;  height: 30px; }",
+					newText: ".session-dashboard .project-toggle .ui-icon-folder { width: 32px; height: 32px; }",
+				},
+			],
+		});
+
+		expect(readFileSync(testFile, "utf-8")).toBe(
+			".a { color: red; }\n.session-dashboard .project-toggle .ui-icon-folder { width: 32px; height: 32px; }\n.b { color: blue; }\n",
+		);
+	});
+
+	it("should not force a similar-block match when drift is large", async () => {
+		const testFile = join(testDir, "similar-too-far.txt");
+		writeFileSync(testFile, "alpha one\nbeta two\ngamma three\ndelta four\n");
+
+		await expect(
+			editTool.execute("test-similar-too-far", {
+				path: testFile,
+				edits: [
+					{
+						oldText: "alpha one\ncompletely rewritten\nalso rewritten\ndelta four",
+						newText: "x",
+					},
+				],
+			}),
+		).rejects.toThrow(/Could not find the text/);
+	});
+
+	it("should explain when an edit only matches after earlier edits in the same call", async () => {
+		const testFile = join(testDir, "incremental-intent.txt");
+		writeFileSync(testFile, "foo\nbar\nbaz\n");
+
+		await expect(
+			editTool.execute("test-incremental-intent", {
+				path: testFile,
+				edits: [
+					{ oldText: "foo\n", newText: "foo bar\n" },
+					{ oldText: "foo bar\nbar\n", newText: "foo bar\nBAR\n" },
+				],
+			}),
+		).rejects.toThrow(/only matches after applying the earlier edits in this call/);
+		// nothing applied
+		expect(readFileSync(testFile, "utf-8")).toBe("foo\nbar\nbaz\n");
 	});
 });
 

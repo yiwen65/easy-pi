@@ -361,7 +361,7 @@ describe("AgentHarness tools", () => {
 					undefined,
 					context,
 				),
-			).rejects.toThrow(/Could not find the exact text/);
+			).rejects.toThrow(/Could not find the text/);
 			await expect(
 				tool.execute(
 					"edit-4",
@@ -416,6 +416,114 @@ describe("AgentHarness tools", () => {
 			);
 
 			expect(getOrThrow(await context.env.readTextFile("edit.txt"))).toBe("replaced\n");
+		});
+
+		it("tolerates whitespace-run and indentation drift", async () => {
+			const context = createContext();
+			getOrThrow(
+				await context.env.writeFile(
+					"edit.txt",
+					"keep me  \n\t\tif (ready) {\n\t\t\treturn true;\n\t\t}\n",
+				),
+			);
+
+			await createEditTool().execute(
+				"edit-loose",
+				{
+					path: "edit.txt",
+					edits: [
+						{
+							oldText: "  if (ready) {\n    return true;\n  }",
+							newText: "\t\tif (ready) {\n\t\t\treturn false;\n\t\t}",
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			);
+
+			expect(getOrThrow(await context.env.readTextFile("edit.txt"))).toBe(
+				"keep me  \n\t\tif (ready) {\n\t\t\treturn false;\n\t\t}\n",
+			);
+		});
+
+		it("tolerates small transcription drift inside an anchored block", async () => {
+			const context = createContext();
+			getOrThrow(
+				await context.env.writeFile(
+					"edit.txt",
+					"export function load() {\n\tconst config = readConfig();\n\tconst session = openSession(config);\n\treturn session;\n}\n",
+				),
+			);
+
+			await createEditTool().execute(
+				"edit-similar-block",
+				{
+					path: "edit.txt",
+					edits: [
+						{
+							oldText:
+								"export function load() {\n\tconst config = readConfig();\n\tconst session = openSesion(config);\n\t\treturn session;\n}",
+							newText:
+								"export function load() {\n\tconst config = readConfig();\n\tconst session = openSession(config, { cache: true });\n\treturn session;\n}",
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			);
+
+			expect(getOrThrow(await context.env.readTextFile("edit.txt"))).toBe(
+				"export function load() {\n\tconst config = readConfig();\n\tconst session = openSession(config, { cache: true });\n\treturn session;\n}\n",
+			);
+		});
+
+		it("rejects ambiguous similar-block matches and explains incremental intent", async () => {
+			const context = createContext();
+			getOrThrow(
+				await context.env.writeFile(
+					"edit.txt",
+					"start alpha\nmiddle line with quite a lot of shared content one\nend omega\n\nstart alpha\nmiddle line with quite a lot of shared content two\nend omega\n",
+				),
+			);
+
+			await expect(
+				createEditTool().execute(
+					"edit-similar-ambiguous",
+					{
+						path: "edit.txt",
+						edits: [
+							{
+								oldText: "start alpha\nmiddle line with quite a lot of shared content drft\nend omega",
+								newText: "start alpha\nmiddle line with quite a lot of shared content new\nend omega",
+							},
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/approximately matches 2 different regions \(starting near lines 1, 5\)/);
+
+			getOrThrow(await context.env.writeFile("incremental.txt", "foo\nbar\nbaz\n"));
+			await expect(
+				createEditTool().execute(
+					"edit-incremental",
+					{
+						path: "incremental.txt",
+						edits: [
+							{ oldText: "foo\n", newText: "foo bar\n" },
+							{ oldText: "foo bar\nbar\n", newText: "foo bar\nBAR\n" },
+						],
+					},
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/only matches after applying the earlier edits in this call/);
+			expect(getOrThrow(await context.env.readTextFile("incremental.txt"))).toBe("foo\nbar\nbaz\n");
 		});
 
 		it("keeps the mutation queue locked until an aborted edit write settles", async () => {
