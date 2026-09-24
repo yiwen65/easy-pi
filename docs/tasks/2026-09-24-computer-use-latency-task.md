@@ -16,6 +16,8 @@
 
 仅 pi 内 Computer 工具与定向性能验证。禁止放宽原生安全检查、操作用户业务窗口、调用网站 API；用户已授权最多 6 次真实模型 A/B，不执行模型返回动作。
 
+后续范围：用户要求彻底解决重复的 `discover` 启动中止；纳入进程信号退出与原生租约归还，授权修复及当前遗留租约的一次人工恢复，不增加自动清理脏租约或重放动作。
+
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
 
@@ -28,7 +30,7 @@
 ## Assumptions and open questions
 
 - Assumption: 合并不依赖新信息的选择与观察可省去一轮模型请求；通过工具回归和本地计时验证。
-- Open question: PID 91484 已退出，仍需重查桌面租约并完成 GUI 验证。用户已确认启用快速截图模式；6 次真实模型 A/B 全部完成。
+- Open question: 快速上下文已启用；6 次模型 A/B 全部完成。信号退出修复及原生回归已通过；选择+观察 bridge 候选尚未安装。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -62,6 +64,26 @@
 - Verification method:
   - Computer 定向测试、类型检查、npm run check。
 - Validation evidence: 新增 2 例先失败后通过，另加观察期间撤销测试；desktop 共 113 passed / 1 GUI skipped / 0 failed。desktop typecheck 与 npm run check 通过。fixture 确认一次 select(observe:true) 完成 select 和 observe，返回引用可供下一次输入；不经过第二轮工具调用。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-004 — 防止外部中断绕过 Computer 关闭
+
+- Status: done
+- Owner: coordinator
+- Objective: 修复可捕获退出信号绕过异步关闭或重复中断提前退出造成的脏租约。
+- Inputs and prerequisites: 新会话 ses_01M38S9JB18FF6YT 的 discover 在 04:03:13.982 UTC 返回 desktop_lease_unavailable；原持有者退出码 130，留下无持有者 D 0318。
+- Scope or files: interactive-mode.ts、print-mode.ts、rpc-mode.ts、computer/signal-shutdown.test.ts；RPC 既有测试监听清理列表。
+- Expected output: SIGINT/SIGTERM/SIGHUP 等待关闭，重复信号不提前退出，当前桌面恢复可用。
+- Dependencies: None.
+- Execution steps:
+  1. 先验证三个模式缺少 SIGINT，建立失败回归，再修复监听和关闭等待。
+  2. 用真实进程信号、真实原生 discover/close 及独立 GUI 输入回读验证。
+- Acceptance criteria:
+  - 原生 terminal 未完成前不退出；同一次关闭只执行一次；暂停状态仍忽略 SIGINT；不修改 native 安全检查。
+- Verification method:
+  - 定向 vitest、npm run check、联合产品编译、安装后子进程信号和 GUI fixture。
+- Validation evidence: 新回归修复前 3 failed / 2 passed，修复后 5 passed；Computer 及相邻退出回归 13 files / 157 passed；npm run check、tsconfig.product-build.json 编译通过。旧安装子进程 SIGINT 直接终止，无 DRAIN_DONE；新安装执行 DRAIN_DONE 后退出。真实 native discover 后单进程 SIGINT、进程组 SIGINT、SIGTERM、SIGHUP 均归还干净租约，连续代数 0319–031c。真实 GUI stale-image 拒绝后 fresh observe+fill，native 和 fixture 双回读一致，关闭后 C 031d。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -116,6 +138,8 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-004 从故障日志和源码定位后执行并验证完成。D 0318 无持有者，独占非阻塞 flock、owner/mode/inode/精确代数检查后原 inode 恢复，备份为 desktop.lock.before-manual-recovery-20260924-121250。三个模式安装产物仅包含本次修复，旧产物备份在 /tmp/easy-pi-computer-latency.WQKu7w/signal-backup。没有终止用户进程，没有输入重放。
+
 - 2026-09-24: 建立串行任务；T-001 开始，等待付费请求授权期间先处理本地可验证路径。
 - 2026-09-24: T-001 回归、类型和仓库检查通过，标记 done；保留原生检查和历史截图，恢复仓库检查的无关格式改动。
 - 2026-09-24: T-002 开始；完成候选打包，发现桌面被 PID 91484 占用并请求正常退出，随后标记 blocked。模型测试授权亦待回复。
@@ -147,4 +171,4 @@
 
 - Result: partial
 - Evidence: T-001 与 T-003 本地测试通过；6 次模型对照完成；快速截图设置及对应本地产物已安装验证。T-002 仍待 bridge 安装与真实窗口验证。
-- Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未补齐 117.5 秒间隔的遥测。
+- Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未补齐 117.5 秒间隔的遥测。T-004 覆盖可捕获的正常退出信号；SIGKILL、断电、原生崩溃或无法确认 terminal 仍必须隔离，不能承诺永不出现脏租约。真实信号测试使用已安装 InteractiveMode 原型及真实 feature，替换 TUI 和 runtime disposer 外壳；未自动操作 AgentPort 停止按钮。已停止的旧 feature 仍需完整重启。

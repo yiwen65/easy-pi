@@ -4193,6 +4193,7 @@ export class InteractiveMode {
 	 * repaint the final frame while the process is exiting.
 	 */
 	private isShuttingDown = false;
+	private isSuspended = false;
 
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
@@ -4285,13 +4286,15 @@ export class InteractiveMode {
 	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
+		// Raw-mode Ctrl+C is editor input; an external SIGINT is process shutdown.
+		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
 
 		for (const signal of signals) {
 			const handler = () => {
+				if (signal === "SIGINT" && this.isSuspended) return;
 				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
 				// first, then attempts terminal restore. A genuinely dead terminal
 				// surfaces as an EIO on the restore writes, which the stdout/stderr
@@ -4339,6 +4342,7 @@ export class InteractiveMode {
 		// can leave Node with no ref'ed handles, causing the process to exit on fg
 		// before the SIGCONT handler gets a chance to restore the terminal.
 		const suspendKeepAlive = setInterval(() => {}, 2 ** 30);
+		this.isSuspended = true;
 
 		// Ignore SIGINT while suspended so Ctrl+C in the terminal does not
 		// kill the backgrounded process. The handler is removed on resume.
@@ -4347,6 +4351,7 @@ export class InteractiveMode {
 
 		// Set up handler to restore TUI when resumed
 		process.once("SIGCONT", () => {
+			this.isSuspended = false;
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
 			this.ui.start();
@@ -4360,6 +4365,7 @@ export class InteractiveMode {
 			// Send SIGTSTP to process group (pid=0 means all processes in group)
 			process.kill(0, "SIGTSTP");
 		} catch (error) {
+			this.isSuspended = false;
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
 			throw error;
@@ -7053,6 +7059,8 @@ export class InteractiveMode {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
-		this.unregisterSignalHandlers();
+		// Interactive quit stops rendering before runtime disposal. Keep signal
+		// listeners alive until disposal finishes, including repeated interrupts.
+		if (!this.isShuttingDown) this.unregisterSignalHandlers();
 	}
 }
