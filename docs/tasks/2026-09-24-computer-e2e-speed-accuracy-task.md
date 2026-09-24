@@ -439,6 +439,48 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-019 — 页内选中状态观察链路
+
+- Status: done
+- Owner: coordinator
+- Objective: 保留 Chrome AX 已报告的 selected 布尔状态，区分 false 与未知，供模型验证页内标签和选项切换。
+- Inputs and prerequisites: T-018 同提示词 click-tab-2 对照与现有 WindowElement.selected 契约；额外搜索回合的原因尚未证明。
+- Scope or files: 原生 page.rs/test 与增量补丁、controlled/tool.ts 浏览器展示、browser 测试和独立 fixture；不改变输入权限、值后条件或浏览器标签页能力。
+- Expected output: 原始 AX/SDK/桥接首个丢失边界证据、最小修复及新观察读回；独立报告模型收益。
+- Dependencies: T-013.
+- Execution steps:
+  1. 在自有页面对照原始 AX 与现有安装观察，确认状态丢失，先建立失败回归。
+  2. 仅传播合法布尔值，secure/ignored 不泄漏，展示精简不得删除状态行。
+  3. 原生与桥接回归、独立包资格、真实页内标签/选项切换及同模型任务复测。
+- Acceptance criteria:
+  - 已知 true/false 正确保留、未知不伪造；点击后新引用与独立业务回执一致，负例边界不变。
+- Verification method:
+  - AX/SDK/bridge 分层反例、定向单测、真实 GUI 与关闭、固定 seed 模型对照。
+- Validation evidence: /tmp/epi-selection.avjmjg/baseline 原始 AX true/false，旧安装 undefined!=true 失败且正常关闭 C06b9。原生和桥接分别 red→green，15 page、29 browser、8 legacy、54 context/desktop/segment、8 qualified package、严格 SDK/native TS 和根 check 通过。新增二文件增量补丁独立 apply/字节一致/reverse 通过，生成绑定/构建材料/精确 pins 已更新。candidate 四调用实际标签与 option 切换，true/false/未知及独立 clicks=1/Plan=Pro 回执一致，关闭 C06ba；scroll-neighbor 七调用 Unicode/select/真实滚动/save 通过，关闭 C06bb。此为状态丢失因果证明，不证明多余模型回合的原因。旧包保留 installed-before，候选可回退试装；model-installed 同 seed 三任务运行中。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-020 — 阻止无值后条件的 press 派发
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 模型误把 selected 当 value 时，整个无效 batch 在输入前拒绝，不产生已派发后的 condition_unknown。
+- Inputs and prerequisites: T-019 model-installed 捕获实际 press expect=tab/value=true，而观察仅有 selected、没有 value；当前桥接只校验 selector 可见。
+- Scope or files: controlled/tool.ts 可见值后条件集合与 browser/tool 测试；不把 selected 映射为 value，不改变原生动作、未知输入不重放或允许动态未观察控件。
+- Expected output: 无效后条件零派发回归、保持空字符串等合法值后条件及修复后模型实测。
+- Dependencies: T-019.
+- Execution steps:
+  1. 重放缺失 value 的可见 tab 后条件，获得预检缺失的失败测试。
+  2. 在实际展示视图记录具有 value 的唯一 selector，press 仅引用该集合，继续整体预检。
+  3. 定向回归、包资格、真实模型重测；另跟踪 role=tab 容器点击未触发内层链接的问题，不混淆两个原因。
+- Acceptance criteria:
+  - 无 value、仅 selected 或未展示后条件均零派发；有 value（包括空串）的合法计划及引用消费不变。
+- Verification method:
+  - 失败 trace 对应 red/green、定向 tool/context 测试、同 seed 模型与独立任务回执。
+- Validation evidence: T-019 三项模型 2/3，form 23.246s/6、dialog 21.314s/6 通过；click-tab-2 27.081s/7 失败，press 条件 unknown 后模型停止，未获任务回执。全部关闭到 C06be，总费用 0.0674452 USD；不声称提速。状态投影本身经实际业务 fixture 证明修复；此新动作契约缺陷待修复。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 

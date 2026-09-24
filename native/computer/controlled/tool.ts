@@ -464,6 +464,7 @@ export function createControlledComputerTool(
 						profile === "browser" &&
 						!row.actions?.length &&
 						row.value === undefined &&
+						row.selected === undefined &&
 						((row.role === "none" && row.enabled === false && !row.label) ||
 							(row.role === "InlineTextBox" && row.label !== undefined && displayedStaticText.has(row.label)))
 					) {
@@ -491,6 +492,7 @@ export function createControlledComputerTool(
 						...(row.label !== undefined ? { label: row.label } : {}),
 						...(row.value !== undefined ? { value: row.value } : {}),
 						...(row.enabled !== undefined ? { enabled: row.enabled } : {}),
+						...(profile === "browser" && typeof row.selected === "boolean" ? { selected: row.selected } : {}),
 						...(profile === "browser" && row.actions?.length
 							? {
 									actions: row.actions.filter((action) =>

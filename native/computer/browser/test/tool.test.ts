@@ -40,6 +40,7 @@ function fixture(
 		noise?: number;
 		blankStructure?: boolean;
 		presentationNoise?: boolean;
+		selectionState?: boolean;
 		presentationTextValue?: string;
 		duplicate?: boolean;
 		observeFailureAfter?: number;
@@ -127,6 +128,21 @@ function fixture(
 									truncated: false,
 									degraded: false,
 									elements: [
+										...(options.selectionState
+											? [
+													{ role: "tab", label: "First", selected: snapshots === 1, actions: ["press"] },
+													{ role: "tab", label: "Second", selected: snapshots !== 1, actions: ["press"] },
+													{ role: "none", label: "", selected: false, enabled: false },
+													{ role: "StaticText", label: "Selection" },
+													{ role: "InlineTextBox", label: "Selection", selected: true },
+												].map((row, index) => ({
+													...row,
+													elementIndex: BigInt(300 + index),
+													depth: 1,
+													inWebContent: true,
+													elementToken: `${snapshotId}:selection-${index}`,
+												}))
+											: []),
 										...Array.from({ length: options.noise ?? 0 }, (_, index) => ({
 											elementIndex: BigInt(index + 2),
 											depth: 0,
@@ -328,6 +344,38 @@ const execute = (ref: string) => ({
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
 });
+
+test(
+	"browser selected state preserves false, absence and fresh state through compaction",
+	{ skip: !sdk },
+	async (t) => {
+		const f = fixture({ selectionState: true });
+		t.after(() => f.host.close());
+		const first = await f.tool.execute("o", { request: { op: "observe" } });
+		const parseRows = (result: typeof first) =>
+			result.content.flatMap((part) =>
+				part.type === "text"
+					? part.text
+							.split("\n")
+							.filter((line) => line.startsWith("{"))
+							.map((line) => JSON.parse(line))
+					: [],
+			);
+		const before = parseRows(first);
+		assert.equal(before.find((row) => row.label === "First").selected, true);
+		assert.equal(before.find((row) => row.label === "Second").selected, false);
+		assert.equal(before.find((row) => row.label === "Name").selected, undefined);
+		assert.equal(before.find((row) => row.role === "none")?.selected, false);
+		assert.equal(before.find((row) => row.role === "InlineTextBox")?.selected, true);
+		const next = await f.tool.execute("c", {
+			request: { op: "click", ref: first.details.observationRef!, target: "b-snapshot-1:selection-1" },
+			observeAfter: true,
+		});
+		assert.equal(parseRows(next).find((row) => row.label === "Second").selected, true);
+		assert.equal(parseRows(next).find((row) => row.label === "First").selected, false);
+		assert.deepEqual(f.calls, ["observe", "click", "observe"]);
+	},
+);
 
 test(
 	"scroll requires a displayed capability and consumes its observation without clicking",

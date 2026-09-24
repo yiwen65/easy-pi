@@ -1,0 +1,71 @@
+diff --git a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+index c0acfcc..8d8e756 100644
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+@@ -365,6 +365,7 @@ fn ax_snapshot(
+         });
+         output.push(json!({"element_index":index,"role":role,"depth":depth,"parent_index":parents[index],
+             "value_description":if role == "option" {select_parent.and_then(|(parent, _)| scalar(&nodes[parent]["name"]["value"]))} else {None},
++            "selected":if secure || ignored {None} else {property(node, "selected").and_then(Value::as_bool)},
+             "label":if ignored {None} else {label},"value":if secure || ignored {None} else {value},"enabled":enabled,"in_web_content":true}));
+     }
+     Ok((
+@@ -625,6 +626,7 @@ impl BrowserContext {
+                             node.selectable = false;
+                             node.scrollable = false;
+                             rows[index]["value"] = Value::Null;
++                            rows[index]["selected"] = Value::Null;
+                         }
+                     }
+                     if node.selectable {
+@@ -645,6 +647,7 @@ impl BrowserContext {
+                     }
+                     if node.secure {
+                         rows[index]["value"] = Value::Null;
++                        rows[index]["selected"] = Value::Null;
+                     }
+                     if node.listener_required {
+                         let backend = node.backend.ok_or("browser_node_unproved")?;
+diff --git a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+index 596c039..89ea13a 100644
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+@@ -14,6 +14,38 @@ fn tree() -> Value {
+     ]})
+ }
+ 
++#[test]
++fn controlled_browser_page_selected_state_preserves_false_without_inventing_values() {
++    for role in ["tab", "option"] {
++        for selected in [
++            json!(true),
++            json!(false),
++            json!(null),
++            json!("true"),
++            json!(0),
++        ] {
++            let mut raw = tree();
++            raw["nodes"][1]["role"]["value"] = json!(role);
++            raw["nodes"][1]["properties"] = json!([{"name":"selected","value":{"value":selected}}]);
++            let (rows, _) = ax_snapshot(&raw, &frame(), 512, 32).unwrap();
++            assert_eq!(rows[1]["selected"].as_bool(), selected.as_bool());
++            assert_eq!(
++                rows[1]["value"], "Ada",
++                "selection is not a value postcondition"
++            );
++            raw["nodes"][1]["ignored"] = json!(true);
++            assert!(ax_snapshot(&raw, &frame(), 512, 32).unwrap().0[1]["selected"].is_null());
++            raw["nodes"][1]["ignored"] = json!(false);
++            raw["nodes"][1]["properties"]
++                .as_array_mut()
++                .unwrap()
++                .push(json!({"name":"protected","value":{"value":true}}));
++            assert!(ax_snapshot(&raw, &frame(), 512, 32).unwrap().0[1]["selected"].is_null());
++        }
++    }
++    assert!(ax_snapshot(&tree(), &frame(), 512, 32).unwrap().0[1]["selected"].is_null());
++}
++
+ #[test]
+ fn controlled_browser_page_generic_control_keeps_visible_direct_text_identity() {
+     let raw = json!({"nodes":[

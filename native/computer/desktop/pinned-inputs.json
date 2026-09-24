@@ -1,7 +1,7 @@
 {
 	"upstreamRef": "05f29785b508a4441ec3aa06c556a8e8b26c1d71",
-	"patchSha256": "387af39ff3de1bf539efdc04757597137092c0b560aa6460b86a4af3ed2f175e",
-	"patchKind": "browser-scroll-into-view-incremental-after-browser-listener-click",
+	"patchSha256": "5017a53f5e7c84a460b61172cc9ef529114a8afe2656d295b4988a7fe5118f45",
+	"patchKind": "browser-selected-state-incremental-after-browser-scroll-into-view",
 	"sdkVersion": "0.28.2",
 	"ubjsVersion": "0.31.0-3",
 	"abiVersion": "1.1.0",
@@ -9,7 +9,7 @@
 	"nodeVersion": "24.15.0",
 	"platform": "darwin",
 	"arch": "arm64",
-	"qualification": "general-desktop-with-bounded-browser-scroll-into-view",
+	"qualification": "general-desktop-with-bounded-browser-selected-state",
 	"sdk": {
 		"paths": ["package.json", "dist/computer.js", "dist/computer.d.ts", "dist/native"],
 		"sha256": "a29f0e8f98b83ccab675dd5c5c350f0d46209ae5c514bead77625402ef62e3e1"
@@ -24,6 +24,6 @@
 	},
 	"platformFiles": {
 		"paths": ["package.json", "libcua_driver_sdk.dylib", "cua_driver_node_runtime.node"],
-		"sha256": "d05701c85f87efaf5f1eaac886cf1c449fc8111a3c18c5a4117a7c2ccafebb25"
+		"sha256": "40a1cfa9b9a688351c2339b58266ff8b1d5534d15adeb4a3ca6b5dc9416b14b3"
 	}
 }
