@@ -25,7 +25,14 @@ function deferred<T>() {
 	return { promise, resolve, reject };
 }
 
-function fixture(options: { web?: boolean; rejectNavigation?: boolean; prepareFailure?: string } = {}) {
+function fixture(
+	options: {
+		web?: boolean;
+		rejectNavigation?: boolean;
+		prepareFailure?: string;
+		clickEffect?: CuaSdk.ActionEffect;
+	} = {},
+) {
 	assert.ok(sdk);
 	const api = sdk;
 	const calls: string[] = [];
@@ -106,7 +113,17 @@ function fixture(options: { web?: boolean; rejectNavigation?: boolean; prepareFa
 						);
 					},
 					startClick() {
-						throw new Error("No JavaScript decomposition of native plans");
+						complete(
+							"click",
+							new api.ComputerResult.Action({
+								value: {
+									effect: options.clickEffect ?? api.ActionEffect.Unverifiable,
+									route: api.ActionRoute.Dom,
+									delivery: { mode: api.ActionDeliveryMode.Background, deliveredCount: 1 },
+								},
+							}),
+							true,
+						);
 					},
 					startPlan(plan) {
 						plans.push(plan);
@@ -249,4 +266,73 @@ test("browser profile never turns native-window rows into browser grants", { ski
 	assert.ok("observationRef" in seen.details && seen.details.observationRef);
 	await assert.rejects(f.tool.execute("p", execute(seen.details.observationRef)), /stale_observation/);
 	assert.equal(f.plans.length, 0);
+});
+
+test(
+	"click uses one observed token, reports submission only and consumes the observation",
+	{ skip: !sdk },
+	async (t) => {
+		const f = fixture();
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		assert.ok("observationRef" in seen.details && seen.details.observationRef);
+		const input = {
+			request: {
+				op: "click" as const,
+				ref: seen.details.observationRef,
+				target: `${seen.details.observationRef}:0`,
+			},
+		};
+		const result = await f.tool.execute("c", input);
+		assert.equal(result.details.status, "action_submitted");
+		assert.equal(result.details.completedSteps, 0);
+		await assert.rejects(f.tool.execute("again", input), /stale_observation/);
+		assert.deepEqual(f.calls, ["observe", "click"]);
+	},
+);
+
+test("unseen postconditions and post-mutation refs fail before any batch input", { skip: !sdk }, async (t) => {
+	for (const scenario of ["postcondition", "batch"] as const) {
+		const f = fixture();
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		assert.ok("observationRef" in seen.details && seen.details.observationRef);
+		const target = { ref: `${seen.details.observationRef}:0` };
+		const steps =
+			scenario === "postcondition"
+				? [{ op: "press" as const, target, expect: { role: "button", label: "Future dialog" }, value: "" }]
+				: [
+						{ op: "fill" as const, target, text: "first" },
+						{ op: "fill" as const, target, text: "second" },
+					];
+		await assert.rejects(
+			f.tool.execute("p", { request: { op: "execute", ref: seen.details.observationRef, steps } }),
+			scenario === "postcondition" ? /postcondition_not_observed/ : /batch_ref_after_mutation/,
+		);
+		assert.equal(f.plans.length, 0);
+		assert.deepEqual(f.calls, ["observe"]);
+	}
+});
+
+test("click does not report refused or partial effects as submitted and never replays", { skip: !sdk }, async (t) => {
+	assert.ok(sdk);
+	for (const effect of [sdk.ActionEffect.Refused, sdk.ActionEffect.Partial, sdk.ActionEffect.SuspectedNoop]) {
+		const f = fixture({ clickEffect: effect });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		assert.ok("observationRef" in seen.details && seen.details.observationRef);
+		const input = {
+			request: {
+				op: "click" as const,
+				ref: seen.details.observationRef,
+				target: `${seen.details.observationRef}:0`,
+			},
+		};
+		await assert.rejects(
+			f.tool.execute("c", input),
+			effect === sdk.ActionEffect.Refused ? /paused/ : /outcome_unknown/,
+		);
+		await assert.rejects(f.tool.execute("c2", input), /stale_observation/);
+		assert.deepEqual(f.calls, ["observe", "click"]);
+	}
 });

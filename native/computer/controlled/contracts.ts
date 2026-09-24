@@ -15,7 +15,7 @@ const address = Type.Union([
 const text = Type.String({ maxLength: 16 * 1024 });
 
 /** Model protocol for the native form profile, not handwritten UniFFI declarations or the P01 fake profile. */
-export const ControlledComputerInputSchema = Type.Object(
+export const ControlledFormInputSchema = Type.Object(
 	{
 		request: Type.Union([
 			Type.Object({ op: StringEnum(["observe"] as const) }, { additionalProperties: false }),
@@ -47,6 +47,19 @@ export const ControlledComputerInputSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+// Keep the desktop pixel-click language separate from token-based form/browser clicks.
+export const ControlledComputerInputSchema = Type.Object(
+	{
+		request: Type.Union([
+			ControlledFormInputSchema.properties.request,
+			Type.Object(
+				{ op: StringEnum(["click"] as const), ref: reference, target: reference },
+				{ additionalProperties: false },
+			),
+		]),
+	},
+	{ additionalProperties: false },
+);
 export type ControlledComputerInput = Static<typeof ControlledComputerInputSchema>;
 export type ExecuteRequest = Extract<ControlledComputerInput["request"], { op: "execute" }>;
 export type Selector = Static<typeof selector>;
@@ -57,6 +70,8 @@ export function parseControlledComputerInput(input: unknown): ControlledComputer
 	if (!Value.Check(ControlledComputerInputSchema, input)) throw new Error("Invalid computer request");
 	const bounded = (value: string, max: number) => Buffer.byteLength(value, "utf8") <= max;
 	const validSelector = (value: Selector) => bounded(value.role, 64) && bounded(value.label, 256);
+	if (input.request.op === "click" && (!bounded(input.request.ref, 128) || !bounded(input.request.target, 128)))
+		throw new Error("Invalid computer reference");
 	if (input.request.op === "execute") {
 		if (!bounded(input.request.ref, 128)) throw new Error("Invalid computer reference");
 		let bytes = 0;

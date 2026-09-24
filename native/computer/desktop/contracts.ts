@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { ControlledComputerInputSchema, parseControlledComputerInput } from "../controlled/contracts.ts";
+import { ControlledFormInputSchema, parseControlledComputerInput } from "../controlled/contracts.ts";
 import { ComputerDragInputSchema, parseComputerDragInput } from "./drag-contracts.ts";
 import { ComputerSegmentInputSchema, parseComputerSegmentInput } from "./segment-contracts.ts";
 
@@ -17,7 +17,7 @@ export const DesktopInputSchema = Type.Object(
 				{ op: Type.Literal("reconcile"), ref, previousEffect: Type.Literal("observed") },
 				{ additionalProperties: false },
 			),
-			ControlledComputerInputSchema.properties.request,
+			ControlledFormInputSchema.properties.request,
 			Type.Object(
 				{
 					op: StringEnum(["observe"] as const),
@@ -107,7 +107,10 @@ export function parseDesktopInput(input: unknown): DesktopInput {
 	}
 	if (request.op === "drag_between") return parseComputerDragInput(input);
 	if (request.op === "segment") return parseComputerSegmentInput(input);
-	if (request.op === "execute") return parseControlledComputerInput(input);
+	if (request.op === "execute") {
+		parseControlledComputerInput(input);
+		return { request: structuredClone(request) };
+	}
 	if ("ref" in request && Buffer.byteLength(request.ref) > 128) throw new Error("Invalid computer reference");
 	if ("x" in request && (!Number.isFinite(request.x) || !Number.isFinite(request.y)))
 		throw new Error("Invalid computer coordinates");

@@ -212,9 +212,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-009 — 浏览器动作契约与错误恢复
+### [x] T-009 — 浏览器动作契约与错误恢复
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 区分无效后条件与真实旧引用，减少 agent 无效 observe 循环，并验证批量输入的引用选择。
 - Inputs and prerequisites: T-008 完成；/tmp/epi-repair.BJD4uG/model-after-helper 与 model-browser-neighbors。
@@ -229,7 +229,28 @@
   - 错误分类可指导有效恢复；不能隐藏真实旧引用、重复投递或未观察目标；业务结果和关闭分别验证。
 - Verification method:
   - 定向回归、模型 trace、独立 oracle、npm run check。
-- Validation evidence: 尚未修复。表单第一步成功后旧 ref 第二步 stale；另两任务 press.expect 未在当前观察出现，controlled/tool.ts 的 selectors 检查统一返回 stale_observation，模型重复 observe 仍失败。
+- Validation evidence: 已安装桥接修复：现有 native startClick 通过当前 observation/token 和实际 provider context 授权；仅报 action_submitted、不冒充业务成功；拒绝/部分效果分类与消费引用均有回归。错误后条件报 postcondition_not_observed，mutation 后 ref 报 batch_ref_after_mutation，均在整个 batch 派发前拒绝。三个候选模型任务 1/3，导航 PASS 41.796s；最终包导航再次 PASS 40.844s/13回合，独立回执准确，关闭成功。表单双字段批量 confirmed 后遇到下拉菜单 action_unavailable；弹窗点击后遇到 unexpected_modal_surface，属 T-010。browser 9/9、context/desktop schema 8/8、desktop+context 129 pass/1 skip、package 9/9、独立 desktop typecheck、npm run check 通过。证据 /tmp/epi-contract.fIKCCx，原包保留 installed-before；native SDK 未变。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-010 — 浏览器弹窗与下拉菜单能力
+
+- Status: pending
+- Owner: coordinator
+- Objective: 定义并实现受当前页面授权约束的 HTML dialog 与 select 操作，不能简单删除 modal 检查。
+- Inputs and prerequisites: T-009 真实失败轨迹；原生受控页面/输入能力。
+- Scope or files: 原生 browser controlled page 与动作契约、相关 fixture。
+- Expected output: 明确支持边界、负向回归及同一表单/弹窗 oracle 通过。
+- Dependencies: T-009.
+- Execution steps:
+  1. 区分 HTML dialog、浏览器原生提示、跨 frame/跨页弹窗，明确允许的目标范围。
+  2. 增加基于当前观察的选项选择操作与类型提示，不把 fill 冒充 select。
+  3. 真实模型与越界/遮挡负向回归，保留失败证据。
+- Acceptance criteria:
+  - 指定选项和弹窗提交独立回执准确；未知/跨页模态目标仍拒绝；正常关闭。
+- Verification method:
+  - 原生与桥接定向测试、同三任务真实模型、源码材料和安装包资格。
+- Validation evidence: 未实现；目前表单双文本字段成功、checkbox 变 true；select fill/press/click 无支持。弹窗确已打开，后续 observe 被 unexpected_modal_surface 拒绝。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -261,6 +282,8 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-009 完成并安装。候选三项导航通过、弹窗/表单仍失败但均推进到独立原生能力限制；最终安装版导航再次通过，最终 lease C0503。未修改 native ABI/权限/全图校验。新增 T-010 跟踪 HTML dialog/select，未假报三项全部通过。
+- 2026-09-24: 用户要求修复动作契约；T-009 开始。复用 SDK 现有 startClick，仅当前观察/实际 provider context 中的 token 可点击；保留 press 的已观察值后条件。将错误后条件、mutation 后旧 ref 从统一 stale 分类中分开，前置拒绝不派发整个无效 batch。原生 ABI/权限与未知输入不重放不变；coordinator 下一步安装桥接候选并复测同三个任务。
 - 2026-09-24: 用户授权正常重启独立 helper；launchctl stop/start 后路径可读，原生探针及三个真实模型 owner prepare/close 均通过，T-008 done、T-007 恢复 in_progress。新增 T-009 pending：无效后条件统一报旧引用及 mutation 后批量 ref 失效。新三项 0/3，耗时 43.955/23.035/46.709 秒，报告费用共 0.0528276 USD，均清洁关闭；未新增源码改动或放宽保护。
 - 2026-09-24: 用户授权受控恢复与修复；T-008 开始。按 code-debug 的因果验证与现有任务计划串行推进，保留所有失败；未授权把全图校验直接弱化为局部校验。
 - 2026-09-24: T-007 首轮完成：image-first Chrome 1/5；semantic-first Chrome 1/5、官方 MiniWoB 子集 2/8。前述 18 次全部正常关闭；实际模型往返占首轮 Chrome 耗时约 97%–98%，未宣称提示策略提速。全 PNG hash 对变化倒计时产生 stale_image_observation；未放宽保护。
@@ -336,4 +359,4 @@ Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":
 
 - Result: partial
 - Evidence: T-001、T-005、T-006 完成；原版失败均保留。此前局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；通用确定性场景 50/50。新增真实模型十三场景单轮 3/13，额外 Chrome 五场景 1/5；不能用确定性结果代替模型表现。新 benchmark 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip 与 npm run check 通过。
-- Limitations: 最新 lease C04ff；T-008 生命周期修复完成，真实模型复测已恢复，但新三项业务 0/3，T-009 动作契约待修复。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明普遍提速、彻底修复或所有应用稳定性。
+- Limitations: 最新 lease C0503；T-008/009 完成，导航原始失败→候选和最终包各一次通过。最新候选三项 1/3，不能宣称普遍提速；T-010 HTML dialog/select 尚未实现。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性。

@@ -21,7 +21,7 @@ export type ControlledBrowserInput = Static<typeof ControlledBrowserInputSchema>
 
 export function parseControlledBrowserInput(input: unknown): ControlledBrowserInput {
 	if (!Value.Check(ControlledBrowserInputSchema, input)) throw new Error("Invalid browser computer request");
-	if (input.request.op === "observe" || input.request.op === "execute") {
+	if (input.request.op === "observe" || input.request.op === "execute" || input.request.op === "click") {
 		return parseControlledComputerInput(input);
 	}
 	if (input.request.op === "navigate") {

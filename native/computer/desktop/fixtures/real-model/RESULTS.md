@@ -2,6 +2,12 @@
 
 ## 最新修复状态
 
+动作契约后续已修复并安装（原生 SDK 不变）：单次 click 使用实际 provider view 的 observation/token；结果只报提交，必须再观察。无效 press.expect 与 mutation 后旧 ref 分别在派发前返回明确错误，不再误报成统一“刷新即可”的问题。桌面像素 click 协议保持独立。
+
+候选同三项：导航 PASS 41.796s/13回合；弹窗 FAIL 24.397s/6回合（确已打开，随后原生 modal 检查拒绝）；表单 FAIL 48.077s/11回合（两个文本字段连续 confirmed，随后 select 操作不受支持）。全部正常关闭。最终安装版导航再次 PASS 40.844s/13回合，独立回执包含 R-204 和 reviewed 你好，lease C0503。不是交错 A/B，不声称速度统计提升。此轮四次报告费用共 0.1486388 USD。证据 `/tmp/epi-contract.fIKCCx/{real-model,final-navigation}`；T-010 跟踪弹窗/select 剩余能力。
+
+### helper 恢复后的原始回归
+
 用户随后授权正常重启独立 helper。launchctl stop/start 后 PID 564→64621，进程路径检查失败数 1→0。原生 prepare/close 成功，随后三项真实 gpt-6-sol/browser 测试均 prepare/close 成功，最终 lease C04ff，无再次人工清锁。
 
 | 续验任务 | 业务结果 | task 秒 | 关闭 | 失败事实 |

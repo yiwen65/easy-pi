@@ -99,7 +99,15 @@ async function fixture() {
 						true,
 					);
 				},
-				startClick: forbidden,
+				startClick() {
+					plans++;
+					finish(
+						new api.ComputerResult.Action({
+							value: { effect: api.ActionEffect.Unverifiable, route: api.ActionRoute.Dom },
+						}),
+						true,
+					);
+				},
 				startSegment: forbidden,
 				startCrossWindowDrag: forbidden,
 				startPrepare: forbidden,
@@ -169,32 +177,38 @@ const execute = (ref: string) => ({
 	},
 });
 
-for (const visible of [true, false]) {
-	test(`browser input requires the exact canonical observation: visible=${visible}`, { skip: !sdk }, async (t) => {
-		const f = await fixture();
-		t.after(() => f.close());
-		const seen = await f.tool.execute("observation", { request: { op: "observe" } });
-		assert.ok(typeof seen.details === "object" && seen.details !== null && "observationRef" in seen.details);
-		const ref = seen.details.observationRef;
-		assert.ok(typeof ref === "string");
-		const message: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: "observation",
-			toolName: "computer",
-			content: seen.content,
-			isError: false,
-			timestamp: 1,
-		};
-		f.binding.observeContext?.(false, visible ? [message] : []);
-		if (visible) await f.tool.execute("input", execute(ref));
-		else {
-			// Persisted history cannot restore authority after omission.
-			f.binding.observeContext?.(false, [message]);
-			await assert.rejects(f.tool.execute("input", execute(ref)), /current model view/);
-		}
-		assert.equal(f.plans, visible ? 1 : 0);
-	});
-}
+for (const visible of [true, false])
+	for (const action of ["execute", "click"] as const) {
+		test(
+			`browser ${action} requires the exact canonical observation: visible=${visible}`,
+			{ skip: !sdk },
+			async (t) => {
+				const f = await fixture();
+				t.after(() => f.close());
+				const seen = await f.tool.execute("observation", { request: { op: "observe" } });
+				assert.ok(typeof seen.details === "object" && seen.details !== null && "observationRef" in seen.details);
+				const ref = seen.details.observationRef;
+				assert.ok(typeof ref === "string");
+				const message: ToolResultMessage = {
+					role: "toolResult",
+					toolCallId: "observation",
+					toolName: "computer",
+					content: seen.content,
+					isError: false,
+					timestamp: 1,
+				};
+				f.binding.observeContext?.(false, visible ? [message] : []);
+				const input = action === "execute" ? execute(ref) : { request: { op: "click", ref, target: `${ref}:0` } };
+				if (visible) await f.tool.execute("input", input);
+				else {
+					// Persisted history cannot restore authority after omission.
+					f.binding.observeContext?.(false, [message]);
+					await assert.rejects(f.tool.execute("input", input), /current model view/);
+				}
+				assert.equal(f.plans, visible ? 1 : 0);
+			},
+		);
+	}
 
 test(
 	"browser cancellation clears a previously published observation before later context delivery",

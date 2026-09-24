@@ -32,6 +32,7 @@ test("arbitrary targets, scripts, chords, repeats and oversized values are rejec
 		{ op: "click", ref: "x", x: Infinity, y: 0 },
 		{ op: "click", ref: "x", x: -1, y: 0 },
 		{ op: "click", ref: "x", x: 0, y: 2049 },
+		{ op: "click", ref: "observation", target: "element-token" },
 		{ op: "scroll", ref: "x", x: 0, y: 0, direction: "down", count: 10 },
 		{ op: "key", ref: "x", key: "Command+Q" },
 		{ op: "key", ref: "x", key: "Tab", repeat: 2 },
