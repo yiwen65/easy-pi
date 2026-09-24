@@ -7,6 +7,7 @@ export default mergeConfig(
 	defineConfig({
 		test: {
 			include: [
+				fileURLToPath(new URL("./startup-failure.test.ts", import.meta.url)),
 				fileURLToPath(new URL("./context.test.ts", import.meta.url)),
 				fileURLToPath(new URL("./loop.test.ts", import.meta.url)),
 				fileURLToPath(new URL("./compaction.test.ts", import.meta.url)),

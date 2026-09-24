@@ -97,7 +97,13 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 					}),
 				);
 			} catch (error) {
-				stop.update({ status: "failed", code: "renderer_creation_failed" });
+				// Host creation also acquires the desktop lease. Preserve this known
+				// refusal without exposing arbitrary native error payloads.
+				const code =
+					sdk.ComputerError.Refused.instanceOf(error) && error.inner.reason === "desktop_lease_unavailable"
+						? "desktop_lease_unavailable"
+						: "renderer_creation_failed";
+				stop.update({ status: "failed", code });
 				throw error;
 			}
 			rendererWatch = watchRenderer(sdk, native, stop);

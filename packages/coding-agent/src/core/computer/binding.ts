@@ -1,4 +1,4 @@
-import type { ResourceScheduler } from "@earendil-works/pi-agent-core";
+import { AgentToolError, type ResourceScheduler } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ComputerNativeSession, ComputerSession } from "./host.ts";
@@ -68,14 +68,33 @@ export class ComputerStopSignal {
 /** Preserve the delegate's authority clearing and native result/terminal ownership. */
 export function withComputerStop(binding: ComputerSessionBinding, stop: ComputerStopSignal): ComputerSessionBinding {
 	const unsubscribe = stop.subscribe(() => binding.revoke());
+	const stoppedError = (cause?: unknown) => {
+		const health = stop.health;
+		const code = health.status === "failed" ? health.code : health.status;
+		const guidance =
+			code === "desktop_lease_unavailable"
+				? "Desktop ownership is busy, quarantined after an unclean shutdown, or its storage is unsafe. Inspect the owner and lease; do not delete the lock or automatically retry. A new session alone may not resolve this."
+				: "Create an explicitly new feature after resolving the stop; do not replay input.";
+		return new AgentToolError(`Computer stopped: ${code}. ${guidance}`, {
+			...(cause instanceof AgentToolError && typeof cause.details === "object" && cause.details !== null
+				? cause.details
+				: {}),
+			stopReason: health,
+		});
+	};
 	return {
 		...binding,
 		tools: Object.freeze(
 			binding.tools.map((tool) => ({
 				...tool,
-				execute(...args: Parameters<typeof tool.execute>) {
-					if (stop.stopped) return Promise.reject(new Error("Computer stopped; create an explicitly new feature"));
-					return tool.execute(...args);
+				async execute(...args: Parameters<typeof tool.execute>) {
+					if (stop.stopped) throw stoppedError();
+					try {
+						return await tool.execute(...args);
+					} catch (error) {
+						if (stop.stopped) throw stoppedError(error);
+						throw error;
+					}
 				},
 			})),
 		),
@@ -87,11 +106,11 @@ export function withComputerStop(binding: ComputerSessionBinding, stop: Computer
 		},
 		subscribeStop: (listener) => stop.subscribe(listener),
 		fork() {
-			if (stop.stopped) throw new Error("Computer stopped; create an explicitly new feature");
+			if (stop.stopped) throw stoppedError();
 			return withComputerStop(binding.fork(), stop);
 		},
 		renew() {
-			if (stop.stopped) throw new Error("Computer stopped; create an explicitly new feature");
+			if (stop.stopped) throw stoppedError();
 			return withComputerStop(binding.renew(), stop);
 		},
 		close() {
