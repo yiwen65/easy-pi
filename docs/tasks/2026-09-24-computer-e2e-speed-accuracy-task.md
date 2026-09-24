@@ -14,7 +14,7 @@
 <!-- task-doc-section:scope-non-goals -->
 ## Scope and non-goals
 
-仅 pi Computer 测试、源码优化和改造；2026-09-24 用户明确授权继续源码级优化，以速度、稳定及 agent 调用友好为目标。原始记录保留。默认不调用付费模型、不改变系统权限、不删除租约、不操作业务文档。冗余等待或重复工作可依据对照证据精简；不得用绕过目标/输入归属校验伪造成功。
+仅 pi Computer 测试、源码优化和改造；2026-09-24 用户明确授权继续源码级优化，并追加真实模型、完整 Chrome 及主流 benchmark 测试。真实 API 必须显式 PI_REAL_MODEL_EVAL=1，仅使用现有配置，不输出凭据；首批每任务最多 24 模型回合/180 秒、累计已报告费用达到 10 USD 后不开始新任务，不自动重试失败。原始记录保留。不改变系统权限、不删除租约、不操作业务文档。不得用绕过目标/输入归属校验伪造成功。
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -30,7 +30,7 @@
 ## Assumptions and open questions
 
 - Assumption: 当前 macOS/Node 安装作为首个基线平台；运行时记录版本和二进制指纹。
-- Open question: 真实模型额度与生产权限精简尚未单独授权，不阻塞本地工具/UI 对照。
+- 真实模型已授权；官方大型 benchmark 全量依赖 VM/专属网站与账号，先核对并区分官方任务子集和本地映射用例，不能宣称官方完整分数。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -42,7 +42,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-004; T-001 -> T-002 -> T-003; T-001 -> T-005; T-001 -> T-006. 全部串行；覆盖采集不依赖焦点修复完成，失败原样保留。T-005/006 为局部交付。
+- Dependency graph: T-001 -> T-004; T-001 -> T-002 -> T-003; T-001 -> T-005; T-001 -> T-006; T-001 -> T-007. 全部串行；覆盖采集不依赖焦点修复完成，失败原样保留。T-005/006 为局部交付。
 - Parallel batches: 无；同一 fixture、记录格式及桌面串行。
 - Serialization constraints: 同一桌面禁止并发；文档由 coordinator 维护。
 
@@ -167,6 +167,27 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-007 — 真实模型与 Chrome benchmark
+
+- Status: blocked
+- Owner: coordinator
+- Objective: 真实 AgentSession、隔离完整 Chrome、主流 benchmark 原始任务和机制映射测试，依据测量继续优化。
+- Inputs and prerequisites: 现有模型配置、已资格验证的 CfT 与 native 安装；真实 API 用户授权。
+- Scope or files: native/computer/desktop/fixtures/real-model 与相关最小生产改动。
+- Expected output: 显式 opt-in runner、来源/种子/版本/费用/逐轮耗时与独立 oracle；官方任务与自建任务分开统计。
+- Dependencies: T-001.
+- Execution steps:
+  1. 核对官方 MiniWoB++、BrowserGym、WebArena、WorkArena、OSWorld 的运行边界。
+  2. 先单个真实调用验证，再执行有界 Chrome 任务；只有 Computer 可操作任务，禁止模型读 evaluator 或直接调用网站 API。
+  3. 按失败及延迟归因做最小修复/优化，再运行相同 oracle。
+- Acceptance criteria:
+  - 真实 provider 请求、Chrome 输入和独立结果三者闭环；成本和回合上限生效；关闭可证明；无假报官方全量分数。
+- Verification method:
+  - 定向离线测试、真实模型轨迹、Chrome UI 状态、原始结果与 npm run check。
+- Validation evidence: 真实模型十三场景完整单轮 3/13；额外 image-first Chrome 1/5。原始失败、provider 异常、费用与关闭状态全部保留。benchmark 单测 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip；npm run check 通过。详见 native/computer/desktop/fixtures/real-model/RESULTS.md。
+- Blocker: canonical TMPDIR 对照推进至 browser prepare outcome_unknown，关闭失败后 lease 为 D00000000000004f7；没有删除锁或重试。GUI 全部停止，候选源码/包未安装。原生关闭确切原因尚未证明。
+- Unblock condition: 用户确认受控恢复范围后，核验原生资源和锁身份、设计审计化恢复，再带有界诊断验证 prepare/close；禁止直接清锁。全图校验改为目标区域校验是另一独立待确认取舍。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -190,11 +211,14 @@
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
 
-模型延迟尚未计入；共享桌面的焦点与负载会影响结果；小样本不能证明低失败率或稳定 p95。
+真实模型延迟已单独采集；共享桌面的焦点与负载会影响结果；小样本不能证明低失败率或稳定 p95。最后一次 browser 对照原生关闭失败，当前桌面租约 dirty，必须先受控恢复，不能继续 GUI 或把候选包安装称为已完成。
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-007 首轮完成：image-first Chrome 1/5；semantic-first Chrome 1/5、官方 MiniWoB 子集 2/8。前述 18 次全部正常关闭；实际模型往返占首轮 Chrome 耗时约 97%–98%，未宣称提示策略提速。全 PNG hash 对变化倒计时产生 stale_image_observation；未放宽保护。
+- 2026-09-24: native browser 默认临时目录 prepare native_fault/关闭正常；发现 entry 的 /var alias 不满足 native canonical parent 契约，已写候选修复与回归。保持旧安装包、仅 TMPDIR=/private/tmp 对照后确实创建 Chrome profile，但 prepare outcome_unknown、shutdown/close unproved，lease D00000000000004f7。停止所有 GUI，不删除锁、不强杀或自动重试；lsof 无持有者、测试 PID 33473 与对应 browser/renderer 已退出，仍不等价于 native drain 证明。候选包未安装；T-007 阻塞于受控恢复授权和原生关闭诊断。
+- 2026-09-24: T-007 开始；已查官方 benchmark 文档与本地可用模型；使用专用 CfT/profile，不接触个人 Chrome 数据，授权真实 API 仍设回合/费用边界。
 - 2026-09-24: 用户追加通用场景实测；T-002 开始，解除对 T-004 的非必要依赖。新增 owned AppKit/WebKit 表单、鼠标点击/滚动/拖动、双窗口切换、连续编辑、过期引用、取消与重新创建会话。WebKit 测试只代表网页引擎，不冒充完整浏览器/外网任务；保持原有保存场景。
 - 2026-09-24: T-001 开始；先实现确定性工具/UI 基线，不更改生产安全策略。
 - 2026-09-24: T-001 完成。6 次冒烟通过后执行 120 次正式对照；不同 probe 版本的冒烟未混入正式统计。补充汇总器拒绝缺失关闭证明或非法耗时的单测。
@@ -264,5 +288,5 @@ Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001、T-005、T-006 完成；原版失败均保留。局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；T-002 已扩展十场景并完成 50/50 实际工具/UI 检验。metrics 单测 3/3、npm run check 通过；格式器引入的四个无关文件改动已单独撤回。
-- Limitations: T-004 焦点根因/修复、T-002 完整浏览器/外部干扰/中途取消/长时会话、T-003 全局精简资格验证未完成；模型层未执行。通用场景是新基线而非新的提速对照，无彻底修复或所有应用稳定性结论。
+- Evidence: T-001、T-005、T-006 完成；原版失败均保留。此前局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；通用确定性场景 50/50。新增真实模型十三场景单轮 3/13，额外 Chrome 五场景 1/5；不能用确定性结果代替模型表现。新 benchmark 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip 与 npm run check 通过。
+- Limitations: 当前 lease dirty，T-007 GUI 阻塞，规范化 parent 候选未安装，原生 prepare/close 故障未修复。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明普遍提速、彻底修复或所有应用稳定性。

@@ -1,5 +1,4 @@
-import { mkdtempSync, rmdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmdirSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -11,6 +10,7 @@ import { ComputerHost } from "../../../packages/coding-agent/src/core/computer/h
 import { createContextBrowserBinding } from "../browser/context-binding.ts";
 import { ControlledComputerRuntime, type ControlledComputerSession } from "../controlled/adapter.ts";
 import { createDesktopBinding } from "./binding.ts";
+import { createBrowserDirectory } from "./browser-directory.ts";
 import { parseEmergencyChord } from "./emergency-config.ts";
 import { loadDesktopSdk } from "./loader.ts";
 import pins from "./pinned-inputs.json" with { type: "json" };
@@ -68,7 +68,7 @@ export function createComputerFeature(options: NativeComputerOptions = {}): Nati
 			}
 			const sdk = getApi();
 			// Allocate before native ownership; retain this root on any unproved close.
-			if (browserBundlePath) browserDirectory = mkdtempSync(join(tmpdir(), "epi-computer-browser-"));
+			if (browserBundlePath) browserDirectory = createBrowserDirectory();
 			const mode = manifestPath ? sdk.SessionPermissionMode.Bounded : sdk.SessionPermissionMode.Unrestricted;
 			let native: ReturnType<typeof sdk.ComputerHost.createWithRenderer>;
 			try {
