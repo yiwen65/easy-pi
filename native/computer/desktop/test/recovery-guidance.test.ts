@@ -4,6 +4,42 @@ import { fixture } from "./segment-fixture.ts";
 
 const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
 
+test("legacy refusal explains segment recovery without resolving unknown input", { skip: !enabled }, async () => {
+	const f = fixture({ mode: "partial" });
+	try {
+		await f.setup();
+		const request = {
+			op: "segment" as const,
+			ref: "snapshot-1",
+			actions: [{ op: "key" as const, key: "Tab" }],
+			expected: { kind: "visual" as const, description: "Field focused" },
+		};
+		await f.call(request);
+		const before = [...f.events];
+		await assert.rejects(f.call({ op: "key", ref: "image-2", key: "Return" }), (error: Error) => {
+			assert.match(error.message, /use_segment_for_unresolved_intent/);
+			assert.match(error.message, /No input dispatched by this call/);
+			assert.match(error.message, /fresh.*segment.*previousEffect:'observed'/s);
+			assert.match(error.message, /unknown.*stop.*never replay/s);
+			return true;
+		});
+		assert.deepEqual(f.events, before);
+		await f.call({ op: "observe" });
+		await assert.rejects(f.call({ ...request, ref: "snapshot-3" }), /previous_intent_unresolved/);
+		assert.equal(f.segments.length, 1);
+		await f.call({ op: "observe" });
+		await f.call({
+			...request,
+			ref: "snapshot-4",
+			actions: [{ op: "key", key: "Return" }],
+			previousEffect: "observed",
+		});
+		assert.equal(f.segments.length, 2);
+	} finally {
+		await f.host.close();
+	}
+});
+
 test(
 	"semantic refs rejected as image points direct recovery to capture, not another observe",
 	{ skip: !enabled },

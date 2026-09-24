@@ -89,7 +89,9 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 					? "No input dispatched. Use capture, inspect the returned image, then use its new Image ref and recomputed image coordinates. Observation refs and element refs cannot authorize coordinate actions; observe alone does not refresh an image."
 					: reason === "previous_intent_unresolved"
 						? "Read fresh evidence of the current target and judge the prior effect. Use reconcile with that new ref and previousEffect:'observed' to record the judgement without new input; then discover/select the intended surface. Reads alone do not resolve prior effects: do not loop between observe and select. If the effect is still unknown, stop and ask the user; never invent confirmation or replay input."
-						: "observe again.";
+						: reason === "use_segment_for_unresolved_intent"
+							? "No input dispatched by this call. Legacy execute/click/scroll/key cannot continue an unresolved segment. Read fresh evidence and judge the prior effect, then use segment with the new ref for genuinely new work; previousEffect:'observed' records your judgement when required. Reads alone do not resolve prior effects. If the effect remains unknown, stop and ask the user; never replay uncertain input."
+							: "observe again.";
 		throw new AgentToolError(`Computer paused: ${reason}; ${guidance}`, { status: "paused", code: reason });
 	};
 	const tool: AgentTool<typeof DesktopInputSchema, unknown> = {
