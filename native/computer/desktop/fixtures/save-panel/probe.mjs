@@ -1,40 +1,86 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
 
-const [fixturePath, bridgePath, mode] = process.argv.slice(2);
+const [fixturePath, bridgePath, requestedMode, strategy = "combined"] = process.argv.slice(2);
+const mode = requestedMode === "save" ? undefined : requestedMode;
+assert.ok(["combined", "split"].includes(strategy));
+const benchmark = process.env.COMPUTER_BENCHMARK === "true";
+const buffered = [];
+function log(...args) {
+	if (benchmark) buffered.push(args);
+	else console.log(...args);
+}
 assert.equal(process.env.ALLOW_GUI_TESTS, "true", "Explicit owned-fixture GUI opt-in required");
 assert.ok(fixturePath && bridgePath && isAbsolute(fixturePath) && isAbsolute(bridgePath));
-const { createComputerFeature } = await import(pathToFileURL(bridgePath).href);
+const loadStart = performance.now();
+const { createComputerFeature } = createRequire(import.meta.url)(bridgePath);
+const loadMs = performance.now() - loadStart;
+const fixtureStart = performance.now();
 const directory = mkdtempSync("/tmp/easy-pi-owned-saved-");
 assert.ok(mode === undefined || ["broken-synthetic", "working-synthetic"].includes(mode));
 const fixture = spawn(fixturePath, [directory, ...(mode ? [mode] : [])], { stdio: ["pipe", "pipe", "inherit"] });
 const lines = createInterface({ input: fixture.stdout });
 const events = [];
 lines.on("line", (line) => {
-	console.log("FIXTURE", line);
+	log("FIXTURE", line);
 	events.push(JSON.parse(line));
 });
 const exit = new Promise((resolve) => fixture.on("exit", (code, signal) => resolve({ code, signal })));
 async function event(name) {
-	const until = Date.now() + 10000;
-	while (Date.now() < until) {
-		const found = events.find((r) => r.event === name);
-		if (found) return found;
-		if (fixture.exitCode !== null) throw Error("fixture exited");
-		await new Promise((r) => setTimeout(r, 20));
-	}
-	throw Error(`missing fixture event ${name}`);
+	const found = events.find((row) => row.event === name);
+	if (found) return found;
+	if (fixture.exitCode !== null) throw Error("fixture exited");
+	return new Promise((resolve, reject) => {
+		const finish = (error, value) => {
+			clearTimeout(timer);
+			lines.off("line", onLine);
+			fixture.off("exit", onExit);
+			if (error) reject(error);
+			else resolve(value);
+		};
+		const onLine = () => {
+			const value = events.find((row) => row.event === name);
+			if (value) finish(undefined, value);
+		};
+		const onExit = () => finish(Error("fixture exited"));
+		const timer = setTimeout(() => finish(Error(`missing fixture event ${name}`)), 10000);
+		lines.on("line", onLine);
+		fixture.on("exit", onExit);
+	});
 }
 let feature;
 let seq = 0;
+let taskStart;
+let taskEnd;
+let failure;
+const calls = [];
+const controller = new AbortController();
+const stop = () => controller.abort(new Error("E2E stopped"));
+process.on("SIGTERM", stop);
+process.on("SIGINT", stop);
+const deadline = setTimeout(stop, 60_000);
+deadline.unref();
 async function call(request) {
 	const id = `save-${++seq}`;
-	const result = await feature.binding.tools[0].execute(id, { request }, undefined, undefined, {});
+	const started = performance.now();
+	let result;
+	try {
+		result = await feature.binding.tools[0].execute(id, { request }, controller.signal, undefined, {});
+	} catch (error) {
+		calls.push({ op: request.op, ms: performance.now() - started, status: "thrown", code: error.details?.code });
+		throw error;
+	}
+	calls.push({
+		op: request.op,
+		ms: performance.now() - started,
+		status: result.details?.status,
+		nativeMs: result.details?.elapsedMs,
+	});
 	feature.binding.observeContext(true, [
 		{
 			role: "toolResult",
@@ -45,7 +91,7 @@ async function call(request) {
 			timestamp: Date.now(),
 		},
 	]);
-	console.log(
+	log(
 		"RESULT",
 		JSON.stringify({
 			request,
@@ -58,48 +104,62 @@ async function call(request) {
 	);
 	return result;
 }
+async function select(ref) {
+	if (strategy === "combined") return call({ op: "select", ref, observe: true });
+	await call({ op: "select", ref });
+	return call({ op: "observe" });
+}
 const rows = (r) => r.content[0].text.split("\n").slice(1).filter(Boolean).map(JSON.parse);
 try {
 	await event("ready");
+	taskStart = performance.now();
 	feature = createComputerFeature();
-	const parents = rows(await call({ op: "discover", title: "easy-pi-owned-save-document" }));
-	assert.equal(parents.length, 1);
-	const parent = await call({ op: "select", ref: parents[0].ref, observe: true });
-	if (mode) {
-		const field = rows(parent).find((r) => r.identifier === "reopened-body");
-		assert.ok(field?.ref);
-		const result = await call({
-			op: "segment",
-			ref: parent.details.observationRef,
-			actions: [{ op: "fill", target: { ref: field.ref }, text: "replacement only" }],
-			expected: { kind: "value", target: { selector: { identifier: "reopened-body" } }, value: "replacement only" },
-		});
-		fixture.stdin.write("state\n");
-		const state = await event("state");
-		if (mode === "broken-synthetic") {
-			assert.equal(state.body, field.value);
-			assert.ok(
-				result.details.actions.some((row) => row.code === "replacement_selection_unproved"),
-				JSON.stringify(result.details),
-			);
+	if (mode || !benchmark) {
+		const parents = rows(await call({ op: "discover", title: "easy-pi-owned-save-document" }));
+		assert.equal(parents.length, 1);
+		const parent = await select(parents[0].ref);
+		if (mode) {
+			const field = rows(parent).find((r) => r.identifier === "reopened-body");
+			assert.ok(field?.ref);
+			const result = await call({
+				op: "segment",
+				ref: parent.details.observationRef,
+				actions: [{ op: "fill", target: { ref: field.ref }, text: "replacement only" }],
+				expected: {
+					kind: "value",
+					target: { selector: { identifier: "reopened-body" } },
+					value: "replacement only",
+				},
+			});
+			fixture.stdin.write("state\n");
+			const state = await event("state");
+			if (mode === "broken-synthetic") {
+				assert.equal(state.body, field.value);
+				assert.ok(
+					result.details.actions.some((row) => row.code === "replacement_selection_unproved"),
+					JSON.stringify(result.details),
+				);
+			} else {
+				assert.equal(state.body, "replacement only");
+				assert.ok(["confirmed", "needs_observation"].includes(result.details.status));
+				assert.equal(result.details.actions[0].action.route, "synthetic_events");
+				const fresh = await call({ op: "observe" });
+				assert.equal(rows(fresh).find((r) => r.identifier === "reopened-body")?.value, "replacement only");
+			}
+			log("SYNTHETIC_SELECTION_PASS", mode);
 		} else {
-			assert.equal(state.body, "replacement only");
-			assert.ok(["confirmed", "needs_observation"].includes(result.details.status));
-			assert.equal(result.details.actions[0].action.route, "synthetic_events");
-			const fresh = await call({ op: "observe" });
-			assert.equal(rows(fresh).find((r) => r.identifier === "reopened-body")?.value, "replacement only");
+			if (parent.details.status === "observed")
+				assert.ok(
+					!rows(parent).some((r) => r.identifier === "saveAsNameTextField"),
+					"parent must not acquire its child sheet",
+				);
+			else assert.ok(["native_refused", "refused"].includes(parent.details.status), JSON.stringify(parent.details));
 		}
-		console.log("SYNTHETIC_SELECTION_PASS", mode);
-	} else {
-		if (parent.details.status === "observed")
-			assert.ok(
-				!rows(parent).some((r) => r.identifier === "saveAsNameTextField"),
-				"parent must not acquire its child sheet",
-			);
-		else assert.ok(["native_refused", "refused"].includes(parent.details.status), JSON.stringify(parent.details));
+	}
+	if (!mode) {
 		const windows = rows(await call({ op: "discover", title: "easy-pi-owned-save-panel" }));
 		assert.equal(windows.length, 1);
-		const before = await call({ op: "select", ref: windows[0].ref, observe: true });
+		const before = await select(windows[0].ref);
 		const field = rows(before).find((r) => r.identifier === "saveAsNameTextField");
 		assert.ok(field?.ref, "filename is visible and granted");
 		const name = "替换 filename.md";
@@ -110,15 +170,16 @@ try {
 			expected: { kind: "value", target: { selector: { identifier: "saveAsNameTextField" } }, value: name },
 		});
 		assert.equal(filled.details.status, "confirmed");
-		await assert.rejects(
-			call({
-				op: "segment",
-				ref: before.details.observationRef,
-				actions: [{ op: "fill", target: { ref: field.ref }, text: "MUST NOT APPEND" }],
-				expected: { kind: "visual", description: "Must refuse consumed observation" },
-			}),
-			(error) => error.details?.code === "stale_observation",
-		);
+		if (!benchmark)
+			await assert.rejects(
+				call({
+					op: "segment",
+					ref: before.details.observationRef,
+					actions: [{ op: "fill", target: { ref: field.ref }, text: "MUST NOT APPEND" }],
+					expected: { kind: "visual", description: "Must refuse consumed observation" },
+				}),
+				(error) => error.details?.code === "stale_observation",
+			);
 		const after = await call({ op: "observe" });
 		assert.equal(rows(after).find((r) => r.identifier === "saveAsNameTextField")?.value, name);
 		fixture.stdin.write("state\n");
@@ -137,7 +198,7 @@ try {
 		const catalog = await call({ op: "discover", title: "easy-pi-owned-save-document" });
 		const docs = rows(catalog);
 		assert.equal(docs.length, 1);
-		const doc = await call({ op: "select", ref: docs[0].ref, observe: true });
+		const doc = await select(docs[0].ref);
 		await call({
 			op: "segment",
 			ref: doc.details.observationRef,
@@ -149,12 +210,46 @@ try {
 		const view = await call({ op: "observe" });
 		assert.equal(rows(view).find((r) => r.identifier === "reopened-body")?.value, reopened.body);
 		assert.equal(readFileSync(saved.path, "utf8"), reopened.body);
-		console.log("SAVE_REOPEN_PASS", JSON.stringify({ name, bytes: Buffer.byteLength(reopened.body), directory }));
+		log("SAVE_REOPEN_PASS", JSON.stringify({ name, bytes: Buffer.byteLength(reopened.body), directory }));
 	}
+	taskEnd = performance.now();
+} catch (error) {
+	failure = { message: error.message, code: error.details?.code };
+	throw error;
 } finally {
-	await feature?.close();
-	console.log("LEASE", readFileSync(join(userInfo().homedir, ".pi-computer-desktop-v1/desktop.lock"), "utf8").trim());
-	fixture.stdin.end("quit\n");
-	console.log("EXIT", await exit);
-	lines.close();
+	const closeStart = performance.now();
+	let closed = false;
+	let fixtureExit;
+	try {
+		await feature?.close();
+		closed = true;
+	} finally {
+		fixture.stdin.end("quit\n");
+		fixtureExit = await exit;
+		lines.close();
+		clearTimeout(deadline);
+		process.off("SIGTERM", stop);
+		process.off("SIGINT", stop);
+		const closeMs = performance.now() - closeStart;
+		for (const args of buffered) console.log(...args);
+		console.log(
+			"E2E_SAMPLE",
+			JSON.stringify({
+				scenario: mode ?? "save",
+				strategy,
+				passed: taskEnd !== undefined && !controller.signal.aborted && closed && fixtureExit.code === 0,
+				failure,
+				loadMs,
+				setupMs: taskStart === undefined ? null : taskStart - fixtureStart,
+				taskMs: taskEnd === undefined ? null : loadMs + taskEnd - taskStart,
+				attemptMs: loadMs + (taskEnd ?? closeStart) - (taskStart ?? closeStart),
+				closeMs,
+				closed,
+				fixtureExit,
+				calls,
+				directory,
+				lease: readFileSync(join(userInfo().homedir, ".pi-computer-desktop-v1/desktop.lock"), "utf8").trim(),
+			}),
+		);
+	}
 }
