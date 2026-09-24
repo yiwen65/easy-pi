@@ -405,6 +405,9 @@
 - Verification method:
   - 原 oracle 反例 red/green、实际 handler 几何测试、真实模型及 native close。
 - Validation evidence: 旧反例 true != false 失败；新增 scrollY>0 与完整垂直视口包含记录，13 benchmark/lifecycle/metrics 测试及根 check 通过。model-scroll-qualified 使用已安装 3f07a721f 行为，20.557s/4 回合/0.0117948 USD，返回 bottom=true/scrolled=false/targetVisible=false，正确 FAIL；模型如实报告不足，正常关闭 C0689。仅评估误报已修复，滚动能力尚未实现/验证。
+- Candidate checkpoint: /tmp/epi-browser-scroll.1dusJS 保存原文件与 primitive probe；authoring rust 仍在 /tmp/epi-optimize.vOX6Su/candidate/rust。已增加固定 DomScrollIntoViewChecked 原语、页面 token/DOM/dialog 路由及独立 SDK start_scroll_into_view 入口；非原生窗口 fallback。24 CDP、14 page、3 SDK scroll 定向测试通过；原有 unsafe/dead_code/linker 警告保留。独立 CfT literal probe 9/9，页面/弹窗真实滚动，其他文档、移除、隐藏、透明、inert、secure、弹窗外均拒绝且零滚动/点击/输入；正常关闭。初次 probe dialog 已被 showModal 自动聚焦滚动而断言失败；后续记录 initialDialogScroll=1521.5 并显式重置后测得实际原语滚动，不掩盖测试前置条件。该 probe 不是 SDK 端到端；原生 scope 新路由先红，修复后复测中。
+- Remaining implementation: 独立 browser_scroll_into_view 仍须接入 canonical browser_bound_input 风险分类、能力 token、runtime registry、UniFFI/绑定生成与桥接 schema/context/grants；再做原生真实 guard、模型原任务和邻域。尚未发布候选，安装仍为 08b4fdb 原生加 3f07a721f 桥接。不得用未分类工具绕过授权，也不将 prototype 或传输单测称作产品可用。
+- Additional candidate evidence: scope attestation 回归 red→green；新增 browser_scroll_into_view 仅允许原生受控浏览器路由与 opaque target/tab/element_token，原生窗口、未 attested 或 script/endpoint/pid 注入仍拒绝。已补 canonical R2/active browser_bound_input 分类，44 authorization/session-authorization 定向测试通过。九个 authoring Rust 文件已格式化，恢复 scope 中一处无关格式差异。剩余核心接线是能力 token、runtime registry、生成绑定及 TS；新代码未打包/安装，旧包可继续使用。
 - Blocker: None.
 - Unblock condition: None.
 
