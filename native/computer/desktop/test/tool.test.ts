@@ -21,7 +21,7 @@ if (allowed) {
 }
 const sdk = allowed ? candidateSdk() : undefined;
 
-function fixture(refuse = false, nativeFilteredOut = 0) {
+function fixture(refuse = false, nativeFilteredOut = 0, onObserve?: () => void) {
 	assert.ok(sdk);
 	const api = sdk;
 	const events: string[] = [];
@@ -140,6 +140,7 @@ function fixture(refuse = false, nativeFilteredOut = 0) {
 					startCrossWindowDrag: forbidden,
 					startObserve() {
 						assert.equal(serial, 2, "semantic observation must use the selected child");
+						onObserve?.();
 						finish(
 							new api.ComputerResult.Observation({
 								value: {
@@ -247,6 +248,72 @@ test("discovery forwards bounded metadata narrowing before native catalog admiss
 		await f.host.close();
 	}
 });
+
+test("select with observe returns usable child evidence in one tool round", { skip: !allowed }, async () => {
+	const f = fixture();
+	try {
+		await f.publish("discover", await f.desktop.tool.execute("discover", { request: { op: "discover" } }));
+		const result = await f.desktop.tool.execute("select", {
+			request: { op: "select", ref: "window", observe: true },
+		});
+		assert.deepEqual(f.events, ["discover", "select", "observe"]);
+		assert.match(JSON.stringify(result.details), /"observationRef":"snapshot"/);
+		await f.publish("select", result);
+		await f.desktop.tool.execute("plan", {
+			request: {
+				op: "execute",
+				ref: "snapshot",
+				steps: [{ op: "assert_value", selector: { role: "AXTextField", label: "Field" }, value: "" }],
+			},
+		});
+		assert.equal(f.events.filter((event) => event === "plan").length, 1);
+	} finally {
+		await f.host.close();
+	}
+});
+
+test("retired combined selection does not start observation or grant late evidence", { skip: !allowed }, async () => {
+	const f = fixture();
+	try {
+		await f.publish("discover", await f.desktop.tool.execute("discover", { request: { op: "discover" } }));
+		const selecting = f.desktop.tool.execute("select", { request: { op: "select", ref: "window", observe: true } });
+		f.desktop.clear();
+		await assert.rejects(selecting, /stale_observation/);
+		assert.ok(!f.events.includes("observe"));
+	} finally {
+		await f.host.close();
+	}
+});
+
+test(
+	"retirement during combined observation prevents its late evidence from authorizing input",
+	{ skip: !allowed },
+	async () => {
+		const f = fixture(false, 0, () => f.desktop.clear());
+		try {
+			await f.publish("discover", await f.desktop.tool.execute("discover", { request: { op: "discover" } }));
+			await f.publish(
+				"select",
+				await f.desktop.tool.execute("select", {
+					request: { op: "select", ref: "window", observe: true },
+				}),
+			);
+			await assert.rejects(
+				f.desktop.tool.execute("plan", {
+					request: {
+						op: "execute",
+						ref: "snapshot",
+						steps: [{ op: "assert_value", selector: { role: "AXTextField", label: "Field" }, value: "" }],
+					},
+				}),
+				/stale_observation/,
+			);
+			assert.ok(!f.events.includes("plan"));
+		} finally {
+			await f.host.close();
+		}
+	},
+);
 
 test(
 	"semantic plans reuse the selected child and require the actual visible observation",

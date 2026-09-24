@@ -61,6 +61,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		label: "Computer",
 		description:
 			"Discover windows (optional literal, case-insensitive app/title filters and focused:true), explicitly select one returned ref, then observe semantic elements or capture an image. Focused child surfaces require their own selection; parent refs do not include them. " +
+			"Prefer select with observe:true when you need semantic evidence next: it selects the explicit window and returns a fresh Observation ref in one call, avoiding a separate observe round. " +
 			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
 			"Refs are not interchangeable: discover refs are for select/select_destination only. segment.ref must be the latest Observation ref from observe or Image ref from capture, not the selected window ref or an element ref. Element refs go in target.ref; point.ref uses the Image ref. " +
 			"Every Computer call consumes the previous evidence, including rejected calls; after stale_observation, observe/capture again and use the NEW evidence ref. " +
@@ -433,7 +434,24 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 				if (
 					(request.op === "select" || request.op === "select_destination") &&
 					api.ComputerResult.WindowSelected.instanceOf(result)
-				)
+				) {
+					if (request.op === "select" && request.observe) {
+						if (!canPublish()) return paused("stale_observation");
+						const child = target();
+						// Selection/adoption and its native terminal have already settled.
+						// Reuse this tool's scheduler permit, but track the read separately.
+						const observation = await session.run(
+							(_root, nativeSignal) =>
+								child.callNative((operation) => operation.startObserve(512, 32), nativeSignal),
+							signal,
+						);
+						if (!api.ComputerResult.Observation.instanceOf(observation))
+							throw new Error("Unexpected selected-window observation");
+						const projection = projectObservation(observation.inner.value);
+						if (canPublish() && selected === child && !child.revoked)
+							view.publish(id, projection.content, { ...projection.grant, revision: ++revision });
+						return { content: projection.content, details: { ...projection.details, selected: true } };
+					}
 					return {
 						content: [
 							{
@@ -446,6 +464,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 						],
 						details: { status: request.op === "select_destination" ? "destination_selected" : "selected" },
 					};
+				}
 				if (
 					(request.op === "click" || request.op === "scroll" || request.op === "key") &&
 					api.ComputerResult.Action.instanceOf(result)
