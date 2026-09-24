@@ -425,6 +425,7 @@ export function createControlledComputerTool(
 					valueSelectors: new Set(),
 				};
 				const rows = observation.elements ?? [];
+				const byIndex = new Map(profile === "browser" ? rows.map((row) => [row.elementIndex, row]) : []);
 				const counts = new Map<string, number>();
 				for (const row of rows) {
 					const key = selectorKey({ role: row.role, label: row.label ?? "" });
@@ -489,12 +490,25 @@ export function createControlledComputerTool(
 						Buffer.byteLength(row.elementToken) <= 128
 							? row.elementToken
 							: undefined;
+					const parent = row.parentIndex === undefined ? undefined : byIndex.get(row.parentIndex);
 					const line = JSON.stringify({
 						role: row.role,
 						...(row.label !== undefined ? { label: row.label } : {}),
 						...(row.value !== undefined ? { value: row.value } : {}),
 						...(row.enabled !== undefined ? { enabled: row.enabled } : {}),
 						...(profile === "browser" && typeof row.selected === "boolean" ? { selected: row.selected } : {}),
+						...(profile === "browser" &&
+						row.inWebContent === true &&
+						row.role === "link" &&
+						parent?.role === "tab" &&
+						parent.inWebContent === true
+							? {
+									tab: {
+										label: parent.label ?? "",
+										...(typeof parent.selected === "boolean" ? { selected: parent.selected } : {}),
+									},
+								}
+							: {}),
 						...(profile === "browser" && row.actions?.length
 							? {
 									actions: row.actions.filter((action) =>

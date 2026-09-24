@@ -53,6 +53,7 @@ export function createControlledBrowserTool(
 			"Execute 1–8 fill, press or assert_value steps using only returned refs/selectors and the observation ref. " +
 			"For batches use selectors after the first mutation; refs never rebind. " +
 			"Use click with observation ref and target element ref for links, dialogs, submit buttons and generic elements exposing press (direct click handlers). Prefer observeAfter:true to inspect the result. " +
+			"A link's tab field identifies its enclosing in-page tab and selection state. To switch that tab, prefer the link's own ref over the tab container; clicking a container does not click its children. " +
 			"Click submission is not task success. Press requires a value postcondition on an already observed control, not a future page or dialog. " +
 			"Press.value is the expected resulting control value (for example checkbox 'true'), never its label or a key to send. For activation without a control-value change, use click, not execute.press. Fill edits text fields, not select menus. " +
 			"For a single-select menu, use select_option with the observation ref and the returned option element ref whose actions include select_option, then observe. Option group identifies its menu. " +

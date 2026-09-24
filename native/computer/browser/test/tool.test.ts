@@ -41,6 +41,7 @@ function fixture(
 		blankStructure?: boolean;
 		presentationNoise?: boolean;
 		selectionState?: boolean;
+		tabLinks?: boolean;
 		presentationTextValue?: string;
 		duplicate?: boolean;
 		observeFailureAfter?: number;
@@ -128,6 +129,22 @@ function fixture(
 									truncated: false,
 									degraded: false,
 									elements: [
+										...(options.tabLinks
+											? [
+													{ label: "Activate First", parentIndex: 300n },
+													{ label: "Activate Second", parentIndex: 301n },
+													{ label: "Missing parent", parentIndex: 999n },
+													{ label: "Non-tab parent", parentIndex: 0n },
+												].map((row, index) => ({
+													...row,
+													role: "link",
+													elementIndex: BigInt(400 + index),
+													depth: 2,
+													inWebContent: true,
+													actions: ["press"],
+													elementToken: `${snapshotId}:link-${index}`,
+												}))
+											: []),
 										...(options.selectionState
 											? [
 													{ role: "tab", label: "First", selected: snapshots === 1, actions: ["press"] },
@@ -374,6 +391,43 @@ test(
 		assert.equal(parseRows(next).find((row) => row.label === "Second").selected, true);
 		assert.equal(parseRows(next).find((row) => row.label === "First").selected, false);
 		assert.deepEqual(f.calls, ["observe", "click", "observe"]);
+	},
+);
+
+test(
+	"tab link relationships come from native hierarchy without granting filtered parents",
+	{ skip: !sdk },
+	async (t) => {
+		const f = fixture({ selectionState: true, tabLinks: true });
+		t.after(() => f.host.close());
+		const first = await f.tool.execute("o", { request: { op: "observe", text: "Activate" } });
+		const parseRows = (result: typeof first) =>
+			result.content.flatMap((part) =>
+				part.type === "text"
+					? part.text
+							.split("\n")
+							.filter((line) => line.startsWith("{"))
+							.map((line) => JSON.parse(line))
+					: [],
+			);
+		const before = parseRows(first);
+		assert.deepEqual(before.find((row) => row.label === "Activate First").tab, { label: "First", selected: true });
+		assert.deepEqual(before.find((row) => row.label === "Activate Second").tab, { label: "Second", selected: false });
+		await assert.rejects(
+			f.tool.execute("hidden", {
+				request: { op: "click", ref: first.details.observationRef!, target: "b-snapshot-1:selection-0" },
+			}),
+			/stale_observation/,
+		);
+		const next = await f.tool.execute("all", { request: { op: "observe" } });
+		const after = parseRows(next);
+		assert.equal(after.find((row) => row.label === "Missing parent").tab, undefined);
+		assert.equal(after.find((row) => row.label === "Non-tab parent").tab, undefined);
+		assert.equal(after.find((row) => row.label === "Activate Second").tab.selected, true);
+		await f.tool.execute("click", {
+			request: { op: "click", ref: next.details.observationRef!, target: "b-snapshot-2:link-1" },
+		});
+		assert.deepEqual(f.calls, ["observe", "observe", "click"]);
 	},
 );
 

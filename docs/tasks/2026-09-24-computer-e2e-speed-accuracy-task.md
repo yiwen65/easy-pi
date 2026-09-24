@@ -483,6 +483,49 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-021 — 标签容器与实际激活目标
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 消除模型选择页内标签容器造成的无效果点击，同时保持直接处理器和委托处理器的正常控件能力与精确目标身份。
+- Inputs and prerequisites: model-postcondition 先点击 tab:29 无变化，再点击 link:44 切换成功的原始轨迹；当前原生 role=tab 直接对该 DOM 对象调用 click。
+- Scope or files: browser 观察/动作契约、原生 page 与受控 fixture；不自动将已授权引用重定向到未观察子节点，不删除正常控件能力。
+- Expected output: 容器/链接/直接控件/委托控件差异证据，因果修复和真实模型回归。
+- Dependencies: T-019.
+- Execution steps:
+  1. 用同版 jQuery UI 复现，记录 AX 层级、具体 DOM 对象、处理器与实际选中结果。
+  2. 比较能力声明修正、明确观察关系等方案，避免以普遍拒绝代替通用性。
+  3. 原生/桥接反例、实际控件与模型固定任务验证，独立报告速度与失败。
+- Acceptance criteria:
+  - 模型能直接选择实际激活目标；已有直接和委托标签控件不退化；引用、权限、unknown 不重放保持。
+- Verification method:
+  - 最小确定性页面、原始事件/状态、独立业务回执、定向回归和真实模型。
+- Validation evidence: /tmp/epi-tab-target.TnC456/probe.mjs 使用同版 jQuery UI：LI 容器仅 keydown/mouseover 等监听，A 链接有 click；精确点击 LI 事件 target=second 但选中不变，点击 A 切换，直接 BUTTON 和父级委托 DIV 也可切换。不能按无直接 handler 禁用所有 tab。桥接仅将原生 parentIndex 对应的直接 tab 父节点 label/selected 附于 link.tab，无父 ref、无额外输入授权，不改原生库。单测关系缺失先红后绿；32 browser、8 legacy、54 context/desktop/segment、8 package、native TS、根 check 通过，四个无关格式修改恢复。
+- GUI and model evidence: 无样式页面两次观察拒绝独立归 T-022，不从记录删除。加与原 benchmark 一致样式后，bridge-styled-before 因缺 tab 元数据失败且关闭 C06c3；bridge-styled-after 五调用，独立回执 clicks=[link,direct,delegated]，三类状态全 true，关闭 C06c4。候选可回退安装，旧包 installed-before，bridge 3561ba0935a93578fc3679280de37db3ad7f0e20524b4b07c614cfe76e3f0977，SDK 不变。model-installed 三项 3/3，click-tab-2 29.588s/8、form 23.400s/6、dialog 21.466s/6，全部零工具错误且关闭；费用共 0.0940736 USD。模型直接点击 Tab #2/#3 的 link，没有容器空点击，但多了两次搜索/刷新，较上一 24.652s/7 单样本更慢，不能宣称提速。下一步优先 T-022 的可复现整页拒绝，不以部分改进宣布全局完成。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-022 — Chrome AX 完全相同重复记录
+
+- Status: pending
+- Owner: coordinator
+- Objective: 正常列表页面不因 Chrome 返回完全相同的重复 AX 记录而整体拒绝，同时继续拒绝同 ID 冲突、多父节点、跨 frame 和超预算图。
+- Inputs and prerequisites: /tmp/epi-tab-target.TnC456/raw-ax2.json 包含两个重复 InlineTextBox ID，逐字段完全一致；旧包和 T-021 候选均 browser_observation_unproved 并正常关闭。
+- Scope or files: 原生 ax_snapshot、定向回归、增量补丁及真实普通列表页面；不合并内容不同的同 ID 节点，不放松原始输入大小和目标身份校验。
+- Expected output: 原始快照回放的 red/green、相同记录规范化、冲突/边界负例、真实 SDK 和工具观察资格。
+- Dependencies: T-011.
+- Execution steps:
+  1. 将真实原始重复图转成稳定原生回归，确认首个拒绝分支。
+  2. 只对完整记录相等的重复 ID 做表示规范化，再执行原有图与目标校验。
+  3. 反例、实际无样式列表页面、模型与安装材料资格，保留最初两个失败。
+- Acceptance criteria:
+  - 相同重复不丢内容或改目标；冲突重复仍拒绝，原始总量限制不变，真实输入/读回/关闭一致。
+- Verification method:
+  - captured AX 回放、native graph 单测、确定性 GUI 与包验证。
+- Validation evidence: raw probe2 单根且无重复父关系，但 -1000000003/-1000000006 各出现两次且 JSON 完全相同；对应列表圆点 InlineTextBox。bridge-before/after 两次 native 拒绝并关闭 C06c1/C06c2。尚未修改原生源码，不声称修复。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -512,6 +555,8 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-25: T-021 开始，coordinator 串行隔离 role=tab 容器与内部 link 的事件目标。上一轮状态投影和 press 预检已提交并试装；先保留现有能力，防止以拒绝自定义控件换取更低空点击数。当前安装 bridge ffc0c9dc，租约 C06c0，无运行中的上轮 fixture。
 
 - 2026-09-24: 用户已明确允许当前页面具有点击处理器的普通 HTML 元素受限点击，仍禁止任意脚本、跨 frame 和个人浏览器。文本筛选已提交 fb817cb9a，21 tool/contracts、15 context、8 package、native TS/npm check 与真实六调用资格通过。下一步原生扩展需要独立证明：AX 文字节点到实际 HTMLElement 的身份映射、处理器存在且点击前重验、dialog containment、禁用/脱离文档/导航变化/无处理器负例，以及输入 receipt/terminal 不变；不能只把 pressable 角色白名单全部放开。当前原生源码尚未修改。
 
