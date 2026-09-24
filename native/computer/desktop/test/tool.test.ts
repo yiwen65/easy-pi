@@ -290,6 +290,36 @@ test("retired combined selection does not start observation or grant late eviden
 	}
 });
 
+for (const visible of [true, false]) {
+	test(
+		`select image bypasses AX and grants only visible fresh image (visible=${visible})`,
+		{ skip: !allowed },
+		async () => {
+			const f = fixture(false, 0, () => {
+				throw new Error("image selection must not enable AX");
+			});
+			try {
+				await f.publish("discover", await f.desktop.tool.execute("discover", { request: { op: "discover" } }));
+				const result = await f.desktop.tool.execute("select", {
+					request: { op: "select", ref: "window", observe: "image" },
+				});
+				assert.deepEqual(f.events, ["discover", "select", "capture"]);
+				assert.equal(result.content[1]?.type, "image");
+				assert.match(JSON.stringify(result.details), /"selected":true/);
+				await f.publish("select", result);
+				if (!visible) f.desktop.observeContext(false, f.messages);
+				const input = () => f.desktop.tool.execute("key", { request: { op: "key", ref: "image", key: "Tab" } });
+				if (visible) await input();
+				else await assert.rejects(input, /stale_image/);
+				assert.equal(f.events.filter((event) => event === "input").length, visible ? 1 : 0);
+				await assert.rejects(input, /stale_image/);
+			} finally {
+				await f.host.close();
+			}
+		},
+	);
+}
+
 test(
 	"retirement during combined observation prevents its late evidence from authorizing input",
 	{ skip: !allowed },

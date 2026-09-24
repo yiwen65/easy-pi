@@ -35,7 +35,11 @@ export const DesktopInputSchema = Type.Object(
 				{ additionalProperties: false },
 			),
 			Type.Object(
-				{ op: StringEnum(["select"] as const), ref, observe: Type.Optional(Type.Literal(true)) },
+				{
+					op: StringEnum(["select"] as const),
+					ref,
+					observe: Type.Optional(Type.Union([Type.Literal(true), Type.Literal("image")])),
+				},
 				{ additionalProperties: false },
 			),
 			Type.Object({ op: StringEnum(["select_destination"] as const), ref }, { additionalProperties: false }),

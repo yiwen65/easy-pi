@@ -28,6 +28,10 @@ and report `replacement_selection_unproved`; working must replace exactly and
 pass independent fixture plus fresh AX readback. Before the native selection
 guard, broken mode deterministically appended the replacement and failed.
 
+`image-synthetic` selects and captures in one call, sends one image-bound Tab,
+then compares the complete body through fixture state and fresh AX readback.
+It checks the new combined visual route without a website or model API.
+
 The fixture's short startup deferral only allows its show animation to settle;
 it is not an acceptance oracle. All target authority comes from fresh native
 checks, not fixture titles. State/reopen stdout and disk reads are independent

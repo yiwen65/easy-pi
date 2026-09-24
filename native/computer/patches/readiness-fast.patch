@@ -1,0 +1,113 @@
+--- a/rust/crates/platform-macos/src/tools/computer.rs
++++ b/rust/crates/platform-macos/src/tools/computer.rs
+@@ -55,6 +55,23 @@
+     kind: &'static str,
+     call: impl FnOnce() -> ToolResult,
+ ) -> ToolResult {
++    with_focus_cleanup_policy(operation, kind, || (call(), true))
++}
++
++fn with_readiness_cleanup(operation: &Operation, kind: &'static str) -> ToolResult {
++    with_focus_cleanup_policy(operation, kind, || {
++        match (Native { operation }).prepare() {
++            Ok(changed) => (ToolResult::text("AX readiness established"), changed),
++            Err(code) => (refusal(code), true),
++        }
++    })
++}
++
++fn with_focus_cleanup_policy(
++    operation: &Operation,
++    kind: &'static str,
++    call: impl FnOnce() -> (ToolResult, bool),
++) -> ToolResult {
+     let started = Instant::now();
+     let Ok(target) = operation.session.native_window() else {
+         return refusal("unsupported_route");
+@@ -71,16 +88,23 @@
+         return refusal("controlled_cancelled");
+     };
+     let ready = Instant::now();
+-    let result = call();
++    let (result, may_change_focus) = call();
+     let called = Instant::now();
+     // Same bounded post-action settle as FocusGuard. This is behavior, NOT
+     // terminal evidence. Registered callbacks, not this sleep, prove drain.
+-    if targeted.is_some() {
++    if may_change_focus && targeted.is_some() {
+         std::thread::sleep(std::time::Duration::from_millis(50));
+     }
+     drop(targeted);
+     let settled = Instant::now();
+-    let _ = snapshot.detect();
++    // Unsupported optional AX setters made no change. Release both leases and
++    // drain already registered callbacks without polling unrelated windows.
++    // Accepted or uncertain setters retain the original settling behavior.
++    if may_change_focus {
++        let _ = snapshot.detect();
++    } else {
++        drop(snapshot);
++    }
+     let detected = Instant::now();
+     let callbacks = operation.wait_callbacks();
+     let drained = Instant::now();
+@@ -147,11 +171,7 @@
+             let native = Native { operation: &worker };
+             match native.needs_preparation() {
+                 Ok(true) => {
+-                    let readiness =
+-                        with_focus_cleanup(&worker, "ax_readiness", || match native.prepare() {
+-                            Ok(()) => ToolResult::text("AX readiness established"),
+-                            Err(code) => refusal(code),
+-                        });
++                    let readiness = with_readiness_cleanup(&worker, "ax_readiness");
+                     if readiness.is_error == Some(true) {
+                         return readiness;
+                     }
+--- a/rust/crates/platform-macos/src/tools/computer/observation/native.rs
++++ b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+@@ -248,7 +248,7 @@
+ 
+     /// First enablement can change application readiness. Its caller retains
+     /// focus cleanup; subsequent read-only scans do not repeat those waits.
+-    pub fn prepare(&self) -> Result<(), &'static str> {
++    pub fn prepare(&self) -> Result<bool, &'static str> {
+         let target = self.operation.session.native_window()?;
+         self.checkpoint()?;
+         let app = self.operation.primary(false, || unsafe {
+@@ -270,7 +270,8 @@
+                 set_bool_attr_true(app.as_ptr() as AXUIElementRef, "AXEnhancedUserInterface")
+             };
+         }
+-        if readiness_settle(error)? {
++        let changed = readiness_settle(error)?;
++        if changed {
+             crate::permissions::panel::pump_run_loop_briefly(0.5);
+         }
+         self.checkpoint()?;
+@@ -284,7 +285,7 @@
+         }
+         cache.retain(|(pid, _)| *pid != target.pid);
+         cache.insert((target.pid, stamp));
+-        Ok(())
++        Ok(changed)
+     }
+ 
+     fn bound(&self, element: AXUIElementRef) -> Result<(), &'static str> {
+--- a/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -665,13 +665,7 @@
+             operation: &self.operation,
+         };
+         if native.needs_preparation()? {
+-            let readiness =
+-                super::with_focus_cleanup(&self.operation, "segment_ax_readiness", || match native
+-                    .prepare()
+-                {
+-                    Ok(()) => cua_driver_core::protocol::ToolResult::text("AX ready"),
+-                    Err(code) => super::refusal(code),
+-                });
++            let readiness = super::with_readiness_cleanup(&self.operation, "segment_ax_readiness");
+             if readiness.is_error == Some(true) {
+                 return Err("accessibility_readiness_unknown");
+             }

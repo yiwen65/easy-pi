@@ -32,7 +32,7 @@ final class Document: NSObject {
         if CommandLine.arguments.count > 2 {
             window.makeFirstResponder(editor)
             editor.setSelectedRange(NSRange(location:(body as NSString).length,length:0))
-            DispatchQueue.main.asyncAfter(deadline:.now()+0.3) { self.emit("ready",["pid":ProcessInfo.processInfo.processIdentifier]) }; return
+            DispatchQueue.main.asyncAfter(deadline:.now()+0.3) { self.emit("ready",["pid":ProcessInfo.processInfo.processIdentifier,"body":self.body]) }; return
         }
         panel.title="easy-pi-owned-save-panel"
         panel.nameFieldStringValue="old-name.md"
@@ -75,7 +75,16 @@ DispatchQueue.global().async {
     while let line=readLine() {
         DispatchQueue.main.async {
             if line=="quit" {document.panel.cancel(nil);app.terminate(nil)}
-            else if line=="state" {document.emit("state",["name":document.panel.nameFieldStringValue,"body":document.editor.string])}
+            else if line=="state" {
+                document.emit("state",[
+                "name":document.panel.nameFieldStringValue,"body":document.editor.string,
+                "active":app.isActive,
+                "frontPid":NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
+                "keyWindow":app.keyWindow?.windowNumber ?? -1,
+                "panelWindow":document.panel.windowNumber,
+                "documentWindow":document.window.windowNumber,
+                "pid":ProcessInfo.processInfo.processIdentifier
+            ])}
         }
     }
     DispatchQueue.main.async {document.panel.cancel(nil);app.terminate(nil)}

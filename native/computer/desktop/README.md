@@ -20,6 +20,12 @@ clicks, dragging, two-axis scrolling, and window actions. The closed schemas in
 `contracts.ts`, `segment-contracts.ts` and `drag-contracts.ts` define accepted
 requests; this is not an arbitrary script interface.
 
+For fewer agent round trips, `select` accepts `observe: true` to return semantic
+evidence immediately, or `observe: "image"` to return an exact-window screenshot
+and Image ref (maximum 2048 pixels) without enabling AX. Omit the option for
+selection only. Both combined forms retain cancellation, child ownership and
+model-visible evidence checks; selection alone never authorizes input.
+
 References have distinct roles: `discover` returns window refs used only by
 `select`/`select_destination`; `segment.ref` requires the latest **Observation
 ref** from `observe` or **Image ref** from `capture` (or fresh segment evidence).

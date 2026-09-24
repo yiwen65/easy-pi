@@ -22,7 +22,7 @@ const { createComputerFeature } = createRequire(import.meta.url)(bridgePath);
 const loadMs = performance.now() - loadStart;
 const fixtureStart = performance.now();
 const directory = mkdtempSync("/tmp/easy-pi-owned-saved-");
-assert.ok(mode === undefined || ["broken-synthetic", "working-synthetic"].includes(mode));
+assert.ok(mode === undefined || ["broken-synthetic", "working-synthetic", "image-synthetic"].includes(mode));
 const fixture = spawn(fixturePath, [directory, ...(mode ? [mode] : [])], { stdio: ["pipe", "pipe", "inherit"] });
 const lines = createInterface({ input: fixture.stdout });
 const events = [];
@@ -111,14 +111,34 @@ async function select(ref) {
 }
 const rows = (r) => r.content[0].text.split("\n").slice(1).filter(Boolean).map(JSON.parse);
 try {
-	await event("ready");
+	const ready = await event("ready");
 	taskStart = performance.now();
 	feature = createComputerFeature();
 	if (mode || !benchmark) {
 		const parents = rows(await call({ op: "discover", title: "easy-pi-owned-save-document" }));
 		assert.equal(parents.length, 1);
-		const parent = await select(parents[0].ref);
-		if (mode) {
+		const parent =
+			mode === "image-synthetic"
+				? await call({ op: "select", ref: parents[0].ref, observe: "image" })
+				: await select(parents[0].ref);
+		if (mode === "image-synthetic") {
+			assert.ok(parent.content.some((row) => row.type === "image"));
+			assert.ok(parent.details.imageRef);
+			assert.equal(parent.details.selected, true);
+			const result = await call({
+				op: "segment",
+				ref: parent.details.imageRef,
+				actions: [{ op: "key", key: "Tab" }],
+				expected: { kind: "visual", description: "A single tab appended in the owned editor" },
+			});
+			assert.equal(result.details.actions[0]?.dispatch, "dispatched");
+			fixture.stdin.write("state\n");
+			const state = await event("state");
+			assert.equal(state.body, `${ready.body}\t`);
+			const fresh = await call({ op: "observe" });
+			assert.equal(rows(fresh).find((row) => row.identifier === "reopened-body")?.value, state.body);
+			log("IMAGE_SELECT_INPUT_PASS");
+		} else if (mode) {
 			const field = rows(parent).find((r) => r.identifier === "reopened-body");
 			assert.ok(field?.ref);
 			const result = await call({

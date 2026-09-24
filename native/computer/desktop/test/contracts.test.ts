@@ -6,6 +6,8 @@ test("closed desktop requests accept bounded discovery, capture and image input"
 	for (const request of [
 		{ op: "discover" },
 		{ op: "select", ref: "opaque" },
+		{ op: "select", ref: "opaque", observe: "image" },
+		{ op: "select", ref: "opaque", observe: true },
 		{ op: "capture", maxDimension: 1024 },
 		{ op: "click", ref: "image", x: 0.5, y: 100 },
 		{ op: "scroll", ref: "image", x: 0, y: 0, direction: "down" },
@@ -22,6 +24,7 @@ test("arbitrary targets, scripts, chords, repeats and oversized values are rejec
 	for (const request of [
 		{ op: "discover", pid: 123 },
 		{ op: "select", ref: "x", windowId: 1 },
+		{ op: "select", ref: "x", observe: "arbitrary" },
 		{ op: "capture", maxDimension: 2049 },
 		{ op: "capture", maxDimension: 1.5 },
 		{ op: "capture", maxDimension: 100, crop: [0, 0, 1, 1] },

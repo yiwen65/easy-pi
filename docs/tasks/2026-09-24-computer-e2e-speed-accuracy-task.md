@@ -14,7 +14,7 @@
 <!-- task-doc-section:scope-non-goals -->
 ## Scope and non-goals
 
-仅 pi Computer 测试、测量与已授权实验；原始记录保留。默认不调用付费模型、不改变系统权限、不删除租约、不操作业务文档。生产检查的删除需独立证据与确认。
+仅 pi Computer 测试、源码优化和改造；2026-09-24 用户明确授权继续源码级优化，以速度、稳定及 agent 调用友好为目标。原始记录保留。默认不调用付费模型、不改变系统权限、不删除租约、不操作业务文档。冗余等待或重复工作可依据对照证据精简；不得用绕过目标/输入归属校验伪造成功。
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -42,7 +42,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-004 -> T-002 -> T-003.
+- Dependency graph: T-001 -> T-004 -> T-002 -> T-003; T-001 -> T-005; T-001 -> T-006. 全部串行；T-005/006 为单独可验证的局部交付，不代表 T-003 全局精简完成。
 - Parallel batches: 无；同一 fixture、记录格式及桌面串行。
 - Serialization constraints: 同一桌面禁止并发；文档由 coordinator 维护。
 
@@ -109,7 +109,7 @@
 
 ### [ ] T-004 — 保存焦点失败定位及回归
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 解释并修复保存流程中 foreground_focus_unproved 的首次分歧，不绕过焦点校验。
 - Inputs and prerequisites: T-001 的 6 次失败原始日志；现有 owned fixture。
@@ -124,6 +124,46 @@
 - Verification method:
   - 原始失败 trace 对照、独立文件与重新打开读回、串行重复 GUI 回归。
 - Validation evidence: Not run.
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-005 — 不支持 AX 启用时的无效等待精简
+
+- Status: done
+- Owner: coordinator
+- Objective: 对明确未改变应用状态的 AX 启用结果跳过窗口变化等待，保留已接受/未知结果和回调排空。
+- Inputs and prerequisites: T-001 分段计时及现有 readiness_settle 返回分类。
+- Scope or files: 原生 tools/computer、observation/native、segment；增量补丁与安装包。
+- Expected output: 同业务 oracle 的原生二进制 A/B、源码补丁、已资格验证的安装资产。
+- Dependencies: T-001.
+- Execution steps:
+  1. prepare 返回是否已接受启用，保留拒绝/错误分类；只在明确 unsupported/not implemented 且成功返回时释放 lease 并跳过等待。
+  2. 交错二进制对照、原生与桥接测试、重新生成绑定检查、安装路径回归。
+- Acceptance criteria:
+  - 没有放松目标、权限或输入校验；成功率及关闭无回归，端到端收益明显。
+- Verification method:
+  - 三场景 10 对交错 A/B；native tools::computer；源码/材料/包一致性与安装后 UI。
+- Validation evidence: /tmp/epi-optimize.vOX6Su/fast-ab 60/60；最终安装 installed-screening 60/60；完整保存探针（含旧 ref 拒绝/parent 隔离）通过。最终 native tools::computer 67/67、focus_steal 11/11、配置 headless fixture 后 SDK controlled_ 94/94；desktop 124/124、package 8/8、typecheck、npm run check、UniFFI --check 通过。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-006 — 单次选择并取得视觉证据
+
+- Status: done
+- Owner: coordinator
+- Objective: 让 agent 以 select observe:image 获取新图及可用 ref，省去独立 capture 轮次。
+- Inputs and prerequisites: T-001 现有选择/读取合并路径和证据授予机制。
+- Scope or files: native/computer/desktop/contracts.ts、tool.ts、test 与 README。
+- Expected output: 不隐式读取 AX 的选择+截图接口，保留旧语义接口及选择-only。
+- Dependencies: T-001.
+- Execution steps:
+  1. 复用现有 child/session/terminal 调度路径，选择后按指定种类读取。
+  2. 验证图片可见性、引用消费及取消；真实 UI 输入读回。
+- Acceptance criteria:
+  - 少一轮调用；未展示或过期图不授权输入；不增加第二执行循环。
+- Verification method:
+  - 定向契约/工具测试、类型检查、安装后的 owned UI。
+- Validation evidence: 19/19 定向及 124/124 desktop 测试通过。安装后 image-synthetic 探针真实 Tab 输入、完整正文 fixture/AX 双读回通过，taskMs=526.976，关闭成功，lease C045c。该值为单次冒烟，不是视觉性能统计。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -143,6 +183,12 @@
 - 2026-09-24: T-001 开始；先实现确定性工具/UI 基线，不更改生产安全策略。
 - 2026-09-24: T-001 完成。6 次冒烟通过后执行 120 次正式对照；不同 probe 版本的冒烟未混入正式统计。补充汇总器拒绝缺失关闭证明或非法耗时的单测。
 - 2026-09-24: 发现保存焦点失败，新增 T-004，并置于覆盖扩展和生产精简之前。当前未删除生产校验、权限或焦点保护，未调用付费模型。
+- 2026-09-24: 用户授权源码级优化改造；T-004 开始，先收集 fixture 前台/key-window 状态与失败动作关联，再做单变量候选。
+- 2026-09-24: 焦点状态基线新增 36 次，保存 8/12；4 次失败均观测到 app inactive/keyWindow=-1，但 NSWorkspace frontPid 仍为 fixture。此为相关性而非根因证明。隔离 trace 8/8 成功。人为 deactivate 导致另一种“已投递但未保存”故障，不等同原拒绝，未据此改生产焦点策略，故障注入代码已移除。
+- 2026-09-24: T-005/006 开始；60 次同 source bridge 二进制 AB 全部通过，原生无效等待明显消除。广义 native controlled_ 测试 169 通过、15 失败、1 忽略，失败包含缺失 headless fixture 环境和历史 browser fixture 问题；不宣称全套通过。随后与改动相关 tools::computer 67/67 通过。
+- 2026-09-24: SDK 首次缺 headless fixture 导致 71 pass/23 fail（后续共享锁 poison），原始失败保留；补齐仓库既有 renderer-liveness-worker/fake-helper 和短 TMPDIR 后 94/94 通过。未修改产品来绕过测试环境错误。
+- 2026-09-24: T-005/006 完成；1434 文件新包已安装，原包保留 /tmp/epi-optimize.vOX6Su/installed-before。最终 SDK 8b01d174bff81dc49101b3a85e692fbc8b4ceb7fbdf13c237e5411ad3d98d75a。安装后 60/60、额外图像输入/完整保存探针通过，最终 lease C045d。长驻进程需正常结束并新建进程使用新库，未强行终止既有进程。
+- 2026-09-24: T-004 仍由 coordinator 持有；恢复时优先对比失败时 WindowServer 实时 PID 与 cleanup 使用的 NSWorkspace PID，再做有针对性的激活实验。最新通过不能证明历史焦点故障根因已修复。T-002/003 仍待后续覆盖，不把局部交付冒充全部完成。
 
 ### 首批实测与决策
 
@@ -160,9 +206,25 @@
 
 分段诊断另行运行，不混入对照：`ax_readiness` 总计 1028.106ms，`detectUs=1024481`、`callUs=480`、`callbackDrainOk=true`。`tools/computer.rs` 的 `with_focus_cleanup` 丢弃 `snapshot.detect()` 返回值；`window_change_detector.rs` 默认检测 1000ms，但 snapshot 同时持有 wildcard 焦点抑制 lease。因此这是高价值待实验项，不是已证实可直接删除的空等待。下一步需要保留回调排空与焦点约束的独立候选对照；目前未替换安装包。
 
+### 已交付的局部优化（后续证据更新）
+
+上段为初始决策记录。随后仅对明确 unsupported/not implemented 的可选 AX 启用结果移除等待；保留 lease 安装/释放、回调排空及所有已接受/未知结果的原行为。无需全量删除焦点保护。源码见 `native/computer/patches/readiness-fast.patch`；增量顺序和材料哈希见同目录 `readiness-fast.md`。
+
+同一 source bridge 的二进制交错 A/B，各场景 10 对，60/60 全部通过（预期拒绝另算场景）。候选 A/B 二进制含关闭默认诊断开关的 trace 分支，最终发布移除了该诊断；最终包另做安装回归，未混入 A/B 分布。
+
+| 场景 | 原版/候选成功数 | P50 原版 → 候选 (ms) | P95 原版 → 候选 (ms) | 逐对节省中位数 (ms) |
+| --- | --- | --- | --- | --- |
+| 保存重开 | 10/10、10/10 | 2238.9 → 1273.7 | 2590.6 → 1917.3 | 854.4 |
+| 正常替换 | 10/10、10/10 | 1514.8 → 450.7 | 1934.6 → 898.2 | 1036.4 |
+| 失效全选正确拒绝 | 10/10、10/10 | 1666.6 → 597.5 | 1778.0 → 622.0 | 1073.8 |
+
+每一对均更快，非只比较均值；没有失败剔除。诊断中 detect 从约 1024ms 降到 0.041ms，callbackDrainOk=true。最终包安装回归 split/combined 每场景各 10 次，60/60 全部通过且关闭；保留首个冷启动保存 2720ms，不静默移除尾部样本。该结果不证明所有应用或极低失败率，不宣称模型端到端加速相同比例。
+
+Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":"image"}}` 一次获得窗口选择与新 Image ref，不触发 AX 启用。`observe:true` 保持语义读取；省略保持只选择。后续 input 仍需模型实际看到该图片，过期或被过滤图片不能授权输入。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 仪器与单测通过；正式产品基线 114/120（含 40 次预期拒绝），6 次保存失败完整保留。详细数据及版本见上表和本地原始记录。
-- Limitations: T-004 焦点根因/修复、T-002 浏览器/视觉/干扰/连续会话、T-003 精简资格验证未完成；模型层尚未执行；无生产提速或彻底修复结论。
+- Evidence: T-001、T-005、T-006 完成；原版失败均保留。局部优化 60 次二进制 A/B 和 60 次最终安装 GUI 均通过；额外真实图像输入、完整保存重开通过，完整静态检查及定向测试见上。
+- Limitations: T-004 焦点根因/修复、T-002 浏览器/更广视觉/干扰/连续会话、T-003 全局精简资格验证未完成；模型层未执行；仅已测 owned AppKit 任务具备提速证据，无彻底修复或所有应用稳定性结论。
