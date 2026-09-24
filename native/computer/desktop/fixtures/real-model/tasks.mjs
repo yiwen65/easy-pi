@@ -29,7 +29,7 @@ export function checkOracle(id, value) {
 		);
 	if (id === "chrome-navigation") return value?.record === "R-204" && value.note === "reviewed 你好";
 	if (id === "chrome-tabs") return value?.answer === "REF-729";
-	if (id === "chrome-scroll") return value?.bottom === true;
+	if (id === "chrome-scroll") return value?.bottom === true && value.scrolled === true && value.targetVisible === true;
 	if (id === "chrome-dialog") return value?.comment === "approved 你好";
 	return false;
 }
@@ -57,7 +57,7 @@ export function pageHtml(id, title, pathname) {
 				: `<a href="/reference" target="_blank">Reference</a>${form('<label>Answer <input name="answer"></label>')}`;
 	if (id === "chrome-scroll")
 		body =
-			'<p>Scroll to the bottom.</p><div style="height:2400px;background:linear-gradient(white,#ccd)"></div><button onclick="done({bottom:true})">Bottom confirmation</button>';
+			'<p>Scroll to the bottom.</p><div style="height:2400px;background:linear-gradient(white,#ccd)"></div><button onclick="const r=this.getBoundingClientRect();done({bottom:true,scrolled:scrollY>0,targetVisible:r.top>=0&&r.bottom<=innerHeight})">Bottom confirmation</button>';
 	if (id === "chrome-dialog")
 		body =
 			"<button onclick=\"document.querySelector('dialog').showModal()\">Open dialog</button><dialog><label>Comment <input id=\"comment\"></label><button onclick=\"done({comment:document.getElementById('comment').value});this.closest('dialog').close()\">Confirm</button></dialog>";

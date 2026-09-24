@@ -383,6 +383,28 @@
 - Installed model evidence: 2026-09-25，gpt-6-sol 四任务独立 oracle 4/4、正常关闭 4/4；click-tab-2 rawReward=1，42.856s/11 回合；form 23.483s/6 回合、dialog 22.114s/6 回合、navigation 28.033s/7 回合；费用合计 0.1353116 USD，最终 C067b。保留 click-tab-2 的 stale_observation 拒绝及最终 press condition_unknown：业务点击已成功，但模型错用值后置条件，最终只报告未能确认。不能将 oracle 通过称为零工具错误或完整可见验证。下一轮改进点击/press 契约提示，保持 unknown 不重放及错误后不自动读取边界；不以此单轮声称普遍提速。证据 /tmp/epi-click-handler.mz5oXh/model-installed。
 - Installed smoke evidence: installed-smoke 六次实际工具调用，Unicode 填充/select/save/筛选回执独立与可见结果均通过，正常关闭 C067c。点击能力与原始任务 oracle 已通过；任务仍 in_progress，继续处理模型动作选择及可见验证，依赖 T-015/T-013 尚未整体关闭。
 - Action guidance evidence: 工具描述明确 generic 元素激活使用 click，press.value 是目标控件结果值而非标签。原生、权限、unknown 与错误后读取规则未变。model-action-guidance 同四任务 4/4，零工具错误且全部关闭 C0680；click-tab-2 28.683s/7 回合并读回奖励，form 24.756s/6、dialog 23.217s/6、navigation 25.863s/7；总费用 0.1226096 USD。这是顺序单样本对照，不宣称稳定速度优势。21 browser 契约/工具、15 context、8 package、native TS、根 check 通过；初次两套测试 SDK 路径误配分别在缺 index.js/computer.js 时加载失败，改用各自匹配输入后通过，未计为产品输入故障。package-action-guidance 已可回退安装，旧包 installed-before-action-guidance。接续换 seed 7/99 检查固定种子以外表现。
+- Seed variation evidence: model-seed7 与 model-seed99 的 click-tab-2 均 rawReward=1、零工具错误并正常关闭；14.341s/4 回合/0.0158916 USD 与 18.324s/4 回合/0.0146784 USD，最后 C0682。加 seed 42 共三个固定种子通过，不推断任意页面覆盖率。继续 model-general-neighbors 六个不同机制任务，不将已知未实现的 drag/password/tab 排除后称全量 benchmark。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-017 — 滚动场景真实能力与验收
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 长页面任务确实发生滚动且点击时目标位于视口内，不把 DOM 远程激活冒充滚动能力。
+- Inputs and prerequisites: model-general-neighbors 的旧 oracle 通过与 model-scroll-qualified 的明确反证；受控独立页面，保留全部失败。
+- Scope or files: real-model/tasks.mjs、tasks.test.mjs；后续固定受控页面滚动协议及原生实现，不开放任意脚本、个人浏览器、跨 frame 或未知输入重放。
+- Expected output: 无假阳性的独立 oracle，以及真实滚动/可见目标操作和取消邻域证明。
+- Dependencies: T-016.
+- Execution steps:
+  1. 用无滚动但 button clicked 的反例证明旧 oracle 误报，并记录实际点击时的视口状态。
+  2. 设计有界滚动操作，维持新观察、目标/文档身份及 terminal/取消约束。
+  3. 验证真实模型滚动、正反几何案例、弹窗/失效目标及关闭，不靠忽略失败获得分数。
+- Acceptance criteria:
+  - 原测试要求滚动和按钮入视口均获独立证据；未滚动/视口外点击必须失败，模型可见结果与 oracle 一致。
+- Verification method:
+  - 原 oracle 反例 red/green、实际 handler 几何测试、真实模型及 native close。
+- Validation evidence: 旧反例 true != false 失败；新增 scrollY>0 与完整垂直视口包含记录，13 benchmark/lifecycle/metrics 测试及根 check 通过。model-scroll-qualified 使用已安装 3f07a721f 行为，20.557s/4 回合/0.0117948 USD，返回 bottom=true/scrolled=false/targetVisible=false，正确 FAIL；模型如实报告不足，正常关闭 C0689。仅评估误报已修复，滚动能力尚未实现/验证。
 - Blocker: None.
 - Unblock condition: None.
 

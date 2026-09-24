@@ -17,6 +17,10 @@
 
 该批零工具错误，click-tab-2 使用 click 并读回页面奖励；总报告费用 0.1226096 USD，最终 C0680。前一批费用 0.1353116 USD、四任务 oracle 均通过，但保留上述 unknown 与一次旧引用拒绝。两批不是交错性能试验，不证明普遍提速或全量 benchmark 达标。21 browser 契约/工具、15 context、8 package、native TS、根 check 通过；点击修复另有 13 page、24 CDP、139 desktop/context 与独立 renderer 检查。证据 `/tmp/epi-click-handler.mz5oXh/{model-installed,model-action-guidance,listeners-final,installed-smoke}`；原包分别保留 `installed-before`、`installed-before-action-guidance`。
 
+补充 2026-09-25：click-tab-2 seed 7/99 另两次 rawReward=1、零工具错误且正常关闭（14.341s/4 回合、18.324s/4 回合）。六项邻域旧 oracle 均通过，费用 0.1265812 USD、全部关闭，但 **chrome-scroll 仅证明底部按钮被激活，不证明发生滚动**；不得把它计为完整滚动能力通过。其余五项 MiniWoB click-test-2/enter-text/click-checkboxes/choose-list/scroll-text 均 rawReward=1，仍是浏览器语义模式奖励，不是逐像素手势资格。
+
+随后修正 chrome-scroll oracle：要求实际点击时 scrollY>0 且按钮完整位于垂直视口内。无滚动反例修复前错误通过，修复后拒绝；五种 handler 几何案例及全组 13 测试通过。真实模型复测 **FAIL**，回执 bottom=true/scrolled=false/targetVisible=false，20.557s/4 回合、0.0117948 USD，模型如实报告不足，正常关闭 C0689。证据 `/tmp/epi-click-handler.mz5oXh/{model-seed7,model-seed99,model-general-neighbors,model-scroll-qualified}`。保留旧 fixture 源码快照和历史结果；T-017 继续实现并验收真实滚动，不弱化 oracle。
+
 ### 可选合并观察（前轮）
 
 浏览器可选 `observeAfter:true` 已通过原生动作结束/读取结束/取消/失败事实保留/实际 provider context 回归，并安装实验版。用法见 `native/computer/browser/README.md`。原生 SDK 不变；只合并工具返回，不省略读取或业务验收。
