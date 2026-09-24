@@ -178,6 +178,42 @@ const execute = (ref: string) => ({
 	},
 });
 
+for (const visible of [true, false]) {
+	test(
+		`post-action observations need the exact combined provider result: visible=${visible}`,
+		{ skip: !sdk },
+		async (t) => {
+			const f = await fixture();
+			t.after(() => f.close());
+			const seen = await f.tool.execute("o", { request: { op: "observe" } });
+			const message = (id: string, content: ToolResultMessage["content"]): ToolResultMessage => ({
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "computer",
+				content,
+				isError: false,
+				timestamp: 1,
+			});
+			f.binding.observeContext?.(false, [message("o", seen.content)]);
+			assert.ok(seen.details && typeof seen.details === "object" && "observationRef" in seen.details);
+			const combined = await f.tool.execute("p", {
+				...execute(String(seen.details.observationRef)),
+				observeAfter: true,
+			});
+			assert.ok(combined.details && typeof combined.details === "object" && "observationRef" in combined.details);
+			assert.notEqual(combined.details.observationRef, seen.details.observationRef);
+			f.binding.observeContext?.(false, [message("p", visible ? combined.content : combined.content.slice(1))]);
+			const next = execute(String(combined.details.observationRef));
+			if (visible) await f.tool.execute("p2", next);
+			else {
+				f.binding.observeContext?.(false, [message("p", combined.content)]);
+				await assert.rejects(f.tool.execute("p2", next), /current model view/);
+			}
+			assert.equal(f.plans, visible ? 2 : 1);
+		},
+	);
+}
+
 for (const visible of [true, false])
 	for (const action of ["execute", "click", "select_option"] as const) {
 		test(

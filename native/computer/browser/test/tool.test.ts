@@ -35,6 +35,9 @@ function fixture(
 		clickEffect?: CuaSdk.ActionEffect;
 		option?: boolean;
 		noise?: number;
+		observeFailureAfter?: number;
+		clickTerminal?: Promise<void>;
+		followupTerminal?: Promise<void>;
 	} = {},
 ) {
 	assert.ok(sdk);
@@ -56,7 +59,12 @@ function fixture(
 				const complete = (name: string, value: NativeResult, committed: boolean) => {
 					calls.push(name);
 					result.resolve(value);
-					receipt.resolve({ operationId: `op-${calls.length}`, cancelled: false, inputCommitted: committed });
+					const terminal = { operationId: `op-${calls.length}`, cancelled: false, inputCommitted: committed };
+					if (name === "click" && options.clickTerminal)
+						void options.clickTerminal.then(() => receipt.resolve(terminal));
+					else if (name === "observe" && snapshots > 1 && options.followupTerminal)
+						void options.followupTerminal.then(() => receipt.resolve(terminal));
+					else receipt.resolve(terminal);
 				};
 				return {
 					startPrepare() {
@@ -94,6 +102,12 @@ function fixture(
 					},
 					startObserve() {
 						const snapshotId = `b-snapshot-${++snapshots}`;
+						if (options.observeFailureAfter !== undefined && snapshots > options.observeFailureAfter) {
+							calls.push("observe-refused");
+							result.reject(new api.ComputerError.Refused({ reason: "browser_frame_changed" }));
+							receipt.resolve({ operationId: "read-refused", cancelled: false, inputCommitted: false });
+							return;
+						}
 						complete(
 							"observe",
 							new api.ComputerResult.Observation({
@@ -222,6 +236,136 @@ const execute = (ref: string) => ({
 		ref,
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
+});
+
+test("post-action observe waits for terminal and preserves submission facts", { skip: !sdk }, async (t) => {
+	const terminal = deferred<void>();
+	const f = fixture({ clickTerminal: terminal.promise });
+	t.after(() => f.host.close());
+	const seen = await f.tool.execute("o", { request: { op: "observe" } });
+	const ref = seen.details.observationRef!;
+	const pending = f.tool.execute("c", { request: { op: "click", ref, target: `${ref}:0` }, observeAfter: true });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(f.calls, ["observe", "click"]);
+	terminal.resolve();
+	const combined = await pending;
+	assert.equal(combined.details.status, "action_submitted");
+	assert.equal(combined.details.observationRef, "b-snapshot-2");
+	assert.equal(combined.content.length, 2);
+	assert.deepEqual(f.calls, ["observe", "click", "observe"]);
+});
+
+test("post-action read failure retains the completed action and never replays", { skip: !sdk }, async (t) => {
+	const f = fixture({ observeFailureAfter: 1 });
+	t.after(() => f.host.close());
+	const seen = await f.tool.execute("o", { request: { op: "observe" } });
+	await assert.rejects(
+		f.tool.execute("p", { ...execute(seen.details.observationRef!), observeAfter: true }),
+		(error: unknown) => {
+			assert.ok(error instanceof Error && "details" in error);
+			const details = error.details as {
+				status: string;
+				completedSteps: number;
+				observationError: string;
+				observationRef?: string;
+			};
+			assert.equal(details.status, "completed");
+			assert.equal(details.completedSteps, 1);
+			assert.equal(details.observationError, "browser_frame_changed");
+			assert.equal(details.observationRef, undefined);
+			assert.match(error.message, /Do not replay/);
+			return true;
+		},
+	);
+	assert.deepEqual(f.calls, ["observe", "plan", "observe-refused"]);
+});
+
+test("cancel during action terminal wait suppresses the optional read", { skip: !sdk }, async (t) => {
+	const terminal = deferred<void>();
+	const controller = new AbortController();
+	const f = fixture({ clickTerminal: terminal.promise });
+	t.after(() => f.host.close());
+	const seen = await f.tool.execute("o", { request: { op: "observe" } });
+	const ref = seen.details.observationRef!;
+	const pending = f.tool.execute(
+		"c",
+		{ request: { op: "click", ref, target: `${ref}:0` }, observeAfter: true },
+		controller.signal,
+	);
+	const rejected = assert.rejects(pending);
+	await new Promise((resolve) => setImmediate(resolve));
+	controller.abort();
+	terminal.resolve();
+	await rejected;
+	assert.deepEqual(f.calls, ["observe", "click"]);
+});
+
+test(
+	"follow-up observation waits for its own terminal and cancellation publishes no new ref",
+	{ skip: !sdk },
+	async (t) => {
+		for (const cancel of [false, true]) {
+			const terminal = deferred<void>();
+			const controller = new AbortController();
+			const f = fixture({ followupTerminal: terminal.promise });
+			t.after(() => f.host.close());
+			const seen = await f.tool.execute("o", { request: { op: "observe" } });
+			let settled = false;
+			const pending = f.tool
+				.execute("p", { ...execute(seen.details.observationRef!), observeAfter: true }, controller.signal)
+				.then(
+					(value) => {
+						settled = true;
+						return { value };
+					},
+					(error: unknown) => {
+						settled = true;
+						return { error };
+					},
+				);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.deepEqual(f.calls, ["observe", "plan", "observe"]);
+			assert.equal(settled, false);
+			if (cancel) controller.abort();
+			terminal.resolve();
+			const outcome = await pending;
+			if (cancel) {
+				assert.ok("error" in outcome);
+				assert.ok(outcome.error instanceof Error && "details" in outcome.error);
+				const details = outcome.error.details as {
+					status: string;
+					completedSteps: number;
+					observationRef?: string;
+				};
+				assert.equal(details.status, "completed");
+				assert.equal(details.completedSteps, 1);
+				assert.equal(details.observationRef, undefined);
+			} else {
+				assert.ok("value" in outcome);
+				assert.equal(outcome.value.details.observationRef, "b-snapshot-2");
+			}
+		}
+	},
+);
+
+test("unknown navigation and refused clicks never start post-action reads", { skip: !sdk }, async (t) => {
+	assert.ok(sdk);
+	const navigation = fixture({ navigationFailure: "unexpected_modal_surface", navigationCommitted: true });
+	t.after(() => navigation.host.close());
+	await assert.rejects(
+		navigation.tool.execute("n", { request: { op: "navigate", url: "about:blank" }, observeAfter: true }),
+		/outcome_unknown/,
+	);
+	assert.deepEqual(navigation.calls, ["navigate-refused"]);
+	const click = fixture({ clickEffect: sdk.ActionEffect.Refused });
+	t.after(() => click.host.close());
+	const seen = await click.tool.execute("o", { request: { op: "observe" } });
+	const ref = seen.details.observationRef!;
+	await assert.rejects(
+		click.tool.execute("c", { request: { op: "click", ref, target: `${ref}:0` }, observeAfter: true }),
+		/paused/,
+	);
+	assert.deepEqual(click.calls, ["observe", "click"]);
 });
 
 test("committed navigation retains a safe cause without downgrading unknown outcome", { skip: !sdk }, async (t) => {

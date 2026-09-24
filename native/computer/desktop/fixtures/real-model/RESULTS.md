@@ -2,6 +2,22 @@
 
 ## 最新修复状态
 
+浏览器可选 `observeAfter:true` 已通过原生动作结束/读取结束/取消/失败事实保留/实际 provider context 回归，并安装实验版。用法见 `native/computer/browser/README.md`。原生 SDK 不变；只合并工具返回，不省略读取或业务验收。
+
+同模型、任务、脚本和原生指纹的 A1/B1/A2/B2 交错筛查，A/B 各六次任务全部通过且正常关闭：
+
+| 场景 | A 秒（两次） | B 秒（两次） | A 回合 | B 回合 |
+| --- | --- | --- | --- | --- |
+| form | 35.490 / 39.955 | 29.016 / 35.074 | 10 / 10 | 6 / 6 |
+| dialog | 34.477 / 46.198 | 62.830 / 22.857 | 10 / 10 | 6 / 6 |
+| navigation | 40.986 / 43.980 | 30.976 / 29.740 | 13 / 12 | 7 / 7 |
+
+总回合 65→38；报告费用 0.2303368→0.1668468 USD；总 task 时间 241.087→210.493 秒。B 全部零失败工具调用，A1 navigation 有一次旧引用正确拒绝后恢复。B 每项确实使用 4/4/5 次合并观察，业务 oracle 不变。B1 dialog 的模型阶段占 59.790 秒，该慢样本保留；只有两次独立进程/版本且 A1 早于实现，因此**不能声称稳定 12.7% 提速、可靠 p95 或普遍非劣**。可确认往返减少，端到端收益仍需扩展样本；T-013 保持进行中。
+
+证据 `/tmp/epi-observe-after.MCxmC4/{ab-contract.json,comparison.json,model-b1,model-a2,model-b2,guard-installed}`，A1 为 `/tmp/epi-nav-final.VvOeIZ/model-unlocked`。原包保留 `installed-before`；候选和安装后的真实 Chrome 5-call Unicode/select/save fixture 均通过，最终 C0610。17 browser 契约/工具、9 context（已含于 133 desktop/context pass + 1 skip）、native TypeScript、npm check 通过。临时独立目录探针曾两次因缺少产品 dist/node_modules 而在加载前失败，补齐指向现有依赖的链接后才运行；未将导入失败报告为产品动作故障。
+
+### 导航期间原生提示修复
+
 导航期间原生 alert 的只读等待修复已安装，SDK `e25bdbd56d3017d4928e669e2ade42667fc3b7c0e088f6c425b5cff41cffa62e`；旧包保留 `/tmp/epi-nav-final.VvOeIZ/installed-before`。详情见 `native/computer/patches/browser-navigation-alert.md`。加载期提示最终 guard 7/7、解锁且进程目录恢复后的弹窗邻域 11/11；不自动接受提示、不重放未知输入。桥接 e8679b3e1 保留安全 cause，同时保持 outcome_unknown。
 
 后续保持解锁条件下，同三个真实模型任务 **3/3 通过**：form 35.490s/10 回合、dialog 34.477s/10 回合、navigation 40.986s/13 回合。业务 oracle 分别为完整表单、approved 你好、R-204/reviewed 你好，均准确且关闭。导航一次旧 observation 被正确拒绝，刷新后完成；其他两项零失败工具调用，不宣称全批零失败。费用 0.1221164 USD。安装后加载期提示 guard 再次 7/7，导航 35–56ms、未触发 watchdog 或自动 dismiss，全部关闭。证据 `/tmp/epi-nav-final.VvOeIZ/{model-unlocked,guards-installed}`。此轮非交错性能 A/B，不能证明普遍提速。

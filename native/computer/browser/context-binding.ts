@@ -27,7 +27,7 @@ export function createContextBrowserBinding(
 		async execute(id, input, signal, onUpdate) {
 			const current = ++generation;
 			const visible = view.consume();
-			const { request } = parseControlledBrowserInput(input);
+			const { request, observeAfter } = parseControlledBrowserInput(input);
 			if (
 				(request.op === "execute" || request.op === "click" || request.op === "select_option") &&
 				visible !== request.ref
@@ -40,11 +40,10 @@ export function createContextBrowserBinding(
 			}
 			const result = await delegate.execute(id, input, signal, onUpdate);
 			if (
-				request.op === "observe" &&
+				(request.op === "observe" || observeAfter) &&
 				current === generation &&
 				!session.revoked &&
 				!signal?.aborted &&
-				result.details.status === "observed" &&
 				result.details.observationRef
 			) {
 				view.publish(id, result.content, result.details.observationRef);

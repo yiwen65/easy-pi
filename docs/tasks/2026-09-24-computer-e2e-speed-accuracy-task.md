@@ -300,13 +300,13 @@
 
 ### [ ] T-013 — 动作与新观察合并的端到端提速实验
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 减少不必要的模型往返，保留动作 terminal、输入效果分类和实际 provider view 的新引用授权。
 - Inputs and prerequisites: select 安装版同三任务原始 trace；form/dialog/navigation 各 4/4/5 个动作后独立 observe 往返，模型阶段约占 task 80%–92%。
 - Scope or files: native/computer/browser 与 controlled 桥接、真实模型测量 fixture；不同时修改原生权限或焦点策略。
 - Expected output: 可选择的动作后新观察、取消/读取失败回归，以及同任务交错模型 A/B。
-- Dependencies: T-011, T-012.
+- Dependencies: T-011.
 - Execution steps:
   1. 记录同模型、同任务、同原生包的动作/观察次数、模型/工具/准备耗时和费用基线。
   2. 在原生动作已 terminal 后取得新观察；读取失败必须保留已提交事实，不能诱导重放。
@@ -315,7 +315,7 @@
   - 不降低动作/回执正确性及取消关闭证明；同任务往返减少，并有端到端收益证据。
 - Verification method:
   - 桥接假 native 时序/上下文测试，确定性实际 Chrome fixture，真实模型交错对照。
-- Validation evidence: 尚未实施。已读 code-performance 的 Node、benchmark 和归因参考；现有三任务 modelMs 为 30182.6/30241.3/35323.9，taskMs 为 37851.4/35092.5/38503.1，仅用于候选优先级，不是提速证明。
+- Validation evidence: 可选 browser-only observeAfter 已实现并试装。17 browser 契约/工具、9 context（包含在 133 desktop/context pass + 1 skip）、native TS/npm check；真实 Chrome 候选和安装 5-call Unicode/select/save 通过并关闭。A1/B1/A2/B2 同指纹交错筛查 12/12，通过独立 oracle；A/B 总模型回合 65→38，费用 0.2303368→0.1668468 USD，总时间 241.087→210.493s。B1 dialog 62.830s 慢样本保留，模型阶段 59.790s；样本不足以证明稳定耗时收益，任务保持 in_progress。证据 /tmp/epi-observe-after.MCxmC4，原包 installed-before；coordinator 下一步扩展独立样本并分析模型阶段波动。启动故障仍属 T-012，未删除校验/忽略失败。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -368,6 +368,8 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-013 接口能力完成并安装实验版，新增 observeAfter 的动作/观察双 terminal、取消与实际 provider context 回归。A1/B1/A2/B2 全部 12/12，B 回合稳定 6/6/7，A 10/10/12–13；保留 B1 dialog 模型慢样本，不声称普遍提速。安装后 fixture 5 次调用、完整 Unicode/Pro 保存及关闭通过，C0610。npm check 的四个无关自动格式化文件已精确恢复。任务仍在进行中，下一步扩大样本及继续 T-012，不以接口交付替代全局目标。
+- 2026-09-24: T-013 in_progress；coordinator 串行实施 browser-only 可选动作后观察，不修改原生库。只在动作 terminal 后读取；动作失败/取消/未知终态不续读，读取失败保留先前动作事实、不授新引用、不重放。新的引用仍需出现在实际 provider context。先做契约/时序/上下文回归，再真实 Chrome 和交错模型 A/B；T-012 独立诊断保持未完成。
 - 2026-09-24: T-011 done。桌面恢复后只读目录 failed=0、单次窗口绑定成功；model-unlocked 3/3，安装后 guards-installed 7/7，业务回执和关闭独立验证。没有使用保持唤醒措施；没有删除旧失败样本。T-012 仍由 coordinator 持有，下一步需要端点拒绝的精确阶段证据，不把 75 次未复现判为修复。T-013 保持 pending。
 - 2026-09-24: T-011 安装后模型三项 0/3（form 11.049s、dialog 7.604s、navigation 7.867s），各两回合，prepare browser_window_unproved 后均未重放，close 全部成功 C05fa，费用 0.012692 USD。结束复核 locked=true、目录 failed=0；当前再次等待手动解锁，不能把 prior 11/11 guard 冒充模型资格。记录于 RESULTS.md；T-011 继续 in_progress，coordinator 下一步在持续解锁条件下完成模型及安装后加载期 guard。
 - 2026-09-24: 外部环境恢复后 T-014 done，dialog 邻域 11/11、package 8/8，确认 clean lease 与无持锁者后安装 T-011 package-with-cause。旧包移至 /tmp/epi-nav-final.VvOeIZ/installed-before，可恢复；新 SDK e25bdbd56d3017d4928e669e2ade42667fc3b7c0e088f6c425b5cff41cffa62e。开始 model-installed 的 form/dialog/navigation 三个 gpt-6-sol 任务；结果尚待验证，未把安装等同通过。

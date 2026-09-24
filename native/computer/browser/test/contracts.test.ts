@@ -38,3 +38,22 @@ test("model input cannot choose executable/profile/session, script, foreground o
 	])
 		assert.throws(() => parseControlledBrowserInput({ request }), /Invalid/);
 });
+
+test("optional post-action observation is browser-only, true-only and does not loosen action bounds", () => {
+	for (const request of [
+		{ op: "navigate", url: "https://example.test/" },
+		{ op: "click", ref: "o", target: "o:1" },
+		{ op: "select_option", ref: "o", target: "o:1" },
+		{ op: "execute", ref: "o", steps: [{ op: "fill", target: { ref: "o:1" }, text: "你好" }] },
+	]) {
+		const input = { request, observeAfter: true };
+		assert.deepEqual(parseControlledBrowserInput(input), input);
+	}
+	for (const input of [
+		{ request: { op: "prepare" }, observeAfter: true },
+		{ request: { op: "observe" }, observeAfter: true },
+		{ request: { op: "click", ref: "o", target: "o:1" }, observeAfter: false },
+		{ request: { op: "click", ref: "o", target: "界".repeat(100) }, observeAfter: true },
+	])
+		assert.throws(() => parseControlledBrowserInput(input), /Invalid/);
+});
