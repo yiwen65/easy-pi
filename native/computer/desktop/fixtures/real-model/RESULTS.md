@@ -2,6 +2,16 @@
 
 ## 最新修复状态
 
+导航期间原生 alert 的只读等待修复已安装，SDK `e25bdbd56d3017d4928e669e2ade42667fc3b7c0e088f6c425b5cff41cffa62e`；旧包保留 `/tmp/epi-nav-final.VvOeIZ/installed-before`。详情见 `native/computer/patches/browser-navigation-alert.md`。加载期提示最终 guard 7/7、解锁且进程目录恢复后的弹窗邻域 11/11；不自动接受提示、不重放未知输入。桥接 e8679b3e1 保留安全 cause，同时保持 outcome_unknown。
+
+后续保持解锁条件下，同三个真实模型任务 **3/3 通过**：form 35.490s/10 回合、dialog 34.477s/10 回合、navigation 40.986s/13 回合。业务 oracle 分别为完整表单、approved 你好、R-204/reviewed 你好，均准确且关闭。导航一次旧 observation 被正确拒绝，刷新后完成；其他两项零失败工具调用，不宣称全批零失败。费用 0.1221164 USD。安装后加载期提示 guard 再次 7/7，导航 35–56ms、未触发 watchdog 或自动 dismiss，全部关闭。证据 `/tmp/epi-nav-final.VvOeIZ/{model-unlocked,guards-installed}`。此轮非交错性能 A/B，不能证明普遍提速。
+
+安装后真实模型三项 **0/3**：form 11.049s、dialog 7.604s、navigation 7.867s，均在 prepare 的 browser_window_unproved 后停止，各 2 回合，全部关闭，最终 C05fa。模型可见真实 cause 和禁止重放说明，没有重复未知动作；未产生业务回执。报告费用合计 0.012692 USD。批次结束时系统再次明确 locked=true；不能把这批失败排除或据此称正常解锁场景的模型资格通过。证据 `/tmp/epi-nav-final.VvOeIZ/model-installed`。仍需保持解锁后的相同任务复测，不以新安装替代验收。
+
+环境故障分别保留：原宿主及 Chrome 扩展进程路径 ENOENT 已在后续只读检查消失；锁屏时 CG 窗口尺寸与 CDP 不匹配，解锁后同一探针 prepare/close 成功且尺寸一致。没有强杀个人应用、自动解锁或删除租约。端点偶发失败仍属 T-012，诊断版 75 次未复现不等于已修复。
+
+### 上轮 HTML select 修复
+
 HTML select 修复已安装，详情见 `native/computer/patches/browser-select.md`。原生按实际观察的 OPTION/SELECT 身份选择并读回；桥接增加 `select_option`，可操作行优先进入模型输出预算。没有删除权限或目标身份校验。
 
 | select 修复后同三项真实模型任务 | 结果 | task 秒 | 模型回合 | 关闭 |

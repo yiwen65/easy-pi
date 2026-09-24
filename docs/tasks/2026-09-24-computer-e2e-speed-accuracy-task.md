@@ -256,9 +256,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-011 — 导航期间原生提示的有界结束
+### [x] T-011 — 导航期间原生提示的有界结束
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 定位页面加载时 alert 使导航等待到 watchdog 的首个阻塞点，修复有界结束而不自动接受提示或重放导航。
 - Inputs and prerequisites: T-010 保留的 qualified-guards/native-alert 失败；同一 CfT、原生 CDP 与关闭证明。
@@ -273,7 +273,70 @@
   - 已出现原生提示时不会无意义等待完整导航时限；无输入重放和静默接受提示；关闭可证明。
 - Verification method:
   - 原生定向回归、实际 Chrome 多次延迟触发对照、npm check 与安装包资格。
-- Validation evidence: 已有一例原始导航 15 秒 watchdog 取消且关闭成功。静态路径包括 Page.navigate 与后续 Page.getFrameTree，尚未确定第一个阻塞调用；下一步隔离加载期提示并增加仅记录方法/阶段的诊断，不记录页面正文或凭证。
+- Validation evidence: 方法级诊断证实 Page.navigate 6–10ms 返回，随后 Page.getFrameTree 在提示已出现时阻塞至 20s；0/10ms 触发复现 20.198/20.351s，候选同输入 344/357ms 明确拒绝，全部关闭。最终无诊断构建 7/7 加载期 guard、38 CDP、12 page、131 desktop/context + renderer-value 1/1、8 package、UniFFI/native TS/npm check 通过。select 邻域两批 27/30，三次 prepare endpoint 失败归 T-012，保留原始失败。环境恢复后 dialog 邻域 11/11；安装后同三任务真实模型 3/3（35.490/34.477/40.986s，10/10/13 回合），导航一次 stale_observation 正确拒绝后刷新完成。费用 0.1221164 USD，均关闭。安装后加载期 guard 再次 7/7，导航 35–56ms，未取消或自动接受提示，均正常关闭。证据 /tmp/epi-nav-alert.zrMLcZ 与 /tmp/epi-nav-final.VvOeIZ/{model-unlocked,guards-installed}。未承诺普遍速度提升，T-012 独立残留不隐藏。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-012 — Chrome 启动端点偶发拒绝
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 定位受控冷启动时 browser_endpoint_unproved 的首次分歧，避免把尚未完成的端点发布误判为永久损坏。
+- Inputs and prerequisites: T-011 select 邻域首批 disabled-select 的 prepare 失败，未进入导航或输入，native close 成功。
+- Scope or files: 原生 controlled_browser read_endpoint、启动等待与定向 fixture。
+- Expected output: 端点元数据/读取阶段的最小诊断、可复现原因、必要修复及冷启动回归。
+- Dependencies: T-010.
+- Execution steps:
+  1. 保留原始失败；记录文件类型、长度、读取阶段等非敏感事实，区分不完整发布和不安全文件。
+  2. 证明因果后修复读取/就绪机制，保留路径、所有权、链接和完整格式校验。
+  3. 多次冷启动、取消与正常关闭回归，不自动重启失败 owner。
+- Acceptance criteria:
+  - 已证明的发布竞态不导致无效冷启动失败；不安全/完整但无效文件仍拒绝，关闭可证明。
+- Verification method:
+  - 定向原生测试、真实 Chrome 冷启动、原始失败与修复后相同条件对照。
+- Validation evidence: 两批 30 场景中三次准备阶段 browser_endpoint_unproved（首批 disabled-select，第二批 label-changed/removed），全部关闭证明；其余 27 次场景断言通过。当前不能断言是文件半写竞态。证据 /tmp/epi-nav-final.VvOeIZ/{select-guards,select-guards-repeat}/trace.jsonl。coordinator 下一步在 /tmp/epi-endpoint.kJSkkp 独立诊断构建记录端点长度/格式阶段；T-011 最终构建材料保留且未安装，避免混入诊断改动。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-013 — 动作与新观察合并的端到端提速实验
+
+- Status: pending
+- Owner: coordinator
+- Objective: 减少不必要的模型往返，保留动作 terminal、输入效果分类和实际 provider view 的新引用授权。
+- Inputs and prerequisites: select 安装版同三任务原始 trace；form/dialog/navigation 各 4/4/5 个动作后独立 observe 往返，模型阶段约占 task 80%–92%。
+- Scope or files: native/computer/browser 与 controlled 桥接、真实模型测量 fixture；不同时修改原生权限或焦点策略。
+- Expected output: 可选择的动作后新观察、取消/读取失败回归，以及同任务交错模型 A/B。
+- Dependencies: T-011, T-012.
+- Execution steps:
+  1. 记录同模型、同任务、同原生包的动作/观察次数、模型/工具/准备耗时和费用基线。
+  2. 在原生动作已 terminal 后取得新观察；读取失败必须保留已提交事实，不能诱导重放。
+  3. 独立进程交错 A/B，比较正确回执、往返数、总延迟、成本、取消与关闭；收益未超过噪声则不发布性能结论。
+- Acceptance criteria:
+  - 不降低动作/回执正确性及取消关闭证明；同任务往返减少，并有端到端收益证据。
+- Verification method:
+  - 桥接假 native 时序/上下文测试，确定性实际 Chrome fixture，真实模型交错对照。
+- Validation evidence: 尚未实施。已读 code-performance 的 Node、benchmark 和归因参考；现有三任务 modelMs 为 30182.6/30241.3/35323.9，taskMs 为 37851.4/35092.5/38503.1，仅用于候选优先级，不是提速证明。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-014 — 当前宿主进程路径失效后的 GUI 恢复
+
+- Status: done
+- Owner: coordinator
+- Objective: 恢复可读取的本机进程目录，再继续 Chrome 安装资格；不终止当前宿主或删除租约。
+- Inputs and prerequisites: dialog-neighbors 的 11 次 prepare 拒绝，均 inputCommitted=false 且 close 成功。
+- Scope or files: 只读进程检查与恢复后的真实 GUI 验证；宿主重启需用户操作。
+- Expected output: 进程路径恢复证据与同一候选包邻域测试。
+- Dependencies: T-010.
+- Execution steps:
+  1. 检查 proc_pidpath、PID/父进程与可执行路径，区分当前环境问题和导航修复。
+  2. 用户正常退出并重新启动对应 Codex 会话后，先重新检查进程目录与租约，再运行 GUI。
+- Acceptance criteria:
+  - 进程目录可读，未强杀无关应用或绕过检查，真实动作和关闭均有证据。
+- Verification method:
+  - /tmp/epi-repair.BJD4uG/catalog、ps、dialog-guards 和真实模型 oracle。
+- Validation evidence: 本轮 PID 82295/82296/82303 的 proc_pidpath 均 ENOENT；ps 指向 ChatGPT.app 内 cua_node 的 node/node_repl，前两者 PPID 62746（/opt/homebrew/bin/codex），后者 PPID 82295。磁盘同名文件存在，不证明运行中 image 仍可解析。11 次拒绝在约 86–100ms 返回，全部关闭，最终 C05d3，lsof 无租约持有者。/tmp/epi-nav-final.VvOeIZ/dialog-neighbors 保留全部失败。未认定原因一定为应用升级。
+- Additional validation evidence: 后续只读检查 PID 2204/2162 已退出、目录 failed=0/515；本任务未关闭个人 Chrome。冻结 T-011 SDK 的 dialog-neighbors-recovered 11/11 通过，真实 Unicode 提交及保护拒绝均准确，全部关闭，C05f7；8/8 package 验证通过。原失败批次保留，不混入成功分布。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -290,7 +353,7 @@
 | 连续工作 | 同会话十次替换，每次读回；跨会话取消后恢复 | 已测；小时级 soak、内存趋势未测 |
 | 视觉输入 | 点击目标事件一次、非零滚动、拖动到目标区 | 已测；长文档滚动位置、多屏缩放、跨窗拖放未测 |
 | 窗口与弹窗 | A→B→A 无串写；保存→关闭面板→重开字节相同 | 双窗口已测；保存由原套件覆盖；外部抢焦点根因仍属 T-004 |
-| 网页 | Unicode 表单提交值准确；随后导航、返回、标签页选择 | WebKit 本地表单已测；真实 Chrome/Safari、导航与标签页未测 |
+| 网页 | Unicode 表单提交值准确；随后导航、返回、标签页选择 | WebKit 与真实 Chrome 表单、弹窗、导航已测通过；Chrome 新标签失败保留，Safari 未测 |
 | 引用恢复 | 旧语义/图片 ref 均拒绝且零写入；刷新后新输入成功 | 已测；目标消失/重建、窗口移动导致图片失效未测 |
 | 取消与占用 | 取消不继续派发；释放后新 owner 能完成任务 | 预取消已测；中途按键/拖动取消、双 owner 竞争未测 |
 | 权限/环境 | 缺权限、锁屏、owner 隔离能有界拒绝且零输入 | 不在真实桌面上自动修改权限或锁屏；使用定向模拟回归，真实故障资格待单独安排 |
@@ -305,6 +368,16 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-011 done。桌面恢复后只读目录 failed=0、单次窗口绑定成功；model-unlocked 3/3，安装后 guards-installed 7/7，业务回执和关闭独立验证。没有使用保持唤醒措施；没有删除旧失败样本。T-012 仍由 coordinator 持有，下一步需要端点拒绝的精确阶段证据，不把 75 次未复现判为修复。T-013 保持 pending。
+- 2026-09-24: T-011 安装后模型三项 0/3（form 11.049s、dialog 7.604s、navigation 7.867s），各两回合，prepare browser_window_unproved 后均未重放，close 全部成功 C05fa，费用 0.012692 USD。结束复核 locked=true、目录 failed=0；当前再次等待手动解锁，不能把 prior 11/11 guard 冒充模型资格。记录于 RESULTS.md；T-011 继续 in_progress，coordinator 下一步在持续解锁条件下完成模型及安装后加载期 guard。
+- 2026-09-24: 外部环境恢复后 T-014 done，dialog 邻域 11/11、package 8/8，确认 clean lease 与无持锁者后安装 T-011 package-with-cause。旧包移至 /tmp/epi-nav-final.VvOeIZ/installed-before，可恢复；新 SDK e25bdbd56d3017d4928e669e2ade42667fc3b7c0e088f6c425b5cff41cffa62e。开始 model-installed 的 form/dialog/navigation 三个 gpt-6-sol 任务；结果尚待验证，未把安装等同通过。
+- 2026-09-24: 用户确认解锁；目录 initially failed=0，系统锁屏键不再返回 true（探针显示 unknown，不把缺失键伪报明确 false）。同一 window-probe 成功 prepare/terminal/close，CG/CDP 均 [22,56,1200,878]，证明本次解锁后窗口绑定恢复。紧接 dialog-neighbors-unlocked 0/11，全部输入前 image_path_unavailable 且关闭，C05ec；新故障为 PID 2204 ChatGPT for Chrome，PPID 2162 个人 Google Chrome，运行自前一日，同名磁盘文件时间为今日。不能仅据时间认定替换因果；需正常恢复个人浏览器的用户授权。原 PID 82295/82296/82303 已不在 ps 中，未由本任务终止。
+- 2026-09-24: dialog-neighbors-restored 0/11，全部 browser_window_unproved，输入提交标志来自 Chrome 启动，全部关闭 C05de。单次诊断定位为当前 PID 的 CG 窗口 [93,98,1081,791] 与 CDP [22,56,1200,878] 不一致；第二次诊断在 20 次/20ms 窗口采样内不变且正常关闭，不支持短暂小于 400ms 动画假设。随后系统锁屏状态明确 true、录屏权限 true、截图黑屏，原进程目录 failed=0。保留 /tmp/epi-nav-final.VvOeIZ/window-animation.log 和诊断脚本；未改产品绑定规则，尚须解锁后的同探针对照证明因果。T-014 blocked，等待手动解锁。
+- 2026-09-24: 再次续跑时宿主目录检查 failed=0/540，lease C05d3；T-014 恢复 in_progress，开始同一冻结 SDK 的 dialog-neighbors-restored。未自动重启或强杀宿主，不推断路径恢复原因。原失败批次保留。
+- 2026-09-24: 下一 goal turn 复核：同三宿主 PID 路径仍 ENOENT，未再次启动 GUI。浏览器错误原因桥接单独提交 e8679b3e1；11/11 browser 定向、131/132 desktop/context（1 按配置 skip）、native TypeScript 通过，root npm check 已在该相同代码上通过。提交仅含三个桥接/测试文件，未纳入其他用户改动或未安装 native 候选。T-014 阻塞未解除；真实模型/安装资格仍不能执行。
+- 2026-09-24: 恢复执行后确认诊断版 select 15/15 完成且关闭；两种启动诊断各 30/30，总计 75 次未复现端点错误。只能报告未复现，不能证明 T-012 修复；已移除临时端点日志/延迟并 cmp 确认与诊断前源码一致。保留诊断 SDK 和原始样本。随后最终 T-011 候选 dialog 邻域 0/11，全部因输入前 image_path_unavailable 拒绝；新增 T-014，停止重复 GUI。浏览器桥接已提交导航保留白名单 cause，同时维持 outcome_unknown/禁止重放，离线 11/11 再次通过。最终候选 package-with-cause 尚未安装；coordinator 下一步在宿主恢复后完成邻域与安装资格。
+- 2026-09-24: T-012 转 in_progress；两批端点准备拒绝 3/30，均在新 CDP 等待路径之前。先定位冷启动原因，不继续低信息重复重跑。依赖改为已完成 T-010，与 T-011 共享原生构建串行；T-011 候选保持未安装、待完成邻域/安装资格。
+- 2026-09-24: T-011 候选加载期提示 7/7，首个阻塞定位为 Page.getFrameTree；候选只读等待可唤醒并关闭连接，已提交输入保留原契约。首批 select 邻域 14/15，一次 prepare endpoint 拒绝；新增 T-012，保留该失败并继续独立邻域复测，不从分母删除。
 - 2026-09-24: T-010 select 完成并安装，26/26 真实 Chrome guard、同三任务模型 3/3，关闭全部证明，最终 C054e。继续 T-011：隔离加载期 alert 并测量首个阻塞 CDP 阶段，不因本阶段完成而停止。
 - 2026-09-24: 用户要求持续自动测试修复、不在阶段性目标停止。T-010 继续实现 select_option；同时解决可操作选项被 4 KiB 输出预算挤出的已证实问题。新增 T-011 单独跟踪加载期原生 alert。共享原生库/桌面串行，保留真实模型显式开关与单任务限额，不自动重放未知输入。
 - 2026-09-24: T-010 受限 dialog 资格完成并安装，SDK 222302e7c9fb6cdca8faa5775346e1deed504deece18c05c5d5a46d83a87f914，原包 /tmp/epi-dialog.UEensN/installed-before。11 场景全部准确且关闭；真实模型弹窗/导航 2/2，通过独立回执与可见读回，最终 C0531。四批 44 个 guard owner 的原始失败均保留。T-010 保持 in_progress，coordinator 下一步实现 select，再隔离分析导航期间原生提示竞态；未声称全部任务修复。
@@ -386,4 +459,4 @@ Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":
 
 - Result: partial
 - Evidence: T-001、T-005、T-006 完成；原版失败均保留。此前局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；通用确定性场景 50/50。新增真实模型十三场景单轮 3/13，额外 Chrome 五场景 1/5；不能用确定性结果代替模型表现。新 benchmark 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip 与 npm run check 通过。
-- Limitations: 最新已验证 lease C054e；T-008/009/010 完成，HTML dialog/select 已安装，同三任务真实模型 3/3。T-011 加载期原生 alert 尚未定位；不能宣称普遍提速。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性。
+- Limitations: 最新已验证 lease C0605；T-008/009/010/011/014 完成，HTML dialog/select/加载期提示只读等待修复均已安装，同三任务真实模型 3/3，安装后加载期提示 7/7。T-012 启动端点偶发故障未证实原因；锁屏或不可读进程环境仍可阻塞新会话，不自动解锁/重启用户应用。不能宣称普遍提速。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性。

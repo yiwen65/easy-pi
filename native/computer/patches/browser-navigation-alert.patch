@@ -1,0 +1,338 @@
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+@@ -93,6 +93,9 @@
+     if !Arc::ptr_eq(&bound.owner, &operation.session) || bound.connection.is_closed() {
+         return Err("browser_binding_stale");
+     }
++    if bound.connection.dialog_state(&bound.target_id).is_some() {
++        return Err("unexpected_modal_surface");
++    }
+     let targets = bound
+         .connection
+         .call(None, "Target.getTargets", json!({}))
+@@ -147,7 +150,13 @@
+         .connection
+         .call(Some(&bound.session_id), "Page.getFrameTree", json!({}))
+         .await
+-        .map_err(|_| "browser_frame_unproved")?;
++        .map_err(|error| {
++            if error.to_string() == "unexpected_modal_surface" {
++                "unexpected_modal_surface"
++            } else {
++                "browser_frame_unproved"
++            }
++        })?;
+     let frame = frame_key(&frame)?;
+     check_controlled_browser_document(&frame.url)?;
+     Ok(frame)
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws.rs
+@@ -21,7 +21,7 @@
+ use futures_util::{SinkExt, StreamExt};
+ use serde_json::Value;
+ use tokio::net::TcpStream;
+-use tokio::sync::{mpsc, oneshot, Mutex};
++use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+ use tokio_tungstenite::tungstenite::Message;
+ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+ 
+@@ -135,6 +135,7 @@
+     subscribers: StdMutex<Vec<mpsc::UnboundedSender<CdpEvent>>>,
+     session_targets: StdMutex<HashMap<String, String>>,
+     dialogs: StdMutex<HashMap<String, CdpDialogState>>,
++    dialog_changed: Notify,
+     next_dialog_generation: AtomicU64,
+     closed: AtomicBool,
+ }
+@@ -220,6 +221,7 @@
+                                     session_id: session_id.to_owned(),
+                                 },
+                             );
++                            demux.dialog_changed.notify_waiters();
+                         }
+                     }
+                     "Page.javascriptDialogClosed" => {
+@@ -299,6 +301,7 @@
+             subscribers: StdMutex::new(Vec::new()),
+             session_targets: StdMutex::new(HashMap::new()),
+             dialogs: StdMutex::new(HashMap::new()),
++            dialog_changed: Notify::new(),
+             next_dialog_generation: AtomicU64::new(1),
+             closed: AtomicBool::new(false),
+         });
+@@ -467,6 +470,18 @@
+         }
+         if self.is_closed() {
+             anyhow::bail!("CDP socket closed before {method}");
++        }
++        if operation.is_some()
++            && session_id.is_some_and(|sid| {
++                self.demux
++                    .dialogs
++                    .lock()
++                    .unwrap()
++                    .values()
++                    .any(|dialog| dialog.session_id == sid)
++            })
++        {
++            anyhow::bail!("unexpected_modal_surface");
+         }
+         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+         let (tx, rx) = oneshot::channel();
+@@ -508,7 +523,57 @@
+             anyhow::bail!("CDP send failed during {method}: {e}");
+         }
+ 
+-        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
++        let reply = tokio::time::timeout(CALL_TIMEOUT, rx);
++        let modal = async {
++            if operation.is_some() && !input {
++                if let Some(sid) = session_id {
++                    loop {
++                        let changed = self.demux.dialog_changed.notified();
++                        tokio::pin!(changed);
++                        // Register before checking the journal: opening between
++                        // the check and await must not lose its notification.
++                        changed.as_mut().enable();
++                        if self
++                            .demux
++                            .dialogs
++                            .lock()
++                            .unwrap()
++                            .values()
++                            .any(|dialog| dialog.session_id == sid)
++                        {
++                            return;
++                        }
++                        changed.await;
++                    }
++                }
++            }
++            std::future::pending::<()>().await;
++        };
++        let cancelled = async {
++            if !input {
++                if let Some(operation) = operation {
++                    operation.cancelled().await;
++                    return;
++                }
++            }
++            std::future::pending::<()>().await;
++        };
++        let result = tokio::select! {
++            biased;
++            result = reply => result,
++            _ = modal => {
++                // Only interrupt read-only waits. Closing a transport does not
++                // prove an already submitted input finished executing in Chrome.
++                // Retire and JOIN the transport, never dismiss or replay input.
++                self.shutdown().await?;
++                anyhow::bail!("unexpected_modal_surface");
++            }
++            _ = cancelled => {
++                self.shutdown().await?;
++                anyhow::bail!("cancelled");
++            }
++        };
++        match result {
+             Err(_) => {
+                 self.demux.pending.lock().unwrap().remove(&id);
+                 anyhow::bail!("CDP {method} timed out after {CALL_TIMEOUT:?}")
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/lifecycle_tests.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/lifecycle_tests.rs
+@@ -315,5 +315,195 @@
+     let second = session(&gate);
+     second.revoke();
+     assert!(CdpPool::new_controlled(&second).is_err());
++    assert!(!gate.is_quarantined());
++}
++
++#[tokio::test]
++async fn controlled_cdp_dialog_ends_pending_read_and_joins_transport() {
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let port = listener.local_addr().unwrap().port();
++    let peer = tokio::spawn(async move {
++        let (socket, _) = listener.accept().await.unwrap();
++        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
++        let Some(Ok(Message::Text(text))) = socket.next().await else {
++            panic!("missing read")
++        };
++        let call: Value = serde_json::from_str(&text).unwrap();
++        assert_eq!(call["method"], "Page.getFrameTree");
++        socket
++            .send(Message::Text(
++                serde_json::json!({
++                    "method":"Page.javascriptDialogOpening", "sessionId":"page-session",
++                    "params":{"type":"alert"}
++                })
++                .to_string(),
++            ))
++            .await
++            .unwrap();
++        // Real Chrome blocks this reply while alert is open. No dismissal or
++        // retry is permitted; the caller must close and join its transport.
++        let mut extra = 0;
++        while let Some(Ok(Message::Text(_))) = socket.next().await {
++            extra += 1;
++        }
++        extra
++    });
++    let gate = Gate::new();
++    let session = session(&gate);
++    let pool = CdpPool::new_controlled(&session).unwrap();
++    let op = session.new_operation().unwrap();
++    op.begin().unwrap();
++    let (conn, timely, reason) = controlled::scope(op.clone(), async {
++        let conn = pool
++            .get(&format!("ws://127.0.0.1:{port}/devtools/browser/dialog"))
++            .await
++            .unwrap();
++        conn.register_dialog_session("page-session", "page-target");
++        let mut call = Box::pin(conn.call(
++            Some("page-session"),
++            "Page.getFrameTree",
++            serde_json::json!({}),
++        ));
++        let (timely, result) = tokio::select! {
++            result = &mut call => (true, result),
++            _ = tokio::time::sleep(Duration::from_millis(500)) => {
++                conn.shutdown().await.unwrap();
++                (false, call.await)
++            }
++        };
++        let reason = result.unwrap_err().to_string();
++        (conn.clone(), timely, reason)
++    })
++    .await;
++    op.finish();
++    let receipt = op.terminal().await.unwrap();
++    let joined = conn.reader.lock().await.is_none() && conn.writer.lock().await.is_none();
++    session.revoke();
++    session.resources.close().await.unwrap();
++    assert_eq!(peer.await.unwrap(), 0, "input/retry appeared after dialog");
++    assert!(!receipt.input_committed);
++    assert!(!gate.is_quarantined());
++    assert!(timely, "dialog did not interrupt pending CDP read");
++    assert!(joined, "return preceded transport drain proof");
++    assert_eq!(reason, "unexpected_modal_surface");
++}
++
++#[tokio::test]
++async fn controlled_cdp_interrupted_read_never_replays_or_claims_input() {
++    for cancel in [false, true] {
++        let gate = Gate::new();
++        let session = session(&gate);
++        let pool = CdpPool::new_controlled(&session).unwrap();
++        let op = session.new_operation().unwrap();
++        op.begin().unwrap();
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let port = listener.local_addr().unwrap().port();
++        let peer_op = op.clone();
++        let peer = tokio::spawn(async move {
++            let (socket, _) = listener.accept().await.unwrap();
++            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
++            let Some(Ok(Message::Text(text))) = socket.next().await else {
++                panic!("missing read")
++            };
++            let call: Value = serde_json::from_str(&text).unwrap();
++            assert_eq!(call["method"], "Page.getFrameTree");
++            if cancel {
++                peer_op.cancel();
++            } else {
++                socket
++                    .send(Message::Text(
++                        serde_json::json!({
++                            "method":"Page.javascriptDialogOpening", "sessionId":"page-session",
++                            "params":{"type":"alert"}
++                        })
++                        .to_string(),
++                    ))
++                    .await
++                    .unwrap();
++            }
++            let mut extra = 0;
++            while let Some(Ok(Message::Text(_))) = socket.next().await {
++                extra += 1;
++            }
++            extra
++        });
++        let (conn, timely, reason) = controlled::scope(op.clone(), async {
++            let conn = pool
++                .get(&format!("ws://127.0.0.1:{port}/devtools/browser/input"))
++                .await
++                .unwrap();
++            conn.register_dialog_session("page-session", "page-target");
++            let mut call = Box::pin(conn.call(
++                Some("page-session"),
++                "Page.getFrameTree",
++                serde_json::json!({}),
++            ));
++            let (timely, result) = tokio::select! {
++                result = &mut call => (true, result),
++                _ = tokio::time::sleep(Duration::from_millis(500)) => {
++                    conn.shutdown().await.unwrap();
++                    (false, call.await)
++                }
++            };
++            (conn.clone(), timely, result.unwrap_err().to_string())
++        })
++        .await;
++        op.finish();
++        let receipt = op.terminal().await.unwrap();
++        assert!(!receipt.input_committed);
++        assert_eq!(receipt.cancelled, cancel);
++        let joined = conn.reader.lock().await.is_none() && conn.writer.lock().await.is_none();
++        session.revoke();
++        session.resources.close().await.unwrap();
++        assert_eq!(peer.await.unwrap(), 0);
++        assert!(!gate.is_quarantined());
++        assert!(timely && joined);
++        assert_eq!(
++            reason,
++            if cancel {
++                "cancelled"
++            } else {
++                "unexpected_modal_surface"
++            }
++        );
++    }
++}
++
++#[tokio::test]
++async fn controlled_cdp_foreign_dialog_does_not_interrupt_current_page() {
++    use crate::browser::mock_cdp::{MockCdpServer, MockEvent, MockReply};
++    let server = MockCdpServer::start(Arc::new(|_| {
++        MockReply::ok(serde_json::json!({"frameTree":{}})).with_events(vec![MockEvent {
++            method: "Page.javascriptDialogOpening".into(),
++            session_id: Some("foreign-session".into()),
++            params: serde_json::json!({"type":"alert"}),
++        }])
++    }))
++    .await;
++    let gate = Gate::new();
++    let session = session(&gate);
++    let pool = CdpPool::new_controlled(&session).unwrap();
++    let op = session.new_operation().unwrap();
++    op.begin().unwrap();
++    let conn = controlled::scope(op.clone(), async {
++        let conn = pool.get(&server.ws_url()).await.unwrap();
++        conn.register_dialog_session("page-session", "page-target");
++        conn.register_dialog_session("foreign-session", "foreign-target");
++        conn.call(
++            Some("page-session"),
++            "Page.getFrameTree",
++            serde_json::json!({}),
++        )
++        .await
++        .unwrap();
++        assert!(!conn.is_closed());
++        conn
++    })
++    .await;
++    op.finish();
++    op.terminal().await.unwrap();
++    assert!(conn.dialog_state("foreign-target").is_some());
++    session.revoke();
++    session.resources.close().await.unwrap();
+     assert!(!gate.is_quarantined());
+ }
