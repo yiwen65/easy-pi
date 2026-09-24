@@ -257,6 +257,57 @@ try {
 		feature = createComputerFeature();
 		await fill(await select(), "new session works");
 		assert.equal((await state()).body, "new session works");
+	} else if (scenario === "native-batch" || scenario === "mixed-batch") {
+		const view = await select();
+		const first = rows(view).find((row) => row.identifier === "general-editor");
+		assert.ok(first?.ref);
+		const second = { op: "fill", target: { selector: { identifier: "other-editor" } }, text: "second β" };
+		const expected = { kind: "value", target: second.target, value: second.text };
+		const result = await call({
+			op: "segment",
+			ref: view.details.observationRef,
+			actions: [{ op: "fill", target: { ref: first.ref }, text: "first café 你好" }, second],
+			expected,
+		});
+		const actual = await state();
+		assert.equal(actual.body, "first café 你好");
+		log.push({ oracle: actual });
+		if (scenario === "native-batch") {
+			assert.equal(result.details.status, "confirmed");
+			assert.equal(result.details.actions.length, 2);
+			assert.ok(
+				result.details.actions.every(
+					(row) => row.dispatch === "dispatched" && row.action.route === "accessibility",
+				),
+			);
+			assert.equal(actual.other, second.text);
+		} else {
+			assert.equal(result.details.firstUnfinishedAction, 1);
+			assert.equal(result.details.actions[0].dispatch, "dispatched");
+			assert.equal(result.details.actions[0].action.route, "synthetic_events");
+			assert.equal(result.details.actions[1].dispatch, "not_dispatched");
+			assert.equal(result.details.actions[1].code, "segment_boundary_required");
+			assert.equal(actual.other, "untouched");
+			const evidence = result.content.find((row) => row.type === "text" && row.text.startsWith("Observation ref:"));
+			assert.ok(evidence);
+			const next = rows({ content: [evidence] }).find((row) => row.identifier === "other-editor");
+			assert.ok(next?.ref);
+			const target = { ref: next.ref };
+			const recovered = await call({
+				op: "segment",
+				ref: result.details.evidence.observationRef,
+				previousEffect: "observed",
+				actions: [{ ...second, target }],
+				expected: { ...expected, target },
+			});
+			assert.equal(recovered.details.status, "confirmed");
+			assert.equal(recovered.details.actions.length, 1);
+			assert.equal(recovered.details.actions[0].dispatch, "dispatched");
+			const final = await state();
+			assert.equal(final.body, actual.body, "later fill must preserve the first field");
+			assert.equal(final.other, second.text);
+			log.push({ recoveryOracle: final });
+		}
 	} else {
 		let view = await select();
 		const count = scenario === "continuous-edit" ? 10 : 1;

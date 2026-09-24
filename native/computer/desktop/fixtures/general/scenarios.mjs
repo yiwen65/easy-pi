@@ -1,6 +1,8 @@
 export const scenarios = [
 	"unicode-edit",
 	"continuous-edit",
+	"native-batch",
+	"mixed-batch",
 	"window-switch",
 	"pointer-click",
 	"pointer-scroll",
@@ -12,4 +14,10 @@ export const scenarios = [
 	"cancel-restart",
 ];
 
-export const protectionScenarios = new Set(["stale-reference", "stale-image", "cancel-restart", "pointer-cancel"]);
+export const protectionScenarios = new Set([
+	"stale-reference",
+	"stale-image",
+	"cancel-restart",
+	"pointer-cancel",
+	"mixed-batch",
+]);

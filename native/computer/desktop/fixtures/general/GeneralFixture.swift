@@ -36,6 +36,8 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     let second = NSWindow(contentRect: NSRect(x: 300, y: 250, width: 520, height: 320), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let editor = NSTextView(frame: NSRect(x: 20, y: 20, width: 600, height: 360))
     let other = NSTextView(frame: NSRect(x: 20, y: 20, width: 480, height: 260))
+    let batchFirst = NSTextField(frame: NSRect(x: 20, y: 220, width: 600, height: 32))
+    let batchSecond = NSTextField(frame: NSRect(x: 20, y: 160, width: 600, height: 32))
     let canvas = Canvas(frame: NSRect(x: 0, y: 0, width: 640, height: 420))
     var web: WKWebView?
     var submitted = ""
@@ -58,6 +60,12 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
             """, baseURL: nil)
         } else if mode.hasPrefix("pointer-") {
             window.contentView?.addSubview(canvas)
+        } else if mode == "native-batch" || mode == "mixed-batch" {
+            batchFirst.stringValue = "original"; batchFirst.setAccessibilityIdentifier("general-editor")
+            batchSecond.stringValue = "untouched"; batchSecond.setAccessibilityIdentifier("other-editor")
+            editor.frame = NSRect(x: 20, y: 220, width: 600, height: 100)
+            window.contentView?.addSubview(mode == "native-batch" ? batchFirst : editor)
+            window.contentView?.addSubview(batchSecond)
         } else {
             window.contentView?.addSubview(editor)
             second.contentView?.addSubview(other)
@@ -66,6 +74,7 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if web == nil {
             window.makeFirstResponder(mode.hasPrefix("pointer-") ? canvas : editor)
+            if mode == "native-batch" { window.makeFirstResponder(batchFirst) }
             DispatchQueue.main.async { emit(["event": "ready"]) }
         }
     }
@@ -78,6 +87,8 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
             "clicks": canvas.clicks, "scrolls": canvas.scrolls, "drags": canvas.drags, "releases": canvas.releases,
             "lastX": canvas.last.x, "lastY": canvas.last.y, "submitted": submitted,
             "active": NSApp.isActive, "keyWindow": NSApp.keyWindow?.title ?? ""]
+        if mode == "native-batch" { row["body"] = batchFirst.stringValue }
+        if mode == "native-batch" || mode == "mixed-batch" { row["other"] = batchSecond.stringValue }
         if let web {
             // Read-only oracle; input and submission must come through the Computer tool.
             web.evaluateJavaScript("document.getElementById('name').value") { value, error in
