@@ -39,7 +39,8 @@ type ListenerSnapshot = {
 };
 
 function takeListenerSnapshot(): ListenerSnapshot {
-	const signals: NodeJS.Signals[] = process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
+	const signals: NodeJS.Signals[] =
+		process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 	return {
 		stdinEnd: process.stdin.listeners("end") as NodeListener[],
 		signals: new Map(signals.map((signal) => [signal, process.listeners(signal) as NodeListener[]])),

@@ -38,28 +38,32 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
-	let disposed = false;
+	let disposing: Promise<void> | undefined;
+	let signalShutdown = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
-	const disposeRuntime = async (): Promise<void> => {
-		if (disposed) return;
-		disposed = true;
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		await runtimeHost.dispose();
+	const disposeRuntime = (): Promise<void> => {
+		disposing ??= Promise.resolve().then(async () => {
+			unsubscribe?.();
+			unsubscribeBackpressure?.();
+			await runtimeHost.dispose();
+		});
+		return disposing;
 	};
 
 	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
+		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
 
 		for (const signal of signals) {
 			const handler = () => {
+				if (signalShutdown) return;
+				signalShutdown = true;
 				killTrackedDetachedChildren();
 				void disposeRuntime().finally(() => {
-					process.exit(signal === "SIGHUP" ? 129 : 143);
+					process.exit(signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143);
 				});
 			};
 			process.on(signal, handler);
@@ -162,10 +166,10 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		console.error(error instanceof Error ? error.message : String(error));
 		return 1;
 	} finally {
+		await disposeRuntime();
+		await flushRawStdout();
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
-		await disposeRuntime();
-		await flushRawStdout();
 	}
 }
