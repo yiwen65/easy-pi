@@ -5,6 +5,16 @@ not attach to personal profiles or expose scripts, arbitrary keys or coordinates
 
 ## Observe after an action
 
+When the initial URL is known, combine preparation, navigation and observation:
+
+```json
+{"request":{"op":"prepare","url":"https://allowed.example/"},"observeAfter":true}
+```
+
+This uses the existing native stages in order, each waiting for its terminal
+acknowledgement. Preparation cannot be retried; failure or cancellation stops
+the remaining stages. No browser profile or target authority is reused.
+
 For a generic SPAN/DIV that exposes `press`, use `click` with its own returned
 element reference. This capability proves a direct click handler, not a value
 postcondition. `execute.press.value` means the resulting control value (such as
@@ -22,7 +32,7 @@ result. For example:
 
 The URL still needs permission. Ref-based actions still require the exact
 observation and target references visible in the current provider context.
-This option is not accepted on `prepare` or `observe`, and it does not change
+This option is not accepted on `prepare` without a URL or on `observe`, and it does not change
 the native-window or pixel-input protocols.
 
 The action completes its native terminal acknowledgement before the read starts.

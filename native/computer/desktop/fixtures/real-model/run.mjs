@@ -259,7 +259,7 @@ for (const id of selected) {
 					? "Use select with observe:'image' for combined selection/capture. Batch compatible inputs into one segment when safe; use returned fresh evidence instead of redundant reads. Verify once after a logical action group."
 					: "Use current visible evidence and verify action outcomes.";
 		await session.prompt(
-			`${mode === "browser" ? `Use prepare to open the isolated Chrome, navigate to ${url}, then observe.` : `Only operate the Chrome window titled ${JSON.stringify(title)}.`} ${mini ? "Read and complete the MiniWoB task shown on the page. Do not restart an episode or change task settings." : chromeTasks[id]} ${mode === "desktop" ? guidance : "Batch independent compatible form actions in one execute call, using only current observed refs/selectors."}`,
+			`${mode === "browser" ? `Open the isolated Chrome at ${url} and inspect the page.` : `Only operate the Chrome window titled ${JSON.stringify(title)}.`} ${mini ? "Read and complete the MiniWoB task shown on the page. Do not restart an episode or change task settings." : chromeTasks[id]} ${mode === "desktop" ? guidance : "Batch independent compatible form actions in one execute call, using only current observed refs/selectors."}`,
 		);
 		clearTimeout(timer);
 		assert.ok(!interrupted, "Task interrupted or exceeded 180s deadline");

@@ -528,6 +528,30 @@
 
 - Installed qualification: selection-after 六调用通过，拒绝错误值后置条件且未误点，最终 Second=true、Plan=Pro、clicks=1，关闭 C06ca。候选可回退安装，旧包位于 /tmp/epi-ax-duplicates.hu0bQg/installed-before。安装后 gpt-6-sol 三项真实模型 3/3、零工具错误、全部正常关闭：click-tab-2 23.914s/6 回合，form 21.775s/6，dialog 20.851s/6，总费用 0.0765388 USD，最终 C06cd。该模型组是邻近回归，未直接覆盖无样式列表；新增缺陷的实际操作覆盖来自 gui-before/after 对照。根 check 再次通过并恢复其四处无关格式变化。较前轮少回合不能单样本归因为原生提速；全局 Goal 继续。
 
+### [x] T-023 — 合并浏览器启动的模型往返
+
+- Status: done
+- Owner: coordinator
+- Objective: 通过已有 prepare 的可选 URL 和 observeAfter，省去已知目标 URL 时单独 navigate 的模型往返，不添加动作类型或常驻状态。
+- Inputs and prerequisites: T-022 安装后模型三项全通过；模型时间占 86.0%–87.1%，prepare 2.31–2.95s，五工具调用/六回合。归因记录 /tmp/epi-browser-start.60bOO0/attribution.json。
+- Scope or files: browser/contracts.ts、tool.ts、对应单测和受控真实 E2E；原生动作、权限、隔离浏览器、取消排空不变。
+- Expected output: 复用既有 prepare→navigate→observe 顺序，失败不继续、不重放；同任务交错模型对照检验往返和耗时。
+- Dependencies: T-022.
+- Execution steps:
+  1. 增加可选 URL 的契约与失败/取消/terminal 回归。
+  2. 复用现有顺序动作和观察路径，不新增调度器、重试或生命周期状态。
+  3. 类型、单元、真实受控页面及模型 A/B，全部原始失败保留，未证明收益则不宣称提速。
+- Acceptance criteria:
+  - 一次调用能拿到目标页新观察；准备拒绝、取消、导航未知均不启动下一阶段；所有 URL 限制和上下文引用边界不变。
+  - 实际模型使用合并路径减少往返且准确率不退化；独立关闭与回执通过。
+- Verification method:
+  - targeted browser/context/package tests、native TS、真实 GUI、固定任务/模型/种子的交错 A/B。
+- Validation evidence: prepare 增加可选 URL，共用既有 URL 校验、原生 prepare/navigate 与 observeAfter，无新动作类型、调度器或生命周期状态。36 browser、21 context（含组合结果被过滤时禁止后续输入）、其余 desktop 邻域、8 qualified package、13 benchmark、严格 native TS 和根 check 通过。真实列表 fixture combined 四调用、三种点击独立回执全对，关闭 C06d5；原 split 五调用记录保留。证据 /tmp/epi-browser-start.60bOO0。固定 gpt-6-sol/form/seed42、同中性任务提示，A/B、B/A、A/B 六次全部通过且关闭：A=23.647/23.465/28.762s、6/6/8回合；B=21.538/21.002/21.018s、5/5/5回合。三对节省 2.109/2.463/7.744s；第三 A 有两次输入前契约错误，未剔除，不把全部差值解释为固定提速。B 三次实际调用 prepare(url)+observeAfter，零工具错误。总报告费用 0.1510204 USD，B 单次费用未显著低于 A，不宣称成本下降或尾延迟保证。candidate bridge f1143ecc7421e552787ca13430d0b3250bf440f9e6e362c54dfcde6b7454ea1d 已可回退安装，原包 installed-before；安装后 seed7 标签/弹窗/导航邻域运行中。
+- Blocker: None.
+- Unblock condition: None.
+
+- Installed qualification: seed7 真实模型标签、弹窗、导航 3/3，通过且零工具错误、全部正常关闭至 C06d8；分别 12.532s/3、18.401s/5、26.514s/6 回合，费用 0.063602 USD。seed7 标签任务不同于 seed42，不作同任务速度比较。根 check 最终通过，恢复四处无关格式变化，21 项上下文测试格式化后再过。下一轮继续动态内容/长会话及剩余通用能力，不把 T-023 完成等同 Goal 完成。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -557,6 +581,10 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-25: T-023 done：36 browser、21 context、8 package、13 benchmark、native TS/root check，真实 combined 四调用回执及交错模型 6/6、安装后邻域 3/3 均通过。保留原版两次契约错误和全部计时，不声称普遍加速或成本降低。变更仅复用顺序阶段并暴露可选 URL；native 指纹未改。
+
+- 2026-09-25: T-023 开始。code-performance 实测归因确定模型往返为主导时间；由 coordinator 串行修改共用工具契约，native 不变。保留 prepare 无 URL 的现有语义，仅合并用户已给定 URL 的顺序操作。
 
 - 2026-09-25: 用户明确简化优先、允许架构重构；后续仅保留能以证据支撑速度、准确性、通用性或必要安全边界的机制，优先删除重复工作，不为重构而重构。T-022 以入口规范化修复已复现误拒绝，不增加缓存、重试或新状态实体。
 

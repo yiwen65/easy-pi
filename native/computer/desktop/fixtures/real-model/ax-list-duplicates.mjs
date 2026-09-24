@@ -7,8 +7,9 @@ import { isAbsolute, join } from "node:path";
 import { until } from "./chrome.mjs";
 
 assert.equal(process.env.ALLOW_GUI_TESTS, "true");
-const [output, packageRoot, miniRoot, bundle] = process.argv.slice(2);
+const [output, packageRoot, miniRoot, bundle, start = "split"] = process.argv.slice(2);
 assert.ok([output, packageRoot, miniRoot, bundle].every((p) => p && isAbsolute(p)));
+assert.ok(["split", "combined"].includes(start));
 mkdirSync(output);
 writeFileSync(join(output, "fixture.mjs"), readFileSync(new URL(import.meta.url)));
 const base = join(miniRoot, "miniwob/html/core/jquery-ui");
@@ -79,8 +80,11 @@ try {
 			clearTimeout(timer);
 		}
 	};
-	await call({ request: { op: "prepare" } });
-	let seen = await call({ request: { op: "navigate", url: origin }, observeAfter: true });
+	if (start === "split") await call({ request: { op: "prepare" } });
+	let seen = await call({
+		request: { op: start === "split" ? "navigate" : "prepare", url: origin },
+		observeAfter: true,
+	});
 	assert.deepEqual(row(seen, "link", "Second").tab, { label: "Second", selected: false });
 	for (const [role, label, id] of [
 		["link", "Second", "link"],

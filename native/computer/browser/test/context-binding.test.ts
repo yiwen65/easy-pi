@@ -120,8 +120,17 @@ async function fixture(option = false) {
 					);
 				},
 				startCrossWindowDrag: forbidden,
-				startPrepare: forbidden,
-				startNavigate: forbidden,
+				startPrepare() {
+					finish(new api.ComputerResult.BrowserPrepared({ pid: 42, windowId: 7n }), true);
+				},
+				startNavigate() {
+					finish(
+						new api.ComputerResult.Action({
+							value: { effect: api.ActionEffect.Unverifiable, route: api.ActionRoute.Dom },
+						}),
+						true,
+					);
+				},
 				startCapture: forbidden,
 				startImageClick: forbidden,
 				startImageScroll: forbidden,
@@ -188,6 +197,27 @@ const execute = (ref: string) => ({
 });
 
 for (const visible of [true, false]) {
+	test(`combined prepare requires its exact visible result: visible=${visible}`, { skip: !sdk }, async (t) => {
+		const f = await fixture();
+		t.after(() => f.close());
+		const seen = await f.tool.execute("open", { request: { op: "prepare", url: "about:blank" }, observeAfter: true });
+		assert.ok(seen.details && typeof seen.details === "object" && "observationRef" in seen.details);
+		f.binding.observeContext?.(false, [
+			{
+				role: "toolResult",
+				toolCallId: "open",
+				toolName: "computer",
+				content: visible ? seen.content : seen.content.slice(1),
+				isError: false,
+				timestamp: 1,
+			},
+		]);
+		const next = execute(String(seen.details.observationRef));
+		if (visible) await f.tool.execute("fill", next);
+		else await assert.rejects(f.tool.execute("fill", next), /current model view/);
+		assert.equal(f.plans, visible ? 1 : 0);
+	});
+
 	test(
 		`post-action observations need the exact combined provider result: visible=${visible}`,
 		{ skip: !sdk },

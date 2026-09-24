@@ -19,6 +19,10 @@ test("observation text search is literal, bounded and exclusive to observe", () 
 test("browser protocol is fixed preparation/navigation plus the existing bounded plan language", () => {
 	assert.deepEqual(parseControlledBrowserInput({ request: { op: "prepare" } }), { request: { op: "prepare" } });
 	for (const url of ["about:blank", "http://127.0.0.1:1234/form", "https://example.test/"]) {
+		assert.deepEqual(parseControlledBrowserInput({ request: { op: "prepare", url }, observeAfter: true }), {
+			request: { op: "prepare", url },
+			observeAfter: true,
+		});
 		assert.deepEqual(parseControlledBrowserInput({ request: { op: "navigate", url } }), {
 			request: { op: "navigate", url },
 		});
@@ -54,7 +58,10 @@ test("model input cannot choose executable/profile/session, script, foreground o
 			"https://user:password@example.test",
 			"about:settings",
 			`https://example.test/${"界".repeat(700)}`,
-		].map((url) => ({ op: "navigate", url })),
+		].flatMap((url) => [
+			{ op: "navigate", url },
+			{ op: "prepare", url },
+		]),
 	])
 		assert.throws(() => parseControlledBrowserInput({ request }), /Invalid/);
 });

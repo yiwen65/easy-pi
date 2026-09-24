@@ -32,6 +32,7 @@ function fixture(
 		navigationFailure?: string;
 		navigationCommitted?: boolean;
 		prepareFailure?: string;
+		prepareTerminal?: Promise<void>;
 		clickEffect?: CuaSdk.ActionEffect;
 		scrollable?: boolean;
 		scrollFailure?: string;
@@ -69,7 +70,9 @@ function fixture(
 					calls.push(name);
 					result.resolve(value);
 					const terminal = { operationId: `op-${calls.length}`, cancelled: false, inputCommitted: committed };
-					if ((name === "click" || name === "scroll") && options.clickTerminal)
+					if (name === "prepare" && options.prepareTerminal)
+						void options.prepareTerminal.then(() => receipt.resolve(terminal));
+					else if ((name === "click" || name === "scroll") && options.clickTerminal)
 						void options.clickTerminal.then(() => receipt.resolve(terminal));
 					else if (name === "observe" && snapshots > 1 && options.followupTerminal)
 						void options.followupTerminal.then(() => receipt.resolve(terminal));
@@ -360,6 +363,81 @@ const execute = (ref: string) => ({
 		ref,
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
+});
+
+test(
+	"prepare with URL waits for terminal, navigates once and returns usable observation",
+	{ skip: !sdk },
+	async (t) => {
+		const terminal = deferred<void>();
+		const f = fixture({ prepareTerminal: terminal.promise });
+		t.after(() => f.host.close());
+		const pending = f.tool.execute("open", { request: { op: "prepare", url: "about:blank" }, observeAfter: true });
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(f.calls, ["prepare"]);
+		terminal.resolve();
+		const result = await pending;
+		assert.equal(result.details.status, "navigation_submitted");
+		assert.equal(result.details.observationRef, "b-snapshot-1");
+		await f.tool.execute("fill", execute(result.details.observationRef!));
+		assert.deepEqual(f.calls, ["prepare", "navigate", "observe", "plan"]);
+	},
+);
+
+test("prepare with URL does not navigate after cancellation during terminal drain", { skip: !sdk }, async (t) => {
+	const terminal = deferred<void>();
+	const controller = new AbortController();
+	const f = fixture({ prepareTerminal: terminal.promise });
+	t.after(() => f.host.close());
+	const pending = f.tool.execute(
+		"open",
+		{ request: { op: "prepare", url: "about:blank" }, observeAfter: true },
+		controller.signal,
+	);
+	const rejected = assert.rejects(pending);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(f.calls, ["prepare"]);
+	controller.abort();
+	terminal.resolve();
+	await rejected;
+	assert.deepEqual(f.calls, ["prepare"]);
+});
+
+test("combined preparation stops at the first refused or unknown stage", { skip: !sdk }, async (t) => {
+	for (const options of [
+		{ prepareFailure: "permission_denied" },
+		{ navigationFailure: "permission_denied" },
+		{ navigationFailure: "unexpected_modal_surface", navigationCommitted: true },
+		{ observeFailureAfter: 0 },
+	]) {
+		const f = fixture(options);
+		t.after(() => f.host.close());
+		await assert.rejects(
+			f.tool.execute("open", { request: { op: "prepare", url: "about:blank" }, observeAfter: true }),
+		);
+		assert.deepEqual(
+			f.calls,
+			options.prepareFailure
+				? ["prepare-refused"]
+				: options.navigationFailure
+					? ["prepare", "navigate-refused"]
+					: ["prepare", "navigate", "observe-refused"],
+		);
+	}
+});
+
+test("prepare URL is validated before native creation and observation remains optional", { skip: !sdk }, async (t) => {
+	const f = fixture();
+	t.after(() => f.host.close());
+	await assert.rejects(
+		f.tool.execute("invalid", { request: { op: "prepare", url: "file:///private" }, observeAfter: true }),
+		/Invalid/,
+	);
+	assert.equal(f.creates, 0);
+	const result = await f.tool.execute("open", { request: { op: "prepare", url: "about:blank" } });
+	assert.equal(result.details.status, "navigation_submitted");
+	assert.equal(result.details.observationRef, undefined);
+	assert.deepEqual(f.calls, ["prepare", "navigate"]);
 });
 
 test(
