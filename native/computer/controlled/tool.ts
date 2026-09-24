@@ -70,6 +70,7 @@ const publicCodes = new Set([
 	"native_unavailable",
 	"native_fault",
 	"stale_observation",
+	"stale_browser_observation",
 	"target_ambiguous",
 	"target_missing",
 	"target_disabled",
@@ -374,6 +375,7 @@ export function createControlledComputerTool(
 											: "paused",
 									completedSteps: 0,
 									code: receipt?.inputCommitted ? "outcome_unknown" : reason,
+									...(receipt?.inputCommitted ? { cause: reason } : {}),
 								};
 							}),
 					};
@@ -391,6 +393,10 @@ export function createControlledComputerTool(
 			if (details.firstUnfinishedStep !== undefined)
 				text += ` First unfinished step: ${details.firstUnfinishedStep}.`;
 			if (details.code) text += ` Code: ${details.code}.`;
+			if (details.cause) text += ` Cause: ${details.cause}.`;
+			if (details.status === "outcome_unknown") text += " Do not replay; the input effect is unresolved.";
+			if (details.status === "paused" && details.code === "stale_browser_observation")
+				text += " No input committed. Observe again and use fresh references for a corrected request.";
 			if (details.steps) text += `\nStep facts: ${JSON.stringify(details.steps)}`;
 			if (details.status === "action_submitted")
 				text += ` Native effect=${details.effect}; route=${details.route}. Observe to verify the result; do not repeat this action without resolving its effect.`;

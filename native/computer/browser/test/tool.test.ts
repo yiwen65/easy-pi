@@ -34,6 +34,8 @@ function fixture(
 		prepareFailure?: string;
 		clickEffect?: CuaSdk.ActionEffect;
 		scrollable?: boolean;
+		scrollFailure?: string;
+		scrollCommitted?: boolean;
 		option?: boolean;
 		noise?: number;
 		blankStructure?: boolean;
@@ -206,6 +208,16 @@ function fixture(
 					},
 					startScrollIntoView(token) {
 						assert.equal(token, `b-snapshot-${snapshots}:0`);
+						if (options.scrollFailure) {
+							calls.push("scroll-refused");
+							result.reject(new api.ComputerError.Refused({ reason: options.scrollFailure }));
+							receipt.resolve({
+								operationId: "refused",
+								cancelled: false,
+								inputCommitted: options.scrollCommitted ?? false,
+							});
+							return;
+						}
 						complete(
 							"scroll",
 							new api.ComputerResult.Action({
@@ -352,6 +364,37 @@ test("refused or unknown scrolling never starts a follow-up or replays", { skip:
 		);
 		await assert.rejects(f.tool.execute("retry", input), /stale_observation/);
 		assert.deepEqual(f.calls, ["observe", "scroll"]);
+	}
+});
+
+test("native stale scroll diagnostics preserve uncertainty and never refresh or replay", { skip: !sdk }, async (t) => {
+	for (const committed of [false, true]) {
+		for (const reason of ["stale_browser_observation", "private detail /secret"]) {
+			const f = fixture({ scrollable: true, scrollFailure: reason, scrollCommitted: committed });
+			t.after(() => f.host.close());
+			const seen = await f.tool.execute("o", { request: { op: "observe" } });
+			const ref = seen.details.observationRef!;
+			const input = {
+				request: { op: "scroll_into_view" as const, ref, target: `${ref}:0` },
+				observeAfter: true as const,
+			};
+			const safeReason = reason.startsWith("private") ? "native_fault" : reason;
+			await assert.rejects(f.tool.execute("s", input), (error: unknown) => {
+				assert.ok(error instanceof Error && "details" in error);
+				assert.deepEqual(error.details, {
+					status: committed ? "outcome_unknown" : "paused",
+					completedSteps: 0,
+					code: committed ? "outcome_unknown" : safeReason,
+					...(committed ? { cause: safeReason } : {}),
+				});
+				assert.doesNotMatch(error.message, /private detail|secret/);
+				if (committed) assert.match(error.message, /Do not replay/);
+				else if (reason === "stale_browser_observation") assert.match(error.message, /Observe again/);
+				return true;
+			});
+			await assert.rejects(f.tool.execute("retry", input), /stale_observation/);
+			assert.deepEqual(f.calls, ["observe", "scroll-refused"]);
+		}
 	}
 });
 
@@ -597,6 +640,8 @@ test(
 		t.after(() => f.host.close());
 		assert.equal(f.creates, 0);
 		assert.equal(f.tool.contract?.approval, "never");
+		assert.match(f.tool.description, /Password\/file input, dragging and tab switching are unsupported/);
+		assert.match(f.tool.description, /repeated observation or scrolling cannot enable them/);
 		assert.deepEqual(f.tool.executionResource, { key: "desktop:browser-tool-fixture", mode: "exclusive" });
 		for (const op of ["prepare", "navigate"] as const) {
 			const lease = await f.host.scheduler.acquire(f.tool.executionResource!);
