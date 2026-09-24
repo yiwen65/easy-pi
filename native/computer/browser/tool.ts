@@ -52,9 +52,9 @@ export function createControlledBrowserTool(
 			"Child sessions use independent empty profiles, not the parent's tab or cookies. " +
 			"Execute 1–8 fill, press or assert_value steps using only returned refs/selectors and the observation ref. " +
 			"For batches use selectors after the first mutation; refs never rebind. " +
-			"Use click with observation ref and target element ref for links, dialogs or submit buttons, then observe the result. " +
+			"Use click with observation ref and target element ref for links, dialogs, submit buttons and generic elements exposing press (direct click handlers). Prefer observeAfter:true to inspect the result. " +
 			"Click submission is not task success. Press requires a value postcondition on an already observed control, not a future page or dialog. " +
-			"Press.value is the expected resulting value (for example checkbox 'true'), never a key to send. Fill edits text fields, not select menus. " +
+			"Press.value is the expected resulting control value (for example checkbox 'true'), never its label or a key to send. For activation without a control-value change, use click, not execute.press. Fill edits text fields, not select menus. " +
 			"For a single-select menu, use select_option with the observation ref and the returned option element ref whose actions include select_option, then observe. Option group identifies its menu. " +
 			"DOM events are not trusted keyboard input. No arbitrary script, existing profile, subframe, key, pixel or foreground fallback. " +
 			"Preparation cannot be retried on the same session. Observe after navigation and before another segment. " +

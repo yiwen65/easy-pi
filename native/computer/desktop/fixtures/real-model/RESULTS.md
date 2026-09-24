@@ -1,6 +1,23 @@
-# 真实模型测试报告 — 2026-09-24
+# 真实模型测试报告 — 2026-09-25
 
 ## 最新修复状态
+
+### 普通 HTML 点击处理器与动作选择
+
+受限 SPAN/DIV 直接 click 处理器支持已安装，SDK `08b4fdbdb39b0322ffb7529c8a06ed8b87d88962b8c652bea1c79b8d081f3575`。新观察引用、精确 DOM 对象、页面/弹窗边界、禁用与可见性检查保留；不支持跨 frame、任意脚本、事件委托或个人浏览器。最终点击 guard 13/13、弹窗 11/11、加载期提示 7/7、select 15/15，全部关闭；visibility:hidden 曾使初版负例失败，修正 CSS visibility/opacity 检查后通过，原始失败保留。
+
+安装后 click-tab-2 首次 rawReward=1，但模型误用 press 的值后置条件，最终报告未能确认；没有把业务 oracle 通过冒充完整可见验证。随后仅明确工具描述：普通激活使用 click，press.value 不是元素标签。相同模型/seed 42/任务的后续结果：
+
+| 任务 | task 秒 | 回合 | 独立结果/关闭 |
+| --- | --- | --- | --- |
+| MiniWoB click-tab-2 | 28.683 | 7 | 通过/正常 |
+| Chrome form | 24.756 | 6 | 通过/正常 |
+| Chrome dialog | 23.217 | 6 | 通过/正常 |
+| Chrome navigation | 25.863 | 7 | 通过/正常 |
+
+该批零工具错误，click-tab-2 使用 click 并读回页面奖励；总报告费用 0.1226096 USD，最终 C0680。前一批费用 0.1353116 USD、四任务 oracle 均通过，但保留上述 unknown 与一次旧引用拒绝。两批不是交错性能试验，不证明普遍提速或全量 benchmark 达标。21 browser 契约/工具、15 context、8 package、native TS、根 check 通过；点击修复另有 13 page、24 CDP、139 desktop/context 与独立 renderer 检查。证据 `/tmp/epi-click-handler.mz5oXh/{model-installed,model-action-guidance,listeners-final,installed-smoke}`；原包分别保留 `installed-before`、`installed-before-action-guidance`。
+
+### 可选合并观察（前轮）
 
 浏览器可选 `observeAfter:true` 已通过原生动作结束/读取结束/取消/失败事实保留/实际 provider context 回归，并安装实验版。用法见 `native/computer/browser/README.md`。原生 SDK 不变；只合并工具返回，不省略读取或业务验收。
 

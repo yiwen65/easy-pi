@@ -5,6 +5,13 @@ not attach to personal profiles or expose scripts, arbitrary keys or coordinates
 
 ## Observe after an action
 
+For a generic SPAN/DIV that exposes `press`, use `click` with its own returned
+element reference. This capability proves a direct click handler, not a value
+postcondition. `execute.press.value` means the resulting control value (such as
+a checkbox's `true`), not the element label. Activation without such a value
+change should use `click` plus `observeAfter:true`, then inspect fresh UI for
+the task result. Submission alone is not success; never replay unknown input.
+
 Set the optional top-level `observeAfter: true` on `navigate`, `execute`, `click`
 or `select_option` to include a fresh semantic observation in the same tool
 result. For example:
