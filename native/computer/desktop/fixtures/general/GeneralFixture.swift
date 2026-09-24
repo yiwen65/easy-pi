@@ -10,6 +10,7 @@ final class Canvas: NSView {
     var clicks = 0
     var scrolls = 0
     var drags = 0
+    var releases = 0
     var last = NSPoint.zero
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -19,7 +20,14 @@ final class Canvas: NSView {
         ("Owned canvas: click, scroll, drag" as NSString).draw(at: NSPoint(x: 30, y: 170), withAttributes: [.foregroundColor: NSColor.black])
     }
     override func mouseDown(with event: NSEvent) { clicks += 1; last = convert(event.locationInWindow, from: nil) }
-    override func mouseDragged(with event: NSEvent) { drags += 1; last = convert(event.locationInWindow, from: nil) }
+    override func mouseDragged(with event: NSEvent) {
+        drags += 1; last = convert(event.locationInWindow, from: nil)
+        if drags == 1 { emit(["event": "drag-started"]) }
+    }
+    override func mouseUp(with event: NSEvent) {
+        releases += 1; last = convert(event.locationInWindow, from: nil)
+        emit(["event": "pointer-released", "count": releases])
+    }
     override func scrollWheel(with event: NSEvent) { if event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0 { scrolls += 1 } }
 }
 final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -67,7 +75,7 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
     func state(_ id: String) {
         var row: [String: Any] = ["event": "state", "id": id, "body": editor.string, "other": other.string,
-            "clicks": canvas.clicks, "scrolls": canvas.scrolls, "drags": canvas.drags,
+            "clicks": canvas.clicks, "scrolls": canvas.scrolls, "drags": canvas.drags, "releases": canvas.releases,
             "lastX": canvas.last.x, "lastY": canvas.last.y, "submitted": submitted,
             "active": NSApp.isActive, "keyWindow": NSApp.keyWindow?.title ?? ""]
         if let web {

@@ -111,7 +111,75 @@ try {
 	await event((row) => row.event === "ready");
 	taskStart = performance.now();
 	feature = createComputerFeature();
-	if (scenario.startsWith("pointer-")) {
+	if (scenario === "pointer-cancel") {
+		const view = await select("main", "image");
+		const point = {
+			ref: view.details.imageRef,
+			x: Math.floor(view.details.width / 4),
+			y: Math.floor(view.details.height / 2),
+		};
+		const abort = new AbortController();
+		const pending = call(
+			{
+				op: "segment",
+				ref: point.ref,
+				actions: [
+					{
+						op: "drag",
+						from: point,
+						to: { ...point, x: Math.floor((view.details.width * 3) / 4) },
+						durationMs: 3000,
+					},
+					{ op: "click", point },
+				],
+				expected: visual,
+			},
+			abort.signal,
+		).then(
+			(result) => ({ result }),
+			(error) => ({ error }),
+		);
+		await event((row) => row.event === "drag-started");
+		abort.abort();
+		const outcome = await pending;
+		assert.ok("result" in outcome, JSON.stringify(outcome));
+		assert.equal(outcome.result.details.terminal?.inputCommitted, true);
+		assert.equal(outcome.result.details.terminal?.cancelled, true);
+		assert.equal(outcome.result.details.status, "cancelled");
+		assert.equal(outcome.result.details.attemptedActions, 1);
+		assert.equal(outcome.result.details.firstUnfinishedAction, 0);
+		assert.equal(outcome.result.details.actions[0].dispatch, "unknown");
+		await event((row) => row.event === "pointer-released" && row.count === 1);
+		const actual = await state();
+		assert.equal(actual.clicks, 1, "follow-up click must not execute");
+		assert.equal(actual.releases, 1, "cancel must release the owned mouse button");
+		assert.ok(actual.drags > 0 && actual.lastX < 400, "abort occurred before the drag endpoint");
+		log.push({ oracle: actual });
+		await feature.close();
+		feature = createComputerFeature();
+		const fresh = await select("main", "image");
+		await call({
+			op: "segment",
+			ref: fresh.details.imageRef,
+			actions: [
+				{
+					op: "click",
+					point: {
+						ref: fresh.details.imageRef,
+						x: Math.floor(fresh.details.width / 4),
+						y: Math.floor(fresh.details.height / 2),
+					},
+				},
+			],
+			expected: visual,
+		});
+		await event((row) => row.event === "pointer-released" && row.count === 2);
+		const restarted = await state();
+		assert.equal(restarted.clicks, 2);
+		assert.equal(restarted.releases, 2);
+		assert.equal(restarted.drags, actual.drags, "closed drag must not continue in the new session");
+		log.push({ restartOracle: restarted });
+	} else if (scenario.startsWith("pointer-")) {
 		const view = await select("main", "image");
 		const png = Buffer.from(view.content.find((row) => row.type === "image").data, "base64");
 		assert.equal(png.toString("ascii", 1, 4), "PNG");

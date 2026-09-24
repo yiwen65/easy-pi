@@ -86,7 +86,7 @@
   - 正常成功与正确拒绝分开统计，无错误输入和遗留占用。
 - Verification method:
   - 实际 UI 与独立结果读回。
-- Validation evidence: 通用 owned AppKit/WebKit 10 场景各 5 次，50/50，通过实际工具调用、独立状态读回和干净关闭；/tmp/epi-general.dpLJ12/final。中间九场景版本另有 45/45，不混入最终分布。完整浏览器和输入中途取消尚未覆盖，任务保持 in_progress；coordinator 下一步接入独立浏览器 profile 的本地页面导航/表单与受控中途取消。
+- Validation evidence: 早期通用 owned AppKit/WebKit 10 场景各 5 次，50/50，证据 /tmp/epi-general.dpLJ12/final；九场景版本另有 45/45，不混算。2026-09-25 当前安装 be567fabe 的 11 场景三轮 33/33，证据 /tmp/epi-cancel-drag.m9eBLH/general，正常业务 21/21、保护恢复 12/12；全部 native close、fixture exit 和 clean lease。新增 pointer-cancel 在应用实际收到首个拖动事件后 abort，3/3 严格验证 cancelled/inputCommitted=true、只尝试第一动作且效果 unknown、down/up 各一次、后续点击未发送；关闭后新会话单次点击通过且 drag 数不再增加。no-abort.mjs 负对照故意不取消，准确因 terminal.cancelled=false 失败，不能将自然完成误算取消成功；原始失败保留 no-abort.log。首轮初测另保留 first.log，不混入 33 项。复用原 fixture/probe，无生产或权限修改；Swift 编译及 npm run check 通过并恢复四处无关格式变化。浏览器模型资格见 T-026/028；外部抢焦点、键盘/跨窗口中途取消及长期稳定性仍未完成，T-002 保持 in_progress。
 - Blocker: None.
 - Unblock condition: None.
 

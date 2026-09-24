@@ -14,7 +14,7 @@ ALLOW_GUI_TESTS=true node native/computer/desktop/fixtures/save-panel/benchmark.
   "$fixture_dir/results" 5 general
 ```
 
-The count is rounds, not A/B pairs in this mode: ten scenarios per round,
+The count is rounds, not A/B pairs in this mode: eleven scenarios per round,
 fresh process/feature each time, serial execution, no retry. The save-panel
 suite remains independently runnable for save/reopen and modal-sheet coverage.
 
@@ -26,6 +26,7 @@ suite remains independently runnable for save/reopen and modal-sheet coverage.
 | pointer-click | Image-bound click | Exactly one owned canvas mouse-down |
 | pointer-scroll | Image-bound scroll | Owned canvas receives nonzero scroll event |
 | pointer-drag | Image-bound 200 ms drag | Mouse-down, drag events and endpoint in destination region |
+| pointer-cancel | Abort a 3 s drag after the first received drag event, then reopen the session | Exactly one down/up, no follow-up click, no late drag after close, new session clicks once |
 | web-form | Type Unicode and Return-submit | WebKit DOM read-only value plus submit-handler value |
 | stale-reference | Consume semantic ref, attempt old input, recover | Exact stale error, unchanged body, fresh input succeeds |
 | stale-image | Consume image ref, attempt old input, recover | Segment's exact stale_observation error, unchanged body, fresh input succeeds |
@@ -54,10 +55,10 @@ force-kills a native owner or advances unsafely.
 
 Limits: embedded WebKit is not Safari/Chrome browser chrome, tabs or external
 navigation; canvas scroll tests event delivery, not scrolling a long document;
-window switching is deliberate, not external focus theft; cancellation here is
-before dispatch, not mid-drag. Clipboard, IME composition, file pickers beyond
+window switching is deliberate, not external focus theft; cancellation covers
+pre-dispatch and a single-window drag, not every action or cancellation race. Clipboard, IME composition, file pickers beyond
 the save fixture, multi-display scaling, target disappearance, real browsers,
-external focus theft, mid-input cancellation, long-duration soak and model-led
+external focus theft, keyboard/cross-window cancellation, long-duration soak and model-led
 tasks need distinct qualification. No OS permission/ownership checks are removed.
 
 Execution status and results are maintained only in
