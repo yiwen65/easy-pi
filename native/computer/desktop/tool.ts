@@ -20,6 +20,18 @@ export type DesktopApi = ComputerPlanApi &
 	SegmentResultApi &
 	Pick<typeof CuaSdk, "ComputerKey" | "ScrollDirection">;
 
+function recoveryGuidance(code: string | undefined): string {
+	switch (code) {
+		case "stale_image_observation":
+		case "stale_image_geometry":
+			return "Image evidence changed. For coordinate actions, inspect a fresh capture and recompute coordinates; never reuse the old image ref. Use observe and its fresh Observation ref for keyboard actions, or fresh element refs with fill for editable fields. Split at navigation or UI-changing actions before choosing further coordinates. ";
+		case "physical_input_held_at_target":
+			return "Native input-state checking reports a held key or button. Ask the user to release it using their keyboard or remote-control client, then observe the actual effect before continuing. Do not synthesize releases or automatically retry. ";
+		default:
+			return "";
+	}
+}
+
 export function createDesktopTool(session: ComputerSession<ControlledComputerSession>, getApi: () => DesktopApi) {
 	const view = new DesktopView<DesktopGrant & { revision: number }>();
 	let revision = 0;
@@ -52,6 +64,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
 			"Refs are not interchangeable: discover refs are for select/select_destination only. segment.ref must be the latest Observation ref from observe or Image ref from capture, not the selected window ref or an element ref. Element refs go in target.ref; point.ref uses the Image ref. " +
 			"Every Computer call consumes the previous evidence, including rejected calls; after stale_observation, observe/capture again and use the NEW evidence ref. " +
+			"Image freshness requires unchanged captured pixels and geometry, not merely a recent timestamp. Split after navigation or UI-changing clicks before using further coordinates; inspect fresh evidence and recompute them. Prefer observe plus fill with a fresh exact element ref for editable fields; use an Observation ref for keyboard-only segments. " +
 			"Segment support requires the qualified native candidate; legacy execute/click/scroll/key routes remain available. " +
 			"Segments may automatically foreground the selected window with agent priority, without blocking physical input. " +
 			"For cross-window drag: keep the selected source, discover and select_destination using a new catalog ref, then capture_pair and drag_between using both images. " +
@@ -334,7 +347,7 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 						const content: Awaited<ReturnType<typeof tool.execute>>["content"] = [
 							{
 								type: "text",
-								text: `Computer ${outcome.failure.code}; do not replay input. Native result unavailable; attempted prefix and effect unknown. ${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation." : ""}`,
+								text: `Computer ${outcome.failure.code}; do not replay input. Native result unavailable; attempted prefix and effect unknown. ${recoveryGuidance(outcome.failure.code)}${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation." : ""}`,
 							},
 						];
 						// Exhaustion ends automatic recovery; a read is not permission to
@@ -380,10 +393,16 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 									details.actions.length === 1 &&
 									details.actions[0]?.code === "drag_foreground_prepared")),
 					);
+					const unfinished = details.firstUnfinishedAction;
+					const stoppedAction = unfinished === undefined ? undefined : details.actions[unfinished];
+					const summary =
+						unfinished === undefined
+							? ""
+							: `Action ${unfinished + 1} of ${segmentRequest.actions.length} ${stoppedAction?.dispatch === "not_dispatched" ? "was not dispatched" : "has an incomplete or unknown outcome"}${stoppedAction?.code ? ` (${stoppedAction.code})` : ""}. ${unfinished > 0 ? "Earlier actions may already have taken effect; reconcile them before new work. " : ""}${unfinished + 1 < segmentRequest.actions.length ? "Later actions were not attempted. " : ""}${recoveryGuidance(stoppedAction?.code)}`;
 					const content: Awaited<ReturnType<typeof tool.execute>>["content"] = [
 						{
 							type: "text",
-							text: `Segment facts: ${JSON.stringify(details)}. Delivery is not business success. ${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation. " : ""}Do not replay uncertain input.`,
+							text: `${summary}Segment facts: ${JSON.stringify(details)}. Delivery is not business success. ${segmentRequest.previousEffect ? "Prior effect reconciled by model judgement, not native confirmation. " : ""}Do not replay uncertain input.`,
 						},
 					];
 					// Condition truth does not imply every action was delivered. A dependency

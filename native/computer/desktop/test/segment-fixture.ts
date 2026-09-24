@@ -32,6 +32,7 @@ export function fixture(
 			| "confirmed_boundary"
 			| "exhausted"
 			| "exhausted_result";
+		stopCode?: "stale_image_observation" | "physical_input_held_at_target";
 		hold?: "segment" | "capture" | "pair_capture";
 		terminalFailure?: boolean;
 		failCapture?: number;
@@ -254,8 +255,23 @@ export function fixture(
 								],
 							});
 						}
+						if (options.stopCode) {
+							const index = options.stopCode === "physical_input_held_at_target" ? 1 : 0;
+							value = sdk.ComputerSegmentResult.create({
+								...value,
+								firstUnfinishedAction: index,
+								actions: [
+									...value.actions.slice(0, index),
+									{ index, dispatch: sdk.ComputerDispatch.NotDispatched, code: options.stopCode },
+								],
+							});
+						}
 						sdk.validateComputerSegmentResult(segment, value); // Test-only genuine validator, no host.
-						done("segment", new sdk.ComputerResult.Segment({ value }), !paused || options.mode === "prepared");
+						done(
+							"segment",
+							new sdk.ComputerResult.Segment({ value }),
+							options.stopCode === "stale_image_observation" ? false : !paused || options.mode === "prepared",
+						);
 					},
 					startPlan: forbidden,
 					startClick: forbidden,
