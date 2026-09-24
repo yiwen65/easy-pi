@@ -4,10 +4,14 @@ import { parseDesktopInput } from "../contracts.ts";
 import { DesktopIntents } from "../intent.ts";
 import { projectObservation } from "../projection.ts";
 import { parseComputerSegmentInput } from "../segment-contracts.ts";
-import { projectSegment } from "../segment-projection.ts";
+import { projectSegment, segmentCode } from "../segment-projection.ts";
 import { candidateSdk } from "./sdk.ts";
 
 const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
+test("replacement selection refusal stays explicit while unknown native messages remain redacted", () => {
+	assert.equal(segmentCode("replacement_selection_unproved"), "replacement_selection_unproved");
+	assert.equal(segmentCode("PRIVATE selection payload"), "native_fault");
+});
 const request = () =>
 	parseComputerSegmentInput({
 		request: {

@@ -45,6 +45,7 @@ const codes = new Set([
 	"event_allocation_failed",
 	"keyboard_target_changed",
 	"semantic_delivery_unknown",
+	"replacement_selection_unproved",
 	"focus_effect_unknown",
 	"focus_not_supported",
 	"focus_capability_unknown",

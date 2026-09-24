@@ -146,9 +146,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-006 — 系统保存面板失败与替换输入
+### [x] T-006 — 系统保存面板失败与替换输入
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 修复保存面板的窗口绑定与文件名追加，停止无效恢复循环。
 - Inputs and prerequisites: ses_01M38S9JB18FF6YT 12:29–12:34 失败记录。
@@ -163,9 +163,9 @@
   - 不盲重放、不通过标题/矩形放宽归属；文件名精确替换，真实保存和重开一致。
 - Verification method:
   - 桥接回归、native fixture、原生打包完整性及真实读回。
-- Validation evidence: 错误投影新增四例中三例修复前失败，修复后全通过；desktop 120 passed / 1 skipped，typecheck/root check/1428-file package 通过。已安装桥接修复，真实 fixture 正确显示 controlled_target_unproven 和零输入终态，干净关闭 C0325。保存和替换仍未修复，详见 docs/implementation/computer/2026-09-24-save-panel-failure.md。
-- Blocker: 原生远程面板绑定与合成全选失败的因果链尚未完整验证；不是租约或用户授权阻塞。
-- Unblock condition: 完成独立远程字段替换复现、原生归属证明及保存重开 oracle。
+- Validation evidence: 原生宿主 AXSheet 归属、远程面板前台键盘路由及合成全选读回保护已安装。真实保存/重开/86 字节内容核对通过 C0333；失效全选旧版追加、新版保持原文 C0332，正常合成替换通过 C0331。desktop 122 passed / 0 skipped；SDK 94、native Computer 56、input 20、package 8 均通过；genuine bindings/typecheck/root check/1432-file integrity 通过。五项浏览器原生环境测试旧版同样失败，不计为通过。详见 docs/implementation/computer/2026-09-24-save-panel-failure.md。
+- Blocker: None for owned native save/replacement scope; original full paid-model workflow remains under T-002.
+- Unblock condition: None; 用户完整重启 easy-pi 以加载新 dylib，不能仅 /reload。
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan

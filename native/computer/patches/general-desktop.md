@@ -1,5 +1,8 @@
 # Qualified General desktop source
 
+This is the prerequisite source/binary record. Current root pins additionally
+apply [save-panel.patch](save-panel.md); the hashes below identify its base.
+
 `general-desktop.patch` is the consolidated General increment after the qualified P06 fast source (`p06-fast.patch` and its documented predecessors), **not** a patch against bare upstream Cua.
 
 SHA256: `3ba3ff7a7fef9d8ec1c3b944ea50667a721a4ce19319faa146b6a43d6c1b2d35`.

@@ -81,7 +81,7 @@ The CLI provides Computer by default; SDK embeddings still opt in explicitly. It
 
 ## Build the asset directory
 
-Use the qualified General SDK (`dist/computer.js`), its runtime packages, protocol3 renderer and corresponding source/license materials. The exact inputs are in `desktop/pinned-inputs.json`; the consolidated source increment is `patches/general-desktop.patch`. Older P04/P06 SDKs are not interchangeable.
+Use the qualified General SDK (`dist/computer.js`), its runtime packages, protocol3 renderer and corresponding source/license materials. The exact inputs are in `desktop/pinned-inputs.json`; apply `patches/save-panel.patch` after the consolidated `patches/general-desktop.patch` increment, as described in [save-panel provenance](patches/save-panel.md). Older P04/P06 SDKs are not interchangeable.
 
 ```sh
 node native/computer/scripts/package.mjs \

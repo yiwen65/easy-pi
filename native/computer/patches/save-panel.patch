@@ -1,0 +1,788 @@
+--- a/rust/crates/platform-macos/src/ax/general_surface.rs
++++ b/rust/crates/platform-macos/src/ax/general_surface.rs
+@@ -2,6 +2,7 @@
+ //! a separately mapped focused surface. Legacy exact_target is unchanged.
+ use super::{bindings::*, cache::RetainedElement};
+ use core_foundation::base::{CFRelease, CFTypeRef};
++mod remote_sheet;
+ 
+ #[link(name = "ApplicationServices", kind = "framework")]
+ extern "C" {
+@@ -74,14 +75,14 @@
+ /// A known direct mapping wins even when AXWindow/AXParent names a different
+ /// surface. Unknown direct mapping may use the existing bounded ancestry proof.
+ pub unsafe fn member(element: AXUIElementRef, pid: i32, window: u32) -> bool {
+-    bounded(element)
+-        && matches_identity(
+-            pid,
+-            window,
+-            element_pid(element),
+-            ax_get_window_id(element),
+-            || super::exact_target::element_window_id(element),
+-        )
++    if !bounded(element) || element_pid(element) != Some(pid) {
++        return false;
++    }
++    let direct = ax_get_window_id(element);
++    matches_identity(pid, window, Some(pid), direct, || {
++        super::exact_target::element_window_id(element)
++    }) || direct
++        .is_some_and(|id| id != window && remote_sheet::resolve(element, pid, id) == Some(window))
+ }
+ 
+ pub fn focused(pid: i32) -> Option<RetainedElement> {
+@@ -115,10 +116,31 @@
+     let element = focused(pid)?;
+     unsafe {
+         let ptr = element.as_ptr() as AXUIElementRef;
+-        ax_get_window_id(ptr).or_else(|| super::exact_target::element_window_id(ptr))
++        let direct =
++            ax_get_window_id(ptr).or_else(|| super::exact_target::element_window_id(ptr))?;
++        match crate::windows::resolve_window_owner(pid, direct) {
++            crate::windows::WindowOwner::SamePid => Some(direct),
++            crate::windows::WindowOwner::ForeignPid { .. } => {
++                remote_sheet::resolve(ptr, pid, direct)
++            }
++            crate::windows::WindowOwner::Unknown => None,
++        }
+     }
+ }
+ 
++/// Host AX focus is a proven remote-sheet proxy. PID-posted keys do not travel
++/// through AppKit's remote-view event forwarding, unlike the foreground lane.
++pub fn hosted_keyboard(pid: i32, window: u32) -> bool {
++    let Some(element) = focused(pid) else {
++        return false;
++    };
++    unsafe {
++        let ptr = element.as_ptr() as AXUIElementRef;
++        ax_get_window_id(ptr)
++            .is_some_and(|id| id != window && remote_sheet::resolve(ptr, pid, id) == Some(window))
++    }
++}
++
+ pub fn foreground_match(front: Option<bool>, focused: Option<u32>, selected: u32) -> Option<bool> {
+     match front {
+         Some(false) => Some(false),
+@@ -133,7 +155,14 @@
+     let pid = frontmost_pid()?;
+     let stamp = super::enablement::process_start_stamp(pid)?;
+     let element = focused(pid)?;
+-    let window = unsafe { ax_get_window_id(element.as_ptr() as AXUIElementRef) }?;
++    let direct = unsafe { ax_get_window_id(element.as_ptr() as AXUIElementRef) }?;
++    let window = match crate::windows::resolve_window_owner(pid, direct) {
++        crate::windows::WindowOwner::SamePid => direct,
++        crate::windows::WindowOwner::ForeignPid { .. } => {
++            unsafe { remote_sheet::resolve(element.as_ptr() as _, pid, direct) }?
++        }
++        crate::windows::WindowOwner::Unknown => return None,
++    };
+     if crate::input::skylight::front_process_matches(pid, window) != Some(true)
+         || !matches!(
+             crate::windows::resolve_window_owner(pid, window),
+--- /dev/null
++++ b/rust/crates/platform-macos/src/ax/general_surface/remote_sheet.rs
+@@ -0,0 +1,142 @@
++//! Prove a host-side AX proxy belongs to its nearest explicitly selected sheet.
++//! This never grants a remote process or a same-PID sibling window authority.
++use super::*;
++use core_foundation::{
++    array::CFArray,
++    base::{CFEqual, CFGetTypeID, TCFType},
++    string::CFString,
++};
++
++fn sheet_step(
++    pid: i32,
++    remote: u32,
++    actual_pid: Option<i32>,
++    window: Option<u32>,
++    role: &str,
++) -> Result<Option<u32>, ()> {
++    if actual_pid != Some(pid) {
++        return Err(());
++    }
++    if role == "AXSheet" {
++        return window
++            .filter(|id| *id != 0 && *id != remote)
++            .map(Some)
++            .ok_or(());
++    }
++    if matches!(
++        role,
++        "AXWindow" | "AXApplication" | "AXWebArea" | "AXDocumentWeb" | "AXDocument"
++    ) || window != Some(remote)
++    {
++        return Err(());
++    }
++    Ok(None)
++}
++
++unsafe fn has_child(parent: AXUIElementRef, child: AXUIElementRef) -> bool {
++    let key = CFString::new("AXChildren");
++    let mut value = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(parent, key.as_concrete_TypeRef(), &mut value);
++    if error != kAXErrorSuccess || value.is_null() {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        return false;
++    }
++    if CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
++        CFRelease(value);
++        return false;
++    }
++    let children = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
++    children.len() <= 512
++        && children.iter().any(|item| {
++            !item.is_null()
++                && CFGetTypeID(*item) == AXUIElementGetTypeID()
++                && CFEqual(*item, child as CFTypeRef) != 0
++        })
++}
++
++pub(super) unsafe fn resolve(element: AXUIElementRef, pid: i32, direct: u32) -> Option<u32> {
++    let crate::windows::WindowOwner::ForeignPid { owner_pid, .. } =
++        crate::windows::resolve_window_owner(pid, direct)
++    else {
++        return None;
++    };
++    let stamp = super::super::enablement::process_start_stamp(owner_pid)?;
++    let mut current = RetainedElement::retain(element as usize);
++    for _ in 0..40 {
++        let ptr = current.as_ptr() as AXUIElementRef;
++        if !bounded(ptr) {
++            return None;
++        }
++        let role = copy_string_attr(ptr, "AXRole")?;
++        if let Some(sheet) =
++            sheet_step(pid, direct, element_pid(ptr), ax_get_window_id(ptr), &role).ok()?
++        {
++            if !matches!(
++                crate::windows::resolve_window_owner(pid, sheet),
++                crate::windows::WindowOwner::SamePid
++            ) || super::super::enablement::process_start_stamp(owner_pid) != Some(stamp)
++                || !matches!(crate::windows::resolve_window_owner(pid,direct),crate::windows::WindowOwner::ForeignPid {owner_pid: current, ..} if current==owner_pid)
++            {
++                return None;
++            }
++            return Some(sheet);
++        }
++        let parent = own(copy_element_attr(ptr, "AXParent")?)?;
++        if !bounded(parent.as_ptr() as _) || !has_child(parent.as_ptr() as _, ptr) {
++            return None;
++        }
++        current = parent;
++    }
++    None
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn controlled_remote_sheet_proxy_requires_nearest_sheet_and_same_host_identity() {
++        // Captured AppKit path: field -> split group (remote 17584), sheet 17583.
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15295), Some(17584), "AXTextField"),
++            Ok(None)
++        );
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15295), Some(17584), "AXSplitGroup"),
++            Ok(None)
++        );
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15295), Some(17583), "AXSheet"),
++            Ok(Some(17583))
++        );
++        for role in [
++            "AXWindow",
++            "AXApplication",
++            "AXWebArea",
++            "AXDocumentWeb",
++            "AXDocument",
++        ] {
++            assert_eq!(
++                sheet_step(15295, 17584, Some(15295), Some(17584), role),
++                Err(())
++            );
++        }
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15296), Some(17584), "AXTextField"),
++            Err(())
++        );
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15295), Some(17582), "AXTextField"),
++            Err(())
++        );
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15295), None, "AXSheet"),
++            Err(())
++        );
++        assert_eq!(
++            sheet_step(15295, 17584, Some(15295), Some(17584), "AXSheet"),
++            Err(())
++        );
++    }
++}
+--- a/rust/crates/platform-macos/src/input/controlled/general.rs
++++ b/rust/crates/platform-macos/src/input/controlled/general.rs
+@@ -1,11 +1,11 @@
+ //! Per-event segment admission with preallocated, owned, unwind-safe releases.
+-//! One transport: private-source CGEventPostToPid. Never warp the hardware
++//! Private-source PID input, or foreground HID keys for proven hosted sheets. Never warp the hardware
+ //! pointer, suppress physical events, or retry an unknown delivered event.
+ use crate::computer_renderer::{Channel, Cue, Kind};
+ use core_graphics::{
+     event::{
+-        CGEvent, CGEventField, CGEventFlags, CGEventType, CGMouseButton, EventField,
+-        ScrollEventUnit,
++        CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton,
++        EventField, ScrollEventUnit,
+     },
+     event_source::{CGEventSource, CGEventSourceStateID},
+     geometry::CGPoint,
+@@ -51,6 +51,7 @@
+     releases: Vec<(Hold, OwnedRelease<CGEvent>)>,
+     pub position: Option<(f64, f64, f64, f64)>,
+     pub foreground: bool,
++    global_keyboard: bool,
+ }
+ 
+ pub fn key_code(key: &str) -> Result<u16, &'static str> {
+@@ -100,6 +101,7 @@
+             releases: Vec::with_capacity(16),
+             position: None,
+             foreground: false,
++            global_keyboard: false,
+         })
+     }
+ 
+@@ -107,6 +109,26 @@
+         !self.releases.is_empty()
+     }
+ 
++    pub fn global_keyboard(&mut self, enabled: bool) -> Result<(), &'static str> {
++        if self.held() && self.global_keyboard != enabled {
++            return Err("route_change_with_held_input");
++        }
++        if enabled && !self.global_keyboard {
++            if !self.foreground {
++                return Err("foreground_target_changed");
++            }
++            if super::held_input(
++                (0..128).map(|code| (code, unsafe { super::CGEventSourceKeyState(0, code) })),
++                (0..3).map(|button| unsafe { super::CGEventSourceButtonState(0, button) }),
++            ) {
++                return Err("physical_input_held_at_target");
++            }
++            super::popup_click::non_suppressing_source(&self.source)?;
++        }
++        self.global_keyboard = enabled;
++        Ok(())
++    }
++
+     fn flags(&self) -> CGEventFlags {
+         let mut flags = CGEventFlags::empty();
+         for value in [
+@@ -184,7 +206,14 @@
+         let operation = self.operation.clone();
+         let renderer = self.renderer.clone();
+         let last_cue = self.last_cue.clone();
++        let global = self.global_keyboard && matches!(hold, Hold::Key(_));
+         let release = Box::new(move |up: CGEvent| {
++            if global {
++                // Owned global releases are required even if the sheet closed,
++                // focus changed, or cancellation revoked new primary input.
++                up.post(CGEventTapLocation::HID);
++                return Ok(());
++            }
+             if target.process_stamp.is_none()
+                 || crate::tools::computer_process_stamp(target.pid) != target.process_stamp
+             {
+@@ -208,7 +237,11 @@
+                     release,
+                 },
+             ));
+-            down.post_to_pid(target.pid);
++            if global {
++                down.post(CGEventTapLocation::HID);
++            } else {
++                down.post_to_pid(target.pid);
++            }
+             self.dispatched = true;
+             if matches!(hold, Hold::Button(_)) {
+                 if let (Some(renderer), Some(mut cue)) = (&self.renderer, self.last_cue.get()) {
+--- a/rust/crates/platform-macos/src/input/controlled/popup_click.rs
++++ b/rust/crates/platform-macos/src/input/controlled/popup_click.rs
+@@ -39,6 +39,24 @@
+     title.is_empty() && layer == unsafe { CGWindowLevelForKey(11) }
+ }
+ 
++pub(super) fn non_suppressing_source(source: &CGEventSource) -> Result<(), &'static str> {
++    let ptr = source.as_ptr() as *mut c_void;
++    unsafe {
++        CGEventSourceSetLocalEventsSuppressionInterval(ptr, 0.0);
++        for state in [0, 1] {
++            CGEventSourceSetLocalEventsFilterDuringSuppressionState(ptr, 7, state);
++        }
++        if CGEventSourceGetLocalEventsSuppressionInterval(ptr) != 0.0
++            || [0, 1].iter().any(|state| {
++                CGEventSourceGetLocalEventsFilterDuringSuppressionState(ptr, *state) != 7
++            })
++        {
++            return Err("local_input_policy_unproved");
++        }
++    }
++    Ok(())
++}
++
+ fn exact_hit(
+     target: NativeWindowTarget,
+     foreground: Option<bool>,
+@@ -125,20 +143,7 @@
+     // A lost foreground returns no input and fresh evidence to the original loop.
+     let source = CGEventSource::new(CGEventSourceStateID::Private)
+         .map_err(|_| "event_source_unavailable")?;
+-    let ptr = source.as_ptr() as *mut c_void;
+-    unsafe {
+-        CGEventSourceSetLocalEventsSuppressionInterval(ptr, 0.0);
+-        for state in [0, 1] {
+-            CGEventSourceSetLocalEventsFilterDuringSuppressionState(ptr, 7, state);
+-        }
+-        if CGEventSourceGetLocalEventsSuppressionInterval(ptr) != 0.0
+-            || [0, 1].iter().any(|state| {
+-                CGEventSourceGetLocalEventsFilterDuringSuppressionState(ptr, *state) != 7
+-            })
+-        {
+-            return Err("local_input_policy_unproved");
+-        }
+-    }
++    non_suppressing_source(&source)?;
+     let (mouse, down_kind, up_kind) = match button {
+         ComputerMouseButton::Left => (
+             CGMouseButton::Left,
+--- a/rust/crates/platform-macos/src/tools/computer/observation/native.rs
++++ b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+@@ -39,11 +39,16 @@
+     // A readable node with unknown advertised actions is still observable.
+     // General scans retain the incomplete marker and no action claims; legacy
+     // scans and permission denial remain failures.
+-    metadata::<()>(Err(if error == kAXErrorAPIDisabled {
+-        "accessibility_permission_denied"
+-    } else {
+-        "observation_read_failed"
+-    }), general, incomplete).map(|_| ())
++    metadata::<()>(
++        Err(if error == kAXErrorAPIDisabled {
++            "accessibility_permission_denied"
++        } else {
++            "observation_read_failed"
++        }),
++        general,
++        incomplete,
++    )
++    .map(|_| ())
+ }
+ 
+ fn prepared() -> &'static Mutex<HashSet<(i32, (u64, u64))>> {
+@@ -164,12 +169,21 @@
+     #[test]
+     fn controlled_general_action_metadata_failure_does_not_cut_the_tree() {
+         let mut incomplete = false;
+-        assert_eq!(action_metadata_error(kAXErrorFailure, true, &mut incomplete), Ok(()));
++        assert_eq!(
++            action_metadata_error(kAXErrorFailure, true, &mut incomplete),
++            Ok(())
++        );
+         assert!(incomplete);
+         let mut incomplete = false;
+-        assert_eq!(action_metadata_error(kAXErrorFailure, false, &mut incomplete), Err("observation_read_failed"));
++        assert_eq!(
++            action_metadata_error(kAXErrorFailure, false, &mut incomplete),
++            Err("observation_read_failed")
++        );
+         assert!(!incomplete);
+-        assert_eq!(action_metadata_error(kAXErrorAPIDisabled, true, &mut incomplete), Err("accessibility_permission_denied"));
++        assert_eq!(
++            action_metadata_error(kAXErrorAPIDisabled, true, &mut incomplete),
++            Err("accessibility_permission_denied")
++        );
+         assert!(!incomplete);
+     }
+     #[test]
+@@ -361,6 +375,46 @@
+         if roots.len() > 512 {
+             return Err("observation_bounds");
+         }
++        if general
++            && !roots.iter().any(|root| {
++                let ptr = root.as_ptr() as AXUIElementRef;
++                unsafe {
++                    crate::ax::general_surface::element_pid(ptr) == Some(target.pid)
++                        && ax_get_window_id(ptr) == Some(target.window_id)
++                }
++            })
++        {
++            // AppKit sheets are children of AXWindows, not necessarily entries
++            // in AXWindows. Read only immediate identity metadata, never a
++            // sibling's descriptive content, to find an explicitly selected sheet.
++            let mut sheets = Vec::new();
++            for root in &roots {
++                let ptr = root.as_ptr() as AXUIElementRef;
++                self.bound(ptr)?;
++                if unsafe { crate::ax::general_surface::element_pid(ptr) } != Some(target.pid)
++                    || unsafe { string_attr(ptr, "AXRole")? }.as_deref() != Some("AXWindow")
++                {
++                    continue;
++                }
++                for child in unsafe { elements(ptr, "AXChildren")? } {
++                    let ptr = child.as_ptr() as AXUIElementRef;
++                    self.bound(ptr)?;
++                    if unsafe { crate::ax::general_surface::element_pid(ptr) } == Some(target.pid)
++                        && unsafe { string_attr(ptr, "AXRole")? }.as_deref() == Some("AXSheet")
++                        && !roots
++                            .iter()
++                            .chain(sheets.iter())
++                            .any(|root| self.same(root, &child))
++                    {
++                        sheets.push(child);
++                        if roots.len() + sheets.len() > 512 {
++                            return Err("observation_bounds");
++                        }
++                    }
++                }
++            }
++            roots.extend(sheets);
++        }
+         let mut matched = None;
+         for root in roots {
+             let ptr = root.as_ptr() as AXUIElementRef;
+@@ -466,12 +520,15 @@
+             // window controls do this). Exclude only a proven foreign surface,
+             // before reading any of its descriptive data or children. Unknown
+             // membership remains a failure, never a silently omitted branch.
+-            if unsafe { crate::ax::general_surface::element_pid(ptr) } == Some(target.pid)
++            let member =
++                unsafe { crate::ax::general_surface::member(ptr, target.pid, target.window_id) };
++            if !member
++                && unsafe { crate::ax::general_surface::element_pid(ptr) } == Some(target.pid)
+                 && unsafe { ax_get_window_id(ptr) }.is_some_and(|id| id != target.window_id)
+             {
+                 return Err("target_outside_selected_window");
+             }
+-            if !unsafe { crate::ax::general_surface::member(ptr, target.pid, target.window_id) } {
++            if !member {
+                 return Err("target_membership_unknown");
+             }
+         }
+--- a/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -4,6 +4,7 @@
+ #[cfg(test)]
+ mod order_tests;
+ mod readiness;
++mod selection;
+ mod target;
+ mod window;
+ use super::observation::{self, Native, Reader};
+@@ -176,7 +177,10 @@
+         self.point_with_route(point).map(|(point, _)| point)
+     }
+ 
+-    fn point_with_route(&self, point: &ComputerPoint) -> Result<((f64, f64, f64, f64), bool), &'static str> {
++    fn point_with_route(
++        &self,
++        point: &ComputerPoint,
++    ) -> Result<((f64, f64, f64, f64), bool), &'static str> {
+         self.live()?;
+         let image = self.image.as_ref().ok_or("image_reference_required")?;
+         crate::input::controlled::revalidate(image, &self.operation)?;
+@@ -188,14 +192,18 @@
+         let g = image.geometry();
+         let windows = crate::windows::general_windows_with_space_snapshot();
+         let window = crate::windows::general_point_window_in(
+-            &windows.windows, target.pid, target.window_id,
++            &windows.windows,
++            target.pid,
++            target.window_id,
+             [g.desktop_x, g.desktop_y, g.window_width, g.window_height],
+         )?;
+         // Image addresses name pixels. Use the addressed pixel's center,
+         // including fractional model coordinates within the final edge pixel.
+         let (x, y) = g.desktop_pixel_center(point.x as u32, point.y as u32)?;
+-        Ok(((x, y, x - g.desktop_x, y - g.desktop_y),
+-            crate::input::controlled::popup_click::use_screen_route(window.layer, &window.title)))
++        Ok((
++            (x, y, x - g.desktop_x, y - g.desktop_y),
++            crate::input::controlled::popup_click::use_screen_route(window.layer, &window.title),
++        ))
+     }
+ 
+     fn condition(&self, condition: &ComputerPostcondition) -> Option<bool> {
+@@ -207,9 +215,11 @@
+             condition,
+             ComputerPostcondition::Value { .. } | ComputerPostcondition::Present { .. }
+         ) {
+-            (Native { operation: &self.operation })
+-                .general_input_window()
+-                .ok()?;
++            (Native {
++                operation: &self.operation,
++            })
++            .general_input_window()
++            .ok()?;
+         }
+         match condition {
+             ComputerPostcondition::Visual { .. } => None,
+@@ -259,11 +269,14 @@
+         };
+         // Focus is not permission to click an actionable control. Unknown
+         // capability also refuses before any activation or input mutation.
+-        let semantic = focus::semantic_focus_route(match error {
+-            bindings::kAXErrorSuccess => Ok(settable != 0),
+-            bindings::kAXErrorAPIDisabled => Err("accessibility_permission_denied"),
+-            _ => Err("focus_capability_unknown"),
+-        }, editable_without_press)?;
++        let semantic = focus::semantic_focus_route(
++            match error {
++                bindings::kAXErrorSuccess => Ok(settable != 0),
++                bindings::kAXErrorAPIDisabled => Err("accessibility_permission_denied"),
++                _ => Err("focus_capability_unknown"),
++            },
++            editable_without_press,
++        )?;
+         if semantic {
+             if unsafe { bindings::set_bool_attr_true(ptr, "AXFocused") }
+                 != bindings::kAXErrorSuccess
+@@ -327,7 +340,11 @@
+             },
+         )?;
+         Ok((
+-            if semantic { ActionRoute::Accessibility } else { ActionRoute::SyntheticEvents },
++            if semantic {
++                ActionRoute::Accessibility
++            } else {
++                ActionRoute::SyntheticEvents
++            },
+             self.foreground(),
+         ))
+     }
+@@ -345,7 +362,12 @@
+             action,
+             ComputerInput::Focus { .. } | ComputerInput::Fill { .. } | ComputerInput::Window { .. }
+         ) {
+-            Some((Native { operation: &self.operation }).general_input_window()?)
++            Some(
++                (Native {
++                    operation: &self.operation,
++                })
++                .general_input_window()?,
++            )
+         } else {
+             None
+         };
+@@ -367,7 +389,9 @@
+                     && !data.metadata_incomplete
+                     && !data.actions.iter().any(|action| action == "AXPress");
+                 match action {
+-                    ComputerInput::Focus { .. } => self.focus_element(events, &element, editable_without_press),
++                    ComputerInput::Focus { .. } => {
++                        self.focus_element(events, &element, editable_without_press)
++                    }
+                     ComputerInput::Fill { text, .. }
+                         if data.value_fillable() && self.native_text(&element) =>
+                     {
+@@ -384,13 +408,25 @@
+                             self.operation.session.recover_intent(&self.intent_ref)?;
+                             self.activate()?;
+                         }
+-                        let (_, foreground) = self.focus_element(events, &element, editable_without_press)?;
++                        let (_, foreground) =
++                            self.focus_element(events, &element, editable_without_press)?;
+                         events.foreground = foreground;
++                        let target = self.operation.session.native_window()?;
++                        let hosted = crate::ax::general_surface::hosted_keyboard(
++                            target.pid,
++                            target.window_id,
++                        );
++                        events.global_keyboard(hosted)?;
+                         let check = || {
+                             self.input_check(foreground, true)?;
+                             self.member(&element)
+                         };
+                         events.key("a", &[ComputerModifier::Command], &check)?;
++                        self.confirm_replacement_selection(
++                            &element,
++                            data.value.as_deref(),
++                            foreground,
++                        )?;
+                         // Once selection is dispatched, failures never restart
+                         // replacement. Empty replacement uses one Delete key.
+                         if text.is_empty() {
+@@ -398,7 +434,14 @@
+                         } else {
+                             events.text(text, &check)?;
+                         }
+-                        Ok((ActionRoute::SyntheticEvents, foreground))
++                        Ok((
++                            if hosted {
++                                ActionRoute::GlobalInput
++                            } else {
++                                ActionRoute::SyntheticEvents
++                            },
++                            foreground,
++                        ))
+                     }
+                     _ => unreachable!(),
+                 }
+@@ -479,7 +522,10 @@
+                                 && unsafe { bindings::is_attribute_settable(ptr, "AXSelectedText") }
+                             {
+                                 self.member(&element)?;
+-                                (Native { operation: &self.operation }).general_input_window()?;
++                                (Native {
++                                    operation: &self.operation,
++                                })
++                                .general_input_window()?;
+                                 if unsafe { bindings::set_string_attr(ptr, "AXSelectedText", text) }
+                                     != bindings::kAXErrorSuccess
+                                 {
+@@ -500,9 +546,12 @@
+                 // Select a route before any requested input. Focus switching
+                 // while keys/buttons are owned cannot silently retarget them.
+                 let mut foreground = self.foreground();
++                let target = self.operation.session.native_window()?;
++                let hosted = keyboard
++                    && crate::ax::general_surface::hosted_keyboard(target.pid, target.window_id);
+                 if keyboard
+                     && (!self.keyboard_target()
+-                        || (!foreground && self.editor_requires_foreground()?))
++                        || (!foreground && (hosted || self.editor_requires_foreground()?)))
+                 {
+                     if events.held() {
+                         return Err("route_change_with_held_input");
+@@ -512,6 +561,7 @@
+                     foreground = true;
+                 }
+                 events.foreground = foreground;
++                events.global_keyboard(hosted)?;
+                 let check = || self.input_check(foreground, keyboard);
+                 match action {
+                     ComputerInput::TypeText { text } => events.text(text, &check)?,
+@@ -536,9 +586,17 @@
+                                 return Err("route_change_with_held_input");
+                             }
+                             crate::input::controlled::popup_click::run(
+-                                self.operation.clone(), self.renderer.clone(),
+-                                self.image.as_ref().ok_or("image_reference_required")?.geometry().clone(),
+-                                position, *button, *count, || self.live(),
++                                self.operation.clone(),
++                                self.renderer.clone(),
++                                self.image
++                                    .as_ref()
++                                    .ok_or("image_reference_required")?
++                                    .geometry()
++                                    .clone(),
++                                position,
++                                *button,
++                                *count,
++                                || self.live(),
+                             )?;
+                             events.dispatched = true;
+                             return Ok((ActionRoute::GlobalInput, true));
+@@ -590,7 +648,14 @@
+                     }
+                     _ => unreachable!(),
+                 }
+-                Ok((ActionRoute::SyntheticEvents, foreground))
++                Ok((
++                    if hosted {
++                        ActionRoute::GlobalInput
++                    } else {
++                        ActionRoute::SyntheticEvents
++                    },
++                    foreground,
++                ))
+             }
+         }
+     }
+@@ -601,11 +666,11 @@
+         };
+         if native.needs_preparation()? {
+             let readiness =
+-                super::with_focus_cleanup(&self.operation, "segment_ax_readiness", || {
+-                    match native.prepare() {
+-                        Ok(()) => cua_driver_core::protocol::ToolResult::text("AX ready"),
+-                        Err(code) => super::refusal(code),
+-                    }
++                super::with_focus_cleanup(&self.operation, "segment_ax_readiness", || match native
++                    .prepare()
++                {
++                    Ok(()) => cua_driver_core::protocol::ToolResult::text("AX ready"),
++                    Err(code) => super::refusal(code),
+                 });
+             if readiness.is_error == Some(true) {
+                 return Err("accessibility_readiness_unknown");
+--- /dev/null
++++ b/rust/crates/platform-macos/src/tools/computer/segment/selection.rs
+@@ -0,0 +1,59 @@
++//! Selection delivery is not selection effect. Never type over an unproved range.
++use super::*;
++
++fn complete(
++    original: Option<&str>,
++    value: Option<&str>,
++    selected: Option<&str>,
++    focused: bool,
++) -> bool {
++    focused && original.is_some() && original == value && value == selected
++}
++
++impl Context {
++    pub(super) fn confirm_replacement_selection(
++        &self,
++        element: &RetainedElement,
++        original: Option<&str>,
++        foreground: bool,
++    ) -> Result<(), &'static str> {
++        let deadline = Instant::now() + Duration::from_millis(200);
++        loop {
++            self.input_check(foreground, true)?;
++            self.member(element)?;
++            let target = self.operation.session.native_window()?;
++            let focused =
++                crate::ax::general_surface::focused(target.pid).is_some_and(|current| unsafe {
++                    core_foundation::base::CFEqual(current.as_ptr() as _, element.as_ptr() as _)
++                        != 0
++                });
++            let ptr = element.as_ptr() as bindings::AXUIElementRef;
++            let value = unsafe { bindings::copy_string_attr(ptr, "AXValue") };
++            let selected = unsafe { bindings::copy_string_attr(ptr, "AXSelectedText") };
++            if complete(original, value.as_deref(), selected.as_deref(), focused) {
++                return Ok(());
++            }
++            if Instant::now() >= deadline {
++                return Err("replacement_selection_unproved");
++            }
++            // Read-only settling, never repeat Command+A or any input.
++            std::thread::sleep(Duration::from_millis(10));
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn controlled_replacement_requires_exact_focused_complete_unchanged_value() {
++        assert!(complete(Some("old🦀"), Some("old🦀"), Some("old🦀"), true));
++        assert!(complete(Some(""), Some(""), Some(""), true));
++        assert!(!complete(Some("old"), Some("old"), Some(""), true));
++        assert!(!complete(Some("old"), Some("old"), Some("ol"), true));
++        assert!(!complete(Some("old"), Some("new"), Some("new"), true));
++        assert!(!complete(Some("old"), Some("old"), Some("old"), false));
++        assert!(!complete(None, None, None, true));
++        assert!(!complete(Some(""), Some(""), None, true));
++    }
++}

@@ -1,4 +1,69 @@
-# Save-panel failure: diagnostic fix, native support still incomplete
+# Save-panel failure: native repair and installed regression verification
+
+## Current result — 2026-09-24
+
+The installed native repair passes the independently owned AppKit save/reopen
+workflow. Historical diagnostic-only findings below remain as failure evidence.
+The user's original unsaved VS Code document was not modified and the entire
+paid-model SAE research workflow was not rerun.
+
+Three causal defects are addressed:
+
+1. The host AXSheet is nested under AXWindow, while its host-PID AX proxy field
+   maps to the remote service's CG window. The old root/member resolver rejected
+   this valid sheet. The fix proves bounded bidirectional AX ancestry, exact
+   host/sheet identity and stable remote ownership; it does not infer authority
+   from titles, rectangles or application names.
+2. In the controlled fixture, AXValue replacement succeeded after that fix, but
+   PID-posted Return did not save. With only the hosted-sheet keyboard route
+   switched to a guarded, non-suppressing foreground HID source, Return saved.
+   Normal document Command+O still uses PID input and successfully reopened.
+   Owned key-up cleanup survives sheet closure/cancellation; no input replay.
+3. A separate editable fixture makes Command+A a no-op. The pre-guard installed
+   binary appended `replacement only` to the original body. The final binary
+   reads back exact focus, unchanged full AXValue and equal AXSelectedText
+   before text/Delete. Broken selection now stops before replacement and keeps
+   the original body; normal synthetic selection still replaces correctly.
+   This is a controlled causal reproduction of the append mechanism, not proof
+   of the exact reason the original service ignored Command+A.
+
+Installed qualification:
+
+- NSSavePanel: Unicode filename exactly replaced, consumed-ref replay rejected,
+  parent window unable to read its sheet field, Return saved, Command+O reopened,
+  original body = AX readback = saved file bytes (86 bytes). Clean close C0333;
+  final delivery metadata/package recheck repeated the workflow to C0334.
+- Synthetic working mode: exact replacement and fresh AX/fixture readback,
+  clean C0331. Incomplete surrounding metadata correctly remained
+  `needs_observation`, not fabricated native confirmation.
+- Synthetic broken mode: `replacement_selection_unproved`, original text
+  unchanged, clean C0332. The already dispatched selection prefix remains
+  `inputCommitted:true` / unknown effect, not a false zero-input claim.
+- Desktop: 122 passed, zero skipped with both explicit no-host native-value
+  opt-ins. Native SDK: 94 passed; final native Computer tools: 56 passed;
+  input ownership/cleanup: 20 passed. Generated bindings `--check`, desktop
+  typecheck and root `npm run check` passed. Unrelated formatter deltas restored.
+- Broader platform run before the final selection guard: 179 passed, five
+  browser image/process-catalog failures, one explicit benchmark ignored. The
+  unmodified retained native test binary fails the same five cases in the same
+  environment (`image_path_unavailable` / zombie completeness). These are not
+  relabeled passes; browser-wide qualification is outside this repair.
+- Package integrity: 1432 files and eight package tests passed. Seven-file
+  source increment independently applied, byte-compared and reversed. Genuine
+  locked/offline Rust build; unchanged ABI and N-API, not handwritten bindings.
+
+Reproduction commands and owned fixture are checked in at
+`native/computer/desktop/fixtures/save-panel/README.md`.
+Source/build pins: `native/computer/patches/save-panel.md`.
+Sanitized raw probes/build records: `/tmp/easy-pi-native-save.rkAaFu`.
+Original installation backup: `installed-before` beneath that directory;
+intermediate pre-selection-guard package: `installed-before-guard`.
+No business file, desktop lease, unrelated worktree change or paid API was altered.
+
+Activation requires a complete easy-pi process restart; `/reload` cannot replace
+an already loaded dylib. No claim is made that every application/custom editor
+is supported or that all future refusals can be eliminated. Unknown selection
+now fails safely instead of silently appending.
 
 ## Captured failure
 
@@ -71,7 +136,7 @@ The stop instructions are model guidance, not a new native circuit breaker.
 
 Diagnostic fixture, screenshot and scripts: `/tmp/easy-pi-save-panel.Fg3SLb`.
 
-## Remaining repair
+## Historical remaining repair (resolved by the current result above)
 
 1. Reproduce the synthetic replacement failure with a controllable remote-field
    fixture and an independent selection/value oracle.
@@ -82,4 +147,5 @@ Diagnostic fixture, screenshot and scripts: `/tmp/easy-pi-save-panel.Fg3SLb`.
 4. Rebuild and qualify native sources/bindings/materials together, then verify
    an owned save, file reopen and exact readback through the easy-pi tool path.
 
-Until those gates pass, do not advertise this system-hosted save workflow as fixed.
+These were the gates retained after the diagnostic-only commit; the current
+owned save/reopen and synthetic replacement results above close this repair.
