@@ -96,6 +96,12 @@ try {
 				},
 			]);
 			return result;
+		} catch (error) {
+			appendFileSync(
+				join(output, "trace.jsonl"),
+				`${JSON.stringify({ input, error: String(error), details: error.details })}\n`,
+			);
+			throw error;
 		} finally {
 			clearTimeout(timer);
 		}
@@ -105,6 +111,26 @@ try {
 	assert.equal(find(result, "tab", "First")?.selected, true);
 	assert.equal(find(result, "tab", "Second")?.selected, false);
 	assert.equal(find(result, "button", "Ordinary")?.selected, undefined);
+	await assert.rejects(
+		call({
+			request: {
+				op: "execute",
+				ref: result.details.observationRef,
+				steps: [
+					{
+						op: "press",
+						target: { ref: find(result, "tab", "Second").ref },
+						expect: { role: "tab", label: "Second" },
+						value: "true",
+					},
+				],
+			},
+		}),
+		(error) => error.details?.code === "postcondition_not_observed" && error.details?.completedSteps === 0,
+	);
+	await until(() => oracle !== undefined);
+	assert.deepEqual(oracle, { first: "true", second: "false", plan: "Free", clicks: 0 });
+	result = await call({ request: { op: "observe" } });
 	result = await call({
 		request: { op: "click", ref: result.details.observationRef, target: find(result, "tab", "Second").ref },
 		observeAfter: true,

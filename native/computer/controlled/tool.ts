@@ -199,6 +199,7 @@ interface VisibleObservation {
 	options: Set<string>;
 	scrollTargets: Set<string>;
 	selectors: Set<string>;
+	valueSelectors: Set<string>;
 }
 
 /** One closure per capability, including fork/renew. No default registration, native load or inner scheduler. */
@@ -284,9 +285,9 @@ export function createControlledComputerTool(
 				}
 				let mutated = false;
 				for (const step of request.steps) {
-					if (step.op === "press" && !previous.selectors.has(selectorKey(step.expect)))
+					if (step.op === "press" && !previous.valueSelectors.has(selectorKey(step.expect)))
 						throw new AgentToolError(
-							"Computer paused: postcondition_not_observed. No input dispatched. Press requires an already observed value control; for navigation or dialogs use click, then observe. Refresh before resubmitting a corrected request.",
+							"Computer paused: postcondition_not_observed. No input dispatched. Press requires a unique displayed control with a returned value field; selected is separate metadata, not a value postcondition. For navigation or dialogs use click, then observe. Refresh before resubmitting a corrected request.",
 							{
 								status: "paused",
 								completedSteps: 0,
@@ -421,6 +422,7 @@ export function createControlledComputerTool(
 					options: new Set(),
 					scrollTargets: new Set(),
 					selectors: new Set(),
+					valueSelectors: new Set(),
 				};
 				const rows = observation.elements ?? [];
 				const counts = new Map<string, number>();
@@ -526,6 +528,7 @@ export function createControlledComputerTool(
 					)
 						view.options.add(token);
 					if (selectable) view.selectors.add(key);
+					if (selectable && typeof row.value === "string") view.valueSelectors.add(key);
 				}
 				if (!session.revoked) visible = view;
 				details = {

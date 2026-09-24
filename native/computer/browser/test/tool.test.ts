@@ -377,6 +377,50 @@ test(
 	},
 );
 
+test("press rejects selected-only postconditions before dispatching the entire batch", { skip: !sdk }, async (t) => {
+	for (const label of ["First", "Second"]) {
+		const f = fixture({ selectionState: true });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		await assert.rejects(
+			f.tool.execute("p", {
+				request: {
+					op: "execute",
+					ref: seen.details.observationRef!,
+					steps: [
+						{ op: "fill", target: { selector: { role: "textbox", label: "Name" } }, text: "must not run" },
+						{
+							op: "press",
+							target: { selector: { role: "tab", label } },
+							expect: { role: "tab", label },
+							value: "true",
+						},
+					],
+				},
+			}),
+			/postcondition_not_observed/,
+		);
+		assert.deepEqual(f.calls, ["observe"]);
+		assert.equal(f.plans.length, 0);
+	}
+});
+
+test("press retains explicitly observed empty-string value postconditions", { skip: !sdk }, async (t) => {
+	const f = fixture();
+	t.after(() => f.host.close());
+	const seen = await f.tool.execute("o", { request: { op: "observe" } });
+	const selector = { role: "textbox", label: "Name" };
+	const result = await f.tool.execute("p", {
+		request: {
+			op: "execute",
+			ref: seen.details.observationRef!,
+			steps: [{ op: "press", target: { selector }, expect: selector, value: "changed" }],
+		},
+	});
+	assert.equal(result.details.status, "completed");
+	assert.deepEqual(f.calls, ["observe", "plan"]);
+});
+
 test(
 	"scroll requires a displayed capability and consumes its observation without clicking",
 	{ skip: !sdk },

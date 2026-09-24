@@ -439,9 +439,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [x] T-019 — 页内选中状态观察链路
+### [ ] T-019 — 页内选中状态观察链路
 
-- Status: done
+- Status: in_progress
 - Owner: coordinator
 - Objective: 保留 Chrome AX 已报告的 selected 布尔状态，区分 false 与未知，供模型验证页内标签和选项切换。
 - Inputs and prerequisites: T-018 同提示词 click-tab-2 对照与现有 WindowElement.selected 契约；额外搜索回合的原因尚未证明。
@@ -456,7 +456,7 @@
   - 已知 true/false 正确保留、未知不伪造；点击后新引用与独立业务回执一致，负例边界不变。
 - Verification method:
   - AX/SDK/bridge 分层反例、定向单测、真实 GUI 与关闭、固定 seed 模型对照。
-- Validation evidence: /tmp/epi-selection.avjmjg/baseline 原始 AX true/false，旧安装 undefined!=true 失败且正常关闭 C06b9。原生和桥接分别 red→green，15 page、29 browser、8 legacy、54 context/desktop/segment、8 qualified package、严格 SDK/native TS 和根 check 通过。新增二文件增量补丁独立 apply/字节一致/reverse 通过，生成绑定/构建材料/精确 pins 已更新。candidate 四调用实际标签与 option 切换，true/false/未知及独立 clicks=1/Plan=Pro 回执一致，关闭 C06ba；scroll-neighbor 七调用 Unicode/select/真实滚动/save 通过，关闭 C06bb。此为状态丢失因果证明，不证明多余模型回合的原因。旧包保留 installed-before，候选可回退试装；model-installed 同 seed 三任务运行中。
+- Validation evidence: /tmp/epi-selection.avjmjg/baseline 原始 AX true/false，旧安装 undefined!=true 失败且正常关闭 C06b9。原生和桥接分别 red→green，15 page、29 browser、8 legacy、54 context/desktop/segment、8 qualified package、严格 SDK/native TS 和根 check 通过。新增二文件增量补丁独立 apply/字节一致/reverse 通过，生成绑定/构建材料/精确 pins 已更新。candidate 四调用实际标签与 option 切换，true/false/未知及独立 clicks=1/Plan=Pro 回执一致，关闭 C06ba；scroll-neighbor 七调用 Unicode/select/真实滚动/save 通过，关闭 C06bb。此为状态丢失因果证明，不证明多余模型回合的原因。旧包保留 installed-before，已可回退试装；model-installed 三项 2/3，详细失败进入 T-020。48d3091c8 提交状态投影修复；T-019 保持 in_progress，T-013 依赖和整体模型迭代未结束。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -478,6 +478,8 @@
 - Verification method:
   - 失败 trace 对应 red/green、定向 tool/context 测试、同 seed 模型与独立任务回执。
 - Validation evidence: T-019 三项模型 2/3，form 23.246s/6、dialog 21.314s/6 通过；click-tab-2 27.081s/7 失败，press 条件 unknown 后模型停止，未获任务回执。全部关闭到 C06be，总费用 0.0674452 USD；不声称提速。状态投影本身经实际业务 fixture 证明修复；此新动作契约缺陷待修复。
+- Repair evidence: 缺值后条件包含在第二步的整批预检先红后绿，前置 fill 也不派发；true/false selected 与合法空串值分别覆盖。改为从实际展示且唯一的 selector 中单独记录 valueSelectors，不将 selected 映射为 value。31 browser、8 legacy、54 context/desktop/segment、8 qualified package、native TS 与根 check 通过，四个无关格式变化精确恢复。postcondition 实际六调用场景拒绝无效 press 后独立 clicks=0，刷新后点击/选择完成且 clicks=1，关闭 C06bf。package-postcondition 试装，旧选择状态版保留 installed-before-postcondition，原生二进制未再变化。
+- Model follow-up: model-postcondition 同 seed click-tab-2 PASS，24.652s/7 回合/0.028676 USD、rawReward=1、零工具错误、关闭 C06c0。模型本次未调用 press，不能把成功归因于预检修复；仍先点击 role=tab 容器无变化，继而点击其独立 link 成功。下一轮隔离该无效果点击的原生能力声明与 DOM 事件目标，保留真实失败，不自动重放未知输入。任务状态校验发现 T-019 依赖未结束而误标 done，已纠正为 in_progress，文档校验通过。
 - Blocker: None.
 - Unblock condition: None.
 
