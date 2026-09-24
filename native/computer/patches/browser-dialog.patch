@@ -1,0 +1,370 @@
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+@@ -26,12 +26,14 @@
+ 
+ pub(super) struct Snapshot {
+     frame: FrameKey,
++    dialog: Option<i64>,
+     nodes: Vec<Node>,
+ }
+ 
+ #[derive(Clone)]
+ pub(super) struct Element {
+     frame: FrameKey,
++    dialog: Option<i64>,
+     node: Node,
+ }
+ 
+@@ -43,6 +45,7 @@
+     fn retain(&self, index: usize) -> Option<Element> {
+         self.nodes.get(index).cloned().map(|node| Element {
+             frame: self.frame.clone(),
++            dialog: self.dialog,
+             node,
+         })
+     }
+@@ -208,13 +211,33 @@
+     if parents.iter().filter(|parent| parent.is_none()).count() != 1 {
+         return Err("browser_observation_unproved");
+     }
++    // An AX role is only a candidate. Before publication it must also attest as
++    // an open HTML DIALOG; dispatch checks the exact DOM object and containment.
++    let mut dialog = None;
++    for (index, node) in nodes.iter().enumerate() {
++        if node["ignored"] == false {
++            match node["role"]["value"].as_str() {
++                Some("dialog") if dialog.is_none() => {
++                    let backend = node["backendDOMNodeId"]
++                        .as_i64()
++                        .filter(|id| *id > 0)
++                        .ok_or("unexpected_modal_surface")?;
++                    dialog = Some((index, backend));
++                }
++                Some("dialog" | "alertdialog") => return Err("unexpected_modal_surface"),
++                _ => {}
++            }
++        }
++    }
+     let mut output = Vec::new();
+     let mut retained = Vec::new();
+     let mut bytes = 0usize;
+     for (index, node) in nodes.iter().enumerate() {
+         let mut depth = 0usize;
+         let mut parent = parents[index];
++        let mut in_dialog = dialog.is_none_or(|(root, _)| root == index);
+         while let Some(next) = parent {
++            in_dialog |= dialog.is_some_and(|(root, _)| root == next);
+             depth += 1;
+             if depth >= max_depth || depth > nodes.len() {
+                 return Err("browser_observation_bounds");
+@@ -228,9 +251,6 @@
+             .as_str()
+             .filter(|role| !role.is_empty() && role.len() <= 64)
+             .ok_or("browser_observation_unproved")?;
+-        if !ignored && matches!(role, "dialog" | "alertdialog") {
+-            return Err("unexpected_modal_surface");
+-        }
+         let label = scalar(&node["name"]["value"]);
+         let value =
+             scalar(&node["value"]["value"]).or_else(|| property(node, "checked").and_then(scalar));
+@@ -245,7 +265,9 @@
+         if bytes > 64 * 1024 {
+             return Err("browser_observation_bounds");
+         }
+-        let enabled = !ignored && property(node, "disabled").and_then(Value::as_bool) != Some(true);
++        let enabled = in_dialog
++            && !ignored
++            && property(node, "disabled").and_then(Value::as_bool) != Some(true);
+         let secure = property(node, "protected").and_then(Value::as_bool) == Some(true);
+         retained.push(Node {
+             backend: node["backendDOMNodeId"].as_i64().filter(|id| *id > 0),
+@@ -278,9 +300,29 @@
+         output,
+         Snapshot {
+             frame: frame.clone(),
++            dialog: dialog.map(|(_, backend)| backend),
+             nodes: retained,
+         },
+     ))
++}
++
++fn describe_dialog(raw: &Value, backend: i64) -> Result<(), &'static str> {
++    let node = &raw["node"];
++    let attributes = node["attributes"]
++        .as_array()
++        .ok_or("unexpected_modal_surface")?;
++    if node["backendNodeId"].as_i64() != Some(backend)
++        || node["nodeName"] != "DIALOG"
++        || attributes.len() > 128
++        || attributes.len() % 2 != 0
++        || !attributes
++            .iter()
++            .all(|value| value.as_str().is_some_and(|value| value.len() <= 16 * 1024))
++        || !attributes.chunks_exact(2).any(|pair| pair[0] == "open")
++    {
++        return Err("unexpected_modal_surface");
++    }
++    Ok(())
+ }
+ 
+ fn describe_input(raw: &Value, node: &mut Node) -> Result<(), &'static str> {
+@@ -413,6 +455,18 @@
+                     .await
+                     .map_err(|_| "browser_observation_unproved")?;
+                 let (mut rows, mut snapshot) = ax_snapshot(&raw, &frame, limit, depth)?;
++                if let Some(backend) = snapshot.dialog {
++                    let metadata = bound
++                        .connection
++                        .call(
++                            Some(&bound.session_id),
++                            "DOM.describeNode",
++                            json!({"backendNodeId":backend,"depth":0,"pierce":false}),
++                        )
++                        .await
++                        .map_err(|_| "unexpected_modal_surface")?;
++                    describe_dialog(&metadata, backend)?;
++                }
+                 for (index, node) in snapshot.nodes.iter_mut().enumerate() {
+                     // Readonly/disabled controls still need type attestation
+                     // before exposing a value (notably password/file controls).
+@@ -548,6 +602,20 @@
+                     .await
+                     .map_err(|_| "browser_node_stale")?;
+                 let object_id = bounded_id(&object["object"], "objectId")?;
++                let dialog_object = if let Some(backend) = element.dialog {
++                    let object = bound
++                        .connection
++                        .call(
++                            Some(&bound.session_id),
++                            "DOM.resolveNode",
++                            json!({"backendNodeId":backend,"objectGroup":"pi-controlled-dom"}),
++                        )
++                        .await
++                        .map_err(|_| "unexpected_modal_surface")?;
++                    Some(bounded_id(&object["object"], "objectId")?)
++                } else {
++                    None
++                };
+                 if validate_page(bound, &operation).await? != frame {
+                     return Err("browser_frame_changed");
+                 }
+@@ -569,10 +637,12 @@
+                         object_id: &object_id,
+                         text,
+                         document_url: &frame.url,
++                        dialog_object_id: dialog_object.as_deref(),
+                     },
+                     None => ControlledCdpInput::DomPressChecked {
+                         object_id: &object_id,
+                         document_url: &frame.url,
++                        dialog_object_id: dialog_object.as_deref(),
+                     },
+                 };
+                 let response = bound
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+@@ -61,7 +61,7 @@
+         assert!(rows[1]["value"].is_null());
+     }
+     let mut modal = tree();
+-    modal["nodes"][1]["role"]["value"] = json!("dialog");
++    modal["nodes"][1]["role"]["value"] = json!("alertdialog");
+     assert!(matches!(
+         ax_snapshot(&modal, &frame(), 512, 32),
+         Err("unexpected_modal_surface")
+@@ -69,6 +69,45 @@
+ }
+ 
+ #[test]
++fn controlled_browser_page_single_dialog_scopes_inputs_to_its_subtree() {
++    let mut raw = tree();
++    raw["nodes"][0]["childIds"] = json!(["2", "3"]);
++    raw["nodes"].as_array_mut().unwrap().extend([
++        json!({"nodeId":"3","ignored":false,"role":{"value":"dialog"},"backendDOMNodeId":10,"childIds":["4"]}),
++        json!({"nodeId":"4","ignored":false,"role":{"value":"textbox"},"name":{"value":"Comment"},"backendDOMNodeId":11}),
++    ]);
++    let (rows, snapshot) = ax_snapshot(&raw, &frame(), 512, 32).unwrap();
++    assert!(!snapshot.nodes[1].enabled && !snapshot.nodes[1].fillable);
++    assert_eq!(rows[1]["enabled"], false);
++    assert!(snapshot.nodes[3].enabled && snapshot.nodes[3].fillable);
++    raw["nodes"][1]["role"]["value"] = json!("dialog");
++    assert!(matches!(
++        ax_snapshot(&raw, &frame(), 512, 32),
++        Err("unexpected_modal_surface")
++    ));
++    raw["nodes"][1]["role"]["value"] = json!("textbox");
++    raw["nodes"][2]["backendDOMNodeId"] = Value::Null;
++    assert!(matches!(
++        ax_snapshot(&raw, &frame(), 512, 32),
++        Err("unexpected_modal_surface")
++    ));
++}
++
++#[test]
++fn controlled_browser_page_dialog_role_requires_exact_open_html_node() {
++    let good = json!({"node":{"backendNodeId":10,"nodeName":"DIALOG","attributes":["open",""]}});
++    assert_eq!(describe_dialog(&good, 10), Ok(()));
++    for bad in [
++        json!({"node":{"backendNodeId":11,"nodeName":"DIALOG","attributes":["open",""]}}),
++        json!({"node":{"backendNodeId":10,"nodeName":"DIV","attributes":["role","dialog","open",""]}}),
++        json!({"node":{"backendNodeId":10,"nodeName":"DIALOG","attributes":[]}}),
++        json!({"node":{"backendNodeId":10,"nodeName":"DIALOG","attributes":["open"]}}),
++    ] {
++        assert_eq!(describe_dialog(&bad, 10), Err("unexpected_modal_surface"));
++    }
++}
++
++#[test]
+ fn controlled_browser_page_dom_attributes_recheck_secure_disabled_and_readonly_input() {
+     let (_, snapshot) = ax_snapshot(&tree(), &frame(), 512, 32).unwrap();
+     for attributes in [
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled.rs
+@@ -30,10 +30,12 @@
+         object_id: &'a str,
+         text: &'a str,
+         document_url: &'a str,
++        dialog_object_id: Option<&'a str>,
+     },
+     DomPressChecked {
+         object_id: &'a str,
+         document_url: &'a str,
++        dialog_object_id: Option<&'a str>,
+     },
+ }
+ 
+@@ -56,9 +58,24 @@
+     Ok(parsed.origin().ascii_serialization())
+ }
+ 
+-const FILL_CHECKED: &str = r#"function(text, expectedUrl) {
++// These are fixed source literals, never caller-provided JavaScript. Modal
++// identity/containment is rechecked in the same turn as the eventual mutation.
++macro_rules! checked_dom_function {
++    ($signature:literal, $body:literal) => { concat!($signature, r#"
+     const w = this.ownerDocument && this.ownerDocument.defaultView;
+     if (!w || w !== w.top || this.ownerDocument !== w.document || w.location.href !== expectedUrl || !this.isConnected) throw new Error('stale_document');
++    const dialogs = Array.from(w.document.querySelectorAll('dialog[open]'));
++    const ariaDialogs = Array.from(w.document.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter(e => e.checkVisibility());
++    if (expectedDialog === null) {
++        if (dialogs.length || ariaDialogs.length) throw new Error('unexpected_modal_surface');
++    } else {
++        if (!(expectedDialog instanceof w.HTMLDialogElement) || expectedDialog.ownerDocument !== w.document || !expectedDialog.isConnected || !expectedDialog.open || dialogs.length !== 1 || dialogs[0] !== expectedDialog || ariaDialogs.some(e => e !== expectedDialog) || !expectedDialog.contains(this)) throw new Error('unexpected_modal_surface');
++    }
++"#, $body, "}") };
++}
++const FILL_CHECKED: &str = checked_dom_function!(
++    "function(text, expectedUrl, expectedDialog) {",
++    r#"
+     if (this.disabled || this.readOnly) throw new Error('input_unavailable');
+     let prototype;
+     if (this instanceof w.HTMLTextAreaElement) prototype = w.HTMLTextAreaElement.prototype;
+@@ -68,15 +85,25 @@
+     this.dispatchEvent(new w.Event('input', {bubbles:true}));
+     this.dispatchEvent(new w.Event('change', {bubbles:true}));
+     return {value:this.value};
+-}"#;
+-const PRESS_CHECKED: &str = r#"function(expectedUrl) {
+-    const w = this.ownerDocument && this.ownerDocument.defaultView;
+-    if (!w || w !== w.top || this.ownerDocument !== w.document || w.location.href !== expectedUrl || !this.isConnected) throw new Error('stale_document');
++"#
++);
++const PRESS_CHECKED: &str = checked_dom_function!(
++    "function(expectedUrl, expectedDialog) {",
++    r#"
+     if (!(this instanceof w.HTMLElement) || this.disabled || this.type === 'password' || this.type === 'file') throw new Error('input_unavailable');
+     this.click();
+     return {invoked:true};
+-}"#;
++"#
++);
+ 
++fn dialog_argument(object_id: Option<&str>) -> anyhow::Result<Value> {
++    match object_id {
++        None => Ok(json!({"value":null})),
++        Some(id) if !id.is_empty() && id.len() <= 512 => Ok(json!({"objectId":id})),
++        _ => anyhow::bail!("invalid controlled dialog object"),
++    }
++}
++
+ impl CdpConnection {
+     pub(super) fn controlled_operation(&self) -> anyhow::Result<Option<Arc<Operation>>> {
+         match (&self.controlled_owner, controlled::current()) {
+@@ -132,23 +159,25 @@
+                 object_id,
+                 text,
+                 document_url,
++                dialog_object_id,
+             } if !object_id.is_empty() && object_id.len() <= 512 && text.len() <= 16 * 1024 => {
+                 controlled_url_origin(document_url).map_err(anyhow::Error::msg)?;
+                 (
+                     "Runtime.callFunctionOn",
+                     json!({"objectId":object_id,"functionDeclaration":FILL_CHECKED,
+-                    "arguments":[{"value":text},{"value":document_url}],"returnByValue":true}),
++                    "arguments":[{"value":text},{"value":document_url},dialog_argument(dialog_object_id)?],"returnByValue":true}),
+                 )
+             }
+             ControlledCdpInput::DomPressChecked {
+                 object_id,
+                 document_url,
++                dialog_object_id,
+             } if !object_id.is_empty() && object_id.len() <= 512 => {
+                 controlled_url_origin(document_url).map_err(anyhow::Error::msg)?;
+                 (
+                     "Runtime.callFunctionOn",
+                     json!({"objectId":object_id,"functionDeclaration":PRESS_CHECKED,
+-                    "arguments":[{"value":document_url}],"returnByValue":true}),
++                    "arguments":[{"value":document_url},dialog_argument(dialog_object_id)?],"returnByValue":true}),
+                 )
+             }
+             _ => anyhow::bail!("invalid controlled CDP input"),
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled/dom_tests.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled/dom_tests.rs
+@@ -73,6 +73,7 @@
+                 object_id: "node",
+                 text,
+                 document_url: "http://localhost/form",
++                dialog_object_id: Some("dialog-node"),
+             },
+         )
+         .await
+@@ -82,6 +83,7 @@
+             ControlledCdpInput::DomPressChecked {
+                 object_id: "node",
+                 document_url: "http://localhost/form",
++                dialog_object_id: None,
+             },
+         )
+         .await
+@@ -91,7 +93,8 @@
+                 "page",
+                 ControlledCdpInput::DomPressChecked {
+                     object_id: "node",
+-                    document_url: "javascript:1"
++                    document_url: "javascript:1",
++                    dialog_object_id: None,
+                 }
+             )
+             .await
+@@ -102,7 +105,8 @@
+                 "page",
+                 ControlledCdpInput::DomPressChecked {
+                     object_id: "node",
+-                    document_url: "http://localhost/form"
++                    document_url: "http://localhost/form",
++                    dialog_object_id: None,
+                 }
+             )
+             .await
+@@ -114,6 +118,11 @@
+     assert_eq!(messages.len(), 2);
+     assert_eq!(messages[0]["params"]["functionDeclaration"], FILL_CHECKED);
+     assert_eq!(messages[0]["params"]["arguments"][0]["value"], text);
++    assert_eq!(
++        messages[0]["params"]["arguments"][2],
++        json!({"objectId":"dialog-node"})
++    );
++    assert_eq!(messages[1]["params"]["arguments"][1], json!({"value":null}));
+     assert_eq!(messages[1]["params"]["functionDeclaration"], PRESS_CHECKED);
+     assert!(messages
+         .iter()

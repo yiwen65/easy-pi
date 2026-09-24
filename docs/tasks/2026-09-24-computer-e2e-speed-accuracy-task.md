@@ -187,7 +187,7 @@
 - Verification method:
   - 定向离线测试、真实模型轨迹、Chrome UI 状态、原始结果与 npm run check。
 - Validation evidence: 真实模型十三场景完整单轮 3/13；额外 image-first Chrome 1/5。原始失败、provider 异常、费用与关闭状态全部保留。benchmark 单测 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip；npm run check 通过。详见 native/computer/desktop/fixtures/real-model/RESULTS.md。
-- Blocker: None. 生命周期阻塞已解除；coordinator 下一步先执行 T-009，再恢复相同 oracle 的任务对照。新增真实 browser 三项业务 0/3，但 prepare/close 全部通过，记录于 RESULTS.md。
+- Blocker: None. 生命周期阻塞已解除、T-009 已完成；当前执行 T-010，先验证受限 HTML dialog，再实现 select。后续用相同 oracle 复测，全部尝试记录于 RESULTS.md。
 - Unblock condition: None. 全图校验改为目标区域校验仍是另一独立待确认取舍。
 
 ### [x] T-008 — 授权恢复与浏览器生命周期修复
@@ -235,7 +235,7 @@
 
 ### [ ] T-010 — 浏览器弹窗与下拉菜单能力
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 定义并实现受当前页面授权约束的 HTML dialog 与 select 操作，不能简单删除 modal 检查。
 - Inputs and prerequisites: T-009 真实失败轨迹；原生受控页面/输入能力。
@@ -250,7 +250,8 @@
   - 指定选项和弹窗提交独立回执准确；未知/跨页模态目标仍拒绝；正常关闭。
 - Verification method:
   - 原生与桥接定向测试、同三任务真实模型、源码材料和安装包资格。
-- Validation evidence: 未实现；目前表单双文本字段成功、checkbox 变 true；select fill/press/click 无支持。弹窗确已打开，后续 observe 被 unexpected_modal_surface 拒绝。
+- Validation evidence: 受限 HTML dialog 已实现并安装；11 原生 page、21 CDP、129 desktop/context（原 skip 的 renderer-value 另行 1/1）、9 package、UniFFI、独立 native TS 与 npm run check 通过。真实 Chrome 最终 11/11：Unicode 填充/提交准确；弹窗外、ARIA、多弹窗、跨 frame、观察后出现/移出/关闭/替换/第二弹窗及已打开原生 alert 拒绝且零误输入；全部正常关闭。真实模型 dialog PASS 37.640s/11 回合、navigation PASS 37.580s/13 回合，独立回执/可见回执均准确；费用 0.0702204 USD，均关闭，C0531。证据 /tmp/epi-dialog.UEensN/{qualified-stable-guards,model}。不以两个样本宣称速度统计提升。
+- Remaining work: select 尚未实现，不得把 fill 冒充选项选择。另一次页面加载时自动 alert 导致导航等待至 15 秒 watchdog 取消，terminal/close 均证明；保留 qualified-guards 原始失败，尚未修复。最终 guard 将已打开 alert 与导航期间 alert 分开验证，不代表后者已通过。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -282,6 +283,8 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-010 受限 dialog 资格完成并安装，SDK 222302e7c9fb6cdca8faa5775346e1deed504deece18c05c5d5a46d83a87f914，原包 /tmp/epi-dialog.UEensN/installed-before。11 场景全部准确且关闭；真实模型弹窗/导航 2/2，通过独立回执与可见读回，最终 C0531。四批 44 个 guard owner 的原始失败均保留。T-010 保持 in_progress，coordinator 下一步实现 select，再隔离分析导航期间原生提示竞态；未声称全部任务修复。
+- 2026-09-24: T-010 开始。用户明确允许单个当前页面 HTML dialog 内输入，保留原生提示、多弹窗、跨页/跨 frame 与弹窗外输入拒绝。先修复 dialog 观察/动作闭环，再单独扩展 select；不把 text fill 冒充选项选择。
 - 2026-09-24: T-009 完成并安装。候选三项导航通过、弹窗/表单仍失败但均推进到独立原生能力限制；最终安装版导航再次通过，最终 lease C0503。未修改 native ABI/权限/全图校验。新增 T-010 跟踪 HTML dialog/select，未假报三项全部通过。
 - 2026-09-24: 用户要求修复动作契约；T-009 开始。复用 SDK 现有 startClick，仅当前观察/实际 provider context 中的 token 可点击；保留 press 的已观察值后条件。将错误后条件、mutation 后旧 ref 从统一 stale 分类中分开，前置拒绝不派发整个无效 batch。原生 ABI/权限与未知输入不重放不变；coordinator 下一步安装桥接候选并复测同三个任务。
 - 2026-09-24: 用户授权正常重启独立 helper；launchctl stop/start 后路径可读，原生探针及三个真实模型 owner prepare/close 均通过，T-008 done、T-007 恢复 in_progress。新增 T-009 pending：无效后条件统一报旧引用及 mutation 后批量 ref 失效。新三项 0/3，耗时 43.955/23.035/46.709 秒，报告费用共 0.0528276 USD，均清洁关闭；未新增源码改动或放宽保护。

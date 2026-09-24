@@ -13,7 +13,7 @@ export function candidateSdk(): typeof CuaSdk {
 	const directory = process.env.CUA_DRIVER_TYPESCRIPT_DIR;
 	assert.ok(directory && isAbsolute(directory));
 	for (const [name, hash] of [
-		["libcua_driver_sdk.dylib", "722909c67f7a1fccc28e6ab0f9dea01ee48f207b7e184be148d8dbac419ede54"],
+		["libcua_driver_sdk.dylib", "222302e7c9fb6cdca8faa5775346e1deed504deece18c05c5d5a46d83a87f914"],
 		["cua_driver_node_runtime.node", "93ffdcc7fbba3437af84c61d60d5d6a8cbf231129f5b1ad4c947abeb8a5aed5a"],
 	] as const)
 		assert.equal(

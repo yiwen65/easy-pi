@@ -2,6 +2,21 @@
 
 ## 最新修复状态
 
+受限 HTML dialog 修复现已安装：只允许当前页面单个、经 DOM 元数据确认的 HTML dialog 内输入；派发时复核同一个弹窗和目标归属。权限、原生提示、多弹窗、跨 frame、取消与关闭检查保留。源码及复现命令见 `native/computer/patches/browser-dialog.md`。
+
+| 本轮真实模型任务 | 结果 | task 秒 | 模型回合 | 关闭 |
+| --- | --- | --- | --- | --- |
+| Chrome dialog | 通过 | 37.640 | 11 | 正常 |
+| Chrome navigation | 通过 | 37.580 | 13 | 正常 |
+
+同一 gpt-6-sol/browser 路径、同一独立 oracle；弹窗回执 `approved 你好`、导航回执 R-204 / `reviewed 你好` 均准确且被模型看到。弹窗中一次旧 ref 被正确拒绝，刷新后恢复，不宣称零失败调用。报告费用合计 0.0702204 USD，最终 lease C0531。SDK `222302e7c9fb6cdca8faa5775346e1deed504deece18c05c5d5a46d83a87f914`；安装前包保留 `/tmp/epi-dialog.UEensN/installed-before`。不是交错速度对照，不声称稳定 p95 或普遍提速。
+
+另外，最终确定性真实 Chrome guard 11/11：一次正确 Unicode 填充/提交，十种拒绝情形零误输入，全部关闭。所有四批共 44 次原始尝试保留，不将不同 harness 版本混为成功率。前三批包括三个测试断言错误（拒绝阶段/外层错误码）和一个真实残留竞态：页面加载时立即 alert，导航等待至 15 秒 watchdog 取消，terminal 和 close 正常。最终协议改为页面就绪后触发 alert，仅证明“已打开原生提示”拒绝，**不证明导航期间 alert 已修复**。
+
+证据 `/tmp/epi-dialog.UEensN/{guards,guards-final,qualified-guards,qualified-stable-guards,model}`。select 仍未实现；本轮没有重跑已知失败的 form，也不改写历史全套分数。11 page、21 CDP、129 desktop/context + 单独 renderer-value 1/1、package 9/9、UniFFI、native TS 和 npm check 通过。长驻 easy-pi 进程需要正常退出重开以加载新原生库。
+
+### 上轮动作契约修复
+
 动作契约后续已修复并安装（原生 SDK 不变）：单次 click 使用实际 provider view 的 observation/token；结果只报提交，必须再观察。无效 press.expect 与 mutation 后旧 ref 分别在派发前返回明确错误，不再误报成统一“刷新即可”的问题。桌面像素 click 协议保持独立。
 
 候选同三项：导航 PASS 41.796s/13回合；弹窗 FAIL 24.397s/6回合（确已打开，随后原生 modal 检查拒绝）；表单 FAIL 48.077s/11回合（两个文本字段连续 confirmed，随后 select 操作不受支持）。全部正常关闭。最终安装版导航再次 PASS 40.844s/13回合，独立回执包含 R-204 和 reviewed 你好，lease C0503。不是交错 A/B，不声称速度统计提升。此轮四次报告费用共 0.1486388 USD。证据 `/tmp/epi-contract.fIKCCx/{real-model,final-navigation}`；T-010 跟踪弹窗/select 剩余能力。
