@@ -40,6 +40,12 @@ The desktop fixture uses an empty profile, `--use-mock-keychain`, disabled sync/
 
 ## Evidence and acceptance
 
+`chrome-dynamic` processes three records in one browser session. Each save
+removes the form, briefly shows a loading state, and creates new controls with
+the same labels. Notes contain the distinct record ID; the independent oracle
+requires all three exact records in order. This tests dynamic replacement and
+fresh observations, not long-duration stability or an official benchmark score.
+
 `contract.json` records model, strategy, tool profile, seed, native/bridge/probe/fixture hashes, MiniWoB commit and limits; `sources/` freezes the harness version. Each attempt retains tool calls, assistant actions (not hidden reasoning), usage, screenshots, independent oracle, timing, cleanup proof and failure. `summary.json` retains **all** attempts and reported costs. `node native/computer/desktop/fixtures/real-model/report.mjs /absolute/output` summarizes durations and refusal codes without dropping failures.
 
 Business success requires the exact independent result, real model and tool calls, and clean native/Chrome closure. A correctly refused stale reference is protection success, **not task success**. Model narration or `inputCommitted` is never the task oracle. Report setup/failed/interrupted attempts separately but keep them in the denominator. P50/P95 of successful tasks exclude failed durations explicitly; small-N P95 is not a reliability claim.

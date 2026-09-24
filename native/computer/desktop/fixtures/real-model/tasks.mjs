@@ -9,6 +9,8 @@ export const miniTasks = [
 	"login-user",
 ];
 export const chromeTasks = {
+	"chrome-dynamic":
+		"Process all three records R-101, R-204 and R-305 in the shown order. For each record set Note to reviewed followed by its record ID and 你好 (for example reviewed R-101 你好), choose Pro plan, and click Save record. The form is replaced asynchronously after each save. Inspect the next record before continuing and confirm the final receipt contains all three records with their distinct notes.",
 	"chrome-form":
 		"Fill Name with 王小明 café, City with Hangzhou, tick the consent checkbox, choose Pro plan, and Submit. Confirm the visible receipt.",
 	"chrome-navigation":
@@ -22,6 +24,15 @@ export const chromeTasks = {
 export const caseIds = [...miniTasks.map((id) => `miniwob:${id}`), ...Object.keys(chromeTasks)];
 
 export function checkOracle(id, value) {
+	if (id === "chrome-dynamic")
+		return (
+			Array.isArray(value?.records) &&
+			value.records.length === 3 &&
+			["R-101", "R-204", "R-305"].every((id, index) => {
+				const row = value.records[index];
+				return row?.record === id && row.note === `reviewed ${id} 你好` && row.plan === "Pro";
+			})
+		);
 	if (id.startsWith("miniwob:")) return value?.done === true && value.rawReward === 1;
 	if (id === "chrome-form")
 		return (
@@ -38,6 +49,11 @@ export function pageHtml(id, title, pathname) {
 	const form = (body) =>
 		`<form onsubmit="event.preventDefault();done(Object.fromEntries(new FormData(this)))">${body}<button>Submit</button></form>`;
 	let body;
+	if (id === "chrome-dynamic")
+		body = `<div id="queue"></div><script>
+const records=['R-101','R-204','R-305'], saved=[];
+function renderRecord(){const q=document.getElementById('queue');if(saved.length===records.length){q.textContent='All records completed';done({records:saved});return}q.innerHTML='<h2>Record '+records[saved.length]+'</h2><form id="record-form"><label>Note <input name="note"></label><label>Plan <select name="plan"><option>Free</option><option>Pro</option></select></label><button>Save record</button></form>';document.getElementById('record-form').onsubmit=e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.currentTarget));saved.push({record:records[saved.length],...data});q.textContent='Loading next record…';setTimeout(renderRecord,120)}}
+renderRecord();</script>`;
 	if (id === "chrome-form")
 		body = form(
 			'<label>Name <input name="name"></label><label>City <input name="city"></label><label>Consent <input type="checkbox" name="consent"></label><label>Plan <select name="plan"><option>Free</option><option>Pro</option></select></label>',

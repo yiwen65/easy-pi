@@ -42,6 +42,24 @@ test("Chrome validators check exact fields and character content", () => {
 		for (const key of Object.keys(value)) assert.equal(checkOracle(id, { ...value, [key]: "incorrect" }), false);
 	}
 });
+
+test("dynamic records require every exact value in order, not merely the last receipt", () => {
+	const records = ["R-101", "R-204", "R-305"].map((record) => ({
+		record,
+		note: `reviewed ${record} 你好`,
+		plan: "Pro",
+	}));
+	assert.equal(checkOracle("chrome-dynamic", { records }), true);
+	for (const wrong of [
+		records.slice(1),
+		[...records].reverse(),
+		[...records, records[0]],
+		records.map((row, index) => (index === 1 ? { ...row, note: "wrong" } : row)),
+		records.map((row) => ({ ...row, note: records[0].note })),
+		records.map((row, index) => (index === 0 ? { ...row, plan: "Free" } : row)),
+	])
+		assert.equal(checkOracle("chrome-dynamic", { records: wrong }), false);
+});
 test("scroll fixture measures viewport geometry at the actual click", () => {
 	const html = pageHtml("chrome-scroll", "Owned test", "/");
 	const handler = /<button onclick="([^"]+)">Bottom confirmation<\/button>/.exec(html)?.[1];

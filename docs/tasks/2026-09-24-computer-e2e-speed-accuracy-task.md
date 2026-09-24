@@ -552,6 +552,49 @@
 
 - Installed qualification: seed7 真实模型标签、弹窗、导航 3/3，通过且零工具错误、全部正常关闭至 C06d8；分别 12.532s/3、18.401s/5、26.514s/6 回合，费用 0.063602 USD。seed7 标签任务不同于 seed42，不作同任务速度比较。根 check 最终通过，恢复四处无关格式变化，21 项上下文测试格式化后再过。下一轮继续动态内容/长会话及剩余通用能力，不把 T-023 完成等同 Goal 完成。
 
+### [x] T-024 — 动态表单连续记录
+
+- Status: done
+- Owner: coordinator
+- Objective: 覆盖异步替换表单和同名控件连续记录，验证真实模型不会沿用旧引用误写下一条。
+- Inputs and prerequisites: T-023 已安装，现有通用 Chrome 表单仅覆盖单条静态页面；复用真实模型 runner 与独立 oracle。
+- Scope or files: real-model/tasks.mjs、tasks.test.mjs 和现有 runner；隔离 Chrome、本地三条测试记录，不操作用户数据。
+- Expected output: 三条依次加载/保存且 DOM 被替换的真实模型任务，oracle 校验完整顺序、Unicode 正文和选项，保留全部失败及关闭证据。
+- Dependencies: T-023.
+- Execution steps:
+  1. 在既有任务表增加动态记录，不创建另一套 runner。
+  2. 验证 oracle 拒绝少条、错序、错值和只完成最后一条。
+  3. 运行真实模型并按首个错误定位修复；需要时增加定向原生回归。
+- Acceptance criteria:
+  - 全部记录按顺序正确完成，模型基于新观察继续，超时和错误不隐藏，清洁关闭。
+- Verification method:
+  - targeted task tests、root check、真实模型独立回执和逐调用 trace。
+- Validation evidence: 复用既有 tasks/runner 新增 chrome-dynamic，三个保存均销毁旧表单，120ms 后创建同名新控件。首轮同正文版本通过 56.905s/14 回合/0.0697244 USD，证据 model 保留但辨别串写能力较弱。加强为 reviewed R-101/R-204/R-305 你好 后，model-distinct 通过 47.497s/14 回合/0.0716772 USD，三条完整独立回执准确，零工具错误，所有输入 request.ref 均等于最近工具结果的 observationRef，关闭 C06da。两版各出现 3 次 loading 观察和 3 次额外 observe，后者模型 43.268s、工具 4.200s。不是同任务速度对照，不称本轮提速。14 benchmark 单测及根 check 通过，恢复根 check 的四处无关格式变化。证据 /tmp/epi-dynamic.4IqPMC/{model,model-distinct,inspect.mjs}；未改产品原生或权限，不代表长时稳定性已证明。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-025 — 瞬态观察的额外模型往返
+
+- Status: pending
+- Owner: unassigned
+- Objective: 减少真实异步页面短暂 loading 状态导致的额外模型往返，同时不全局增加固定延时、不重放输入。
+- Inputs and prerequisites: T-024 两轮均 3 个 120ms loading 状态导致各 3 次模型 observe；不同正文版本 43.268s 模型时间对 4.200s 工具时间。
+- Scope or files: 现有 browser 观察路径与 dynamic fixture；先比较有界只读等待方案的成本和拒绝/取消语义，不增加后台常驻状态或输入重试。
+- Expected output: 可证伪的最小候选及静态/动态页面交错对照；若不优于现状保留证据而不推广。
+- Dependencies: T-024.
+- Execution steps:
+  1. 检查已有原生读取、页面就绪与取消排空路径，选择无需额外常驻实体的最小实验。
+  2. 动态页面观察往返与普通页面开销对照，包含永不就绪、取消和页面边界改变。
+  3. 真实模型验证准确率、调用数和端到端时间，所有失败保留。
+- Acceptance criteria:
+  - 不按任意 loading 文案猜测业务成功，不自动重复输入，不发布未完成或被取消的观察引用。
+  - 动态场景实测少往返且静态常见场景无不可接受延迟；否则不声称优化完成。
+- Verification method:
+  - native/bridge 定向测试、真实静态和动态 UI、模型交错 A/B、独立回执与关闭证明。
+- Validation evidence: T-024 trace 已证实瞬态读取和额外 observe 序列；具体改造尚未决定或实现。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -581,6 +624,10 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-25: T-024 done，新增动态记录 benchmark 已经实际模型验证，强化不同记录正文后依然准确，未放松观察边界。T-025 pending 记录新测得的等待成本；不是产品已修复或性能收益承诺。
+
+- 2026-09-25: T-024 开始，coordinator 串行复用现有任务表，增加动态连续表单；本轮不新增 runner、调度器或产品状态。目标为发现通用执行缺口，不追求只选易通过任务。
 
 - 2026-09-25: T-023 done：36 browser、21 context、8 package、13 benchmark、native TS/root check，真实 combined 四调用回执及交错模型 6/6、安装后邻域 3/3 均通过。保留原版两次契约错误和全部计时，不声称普遍加速或成本降低。变更仅复用顺序阶段并暴露可选 URL；native 指纹未改。
 
