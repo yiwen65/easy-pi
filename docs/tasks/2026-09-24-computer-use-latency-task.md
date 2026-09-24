@@ -3,7 +3,7 @@
 - Created: 2026-09-24
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: blocked
+- Overall status: in_progress
 - Source: 用户要求继续实测优化；会话 ses_01M38MR9CET5PD58。
 
 <!-- task-doc-section:background-goal -->
@@ -28,7 +28,7 @@
 ## Assumptions and open questions
 
 - Assumption: 合并不依赖新信息的选择与观察可省去一轮模型请求；通过工具回归和本地计时验证。
-- Open question: 真实桌面仍由 PID 91484 占用，等待用户正常退出；快速截图模式启用待确认。已获授权的 6 次真实模型 A/B 全部完成。
+- Open question: PID 91484 已退出，仍需重查桌面租约并完成 GUI 验证。用户已确认启用快速截图模式；6 次真实模型 A/B 全部完成。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -67,7 +67,7 @@
 
 ### [ ] T-002 — 实测验收与交付
 
-- Status: blocked
+- Status: in_progress
 - Owner: coordinator
 - Objective: 验证收益和边界，更新本地运行产物。
 - Inputs and prerequisites: T-001；真实模型实验需用户授权。
@@ -81,8 +81,8 @@
 - Verification method:
   - 独立 fixture 与已有模型日志对照，检查 scoped diff。
 - Validation evidence: bridge 打包校验成功（1428 files），候选位于 /tmp/easy-pi-computer-latency.WQKu7w/computer；未安装候选。PID 91484 仍运行，未干预桌面。6 次真实模型请求成功；独立 tsgo 构建检查失败于 src/extensions/index.ts:12 和 pi-child-session-host.ts:210 的源码/已安装 dist ExtensionAPI 类型不一致，未以失败输出覆盖安装。
-- Blocker: 真实窗口由当前 easy-pi 会话占用；快速模式启用未确认；安装前需解决现有 dist 声明漂移并重新验证编译。
-- Unblock condition: 用户正常退出持有者、确认截图策略后恢复 GUI 验证；一致的构建检查通过后安装。
+- Blocker: None; 后续由 coordinator 重查租约并继续 bridge 安装与 GUI 验证。
+- Unblock condition: None.
 
 ### [x] T-003 — 可选精简历史截图上下文
 
@@ -111,7 +111,7 @@
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
 
-模型延迟受服务端和网络波动影响；删除旧截图可能破坏缓存前缀，因此不直接启用。117.5 秒间隔仍缺细分遥测。
+模型延迟受服务端和网络波动影响；滚动省略旧截图可能破坏缓存前缀，用户已接受视觉回看代价并启用。117.5 秒间隔仍缺细分遥测。
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -124,6 +124,8 @@
 - 2026-09-24: T-003 测试与仓库检查通过，标记 done；重新运行 desktop 全部定向测试，113 passed / 1 GUI skipped。T-002 等待桌面和设置选择，标记 blocked。独立构建发现源码与旧 dist 声明冲突，未安装。
 
 ### 固定请求 A/B 证据
+
+最新安装状态：用户确认后已将 `/Users/w/.epi/agent/settings.json` 的 `images.computerHistory` 设置为 `recent`，原配置备份在 `/tmp/easy-pi-computer-latency.WQKu7w/settings-before-recent.json`。使用项目已有 `tsconfig.product-build.json` 联合编译通过，确认 sdk.js/settings-manager.js 差异仅为本次功能后，仅安装这两组产物及新 context 模块；旧产物备份在同目录 installed-backup。安装后真实 SettingsManager 读取 recent、SDK import 和 3 图存档/2 图投影断言通过，无模型或桌面调用。原独立构建配置的声明环依赖不再作为交付阻塞。运行中的旧进程需完整重启；select+observe bridge 候选仍未安装。T-002 恢复 in_progress，下一步是租约核验和 GUI 验证。
 
 同一原会话截止 03:05:42.658 UTC 的历史，gpt-6-astra / low / SSE，maxTokens 1024、maxRetries 0；按 ABBAAB 顺序请求，A/B 各自独立缓存键、同组重复相同载荷。每组仅 3 次，不提供可靠尾延迟或完整任务质量结论。
 
@@ -144,5 +146,5 @@
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 与 T-003 本地测试通过；bridge 候选打包校验通过，6 次模型对照完成；T-002 待一致构建、安装与真实窗口验证。
-- Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未改变生产截图策略，未补齐 117.5 秒间隔的遥测。
+- Evidence: T-001 与 T-003 本地测试通过；6 次模型对照完成；快速截图设置及对应本地产物已安装验证。T-002 仍待 bridge 安装与真实窗口验证。
+- Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未补齐 117.5 秒间隔的遥测。
