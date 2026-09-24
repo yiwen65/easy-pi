@@ -48,17 +48,27 @@ OS-held-key cause.
 - Desktop test group: 110 passed, 1 GUI test skipped, 0 failed.
 - Desktop typecheck and `npm run check`: passed. Unrelated formatter-only
   changes from the repository check were reverted.
-- Current real GUI rerun blocked: desktop lease generation `0310` is dirty
-  with no holder found by `lsof`. No marker was cleared. The earlier clean
-  GUI run documented in `2026-09-24-stop-recovery.md` predates this patch and
-  does not verify this repair.
+- Initial real GUI rerun was blocked by dirty lease generation `0310`.
+  After explicit user approval, nonblocking exclusive flock, owner/mode,
+  same-inode and exact-generation checks passed. The original marker was
+  fsynced to `desktop.lock.before-manual-recovery-20260924-104606` in the
+  lease directory, then changed to clean on the same inode. This is an
+  operator override, not proof of the previous process's terminality.
+- Installed bridge real GUI tests passed twice. First: discover, select,
+  observe, exact-ref fill, native observe readback and independent fixture
+  checkpoint agreed. Clean close left `C 0311`.
+- Second: capture the fixture, change its visible state through its control
+  pipe, submit Return against the old image. Native returned
+  `stale_image_observation`, `not_dispatched`, `inputCommitted: false` and
+  the new actionable guidance. Fresh observe followed by exact-ref fill
+  succeeded, with matching native and fixture readbacks. Clean close left
+  `C 0312`. No unknown input was replayed or guard disabled.
 
 ## Remaining gate
 
-Obtain explicit operator recovery approval for the abandoned dirty lease;
-verify no owner and recover with backup and exact-generation checks, not by
-deleting the lock. Have the user release any held A key through their actual
-keyboard/remote client, re-read key state, then test text entry and readback
-in an isolated native fixture through the installed bridge. Reproduce changed
-image rejection and fresh-evidence recovery there. Do not claim full repair
-until these real-action gates pass.
+The read-only CoreGraphics check still reported A held immediately before
+recovery. Have the user release it through their actual keyboard/remote client,
+re-read key state, then test synthetic text entry and readback in an isolated
+fixture. The successful accessibility fill does not validate synthetic key
+delivery or explain the stuck state. The already-stopped easy-pi process must
+be fully exited and restarted; lock recovery does not clear its stop latch.
