@@ -505,9 +505,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-022 — Chrome AX 完全相同重复记录
+### [x] T-022 — Chrome AX 完全相同重复记录
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 正常列表页面不因 Chrome 返回完全相同的重复 AX 记录而整体拒绝，同时继续拒绝同 ID 冲突、多父节点、跨 frame 和超预算图。
 - Inputs and prerequisites: /tmp/epi-tab-target.TnC456/raw-ax2.json 包含两个重复 InlineTextBox ID，逐字段完全一致；旧包和 T-021 候选均 browser_observation_unproved 并正常关闭。
@@ -522,9 +522,11 @@
   - 相同重复不丢内容或改目标；冲突重复仍拒绝，原始总量限制不变，真实输入/读回/关闭一致。
 - Verification method:
   - captured AX 回放、native graph 单测、确定性 GUI 与包验证。
-- Validation evidence: raw probe2 单根且无重复父关系，但 -1000000003/-1000000006 各出现两次且 JSON 完全相同；对应列表圆点 InlineTextBox。bridge-before/after 两次 native 拒绝并关闭 C06c1/C06c2。尚未修改原生源码，不声称修复。
+- Validation evidence: raw probe2 单根且无重复父关系，但 -1000000003/-1000000006 各出现两次且 JSON 完全相同；对应列表圆点 InlineTextBox。原生回放先失败后通过，新增重复文本预算负例再次先失败后通过；18 项 page 测试通过。仅在入口合并完整 JSON 相同记录，原始条数及重复文本仍计入预算，冲突/图/目标校验保留，无新增重试或状态机。增量补丁双文件正向应用、逐字节比对、反向恢复通过。证据 /tmp/epi-ax-duplicates.hu0bQg：同一个 ax-list-duplicates.mjs，gui-before 原包仍 observation_unproved、关闭 C06c8；gui-after 候选 5 调用，独立回执 clicks=[link,direct,delegated] 且三状态 true、关闭 C06c9。严格 native TS、32 browser、54 context/desktop、8 qualified package 和根 check 通过。候选已构建暂存，尚未安装或运行候选真实模型，不能宣称端到端提速。
 - Blocker: None.
 - Unblock condition: None.
+
+- Installed qualification: selection-after 六调用通过，拒绝错误值后置条件且未误点，最终 Second=true、Plan=Pro、clicks=1，关闭 C06ca。候选可回退安装，旧包位于 /tmp/epi-ax-duplicates.hu0bQg/installed-before。安装后 gpt-6-sol 三项真实模型 3/3、零工具错误、全部正常关闭：click-tab-2 23.914s/6 回合，form 21.775s/6，dialog 20.851s/6，总费用 0.0765388 USD，最终 C06cd。该模型组是邻近回归，未直接覆盖无样式列表；新增缺陷的实际操作覆盖来自 gui-before/after 对照。根 check 再次通过并恢复其四处无关格式变化。较前轮少回合不能单样本归因为原生提速；全局 Goal 继续。
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -555,6 +557,10 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-25: 用户明确简化优先、允许架构重构；后续仅保留能以证据支撑速度、准确性、通用性或必要安全边界的机制，优先删除重复工作，不为重构而重构。T-022 以入口规范化修复已复现误拒绝，不增加缓存、重试或新状态实体。
+
+- 2026-09-25: T-022 开始；coordinator 已比对 authoring page.rs 与当前安装材料完全一致。先用真实圆点重复节点的最小回放和冲突/原始大小负例建立失败回归，再实现完整记录相等的规范化；当前 installed 仍为 T-021，租约 C06c7。
 
 - 2026-09-25: T-021 开始，coordinator 串行隔离 role=tab 容器与内部 link 的事件目标。上一轮状态投影和 press 预检已提交并试装；先保留现有能力，防止以拒绝自定义控件换取更低空点击数。当前安装 bridge ffc0c9dc，租约 C06c0，无运行中的上轮 fixture。
 

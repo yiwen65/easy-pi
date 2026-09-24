@@ -1,0 +1,159 @@
+diff --git a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+index 8d8e756..f252220 100644
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+@@ -186,16 +186,28 @@ fn ax_snapshot(
+     max_elements: usize,
+     max_depth: usize,
+ ) -> Result<(Vec<Value>, Snapshot), &'static str> {
+-    let nodes = raw["nodes"]
++    let raw_nodes = raw["nodes"]
+         .as_array()
+         .filter(|nodes| !nodes.is_empty() && nodes.len() <= max_elements)
+         .ok_or("browser_observation_bounds")?;
+-    let mut ids = HashMap::new();
+-    for (index, node) in nodes.iter().enumerate() {
++    let mut ids: HashMap<String, usize> = HashMap::new();
++    let mut nodes: Vec<&Value> = Vec::with_capacity(raw_nodes.len());
++    let mut occurrences = Vec::with_capacity(raw_nodes.len());
++    for node in raw_nodes {
+         let id = bounded_id(node, "nodeId")?;
+-        if ids.insert(id, index).is_some() {
+-            return Err("browser_observation_unproved");
++        // Chrome can repeat an identical synthetic AX record (e.g. list markers).
++        // Normalize representation only; conflicting identities still refuse.
++        // The raw record count above remains bounded, including duplicates.
++        if let Some(&index) = ids.get(&id) {
++            if nodes[index] != node {
++                return Err("browser_observation_unproved");
++            }
++            occurrences[index] += 1;
++            continue;
+         }
++        ids.insert(id, nodes.len());
++        nodes.push(node);
++        occurrences.push(1usize);
+         if node
+             .get("frameId")
+             .and_then(Value::as_str)
+@@ -302,9 +314,10 @@ fn ax_snapshot(
+         {
+             return Err("browser_observation_bounds");
+         }
+-        bytes += role.len()
+-            + label.as_ref().map_or(0, String::len)
+-            + value.as_ref().map_or(0, String::len);
++        bytes += occurrences[index]
++            * (role.len()
++                + label.as_ref().map_or(0, String::len)
++                + value.as_ref().map_or(0, String::len));
+         if bytes > 64 * 1024 {
+             return Err("browser_observation_bounds");
+         }
+diff --git a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+index 89ea13a..1812c2b 100644
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+@@ -14,6 +14,102 @@ fn tree() -> Value {
+     ]})
+ }
+ 
++#[test]
++fn controlled_browser_page_identical_duplicate_ax_records_keep_one_identity() {
++    let original = tree();
++    let expected = ax_snapshot(&original, &frame(), 512, 32).unwrap();
++    let mut repeated = original.clone();
++    repeated["nodes"]
++        .as_array_mut()
++        .unwrap()
++        .extend(original["nodes"].as_array().unwrap().clone());
++    let (rows, snapshot) = ax_snapshot(&repeated, &frame(), 512, 32).unwrap();
++    assert_eq!(rows, expected.0);
++    assert_eq!(snapshot.nodes.len(), 2);
++    assert_eq!(snapshot.nodes[1].backend, Some(9));
++    assert!(snapshot.nodes[1].fillable);
++    assert!(
++        matches!(
++            ax_snapshot(&repeated, &frame(), 2, 32),
++            Err("browser_observation_bounds")
++        ),
++        "raw record count is still bounded before normalization"
++    );
++    let mut oversized = tree();
++    oversized["nodes"][1]["value"]["value"] = json!("x".repeat(16 * 1024));
++    let record = oversized["nodes"][1].clone();
++    oversized["nodes"]
++        .as_array_mut()
++        .unwrap()
++        .extend(vec![record; 3]);
++    assert!(
++        matches!(
++            ax_snapshot(&oversized, &frame(), 512, 32),
++            Err("browser_observation_bounds")
++        ),
++        "duplicates still consume the text budget"
++    );
++}
++
++#[test]
++fn controlled_browser_page_duplicate_list_marker_capture_is_observable() {
++    // Minimized from Chrome's repeated records for a visible unordered-list marker.
++    let inline = json!({"nodeId":"-1000000003","ignored":false,
++        "role":{"type":"internalRole","value":"InlineTextBox"},
++        "chromeRole":{"type":"internalRole","value":101},
++        "name":{"type":"computedString","value":"• "},
++        "properties":[],"parentId":"2","childIds":[]});
++    let mut raw = tree();
++    raw["nodes"][1] = json!({"nodeId":"2","ignored":false,"role":{"value":"StaticText"},"name":{"value":"• "},"childIds":["-1000000003"]});
++    raw["nodes"]
++        .as_array_mut()
++        .unwrap()
++        .extend([inline.clone(), inline]);
++    let (rows, snapshot) = ax_snapshot(&raw, &frame(), 512, 32).unwrap();
++    assert_eq!(rows.len(), 3);
++    assert_eq!(rows[2]["label"], "• ");
++    assert_eq!(rows[2]["parent_index"], 1);
++    assert_eq!(snapshot.nodes[2].backend, None);
++    assert!(!snapshot.nodes[2].pressable && !snapshot.nodes[2].fillable);
++}
++
++#[test]
++fn controlled_browser_page_duplicate_conflicts_and_invalid_graphs_still_refuse() {
++    for (key, value) in [
++        ("name", json!({"value":"Other"})),
++        ("value", json!({"value":"Changed"})),
++        ("role", json!({"value":"button"})),
++        ("backendDOMNodeId", json!(10)),
++        ("ignored", json!(true)),
++        ("parentId", json!("unexpected")),
++        ("properties", json!([])),
++        ("frameId", json!("foreign")),
++    ] {
++        let mut raw = tree();
++        let mut conflict = raw["nodes"][1].clone();
++        conflict[key] = value;
++        raw["nodes"].as_array_mut().unwrap().push(conflict);
++        assert!(
++            matches!(
++                ax_snapshot(&raw, &frame(), 512, 32),
++                Err("browser_observation_unproved")
++            ),
++            "conflicting {key}"
++        );
++    }
++    let mut multiple_parents = tree();
++    multiple_parents["nodes"][0]["childIds"] = json!(["2", "2"]);
++    let duplicate = multiple_parents["nodes"][1].clone();
++    multiple_parents["nodes"]
++        .as_array_mut()
++        .unwrap()
++        .push(duplicate);
++    assert!(matches!(
++        ax_snapshot(&multiple_parents, &frame(), 512, 32),
++        Err("browser_observation_unproved")
++    ));
++}
++
+ #[test]
+ fn controlled_browser_page_selected_state_preserves_false_without_inventing_values() {
+     for role in ["tab", "option"] {
