@@ -620,6 +620,29 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-027 — 换行文本副本的观察成本
+
+- Status: done
+- Owner: coordinator
+- Objective: 省去已经完整展示的 StaticText 的纯展示换行副本；只在实测有价值且行为不退化后安装。
+- Inputs and prerequisites: T-026 本地全场景模型阶段占 83.1%；login-user trace 的多个 InlineTextBox 为已展示正文片段，当前仅压缩完全相同副本。
+- Scope or files: controlled/tool.ts 原有投影、browser/test/tool.test.ts 原有 fixture；不加新 API、常驻状态或权限。
+- Expected output: 保留正文与动作/值/选择状态的最小投影改动、定向边界测试、同模型任务的交错对照。
+- Dependencies: T-026.
+- Execution steps:
+  1. 先扩展现有 fixture，证明换行片段重复展示；父文本缺失/预算丢弃仍须保留子文本。
+  2. 复用现有 byIndex 和 displayedStaticText，只有父角色 StaticText、父完整文本已展示并包含片段时才省略无状态无动作副本。
+  3. 同 native、模型、任务、seed 下交错 A/B，并检查准确性、调用轮数、观察字节与耗时；未获收益不得称为提速。
+- Acceptance criteria:
+  - 不删除独有正文或动作/值/选择状态；隐藏副本不获得可操作引用。
+  - 单测和类型检查通过，真实模型结果不放宽 oracle；原安装版保留至资格确认。
+- Verification method: 既有 browser/context/desktop 测试、严格 TS、根 check，/tmp/epi-wrapped-text.7avBaa 交错 A/B 原始 trace。
+- Validation evidence: 旧代码两个相关测试预期失败，修复后 41 browser 全过；严格 native TS、根 check 通过且恢复无关四文件格式变化。候选包独立 staging，未安装；A/B 顺序 A,B,B,A,A,B，各跑 enter-text/click-tab-2，真实 gpt-6-sol seed42，最多 24 回合/180s，每次关闭证明后才启动下一例，报告费用上限 2 USD。handle 78168 已启动，后续必须 poll 同一 handle，不能因观察超时重开。
+- Blocker: None.
+- Unblock condition: None.
+
+T-027 最终结论：候选不安装，源码和候选专用测试已精确撤回至原版；完整 patch、包和原始结果保存在 /tmp/epi-wrapped-text.7avBaa/{rejected.patch,package,staged-candidate,ab.json}。十二例全通过、全关闭 C0711，handle 78168 正常退出。页内标签 A=29.844/26.940/16.488s、9/9/5 轮；B=16.417/16.974/17.755s、5/5/5 轮；第三组反向慢 1.267s。输入 A=13.964/14.608/15.202s、4/4/4 轮；B=16.865/16.357/22.130s、4/4/5 轮，三组均慢，最后一次多一轮。不能凭这些小样本证明因果退化，也不能证明通用提速。观察空间被其他正文填满，输入观察字节 13231→13254，未减少上下文；标签前两组省下过滤/恢复观察、第三组原版本就无需补读。按最小复杂度原则拒绝默认加入父文本片段规则。候选 41 browser、58 context/desktop、严格 native TS、根 check 均通过，但正确性绿灯不替代性能资格。安装 bridge 仍为 4938b97cdf9e145e65351baf83ee73491bda550ef7ed9bd469571786a4e5beaf。下一步回到通用能力缺口及动作契约，不继续无依据地堆积投影启发式；Goal active。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
