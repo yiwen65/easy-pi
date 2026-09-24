@@ -29,6 +29,8 @@ function fixture(
 	options: {
 		web?: boolean;
 		rejectNavigation?: boolean;
+		navigationFailure?: string;
+		navigationCommitted?: boolean;
 		prepareFailure?: string;
 		clickEffect?: CuaSdk.ActionEffect;
 		option?: boolean;
@@ -67,10 +69,16 @@ function fixture(
 						complete("prepare", new api.ComputerResult.BrowserPrepared({ pid: 42, windowId: 7n }), true);
 					},
 					startNavigate() {
-						if (options.rejectNavigation) {
+						if (options.rejectNavigation || options.navigationFailure) {
 							calls.push("navigate-refused");
-							result.reject(new api.ComputerError.Refused({ reason: "permission_denied" }));
-							receipt.resolve({ operationId: "refused", cancelled: false, inputCommitted: false });
+							result.reject(
+								new api.ComputerError.Refused({ reason: options.navigationFailure ?? "permission_denied" }),
+							);
+							receipt.resolve({
+								operationId: "refused",
+								cancelled: false,
+								inputCommitted: options.navigationCommitted ?? false,
+							});
 						} else
 							complete(
 								"navigate",
@@ -214,6 +222,29 @@ const execute = (ref: string) => ({
 		ref,
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
+});
+
+test("committed navigation retains a safe cause without downgrading unknown outcome", { skip: !sdk }, async (t) => {
+	for (const reason of ["unexpected_modal_surface", "private detail /secret"]) {
+		const f = fixture({ navigationFailure: reason, navigationCommitted: true });
+		t.after(() => f.host.close());
+		await assert.rejects(
+			f.tool.execute("n", { request: { op: "navigate", url: "http://127.0.0.1/" } }),
+			(error: unknown) => {
+				assert.ok(error instanceof Error && "details" in error);
+				assert.deepEqual(error.details, {
+					status: "outcome_unknown",
+					completedSteps: 0,
+					code: "outcome_unknown",
+					cause: reason.startsWith("private") ? "native_fault" : reason,
+				});
+				assert.match(error.message, /Do not replay/);
+				assert.doesNotMatch(error.message, /private detail|secret/);
+				return true;
+			},
+		);
+		assert.deepEqual(f.calls, ["navigate-refused"]);
+	}
 });
 
 test(

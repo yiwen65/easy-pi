@@ -30,6 +30,8 @@ const safeCodes = new Set([
 	"image_catalog_unavailable",
 	"image_catalog_changed",
 	"browser_parent_unqualified",
+	"browser_endpoint_unproved",
+	"browser_endpoint_timeout",
 ]);
 
 /** One ordinary tool on the existing AgentSession loop and outer desktop scheduler. */
@@ -116,6 +118,7 @@ export function createControlledBrowserTool(
 											: "paused",
 									completedSteps: 0,
 									code: receipt?.inputCommitted ? "outcome_unknown" : code,
+									...(receipt?.inputCommitted ? { cause: code } : {}),
 								};
 							}),
 					};
@@ -134,7 +137,12 @@ export function createControlledBrowserTool(
 				};
 			}
 			if (details.status !== "prepared" && details.status !== "navigation_submitted") {
-				throw new AgentToolError(`Computer ${details.status}; completed steps: 0.`, details);
+				throw new AgentToolError(
+					`Computer ${details.status}; completed steps: 0. Code: ${details.code ?? "native_fault"}.` +
+						(details.cause ? ` Native cause: ${details.cause}.` : "") +
+						(details.status === "outcome_unknown" ? " Do not replay this action; its effect is unresolved." : ""),
+					details,
+				);
 			}
 			return {
 				content: [

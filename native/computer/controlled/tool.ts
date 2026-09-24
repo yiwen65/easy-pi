@@ -36,6 +36,7 @@ export interface ControlledComputerDetails {
 	completedSteps: number;
 	firstUnfinishedStep?: number;
 	code?: string;
+	cause?: string;
 	observationRef?: string;
 	nativeComplete?: boolean;
 	viewTruncated?: boolean;
