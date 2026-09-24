@@ -42,7 +42,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-004 -> T-002 -> T-003; T-001 -> T-005; T-001 -> T-006. 全部串行；T-005/006 为单独可验证的局部交付，不代表 T-003 全局精简完成。
+- Dependency graph: T-001 -> T-004; T-001 -> T-002 -> T-003; T-001 -> T-005; T-001 -> T-006. 全部串行；覆盖采集不依赖焦点修复完成，失败原样保留。T-005/006 为局部交付。
 - Parallel batches: 无；同一 fixture、记录格式及桌面串行。
 - Serialization constraints: 同一桌面禁止并发；文档由 coordinator 维护。
 
@@ -71,20 +71,20 @@
 
 ### [ ] T-002 — 扩展业务与干扰覆盖
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 浏览器、纯视觉、连续会话、焦点变化和取消。
 - Inputs and prerequisites: T-001 的测量与 oracle。
 - Scope or files: native/computer/desktop/fixtures。
 - Expected output: 可重复任务与扰动结果。
-- Dependencies: T-004.
+- Dependencies: T-001.
 - Execution steps:
   1. 增加每种独立执行机制的最小任务，不复制相同流程。
 - Acceptance criteria:
   - 正常成功与正确拒绝分开统计，无错误输入和遗留占用。
 - Verification method:
   - 实际 UI 与独立结果读回。
-- Validation evidence: Not run.
+- Validation evidence: 通用 owned AppKit/WebKit 10 场景各 5 次，50/50，通过实际工具调用、独立状态读回和干净关闭；/tmp/epi-general.dpLJ12/final。中间九场景版本另有 45/45，不混入最终分布。完整浏览器和输入中途取消尚未覆盖，任务保持 in_progress；coordinator 下一步接入独立浏览器 profile 的本地页面导航/表单与受控中途取消。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -172,6 +172,21 @@
 
 逐层执行纯汇总单测、三种真实 fixture 冒烟、交错 A/B。记录来源版本、原生指纹、耗时边界；不使用同步日志时间冒充原生执行时间。
 
+通用场景按机制分层，避免重复类似步骤。第一批可执行套件见 `native/computer/desktop/fixtures/general/README.md`。后续资格场景定义如下，未跑项不视为通过：
+
+| 层 | 场景与独立验收 | 当前覆盖边界 |
+| --- | --- | --- |
+| 原生编辑 | 中英文、组合字符、emoji、多行、Tab；完整值相等 | 已测 direct/synthetic 编辑；真实 IME 组合态未测 |
+| 连续工作 | 同会话十次替换，每次读回；跨会话取消后恢复 | 已测；小时级 soak、内存趋势未测 |
+| 视觉输入 | 点击目标事件一次、非零滚动、拖动到目标区 | 已测；长文档滚动位置、多屏缩放、跨窗拖放未测 |
+| 窗口与弹窗 | A→B→A 无串写；保存→关闭面板→重开字节相同 | 双窗口已测；保存由原套件覆盖；外部抢焦点根因仍属 T-004 |
+| 网页 | Unicode 表单提交值准确；随后导航、返回、标签页选择 | WebKit 本地表单已测；真实 Chrome/Safari、导航与标签页未测 |
+| 引用恢复 | 旧语义/图片 ref 均拒绝且零写入；刷新后新输入成功 | 已测；目标消失/重建、窗口移动导致图片失效未测 |
+| 取消与占用 | 取消不继续派发；释放后新 owner 能完成任务 | 预取消已测；中途按键/拖动取消、双 owner 竞争未测 |
+| 权限/环境 | 缺权限、锁屏、owner 隔离能有界拒绝且零输入 | 不在真实桌面上自动修改权限或锁屏；使用定向模拟回归，真实故障资格待单独安排 |
+
+每层记录所有尝试、正确业务成功/保护成功、错误输入、工具次数、冷加载、task P50/P95、失败耗时及排空。精简候选必须保持相同结果 oracle；不以去掉验证或失败样本改善统计。真实模型选目标/视觉理解不由确定性 fixture 代替。
+
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
 
@@ -180,6 +195,7 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: 用户追加通用场景实测；T-002 开始，解除对 T-004 的非必要依赖。新增 owned AppKit/WebKit 表单、鼠标点击/滚动/拖动、双窗口切换、连续编辑、过期引用、取消与重新创建会话。WebKit 测试只代表网页引擎，不冒充完整浏览器/外网任务；保持原有保存场景。
 - 2026-09-24: T-001 开始；先实现确定性工具/UI 基线，不更改生产安全策略。
 - 2026-09-24: T-001 完成。6 次冒烟通过后执行 120 次正式对照；不同 probe 版本的冒烟未混入正式统计。补充汇总器拒绝缺失关闭证明或非法耗时的单测。
 - 2026-09-24: 发现保存焦点失败，新增 T-004，并置于覆盖扩展和生产精简之前。当前未删除生产校验、权限或焦点保护，未调用付费模型。
@@ -189,6 +205,7 @@
 - 2026-09-24: SDK 首次缺 headless fixture 导致 71 pass/23 fail（后续共享锁 poison），原始失败保留；补齐仓库既有 renderer-liveness-worker/fake-helper 和短 TMPDIR 后 94/94 通过。未修改产品来绕过测试环境错误。
 - 2026-09-24: T-005/006 完成；1434 文件新包已安装，原包保留 /tmp/epi-optimize.vOX6Su/installed-before。最终 SDK 8b01d174bff81dc49101b3a85e692fbc8b4ceb7fbdf13c237e5411ad3d98d75a。安装后 60/60、额外图像输入/完整保存探针通过，最终 lease C045d。长驻进程需正常结束并新建进程使用新库，未强行终止既有进程。
 - 2026-09-24: T-004 仍由 coordinator 持有；恢复时优先对比失败时 WindowServer 实时 PID 与 cleanup 使用的 NSWorkspace PID，再做有针对性的激活实验。最新通过不能证明历史焦点故障根因已修复。T-002/003 仍待后续覆盖，不把局部交付冒充全部完成。
+- 2026-09-24: T-002 首批十场景正式 50/50；格式化后同套件冒烟 10/10，原保存套件 split/combined 6/6。metrics 3/3、npm run check、task document validate 与本次文件 diff --check 通过。既有 LEARNS.md 的 EOF 空行告警为用户原改动，未修改。完整浏览器及中途取消仍待覆盖，T-002 保持 coordinator 可恢复状态，下一步见任务字段。
 
 ### 首批实测与决策
 
@@ -222,9 +239,30 @@
 
 Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":"image"}}` 一次获得窗口选择与新 Image ref，不触发 AX 启用。`observe:true` 保持语义读取；省略保持只选择。后续 input 仍需模型实际看到该图片，过期或被过滤图片不能授权输入。
 
+### 通用场景首批资格结果
+
+来源 `/tmp/epi-general.dpLJ12/final/{contract.json,samples.jsonl,summary.json}`；同一已安装 SDK `8b01d174bff81dc49101b3a85e692fbc8b4ceb7fbdf13c237e5411ad3d98d75a`，十场景各五次独立冷进程，无重试。业务场景 35/35；保护/恢复场景 15/15；全部 native close、fixture exit、clean lease 通过。
+
+| 场景 | 通过/尝试 | task P50 / P95 (ms) | 工具调用中位数 |
+| --- | --- | --- | --- |
+| Unicode 多行替换 | 5/5 | 485.5 / 506.4 | 5 |
+| 同会话连续十次替换 | 5/5 | 1630.0 / 1639.6 | 41 |
+| 双窗口 A→B→A | 5/5 | 836.0 / 903.9 | 15 |
+| 图像点击 | 5/5 | 660.3 / 733.8 | 3 |
+| 图像滚动事件 | 5/5 | 664.3 / 682.7 | 3 |
+| 图像拖动 | 5/5 | 1057.9 / 1115.3 | 3 |
+| WebKit Unicode 表单 | 5/5 | 621.6 / 629.2 | 3 |
+| 过期语义引用拒绝及恢复 | 5/5 | 532.7 / 558.3 | 8 |
+| 过期截图引用拒绝及恢复 | 5/5 | 585.1 / 634.3 | 8 |
+| 预取消及新建会话恢复 | 5/5 | 611.0 / 643.8 | 8 |
+
+计时包括冷 bridge 加载、首次 native 初始化、工具执行与独立读回，不含模型、预先启动 fixture 或网络。关闭单列；本版 general closeMs 包含缓冲日志输出开销，不与早期 save closeMs 做细微差值比较。五次 P95 实际为最大值，只做筛查，不证明可靠尾延迟或极低故障率。连续编辑的 41 次包括每步 fresh observe/reconcile 的验证成本，尚不是最省调用的 agent 策略；可用 segment 自带新证据做后续等价对照，不应先删结果验证。
+
+原始失败保留：`smoke` 九次中 4 pass/5 fail；一个为真实 `foreground_target_changed` 且正文未变，其余四个为 harness 错把 `needs_observation` 一律要求成 `confirmed`。修正后必须校验 fresh AX 和独立正文，再 reconcile，不重放输入。单独 `stale-image.log` 初次断言错误码失败：segment 的统一失效证据错误是 `stale_observation`，不是旧 click 接口的 `stale_image`；产品已正确拒绝，测试按实际契约修正。后续 45/45、最终 50/50 分版本保留，不能消除首轮焦点失败事实，也不构成 T-004 根因修复。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001、T-005、T-006 完成；原版失败均保留。局部优化 60 次二进制 A/B 和 60 次最终安装 GUI 均通过；额外真实图像输入、完整保存重开通过，完整静态检查及定向测试见上。
-- Limitations: T-004 焦点根因/修复、T-002 浏览器/更广视觉/干扰/连续会话、T-003 全局精简资格验证未完成；模型层未执行；仅已测 owned AppKit 任务具备提速证据，无彻底修复或所有应用稳定性结论。
+- Evidence: T-001、T-005、T-006 完成；原版失败均保留。局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；T-002 已扩展十场景并完成 50/50 实际工具/UI 检验。metrics 单测 3/3、npm run check 通过；格式器引入的四个无关文件改动已单独撤回。
+- Limitations: T-004 焦点根因/修复、T-002 完整浏览器/外部干扰/中途取消/长时会话、T-003 全局精简资格验证未完成；模型层未执行。通用场景是新基线而非新的提速对照，无彻底修复或所有应用稳定性结论。

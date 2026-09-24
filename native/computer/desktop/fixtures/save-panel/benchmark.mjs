@@ -5,21 +5,25 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { arch, release } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scenarios as generalScenarios } from "../general/scenarios.mjs";
 import { summarize } from "./metrics.mjs";
 
-const [fixture, bridge, output, count = "20"] = process.argv.slice(2);
+const [fixture, bridge, output, count = "20", suite = "save-panel"] = process.argv.slice(2);
+assert.ok(["save-panel", "general"].includes(suite));
 assert.equal(process.env.ALLOW_GUI_TESTS, "true");
 assert.ok([fixture, bridge, output].every((value) => value && isAbsolute(value)));
 const pairs = Number(count);
 assert.ok(Number.isInteger(pairs) && pairs > 0 && pairs <= 100);
 mkdirSync(output); // Never overwrite another run.
 const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
-const probe = fileURLToPath(new URL("./probe.mjs", import.meta.url));
+const probe = fileURLToPath(new URL(suite === "general" ? "../general/probe.mjs" : "./probe.mjs", import.meta.url));
 writeFileSync(
 	join(output, "contract.json"),
 	JSON.stringify(
 		{
 			version: 1,
+			suite,
+			scenarios: suite === "general" ? generalScenarios : ["save", "working-synthetic", "broken-synthetic"],
 			pairs,
 			node: process.versions.node,
 			os: release(),
@@ -33,7 +37,10 @@ writeFileSync(
 			timing:
 				"cold bridge require plus feature creation through final independent verification; preopened fixture setup and awaited close separately reported",
 			model: "none; deterministic tool/UI E2E",
-			order: "alternating AB/BA by pair",
+			order:
+				suite === "general"
+					? "one combined attempt per scenario per round, fresh process"
+					: "alternating AB/BA by pair",
 			failurePolicy:
 				"retain every attempt; stop batch on missing native close proof or non-clean lease; never retry an attempt",
 		},
@@ -44,8 +51,12 @@ writeFileSync(
 const samples = [];
 let stop = false;
 for (let pair = 0; pair < pairs && !stop; pair++) {
-	for (const scenario of ["save", "working-synthetic", "broken-synthetic"]) {
-		for (const strategy of pair % 2 ? ["combined", "split"] : ["split", "combined"]) {
+	for (const scenario of suite === "general" ? generalScenarios : ["save", "working-synthetic", "broken-synthetic"]) {
+		for (const strategy of suite === "general"
+			? ["combined"]
+			: pair % 2
+				? ["combined", "split"]
+				: ["split", "combined"]) {
 			const name = `${pair}-${scenario}-${strategy}`;
 			const result = await new Promise((resolve, reject) => {
 				const child = spawn(process.execPath, [probe, fixture, bridge, scenario, strategy], {
