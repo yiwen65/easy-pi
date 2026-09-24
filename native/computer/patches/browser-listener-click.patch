@@ -1,0 +1,376 @@
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+@@ -20,6 +20,7 @@
+     enabled: bool,
+     fillable: bool,
+     pressable: bool,
++    listener_required: bool,
+     selectable: bool,
+     select_parent: Option<i64>,
+     option_label: Option<String>,
+@@ -276,7 +277,23 @@
+             .as_str()
+             .filter(|role| !role.is_empty() && role.len() <= 64)
+             .ok_or("browser_observation_unproved")?;
+-        let label = scalar(&node["name"]["value"]);
++        let mut label = scalar(&node["name"]["value"]);
++        // Keep the actual element identity. Never redirect a text-node token
++        // to its parent at dispatch. Only visible direct text names this row.
++        if role == "generic" && !ignored && label.as_deref().is_none_or(|s| s.is_empty()) {
++            let direct_text = node["childIds"]
++                .as_array()
++                .into_iter()
++                .flatten()
++                .filter_map(|id| id.as_str().and_then(|id| ids.get(id)))
++                .map(|index| &nodes[*index])
++                .filter(|child| child["ignored"] == false && child["role"]["value"] == "StaticText")
++                .filter_map(|child| child["name"]["value"].as_str())
++                .collect::<String>();
++            if !direct_text.is_empty() && direct_text.len() <= 256 {
++                label = Some(direct_text);
++            }
++        }
+         let value =
+             scalar(&node["value"]["value"]).or_else(|| property(node, "checked").and_then(scalar));
+         if label.as_ref().is_some_and(|value| value.len() > 256)
+@@ -294,9 +311,14 @@
+             && !ignored
+             && property(node, "disabled").and_then(Value::as_bool) != Some(true);
+         let secure = property(node, "protected").and_then(Value::as_bool) == Some(true);
++        let listener_required = enabled
++            && !secure
++            && role == "generic"
++            && label.as_ref().is_some_and(|s| !s.trim().is_empty());
+         retained.push(Node {
+             backend: node["backendDOMNodeId"].as_i64().filter(|id| *id > 0),
+             enabled,
++            listener_required,
+             fillable: enabled
+                 && matches!(role, "textbox" | "searchbox")
+                 && property(node, "readonly").and_then(Value::as_bool) != Some(true),
+@@ -318,18 +340,19 @@
+             },
+             option_value: None,
+             secure,
+-            needs_metadata: matches!(
+-                role,
+-                "textbox"
+-                    | "searchbox"
+-                    | "button"
+-                    | "link"
+-                    | "checkbox"
+-                    | "radio"
+-                    | "switch"
+-                    | "tab"
+-                    | "option"
+-            ),
++            needs_metadata: listener_required
++                || matches!(
++                    role,
++                    "textbox"
++                        | "searchbox"
++                        | "button"
++                        | "link"
++                        | "checkbox"
++                        | "radio"
++                        | "switch"
++                        | "tab"
++                        | "option"
++                ),
+         });
+         output.push(json!({"element_index":index,"role":role,"depth":depth,"parent_index":parents[index],
+             "value_description":if role == "option" {select_parent.and_then(|(parent, _)| scalar(&nodes[parent]["name"]["value"]))} else {None},
+@@ -407,6 +430,12 @@
+                     "text" | "search" | "email" | "tel" | "url" | "number"
+                 )));
+     node.pressable &= !node.secure && !disabled;
++    if node.listener_required {
++        node.listener_required &= !node.secure
++            && !disabled
++            && matches!(described["nodeName"].as_str(), Some("SPAN" | "DIV"));
++        node.pressable &= node.listener_required;
++    }
+     node.selectable &= !node.secure && !disabled && described["nodeName"] == "OPTION";
+     node.option_value = option_value;
+     Ok(())
+@@ -455,6 +484,33 @@
+     Input { confirmed: bool },
+ }
+ 
++fn has_direct_click_listener(raw: &Value, backend: i64) -> Result<bool, &'static str> {
++    let listeners = raw["listeners"]
++        .as_array()
++        .filter(|rows| rows.len() <= 64)
++        .ok_or("browser_node_unproved")?;
++    Ok(listeners.iter().any(|listener| {
++        listener["type"] == "click" && listener["backendNodeId"].as_i64() == Some(backend)
++    }))
++}
++
++async fn click_listener(
++    bound: &BoundPage,
++    object: &str,
++    backend: i64,
++) -> Result<bool, &'static str> {
++    let raw = bound
++        .connection
++        .call(
++            Some(&bound.session_id),
++            "DOMDebugger.getEventListeners",
++            json!({"objectId":object,"depth":0,"pierce":false}),
++        )
++        .await
++        .map_err(|_| "browser_node_unproved")?;
++    has_direct_click_listener(&raw, backend)
++}
++
+ impl BrowserContext {
+     pub fn arguments(&self) -> Result<Value, &'static str> {
+         let identity = self.identity.get().ok_or("browser_not_prepared")?;
+@@ -574,6 +630,20 @@
+                     if node.secure {
+                         rows[index]["value"] = Value::Null;
+                     }
++                    if node.listener_required {
++                        let backend = node.backend.ok_or("browser_node_unproved")?;
++                        let object = bound
++                            .connection
++                            .call(
++                                Some(&bound.session_id),
++                                "DOM.resolveNode",
++                                json!({"backendNodeId":backend,"objectGroup":"pi-controlled-dom"}),
++                            )
++                            .await
++                            .map_err(|_| "browser_node_stale")?;
++                        let object_id = bounded_id(&object["object"], "objectId")?;
++                        node.pressable = click_listener(bound, &object_id, backend).await?;
++                    }
+                     rows[index]["enabled"] = json!(node.enabled);
+                     rows[index]["actions"] = json!(
+                         ([
+@@ -585,6 +655,17 @@
+                         .flatten()
+                         .collect::<Vec<_>>())
+                     );
++                }
++                if snapshot.nodes.iter().any(|node| node.listener_required) {
++                    bound
++                        .connection
++                        .call(
++                            Some(&bound.session_id),
++                            "Runtime.releaseObjectGroup",
++                            json!({"objectGroup":"pi-controlled-dom"}),
++                        )
++                        .await
++                        .map_err(|_| "browser_binding_stale")?;
+                 }
+                 if validate_page(bound, &operation).await? != frame {
+                     return Err("browser_frame_changed");
+@@ -690,6 +771,9 @@
+                     .await
+                     .map_err(|_| "browser_node_stale")?;
+                 let object_id = bounded_id(&object["object"], "objectId")?;
++                if node.listener_required && !click_listener(bound, &object_id, backend).await? {
++                    return Err("browser_input_unavailable");
++                }
+                 let select_object = if node.selectable {
+                     let parent = node.select_parent.ok_or("browser_node_stale")?;
+                     let metadata = bound
+@@ -759,6 +843,11 @@
+                         select_object_id: select_object.as_deref().ok_or("browser_node_stale")?,
+                         label: node.option_label.as_deref().ok_or("browser_node_stale")?,
+                         value: node.option_value.as_deref(),
++                        document_url: &frame.url,
++                        dialog_object_id: dialog_object.as_deref(),
++                    },
++                    None if node.listener_required => ControlledCdpInput::DomListenerPressChecked {
++                        object_id: &object_id,
+                         document_url: &frame.url,
+                         dialog_object_id: dialog_object.as_deref(),
+                     },
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+@@ -12,9 +12,69 @@
+         {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"name":{"value":"Fixture"},"childIds":["2"],"frameId":"frame"},
+         {"nodeId":"2","ignored":false,"role":{"value":"textbox"},"name":{"value":"Name"},"value":{"value":"Ada"},"backendDOMNodeId":9}
+     ]})
++}
++
++#[test]
++fn controlled_browser_page_generic_control_keeps_visible_direct_text_identity() {
++    let raw = json!({"nodes":[
++        {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"childIds":["2"],"frameId":"frame"},
++        {"nodeId":"2","ignored":false,"role":{"value":"generic"},"name":{"value":""},"backendDOMNodeId":20,"childIds":["3"]},
++        {"nodeId":"3","ignored":false,"role":{"value":"StaticText"},"name":{"value":"Tempor"},"backendDOMNodeId":21}
++    ]});
++    let (rows, snapshot) = ax_snapshot(&raw, &frame(), 512, 32).unwrap();
++    assert_eq!(rows[1]["label"], "Tempor");
++    assert_eq!(snapshot.nodes[1].backend, Some(20));
++    assert!(
++        !snapshot.nodes[1].pressable,
++        "AX text alone is not input authority"
++    );
++    assert!(snapshot.nodes[1].listener_required);
++    for tag in ["INPUT", "TEXTAREA", "IFRAME"] {
++        let mut node = snapshot.nodes[1].clone();
++        describe_input(
++            &json!({"node":{"backendNodeId":20,"nodeName":tag,"attributes":[]}}),
++            &mut node,
++        )
++        .unwrap();
++        assert!(!node.listener_required && !node.pressable);
++    }
++    for attrs in [json!(["disabled", ""]), json!(["type", "password"])] {
++        let mut node = snapshot.nodes[1].clone();
++        describe_input(
++            &json!({"node":{"backendNodeId":20,"nodeName":"SPAN","attributes":attrs}}),
++            &mut node,
++        )
++        .unwrap();
++        assert!(!node.listener_required && !node.pressable);
++    }
++    let mut hidden = raw;
++    hidden["nodes"][2]["ignored"] = json!(true);
++    assert_eq!(
++        ax_snapshot(&hidden, &frame(), 512, 32).unwrap().0[1]["label"],
++        ""
++    );
+ }
+ 
+ #[test]
++fn controlled_browser_page_click_listener_proof_is_bounded_and_exact() {
++    assert!(has_direct_click_listener(
++        &json!({"listeners":[{"type":"click","backendNodeId":20}]}),
++        20
++    )
++    .unwrap());
++    for raw in [
++        json!({"listeners":[]}),
++        json!({"listeners":[{"type":"keydown","backendNodeId":20}]}),
++        json!({"listeners":[{"type":"click","backendNodeId":21}]}),
++        json!({"listeners":[{"type":"click"}]}),
++    ] {
++        assert!(!has_direct_click_listener(&raw, 20).unwrap());
++    }
++    assert!(has_direct_click_listener(&json!({}), 20).is_err());
++    assert!(has_direct_click_listener(&json!({"listeners":vec![json!({});65]}), 20).is_err());
++}
++
++#[test]
+ fn controlled_browser_page_options_require_metadata_and_keep_select_context() {
+     let raw = json!({"nodes":[
+         {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"childIds":["2"],"frameId":"frame"},
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled.rs
+@@ -45,6 +45,11 @@
+         document_url: &'a str,
+         dialog_object_id: Option<&'a str>,
+     },
++    DomListenerPressChecked {
++        object_id: &'a str,
++        document_url: &'a str,
++        dialog_object_id: Option<&'a str>,
++    },
+ }
+ 
+ /// Canonical origin for typed navigation and live-document authorization.
+@@ -103,6 +108,14 @@
+     return {invoked:true};
+ "#
+ );
++const LISTENER_PRESS_CHECKED: &str = checked_dom_function!(
++    "function(expectedUrl, expectedDialog) {",
++    r#"
++    if (!(this instanceof w.HTMLElement) || !['SPAN','DIV'].includes(this.tagName) || !this.checkVisibility({visibilityProperty:true,opacityProperty:true}) || this.closest('[inert],[aria-disabled="true"],[disabled]')) throw new Error('input_unavailable');
++    w.HTMLElement.prototype.click.call(this);
++    return {invoked:true};
++"#
++);
+ 
+ fn dialog_argument(object_id: Option<&str>) -> anyhow::Result<Value> {
+     match object_id {
+@@ -200,6 +213,18 @@
+                     "arguments":[{"value":document_url},dialog_argument(dialog_object_id)?],"returnByValue":true}),
+                 )
+             }
++            ControlledCdpInput::DomListenerPressChecked {
++                object_id,
++                document_url,
++                dialog_object_id,
++            } if !object_id.is_empty() && object_id.len() <= 512 => {
++                controlled_url_origin(document_url).map_err(anyhow::Error::msg)?;
++                (
++                    "Runtime.callFunctionOn",
++                    json!({"objectId":object_id,"functionDeclaration":LISTENER_PRESS_CHECKED,
++                    "arguments":[{"value":document_url},dialog_argument(dialog_object_id)?],"returnByValue":true}),
++                )
++            }
+             ControlledCdpInput::DomSelectChecked {
+                 object_id,
+                 select_object_id,
+@@ -234,6 +259,14 @@
+ /// emulation, navigate, install code or dispatch page input.
+ pub(super) fn read_method(method: &str, params: &Value) -> bool {
+     match method {
++        "DOMDebugger.getEventListeners" => {
++            params.as_object().is_some_and(|p| p.len() == 3)
++                && params["objectId"]
++                    .as_str()
++                    .is_some_and(|s| !s.is_empty() && s.len() <= 512)
++                && params["depth"] == 0
++                && params["pierce"] == false
++        }
+         "Accessibility.getFullAXTree"
+         | "Browser.getWindowBounds"
+         | "Browser.getWindowForTarget"
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled/dom_tests.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled/dom_tests.rs
+@@ -5,6 +5,18 @@
+ 
+ #[test]
+ fn controlled_cdp_dom_origin_and_cleanup_are_closed_surfaces() {
++    assert!(read_method(
++        "DOMDebugger.getEventListeners",
++        &json!({"objectId":"owned","depth":0,"pierce":false})
++    ));
++    for params in [
++        json!({"objectId":"owned","depth":1,"pierce":false}),
++        json!({"objectId":"owned","depth":0,"pierce":true}),
++        json!({"objectId":"owned","depth":0,"pierce":false,"extra":true}),
++        json!({"objectId":"","depth":0,"pierce":false}),
++    ] {
++        assert!(!read_method("DOMDebugger.getEventListeners", &params));
++    }
+     assert_eq!(
+         controlled_url_origin("https://example.test/path#fragment"),
+         Ok("https://example.test".into())
+@@ -101,6 +113,16 @@
+         )
+         .await
+         .unwrap();
++        conn.input(
++            "page",
++            ControlledCdpInput::DomListenerPressChecked {
++                object_id: "listener-node",
++                document_url: "http://localhost/form",
++                dialog_object_id: None,
++            },
++        )
++        .await
++        .unwrap();
+         assert!(conn
+             .input(
+                 "page",
+@@ -128,7 +150,11 @@
+     .await;
+     conn.shutdown().await.unwrap();
+     let messages = peer.await.unwrap();
+-    assert_eq!(messages.len(), 3);
++    assert_eq!(messages.len(), 4);
++    assert_eq!(
++        messages[3]["params"]["functionDeclaration"],
++        LISTENER_PRESS_CHECKED
++    );
+     assert_eq!(messages[0]["params"]["functionDeclaration"], FILL_CHECKED);
+     assert_eq!(messages[0]["params"]["arguments"][0]["value"], text);
+     assert_eq!(

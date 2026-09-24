@@ -361,6 +361,30 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-016 — 受限普通 HTML 点击处理器支持
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 支持当前受控页面有直接 click 处理器的普通 HTML 元素，保持目标身份、弹窗范围、取消与未知效果不重放。
+- Inputs and prerequisites: 用户明确批准；model-search 已找到 Tempor 但原生 browser_input_unavailable；独立 CfT AX/CDP 采样表明处理器属于 generic SPAN/DIV，非其 StaticText。
+- Scope or files: browser-listener-click.patch、listener-guards.mjs、原生构建及匹配材料；不操作个人浏览器，不开放任意脚本或跨 frame。
+- Expected output: 正向业务点击、负向零点击、可复现补丁/二进制和真实模型资格。
+- Dependencies: T-015.
+- Execution steps:
+  1. 证明 AX generic 父元素与可见直系文本及直接 click 处理器的关系；不在输入时重定向文字引用。
+  2. 原生观察/输入前读取深度零的事件处理器，固定输入函数重验文档、弹窗、可见性、禁用和精确 DOM 对象。
+  3. 原始失败、负例、select/dialog/navigation 邻域、模型 click-tab-2 和构建材料一致性验收后再安装。
+- Acceptance criteria:
+  - 独立计数正向恰好一次点击、负向零点击；原模型任务独立奖励通过；所有原生关闭及权限边界保持。
+- Verification method:
+  - Rust 定向单测、真实 listener-guards、原有邻域及真实模型 raw reward。
+- Validation evidence: 父元素标注回归先失败（空标签 != Tempor）；候选 13 page、24 controlled CDP 通过。原 SDK span guard 按能力缺失失败并关闭；初版候选 11/11，随后新增 visibility:hidden 负例发现默认 checkVisibility 未检查 CSS visibility/opacity，保留 visibility-before 失败。显式开启两项后最终 13/13，包括 span/div/dialog、无处理器、其他事件、移除处理器/节点、display/visibility/opacity 隐藏、inert/aria-disabled/dialog 外；正向恰好一次、负向零点击、全部关闭。当前只支持具可见 AX 名称或直系文本的 SPAN/DIV 直接 click 监听，不支持事件委托或任意祖先回退。
+- Qualification evidence: 最终 SDK 08b4fdbdb39b0322ffb7529c8a06ed8b87d88962b8c652bea1c79b8d081f3575；独立补丁 apply/四源文件完全一致/reverse 通过。139 desktop/context pass、一个 renderer skip 单独启用后 1/1、8 package、native TS、npm run check 通过；恢复四个无关格式变化。最终 dialog 11/11、加载期 alert 7/7、select 15/15，全关闭。证据 /tmp/epi-click-handler.mz5oXh/{listeners-final,dialog-final,navigation-final,select-final,sdk-final2,materials2,patch-verification-v2}。确认 clean C0677 后可回退安装，原包保留 installed-before；真实模型验收 model-installed 进行中，不把候选通过等同模型或普遍性能提升。
+- Installed model evidence: 2026-09-25，gpt-6-sol 四任务独立 oracle 4/4、正常关闭 4/4；click-tab-2 rawReward=1，42.856s/11 回合；form 23.483s/6 回合、dialog 22.114s/6 回合、navigation 28.033s/7 回合；费用合计 0.1353116 USD，最终 C067b。保留 click-tab-2 的 stale_observation 拒绝及最终 press condition_unknown：业务点击已成功，但模型错用值后置条件，最终只报告未能确认。不能将 oracle 通过称为零工具错误或完整可见验证。下一轮改进点击/press 契约提示，保持 unknown 不重放及错误后不自动读取边界；不以此单轮声称普遍提速。证据 /tmp/epi-click-handler.mz5oXh/model-installed。
+- Installed smoke evidence: installed-smoke 六次实际工具调用，Unicode 填充/select/save/筛选回执独立与可见结果均通过，正常关闭 C067c。点击能力与原始任务 oracle 已通过；任务仍 in_progress，继续处理模型动作选择及可见验证，依赖 T-015/T-013 尚未整体关闭。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -390,6 +414,8 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-24: 用户已明确允许当前页面具有点击处理器的普通 HTML 元素受限点击，仍禁止任意脚本、跨 frame 和个人浏览器。文本筛选已提交 fb817cb9a，21 tool/contracts、15 context、8 package、native TS/npm check 与真实六调用资格通过。下一步原生扩展需要独立证明：AX 文字节点到实际 HTMLElement 的身份映射、处理器存在且点击前重验、dialog containment、禁用/脱离文档/导航变化/无处理器负例，以及输入 receipt/terminal 不变；不能只把 pressable 角色白名单全部放开。当前原生源码尚未修改。
 
 - 2026-09-24: T-015 第二阶段实现 browser observe.text（256 UTF-8 字节、有界字面包含搜索，4 KiB 输出保持），每次新原生读取且替换旧授权。过滤前全量计数确保重复 selector 不因过滤变唯一；未展示目标无授权。21 browser 契约/工具、15 context（含过滤后 provider omission）、native TS/npm check 通过。真实六调用 Unicode/select/save/筛选回执及关闭通过 C062c；试装包 package-search，旧包 installed-before-search。真实模型 model-search 找到 Tab #3 的 Tempor 并请求点击，此次首个阻断为 browser_input_unavailable，44.388s、12 回合、0.087366 USD、cleanup=true；不能把找到文字当作任务通过。已异步询问用户是否允许支持受控页面带点击处理器的普通 HTML 元素，尚未放宽原生角色白名单。第一阶段空结构排序与本阶段搜索分开留证；原始三轮失败均保留。
 
