@@ -128,7 +128,7 @@ for (const id of selected) {
 	});
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const url = `http://127.0.0.1:${server.address().port}${mini ? `/miniwob/${id.slice(8)}.html` : "/"}`;
-	let chrome, feature, session, failure, taskMs, cleanup;
+	let chrome, feature, session, failure, taskStartedAt, taskMs, cleanup;
 	let turns = 0,
 		cost = 0,
 		modelMs = 0,
@@ -250,7 +250,7 @@ for (const id of selected) {
 			}
 		});
 		setupMs = performance.now() - setupStart;
-		const started = performance.now();
+		taskStartedAt = performance.now();
 		timer = setTimeout(stop, 180_000);
 		const guidance =
 			strategy === "semantic"
@@ -274,12 +274,12 @@ for (const id of selected) {
 				"Reference tab missing",
 			);
 		}
-		taskMs = performance.now() - started;
 		assert.equal(assistantErrors.length, 0, "Model request failed; see retained provider trace");
 		assert.ok(turns > 0 && calls.length > 0 && checkOracle(id, oracle), "Independent task oracle failed");
 	} catch (error) {
 		failure = { name: error.name, message: error.message.slice(0, 500) };
 	} finally {
+		if (taskStartedAt !== undefined) taskMs = performance.now() - taskStartedAt;
 		clearTimeout(timer);
 		const closeStart = performance.now();
 		const { nativeClosed, cleanupErrors } = await closeNative(session, feature);

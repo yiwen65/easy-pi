@@ -598,6 +598,28 @@
 
 - Final qualification: /tmp/epi-observe-wait.lr55CY/ab.json、report.json 冻结 A/B、B/A、A/B 十二个模型样本，全通过、零工具错误、全关闭。动态 A=44.094/47.197/47.860s（14 回合），B=40.165/43.370/42.073s（11 回合）；逐对节省 3.929/3.827/5.787s。B 三次均使用明确文本条件并省掉三次独立 observe，工具阶段增加 317–380ms，但减少模型往返后端到端更快。静态两边均五回合、均不使用 waitForText；逐对节省 3.133/2.045/-1.537s，保留反向波动，不称静态提速或尾延迟已证明。AB 报告总费用 0.5923368 USD。durable guards-alert-final 五例全通过：ready 196.7ms、timeout 1027.1ms、cancel 261.4ms、foreign 170.6ms、native alert 173.0ms，各只点击一次、失败不发布引用，全部关闭至 C06f5；未自动接受 alert。已可回退安装 bridge 4938b97cdf9e145e65351baf83ee73491bda550ef7ed9bd469571786a4e5beaf，旧包 installed-before。model-installed 再次动态通过 38.684s/11 回合/0.0584356 USD，正文、顺序与所有最新 ref 校验通过，零工具错误，关闭 C06f6。根 check 最终通过并恢复四处无关格式变化；native/ABI 未改。上述 handle 78380 已正常退出，不再运行。
 
+### [x] T-026 — 失败耗时与当前全场景基线
+
+- Status: done
+- Owner: coordinator
+- Objective: 提前失败的任务也保留执行耗时，再获得当前安装版全部本地十四场景的真实模型基线，保留不支持项而不伪称官方全量测试。
+- Inputs and prerequisites: T-025 已安装；run.mjs 在中断和 chrome-tabs oracle 断言之后才赋值 taskMs，提前失败缺少该指标。
+- Scope or files: 既有 real-model/run.mjs 计时边界和现有全场景 runner；不增加另一套评估器或放宽成功条件。
+- Expected output: 实际失败回放的缺失/修复计时证据，以及本地全部场景结果和首个未解决失败的诊断入口。
+- Dependencies: T-025.
+- Execution steps:
+  1. 在实际 chrome-tabs 失败路径确认 taskMs 缺失。
+  2. 将任务计时收口到 cleanup 前的 finally，setup 失败不伪造任务时间。
+  3. 定向回归和当前全场景真实模型执行，所有失败与费用保留。
+- Acceptance criteria:
+  - 已开始执行的失败任务也有真实非负 taskMs；成功计时仍不含 setup/cleanup。
+  - 本地所有 caseIds 获得结果或明确可验证的停止原因；不删未支持项或放宽 oracle。
+- Verification method:
+  - 失败实际路径前后对照、现有 benchmark 单测、root check、全场景模型原始 trace/summary。
+- Validation evidence: /tmp/epi-full-suite.4mQT7j/timing-before 实际 chrome-tabs 失败缺少 taskMs；verify-timing.mjs 对旧 summary 失败、对 current-all 通过，后者同样保留 oracle 失败但记录 9815.8ms。仅将原计时移动至 cleanup 前 finally，无新模块；未开始的 setup 失败仍不伪造 taskMs。当前安装版 gpt-6-sol/browser/semantic/seed42 本地十四场景 11/14，通过全部已支持项；拖拽 9.504s、密码登录 19.955s、多标签页 9.816s 仍失败，不删分母、不放宽判定。所有 14 项 cleanup=true、零工具错误，关闭 C0705；总费用 0.289330 USD。成功样本 p50=18.503s、p95=41.498s（单轮异质场景，非稳定尾延迟估计）。check-all.mjs 验证结果数量、计时、工具错误和关闭；14 项 benchmark 单测和 npm run check 通过，恢复四处无关格式变化。计时原始 runner 路径靠上述真实模型前后回放保护，未新增默认 CI runner 注入框架；不能将指标修复称为多标签功能修复。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -627,6 +649,10 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-25: T-026 done，真实全本地基线 11/14；总 task=259.216s、model=215.389s（83.1%）、tool=43.729s。下一步优先减少观察噪声与无效模型往返，保持现有目标身份/权限/排空边界；不因用户允许架构调整就新增框架。拖拽、密码、多标签能力缺口与正式完整 benchmark/长稳测试仍未解决，Goal 保持 active。
+
+- 2026-09-25: T-026 开始；上一轮已完成可选等待，不据局部绿灯宣称整体完成。本轮先用 code-debug 实际失败回放修正评估计时，再跑全部本地通用场景。
 
 - 2026-09-25: T-025 done：显式 waitForText 复用有界只读观察，无新动作类型/调度器/常驻状态，不改变默认立即观察。十二模型交错样本、五个真实边界、安装模型与定向测试均通过；只认领动态场景少三轮的局部收益，Goal 继续。
 - 2026-09-25: T-025 开始，coordinator 串行实验显式文本条件的有界只读等待，避免全局固定等待；优先检验取消、超时与未发布引用边界，再实测动态/静态模型。
