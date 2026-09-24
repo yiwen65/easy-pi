@@ -35,6 +35,7 @@ function fixture(
 		clickEffect?: CuaSdk.ActionEffect;
 		option?: boolean;
 		noise?: number;
+		blankStructure?: boolean;
 		observeFailureAfter?: number;
 		clickTerminal?: Promise<void>;
 		followupTerminal?: Promise<void>;
@@ -124,7 +125,7 @@ function fixture(
 											elementIndex: BigInt(index + 2),
 											depth: 0,
 											role: "none",
-											label: "structure".repeat(20),
+											label: options.blankStructure ? " " : "structure".repeat(20),
 											inWebContent: true,
 											enabled: false,
 											elementToken: `${snapshotId}:noise-${index}`,
@@ -140,6 +141,18 @@ function fixture(
 											inWebContent: options.web ?? true,
 											elementToken: `${snapshotId}:0`,
 										},
+										...(options.blankStructure
+											? [
+													{
+														elementIndex: 100n,
+														depth: 1,
+														role: "StaticText",
+														label: "Task body at end",
+														inWebContent: true,
+														elementToken: `${snapshotId}:body`,
+													},
+												]
+											: []),
 										...(options.option
 											? [
 													{
@@ -237,6 +250,32 @@ const execute = (ref: string) => ({
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
 });
+
+test(
+	"browser observation retains meaningful text ahead of empty structure within the byte budget",
+	{ skip: !sdk },
+	async (t) => {
+		const f = fixture({ noise: 60, blankStructure: true });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		const text = seen.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		assert.match(text, /Task body at end/);
+		assert.match(text, /Name/);
+		assert.equal(seen.details.viewTruncated, true);
+		assert.ok(Buffer.byteLength(text.split("Untrusted UI rows:\n")[1]!) <= 4096);
+		await assert.rejects(
+			f.tool.execute("hidden", {
+				request: {
+					op: "click",
+					ref: seen.details.observationRef!,
+					target: `${seen.details.observationRef}:noise-59`,
+				},
+			}),
+			/stale_observation/,
+		);
+		assert.deepEqual(f.calls, ["observe"]);
+	},
+);
 
 test("post-action observe waits for terminal and preserves submission facts", { skip: !sdk }, async (t) => {
 	const terminal = deferred<void>();

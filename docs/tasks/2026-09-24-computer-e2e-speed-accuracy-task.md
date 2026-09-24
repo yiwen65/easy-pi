@@ -340,6 +340,27 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-015 — 浏览器观察截断后的可恢复读取
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 页面正文不被空结构节点挤出，并使超预算页面可通过有界读取获得剩余相关内容，不授予未展示目标引用。
+- Inputs and prerequisites: MiniWoB click-tab-2 的原始失败和当前投影重跑记录。
+- Scope or files: native/computer/controlled/tool.ts、browser 协议、回归测试与真实 Chrome fixture；不修改密码保护或原生点击权限。
+- Expected output: 有界且可恢复的页面观察，原任务复测和独立能力限制记录。
+- Dependencies: T-013.
+- Execution steps:
+  1. 复现空结构节点挤占 4 KiB 正文的失败，优先保留动作和非空信息。
+  2. 分开验证投影截断与非语义 span 缺少点击能力；设计截断后的有界检索，不重复相同观察空转。
+  3. 验证未展示引用、唯一性计数、实际 provider context、取消及真实模型邻域。
+- Acceptance criteria:
+  - 超预算页面存在可恢复读取路径，未展示目标不能授权输入；原任务的剩余能力缺口有精确证据，不将局部文本改善记为任务通过。
+- Verification method:
+  - 合成观察回归、上下文契约、真实 MiniWoB 和 Chrome 独立 oracle。
+- Validation evidence: 第一阶段回归原版 14 pass/1 fail（正文丢失），候选 browser/contracts 18/18；context/projection 12/12，native TS、npm check、package 8/8。真实五调用 Unicode/select/save 成功并关闭 C0628。试装后 click-tab-2 仍失败：40.999s、7 回合、0.0326516 USD、cleanup=true；正文片段恢复但目标未展示，仍需可恢复读取。证据 /tmp/epi-observe-after.MCxmC4/{projection-qualification,model-projection,package-projection}；旧安装包 installed-before-projection。历史 controlled 测试两次均 SDK 指纹拒绝，未计为通过。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -366,8 +387,14 @@
 真实模型延迟已单独采集；共享桌面的焦点与负载会影响结果；小样本不能证明低失败率或稳定 p95。原生关闭隔离故障已按 T-008 恢复并复测，当前 C04ff。动作契约问题和 provider 异常仍使业务失败；不得把成功关闭当成任务成功。
 
 <!-- task-doc-section:execution-log -->
+
+本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
 
+- 2026-09-24: T-015 第一阶段优先非空文本已试装；实际 Chrome form/dialog 邻域 2/2，26.362/40.057s，各 6 回合、费用 0.030862/0.0259988 USD，均关闭。click-tab-2 的剩余失败没有隐藏；下一步提供有界的截断后读取再判断 span 能力。root check 自动格式化的四个无关文件已恢复。误用 chrome:form 的一次 harness 命令在任务名校验阶段失败，未调用模型或 native；随后使用实际 chrome-form 命名。历史 controlled SDK 指纹检查未绕过，现代 browser/context 和包验证均通过。
+
+- 2026-09-24: T-012 本轮仅失败日志诊断版 15/15，全部关闭 C061f，仍未复现端点错误。诊断 SDK/源码保留在 /tmp/epi-endpoint-stage.F4XCQO，工作源码已移除临时日志并 cmp 与诊断前一致；安装版本未变。不继续低信息重复跑，不放宽格式校验，T-012 根因仍未证明。接续 T-007：在当前 browser/observeAfter 安装版运行八项现有官方 MiniWoB HTML 子集，保留不支持能力的真实失败，不冒称全量官方分数。
+- 2026-09-24: T-012 继续：成功路径不再写诊断日志，仅 endpoint 错误分支输出阶段、元数据长度和读取长度，拒绝码不变，无新增等待或重试。独立诊断 SDK 4fb7242f3eadca0d55e4488a8b091ad87e7b6d2202dff35fdd866796b0e258a4，2/2 endpoint 原生测试通过；旧 Rust warnings 保留。当前安装仍为 fde462103 合并观察版，未安装诊断库。/tmp/epi-endpoint-stage.F4XCQO/flow 正在执行同 15 场景并遇首个失败即停止；coordinator 下一步核对 flow.log 的失败阶段与关闭证明，随后移除临时源码诊断。
 - 2026-09-24: T-013 接口能力完成并安装实验版，新增 observeAfter 的动作/观察双 terminal、取消与实际 provider context 回归。A1/B1/A2/B2 全部 12/12，B 回合稳定 6/6/7，A 10/10/12–13；保留 B1 dialog 模型慢样本，不声称普遍提速。安装后 fixture 5 次调用、完整 Unicode/Pro 保存及关闭通过，C0610。npm check 的四个无关自动格式化文件已精确恢复。任务仍在进行中，下一步扩大样本及继续 T-012，不以接口交付替代全局目标。
 - 2026-09-24: T-013 in_progress；coordinator 串行实施 browser-only 可选动作后观察，不修改原生库。只在动作 terminal 后读取；动作失败/取消/未知终态不续读，读取失败保留先前动作事实、不授新引用、不重放。新的引用仍需出现在实际 provider context。先做契约/时序/上下文回归，再真实 Chrome 和交错模型 A/B；T-012 独立诊断保持未完成。
 - 2026-09-24: T-011 done。桌面恢复后只读目录 failed=0、单次窗口绑定成功；model-unlocked 3/3，安装后 guards-installed 7/7，业务回执和关闭独立验证。没有使用保持唤醒措施；没有删除旧失败样本。T-012 仍由 coordinator 持有，下一步需要端点拒绝的精确阶段证据，不把 75 次未复现判为修复。T-013 保持 pending。

@@ -401,7 +401,10 @@ export function createControlledComputerTool(
 				const ordered =
 					profile === "browser"
 						? [...rows].sort(
-								(a, b) => Number((b.actions?.length ?? 0) > 0) - Number((a.actions?.length ?? 0) > 0),
+								(a, b) =>
+									Number((b.actions?.length ?? 0) > 0) - Number((a.actions?.length ?? 0) > 0) ||
+									Number(Boolean(b.label?.trim() || b.value?.trim())) -
+										Number(Boolean(a.label?.trim() || a.value?.trim())),
 							)
 						: rows;
 				for (const row of ordered) {
