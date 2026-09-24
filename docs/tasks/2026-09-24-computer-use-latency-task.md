@@ -30,7 +30,7 @@
 ## Assumptions and open questions
 
 - Assumption: 合并不依赖新信息的选择与观察可省去一轮模型请求；通过工具回归和本地计时验证。
-- Open question: 快速上下文已启用；6 次模型 A/B 全部完成。信号退出修复及原生回归已通过；选择+观察 bridge 候选尚未安装。
+- Open question: 快速上下文已启用；6 次模型 A/B 全部完成。新 bridge（选择+观察及 reconcile）已安装，当前 PID 31040 仍运行旧工具定义，完整真实任务仍待重启后验证。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -125,6 +125,27 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-005 — 解除浮窗恢复协议的无输入确认缺口
+
+- Status: done
+- Owner: coordinator
+- Objective: 避免通过额外输入来确认上一动作，提供安全的无输入目标切换路径。
+- Inputs and prerequisites: ses_01M38S9JB18FF6YT 在 04:17:40 UTC 出现 foreground_target_changed；随后 select 三次被 previous_intent_unresolved 拒绝。
+- Scope or files: native/computer/desktop/contracts.ts、intent.ts、tool.ts、reconcile.test.ts、README.md。
+- Expected output: reconcile 显式使用当前目标的新可见证据，记录模型判断而不提交原生输入；明确停止条件。
+- Dependencies: T-004.
+- Execution steps:
+  1. 固化 partial input 后 observe/select 循环的失败测试。
+  2. 将已有 previousEffect 同目标/新证据判断提取复用，加入无输入 reconcile。
+  3. 回归与打包校验后安装 bridge，保持当前会话和租约不变。
+- Acceptance criteria:
+  - 仅有效新证据可确认；取消、过滤和已消费引用不能确认；确认本身无 native 操作；不自动重放、不把模型判断伪装成原生确认。
+- Verification method:
+  - 新回归 Red/Green、全部桌面单测、native typecheck、root check、SDK 相邻测试及安装后契约检查。
+- Validation evidence: 新测试 3 failed -> 3 passed；desktop 116 passed / 1 GUI skipped；SDK 21 passed；typecheck/root check/1428-file package 校验通过。安装后 prepareArguments 接受 reconcile 且工具描述可见，未启动新 native host。当前 owner 31040 未被干预。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -137,6 +158,8 @@
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
+
+- 2026-09-24: T-005 定位并完成。04:17:40 Cmd+F 后 type_text 出现 foreground_target_changed；04:17:50、04:17:56、04:18:23 的 select 被拒绝但误提示 observe again。尝试 Escape/activate 又产生 foreground_focus_unproved；04:18:30.498 最后 capture 完成，04:20:24.148 模型请求 aborted，中间约 113.65 秒不能归因于工具阻塞。当前 D 031e 有真实持有者，不是脏租约恢复案例。reconcile 与 select+observe 已打包安装，备份在 /tmp/easy-pi-computer-latency.WQKu7w/reconcile-backup；需完整重启加载。真实 Chrome 浮窗及完整任务未重新执行，无新增付费请求。
 
 - 2026-09-24: T-004 从故障日志和源码定位后执行并验证完成。D 0318 无持有者，独占非阻塞 flock、owner/mode/inode/精确代数检查后原 inode 恢复，备份为 desktop.lock.before-manual-recovery-20260924-121250。三个模式安装产物仅包含本次修复，旧产物备份在 /tmp/easy-pi-computer-latency.WQKu7w/signal-backup。没有终止用户进程，没有输入重放。
 
@@ -170,5 +193,5 @@
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 与 T-003 本地测试通过；6 次模型对照完成；快速截图设置及对应本地产物已安装验证。T-002 仍待 bridge 安装与真实窗口验证。
+- Evidence: T-001、T-003、T-004、T-005 定向验证通过；6 次模型对照完成；快速截图和新 bridge 均已安装。T-002 仍待重启后的 Chrome 浮窗及完整任务验证。
 - Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未补齐 117.5 秒间隔的遥测。T-004 覆盖可捕获的正常退出信号；SIGKILL、断电、原生崩溃或无法确认 terminal 仍必须隔离，不能承诺永不出现脏租约。真实信号测试使用已安装 InteractiveMode 原型及真实 feature，替换 TUI 和 runtime disposer 外壳；未自动操作 AgentPort 停止按钮。已停止的旧 feature 仍需完整重启。

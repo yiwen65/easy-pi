@@ -13,6 +13,10 @@ export const DesktopInputSchema = Type.Object(
 		request: Type.Union([
 			ComputerDragInputSchema.properties.request,
 			ComputerSegmentInputSchema.properties.request,
+			Type.Object(
+				{ op: Type.Literal("reconcile"), ref, previousEffect: Type.Literal("observed") },
+				{ additionalProperties: false },
+			),
 			ControlledComputerInputSchema.properties.request,
 			Type.Object(
 				{

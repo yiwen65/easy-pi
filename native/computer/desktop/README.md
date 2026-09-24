@@ -30,6 +30,15 @@ Every Computer call consumes the previous evidence, even when rejected. After
 `stale_observation`, read again and use the newly returned evidence ref; selecting
 the window again does not grant input authority.
 
+After uncertain input opens a popup, reads alone do not resolve the old intent.
+Inspect fresh evidence of the current target; if the prior effect can be judged,
+call `reconcile` with that Observation/Image `ref` and `previousEffect: "observed"`.
+This records model judgement only, sends no native input, and consumes the evidence.
+Then use a fresh `discover` and `select` for the popup. Do not send an unnecessary
+key merely to reconcile. If the effect remains unknown, stop and ask the user;
+do not loop between observing and selecting or fabricate confirmation. Paired drag
+evidence still uses the existing `drag_between.previousEffect` path.
+
 The desktop route works with existing applications/browser profiles. Native
 routing prefers background delivery and automatically prepares or uses foreground
 delivery when needed; results report the actual route. Foreground work may
