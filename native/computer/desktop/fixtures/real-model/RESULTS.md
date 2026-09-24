@@ -2,6 +2,18 @@
 
 ## 最新修复状态
 
+用户随后授权正常重启独立 helper。launchctl stop/start 后 PID 564→64621，进程路径检查失败数 1→0。原生 prepare/close 成功，随后三项真实 gpt-6-sol/browser 测试均 prepare/close 成功，最终 lease C04ff，无再次人工清锁。
+
+| 续验任务 | 业务结果 | task 秒 | 关闭 | 失败事实 |
+| --- | --- | --- | --- | --- |
+| Chrome form | 失败 | 43.955 | 正常 | 首字段写入并 value_readback confirmed；第二个旧 ref 被拒绝，随后 provider_error |
+| Chrome dialog | 失败 | 23.035 | 正常 | press.expect 使用尚未出现的 Confirm 控件，被统一报 stale_observation，重复 observe 无效 |
+| Chrome navigation | 失败 | 46.709 | 正常 | press.expect 使用尚未出现的 Records 标题，同样拒绝并重复 observe |
+
+报告费用合计 0.0528276 USD，业务 0/3，不与前轮合并为成功率提升。证据 `/tmp/epi-repair.BJD4uG/{helper-restarted-probe.log,model-after-helper,model-browser-neighbors}`。动作契约与错误分类待 T-009；本轮未放宽目标授权或重放输入。
+
+### 上轮修复记录
+
 后续获准受控恢复，原位恢复 D04f7 后取得确切错误：`image_path_unavailable`；企业微信独立 IPCHelper 的进程路径读取返回 ENOENT。正常退出重开企业微信未重启该 helper，正在等待单独正常重启授权。
 
 已安装 canonical parent 和 browser-preflight：同一异常环境，原版启动 Chrome 后 close=Quarantined；修复版在副作用前拒绝，inputCommitted=false，close 成功。候选、安装 SDK、安装 Computer 工具三次均保持 clean lease，最后 C04fb。固定错误码已对 agent 可见，未知原生文本仍隐藏。详见 `native/computer/patches/browser-preflight.md`；此轮没有新增模型成功样本，不改写下列历史分数。

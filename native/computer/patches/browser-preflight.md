@@ -37,5 +37,9 @@ Real SDK comparison in the same broken environment:
 Incident D04f7 and diagnostic D04f8 were separately inspected and manually
 recovered under exclusive lock, preserving inode/generation. No automatic dirty
 recovery was added. Evidence and prior package: `/tmp/epi-repair.BJD4uG`.
-WeWork normal quit/reopen did not restart its independent helper. Successful
-browser/model task verification is still blocked pending that environment repair.
+WeWork normal quit/reopen did not restart its independent helper. After explicit
+user approval, launchctl stop/start of that exact helper changed PID 564 to 64621;
+the catalog changed from one unreadable path to zero. Native prepare/close then
+passed (C04fc). Three real-model tasks also prepared and closed cleanly (C04fd–ff).
+Their business oracles failed for separate action-contract/provider issues;
+successful lifecycle recovery is not a claim that those tasks passed.

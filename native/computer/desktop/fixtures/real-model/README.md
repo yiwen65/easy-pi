@@ -2,7 +2,7 @@
 
 This opt-in suite runs the configured **real model through AgentSession and the installed `computer` tool**, against an isolated, visible Chrome for Testing. It is not a scripted-model test. Task completion is checked independently of the model's answer. Failed attempts and setup failures remain in the results.
 
-**Current qualification is blocked:** the final native browser control failed cleanup and left a dirty desktop generation. Do not start another GUI run or install the candidate before controlled recovery. See [measured results and recovery boundary](./RESULTS.md).
+**Lifecycle recovery verified; business qualification remains partial:** the installed preflight fix prevents the reproduced environment failure from creating browser side effects. Authorized helper restart restored prepare/close, including three real-model tasks. Those tasks still failed their business oracles; see [measured results and remaining failures](./RESULTS.md).
 
 ## Scope and mainstream benchmark mapping
 
