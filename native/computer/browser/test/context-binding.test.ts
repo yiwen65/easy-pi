@@ -21,7 +21,7 @@ if (allowed) {
 }
 const sdk = allowed ? loadDesktopSdk(process.env.CUA_DRIVER_TYPESCRIPT_DIR!) : undefined;
 
-async function fixture() {
+async function fixture(option = false) {
 	assert.ok(sdk);
 	const api = sdk;
 	let plans = 0;
@@ -62,7 +62,8 @@ async function fixture() {
 									{
 										elementIndex: 0n,
 										depth: 0,
-										role: "textbox",
+										role: option ? "option" : "textbox",
+										actions: option ? ["select_option"] : ["fill"],
 										label: "Name",
 										value: "",
 										enabled: true,
@@ -178,12 +179,12 @@ const execute = (ref: string) => ({
 });
 
 for (const visible of [true, false])
-	for (const action of ["execute", "click"] as const) {
+	for (const action of ["execute", "click", "select_option"] as const) {
 		test(
 			`browser ${action} requires the exact canonical observation: visible=${visible}`,
 			{ skip: !sdk },
 			async (t) => {
-				const f = await fixture();
+				const f = await fixture(action === "select_option");
 				t.after(() => f.close());
 				const seen = await f.tool.execute("observation", { request: { op: "observe" } });
 				assert.ok(typeof seen.details === "object" && seen.details !== null && "observationRef" in seen.details);
@@ -198,7 +199,7 @@ for (const visible of [true, false])
 					timestamp: 1,
 				};
 				f.binding.observeContext?.(false, visible ? [message] : []);
-				const input = action === "execute" ? execute(ref) : { request: { op: "click", ref, target: `${ref}:0` } };
+				const input = action === "execute" ? execute(ref) : { request: { op: action, ref, target: `${ref}:0` } };
 				if (visible) await f.tool.execute("input", input);
 				else {
 					// Persisted history cannot restore authority after omission.

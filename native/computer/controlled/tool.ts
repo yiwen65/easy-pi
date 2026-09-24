@@ -192,6 +192,7 @@ function projectPlan(
 interface VisibleObservation {
 	ref: string;
 	refs: Set<string>;
+	options: Set<string>;
 	selectors: Set<string>;
 }
 
@@ -227,12 +228,24 @@ export function createControlledComputerTool(
 			const { request } = parseControlledComputerInput(input);
 			const previous = visible;
 			visible = undefined; // Failed refreshes and any attempted segment invalidate the old view.
-			if (request.op === "click" && (previous?.ref !== request.ref || !previous.refs.has(request.target)))
+			if (
+				(request.op === "click" || request.op === "select_option") &&
+				(previous?.ref !== request.ref || !previous.refs.has(request.target))
+			)
 				throw new AgentToolError("Computer paused: stale_observation; observe again.", {
 					status: "paused",
 					completedSteps: 0,
 					code: "stale_observation",
 				});
+			if (request.op === "select_option" && (profile !== "browser" || !previous?.options.has(request.target)))
+				throw new AgentToolError(
+					"Computer paused: action_unavailable; select_option requires a displayed option with that action. Observe again before a corrected request.",
+					{
+						status: "paused",
+						completedSteps: 0,
+						code: "action_unavailable",
+					},
+				);
 			if (request.op === "execute") {
 				const addressKnown = (target: Address) =>
 					"ref" in target ? previous?.refs.has(target.ref) : previous?.selectors.has(selectorKey(target.selector));
@@ -284,7 +297,7 @@ export function createControlledComputerTool(
 					const call =
 						request.op === "observe"
 							? target.observe(512, 32, nativeSignal)
-							: request.op === "click"
+							: request.op === "click" || request.op === "select_option"
 								? target.click(request.target, nativeSignal)
 								: target.plan(encodePlan(api, request), nativeSignal);
 					return {
@@ -298,7 +311,10 @@ export function createControlledComputerTool(
 								}
 								if (request.op === "execute" && api.ComputerResult.Plan.instanceOf(result))
 									return projectPlan(api, result.inner.value, request.steps.length);
-								if (request.op === "click" && api.ComputerResult.Action.instanceOf(result)) {
+								if (
+									(request.op === "click" || request.op === "select_option") &&
+									api.ComputerResult.Action.instanceOf(result)
+								) {
 									const effect = result.inner.value.effect;
 									const submitted =
 										effect === api.ActionEffect.Confirmed || effect === api.ActionEffect.Unverifiable;
@@ -356,7 +372,7 @@ export function createControlledComputerTool(
 			if (details.code) text += ` Code: ${details.code}.`;
 			if (details.steps) text += `\nStep facts: ${JSON.stringify(details.steps)}`;
 			if (details.status === "action_submitted")
-				text += ` Native effect=${details.effect}; route=${details.route}. Observe to verify the result; do not repeat this click without resolving its effect.`;
+				text += ` Native effect=${details.effect}; route=${details.route}. Observe to verify the result; do not repeat this action without resolving its effect.`;
 			if (details.status !== "observed" && details.status !== "completed" && details.status !== "action_submitted")
 				throw new AgentToolError(text, details);
 			if (observation) {
@@ -371,7 +387,7 @@ export function createControlledComputerTool(
 					observation.elementsComplete === true &&
 					observation.truncated === false &&
 					observation.degraded !== true;
-				const view: VisibleObservation = { ref, refs: new Set(), selectors: new Set() };
+				const view: VisibleObservation = { ref, refs: new Set(), options: new Set(), selectors: new Set() };
 				const rows = observation.elements ?? [];
 				const counts = new Map<string, number>();
 				for (const row of rows) {
@@ -381,7 +397,13 @@ export function createControlledComputerTool(
 				const lines: string[] = [];
 				let bytes = 0;
 				let viewTruncated = false;
-				for (const row of rows) {
+				const ordered =
+					profile === "browser"
+						? [...rows].sort(
+								(a, b) => Number((b.actions?.length ?? 0) > 0) - Number((a.actions?.length ?? 0) > 0),
+							)
+						: rows;
+				for (const row of ordered) {
 					const target = { role: row.role, label: row.label ?? "" };
 					const key = selectorKey(target);
 					const selectable =
@@ -403,6 +425,12 @@ export function createControlledComputerTool(
 						...(row.label !== undefined ? { label: row.label } : {}),
 						...(row.value !== undefined ? { value: row.value } : {}),
 						...(row.enabled !== undefined ? { enabled: row.enabled } : {}),
+						...(profile === "browser" && row.actions?.length
+							? { actions: row.actions.filter((action) => ["fill", "press", "select_option"].includes(action)) }
+							: {}),
+						...(profile === "browser" && row.role === "option" && row.valueDescription !== undefined
+							? { group: row.valueDescription }
+							: {}),
 						...(token ? { ref: token } : {}),
 						...(selectable ? { selector: target } : {}),
 					});
@@ -414,6 +442,14 @@ export function createControlledComputerTool(
 					bytes += size;
 					lines.push(line);
 					if (token) view.refs.add(token);
+					if (
+						token &&
+						profile === "browser" &&
+						row.role === "option" &&
+						row.enabled === true &&
+						row.actions?.includes("select_option")
+					)
+						view.options.add(token);
 					if (selectable) view.selectors.add(key);
 				}
 				if (!session.revoked) visible = view;

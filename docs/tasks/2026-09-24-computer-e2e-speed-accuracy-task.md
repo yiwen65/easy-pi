@@ -233,9 +233,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-010 — 浏览器弹窗与下拉菜单能力
+### [x] T-010 — 浏览器弹窗与下拉菜单能力
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 定义并实现受当前页面授权约束的 HTML dialog 与 select 操作，不能简单删除 modal 检查。
 - Inputs and prerequisites: T-009 真实失败轨迹；原生受控页面/输入能力。
@@ -251,7 +251,29 @@
 - Verification method:
   - 原生与桥接定向测试、同三任务真实模型、源码材料和安装包资格。
 - Validation evidence: 受限 HTML dialog 已实现并安装；11 原生 page、21 CDP、129 desktop/context（原 skip 的 renderer-value 另行 1/1）、9 package、UniFFI、独立 native TS 与 npm run check 通过。真实 Chrome 最终 11/11：Unicode 填充/提交准确；弹窗外、ARIA、多弹窗、跨 frame、观察后出现/移出/关闭/替换/第二弹窗及已打开原生 alert 拒绝且零误输入；全部正常关闭。真实模型 dialog PASS 37.640s/11 回合、navigation PASS 37.580s/13 回合，独立回执/可见回执均准确；费用 0.0702204 USD，均关闭，C0531。证据 /tmp/epi-dialog.UEensN/{qualified-stable-guards,model}。不以两个样本宣称速度统计提升。
-- Remaining work: select 尚未实现，不得把 fill 冒充选项选择。另一次页面加载时自动 alert 导致导航等待至 15 秒 watchdog 取消，terminal/close 均证明；保留 qualified-guards 原始失败，尚未修复。最终 guard 将已打开 alert 与导航期间 alert 分开验证，不代表后者已通过。
+- Additional validation evidence: select_option 已实现并安装，SDK fd2ecf68deac2277f1213adeaa637935561f61a550868a473934da89bbec7aba。15 select guard、11 dialog 邻域均通过且正常关闭；12 page、21 CDP、10 browser、131 desktop/context（1 skip）、9 package、UniFFI、native TS、npm check 通过。同三任务真实模型 3/3，form 37.851s/10 回合、dialog 35.092s/10 回合、navigation 38.503s/12 回合，零失败工具调用，独立/可见回执准确，费用 0.105892 USD，最终 C054e。证据 /tmp/epi-select.l1vU6w，旧包保留 installed-before；不是速度 A/B。
+- Remaining work: 加载期自动 alert 的导航等待残留单独交由 T-011；select 不支持 multiple 或自定义 ARIA widget，不宣称全场景支持。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-011 — 导航期间原生提示的有界结束
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 定位页面加载时 alert 使导航等待到 watchdog 的首个阻塞点，修复有界结束而不自动接受提示或重放导航。
+- Inputs and prerequisites: T-010 保留的 qualified-guards/native-alert 失败；同一 CfT、原生 CDP 与关闭证明。
+- Scope or files: 原生 browser page/CDP 调用及专用导航 fixture。
+- Expected output: 可重复触发、明确错误与原生 terminal/close 证明，以及正常导航邻域回归。
+- Dependencies: T-010.
+- Execution steps:
+  1. 将加载时 alert 与稳定页面 alert 分开，测量 Page.navigate 和后续 attestation 的首次阻塞。
+  2. 使用固定 CDP 事件与已提交输入事实设计安全的有界结束，不伪造 drain、不自动 dismiss。
+  3. 相同输入复测、取消与正常导航回归，保留所有失败。
+- Acceptance criteria:
+  - 已出现原生提示时不会无意义等待完整导航时限；无输入重放和静默接受提示；关闭可证明。
+- Verification method:
+  - 原生定向回归、实际 Chrome 多次延迟触发对照、npm check 与安装包资格。
+- Validation evidence: 已有一例原始导航 15 秒 watchdog 取消且关闭成功。静态路径包括 Page.navigate 与后续 Page.getFrameTree，尚未确定第一个阻塞调用；下一步隔离加载期提示并增加仅记录方法/阶段的诊断，不记录页面正文或凭证。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -283,6 +305,8 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: T-010 select 完成并安装，26/26 真实 Chrome guard、同三任务模型 3/3，关闭全部证明，最终 C054e。继续 T-011：隔离加载期 alert 并测量首个阻塞 CDP 阶段，不因本阶段完成而停止。
+- 2026-09-24: 用户要求持续自动测试修复、不在阶段性目标停止。T-010 继续实现 select_option；同时解决可操作选项被 4 KiB 输出预算挤出的已证实问题。新增 T-011 单独跟踪加载期原生 alert。共享原生库/桌面串行，保留真实模型显式开关与单任务限额，不自动重放未知输入。
 - 2026-09-24: T-010 受限 dialog 资格完成并安装，SDK 222302e7c9fb6cdca8faa5775346e1deed504deece18c05c5d5a46d83a87f914，原包 /tmp/epi-dialog.UEensN/installed-before。11 场景全部准确且关闭；真实模型弹窗/导航 2/2，通过独立回执与可见读回，最终 C0531。四批 44 个 guard owner 的原始失败均保留。T-010 保持 in_progress，coordinator 下一步实现 select，再隔离分析导航期间原生提示竞态；未声称全部任务修复。
 - 2026-09-24: T-010 开始。用户明确允许单个当前页面 HTML dialog 内输入，保留原生提示、多弹窗、跨页/跨 frame 与弹窗外输入拒绝。先修复 dialog 观察/动作闭环，再单独扩展 select；不把 text fill 冒充选项选择。
 - 2026-09-24: T-009 完成并安装。候选三项导航通过、弹窗/表单仍失败但均推进到独立原生能力限制；最终安装版导航再次通过，最终 lease C0503。未修改 native ABI/权限/全图校验。新增 T-010 跟踪 HTML dialog/select，未假报三项全部通过。
@@ -362,4 +386,4 @@ Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":
 
 - Result: partial
 - Evidence: T-001、T-005、T-006 完成；原版失败均保留。此前局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；通用确定性场景 50/50。新增真实模型十三场景单轮 3/13，额外 Chrome 五场景 1/5；不能用确定性结果代替模型表现。新 benchmark 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip 与 npm run check 通过。
-- Limitations: 最新 lease C0503；T-008/009 完成，导航原始失败→候选和最终包各一次通过。最新候选三项 1/3，不能宣称普遍提速；T-010 HTML dialog/select 尚未实现。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性。
+- Limitations: 最新已验证 lease C054e；T-008/009/010 完成，HTML dialog/select 已安装，同三任务真实模型 3/3。T-011 加载期原生 alert 尚未定位；不能宣称普遍提速。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性。

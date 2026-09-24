@@ -31,6 +31,8 @@ function fixture(
 		rejectNavigation?: boolean;
 		prepareFailure?: string;
 		clickEffect?: CuaSdk.ActionEffect;
+		option?: boolean;
+		noise?: number;
 	} = {},
 ) {
 	assert.ok(sdk);
@@ -96,16 +98,41 @@ function fixture(
 									truncated: false,
 									degraded: false,
 									elements: [
+										...Array.from({ length: options.noise ?? 0 }, (_, index) => ({
+											elementIndex: BigInt(index + 2),
+											depth: 0,
+											role: "none",
+											label: "structure".repeat(20),
+											inWebContent: true,
+											enabled: false,
+											elementToken: `${snapshotId}:noise-${index}`,
+										})),
 										{
 											elementIndex: 0n,
 											depth: 0,
 											role: "textbox",
+											actions: ["fill"],
 											label: "Name",
 											value: "",
 											enabled: true,
 											inWebContent: options.web ?? true,
 											elementToken: `${snapshotId}:0`,
 										},
+										...(options.option
+											? [
+													{
+														elementIndex: 1n,
+														depth: 1,
+														role: "option",
+														label: "Pro",
+														valueDescription: "Plan",
+														enabled: true,
+														inWebContent: true,
+														elementToken: `${snapshotId}:1`,
+														actions: ["select_option"],
+													},
+												]
+											: []),
 									],
 								},
 							}),
@@ -336,3 +363,38 @@ test("click does not report refused or partial effects as submitted and never re
 		assert.deepEqual(f.calls, ["observe", "click"]);
 	}
 });
+
+test(
+	"select_option requires a displayed native option capability and prioritizes actionable rows",
+	{ skip: !sdk },
+	async (t) => {
+		const f = fixture({ option: true, noise: 40 });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		assert.ok("observationRef" in seen.details && seen.details.observationRef);
+		assert.match(JSON.stringify(seen.content), /select_option/);
+		assert.match(JSON.stringify(seen.content), /Pro/);
+		const request = {
+			op: "select_option" as const,
+			ref: seen.details.observationRef,
+			target: `${seen.details.observationRef}:1`,
+		};
+		const selected = await f.tool.execute("s", { request });
+		assert.equal(selected.details.status, "action_submitted");
+		await assert.rejects(f.tool.execute("again", { request }), /stale_observation/);
+		assert.deepEqual(f.calls, ["observe", "click"]);
+		const fresh = await f.tool.execute("o2", { request: { op: "observe" } });
+		assert.ok("observationRef" in fresh.details && fresh.details.observationRef);
+		await assert.rejects(
+			f.tool.execute("wrong-kind", {
+				request: {
+					op: "select_option",
+					ref: fresh.details.observationRef,
+					target: `${fresh.details.observationRef}:0`,
+				},
+			}),
+			/action_unavailable/,
+		);
+		assert.deepEqual(f.calls, ["observe", "click", "observe"]);
+	},
+);

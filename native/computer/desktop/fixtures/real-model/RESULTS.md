@@ -2,6 +2,20 @@
 
 ## 最新修复状态
 
+HTML select 修复已安装，详情见 `native/computer/patches/browser-select.md`。原生按实际观察的 OPTION/SELECT 身份选择并读回；桥接增加 `select_option`，可操作行优先进入模型输出预算。没有删除权限或目标身份校验。
+
+| select 修复后同三项真实模型任务 | 结果 | task 秒 | 模型回合 | 关闭 |
+| --- | --- | --- | --- | --- |
+| Chrome form | 通过 | 37.851 | 10 | 正常 |
+| Chrome dialog | 通过 | 35.092 | 10 | 正常 |
+| Chrome navigation | 通过 | 38.503 | 12 | 正常 |
+
+三项均无失败工具调用，独立 oracle 和模型可见回执一致。表单为 `王小明 café` / `Hangzhou` / consent `on` / `Pro`，弹窗和导航回执与前轮相同。报告费用 0.105892 USD，最终 lease C054e。SDK `fd2ecf68deac2277f1213adeaa637935561f61a550868a473934da89bbec7aba`；旧包保留 `/tmp/epi-select.l1vU6w/installed-before`。证据 `/tmp/epi-select.l1vU6w/{guards,dialog-guards,model}`。
+
+确定性真实 Chrome select 15/15、弹窗邻域 11/11，全部 native close 证明；拒绝场景零输入/变更事件。离线 12 page、21 CDP、10 browser、131 desktop/context（1 skip）、9 package、UniFFI、native TS、npm check 通过。单次三任务不构成速度 A/B，也不更新历史十三场景整体分数。加载期 alert 问题仍由 T-011 单独诊断，尚未修复。
+
+### 上轮受限 HTML dialog 修复
+
 受限 HTML dialog 修复现已安装：只允许当前页面单个、经 DOM 元数据确认的 HTML dialog 内输入；派发时复核同一个弹窗和目标归属。权限、原生提示、多弹窗、跨 frame、取消与关闭检查保留。源码及复现命令见 `native/computer/patches/browser-dialog.md`。
 
 | 本轮真实模型任务 | 结果 | task 秒 | 模型回合 | 关闭 |

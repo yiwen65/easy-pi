@@ -1,0 +1,414 @@
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page.rs
+@@ -20,6 +20,10 @@
+     enabled: bool,
+     fillable: bool,
+     pressable: bool,
++    selectable: bool,
++    select_parent: Option<i64>,
++    option_label: Option<String>,
++    option_value: Option<String>,
+     secure: bool,
+     needs_metadata: bool,
+ }
+@@ -236,8 +240,20 @@
+         let mut depth = 0usize;
+         let mut parent = parents[index];
+         let mut in_dialog = dialog.is_none_or(|(root, _)| root == index);
++        let mut select_parent = None;
+         while let Some(next) = parent {
+             in_dialog |= dialog.is_some_and(|(root, _)| root == next);
++            if select_parent.is_none()
++                && matches!(
++                    nodes[next]["role"]["value"].as_str(),
++                    Some("combobox" | "listbox")
++                )
++            {
++                select_parent = nodes[next]["backendDOMNodeId"]
++                    .as_i64()
++                    .filter(|id| *id > 0)
++                    .map(|id| (next, id));
++            }
+             depth += 1;
+             if depth >= max_depth || depth > nodes.len() {
+                 return Err("browser_observation_bounds");
+@@ -280,6 +296,18 @@
+                     role,
+                     "button" | "link" | "checkbox" | "radio" | "switch" | "tab"
+                 ),
++            selectable: enabled && role == "option" && select_parent.is_some() && label.is_some(),
++            select_parent: if role == "option" {
++                select_parent.map(|(_, id)| id)
++            } else {
++                None
++            },
++            option_label: if role == "option" {
++                label.clone()
++            } else {
++                None
++            },
++            option_value: None,
+             secure,
+             needs_metadata: matches!(
+                 role,
+@@ -291,9 +319,11 @@
+                     | "radio"
+                     | "switch"
+                     | "tab"
++                    | "option"
+             ),
+         });
+         output.push(json!({"element_index":index,"role":role,"depth":depth,"parent_index":parents[index],
++            "value_description":if role == "option" {select_parent.and_then(|(parent, _)| scalar(&nodes[parent]["name"]["value"]))} else {None},
+             "label":if ignored {None} else {label},"value":if secure || ignored {None} else {value},"enabled":enabled,"in_web_content":true}));
+     }
+     Ok((
+@@ -340,6 +370,7 @@
+     let mut kind = "text";
+     let mut disabled = false;
+     let mut readonly = false;
++    let mut option_value = None;
+     for pair in attributes.chunks_exact(2) {
+         let name = pair[0].as_str().ok_or("browser_node_unproved")?;
+         let value = pair[1]
+@@ -350,6 +381,7 @@
+             "type" => kind = value,
+             "disabled" => disabled = true,
+             "readonly" => readonly = true,
++            "value" => option_value = Some(value.to_owned()),
+             _ => {}
+         }
+     }
+@@ -366,9 +398,33 @@
+                     "text" | "search" | "email" | "tel" | "url" | "number"
+                 )));
+     node.pressable &= !node.secure && !disabled;
++    node.selectable &= !node.secure && !disabled && described["nodeName"] == "OPTION";
++    node.option_value = option_value;
+     Ok(())
+ }
+ 
++fn describe_select(raw: &Value, backend: i64) -> Result<bool, &'static str> {
++    let node = &raw["node"];
++    if node["backendNodeId"].as_i64() != Some(backend) {
++        return Err("browser_node_stale");
++    }
++    let attributes = node["attributes"]
++        .as_array()
++        .ok_or("browser_node_unproved")?;
++    if attributes.len() > 128
++        || attributes.len() % 2 != 0
++        || !attributes
++            .iter()
++            .all(|v| v.as_str().is_some_and(|v| v.len() <= 16 * 1024))
++    {
++        return Err("browser_node_unproved");
++    }
++    Ok(node["nodeName"] == "SELECT"
++        && !attributes
++            .chunks_exact(2)
++            .any(|pair| matches!(pair[0].as_str(), Some("disabled" | "multiple"))))
++}
++
+ fn browser_reference(current: &(u32, String), token: &str) -> Result<(u32, usize), &'static str> {
+     if token.len() > 128 {
+         return Err("invalid_element_token");
+@@ -467,6 +523,7 @@
+                         .map_err(|_| "unexpected_modal_surface")?;
+                     describe_dialog(&metadata, backend)?;
+                 }
++                let mut selects = HashMap::new();
+                 for (index, node) in snapshot.nodes.iter_mut().enumerate() {
+                     // Readonly/disabled controls still need type attestation
+                     // before exposing a value (notably password/file controls).
+@@ -485,8 +542,25 @@
+                         } else {
+                             node.fillable = false;
+                             node.pressable = false;
++                            node.selectable = false;
+                             rows[index]["value"] = Value::Null;
++                        }
++                    }
++                    if node.selectable {
++                        let parent = node.select_parent.ok_or("browser_node_unproved")?;
++                        if !selects.contains_key(&parent) {
++                            let metadata = bound
++                                .connection
++                                .call(
++                                    Some(&bound.session_id),
++                                    "DOM.describeNode",
++                                    json!({"backendNodeId":parent,"depth":0,"pierce":false}),
++                                )
++                                .await
++                                .map_err(|_| "browser_node_stale")?;
++                            selects.insert(parent, describe_select(&metadata, parent)?);
+                         }
++                        node.selectable &= selects[&parent];
+                     }
+                     if node.secure {
+                         rows[index]["value"] = Value::Null;
+@@ -495,7 +569,8 @@
+                     rows[index]["actions"] = json!(
+                         ([
+                             node.fillable.then_some("fill"),
+-                            node.pressable.then_some("press")
++                            node.pressable.then_some("press"),
++                            node.selectable.then_some("select_option")
+                         ]
+                         .into_iter()
+                         .flatten()
+@@ -561,7 +636,7 @@
+                 if !node.enabled
+                     || node.secure
+                     || (name == "browser_type" && !node.fillable)
+-                    || (name == "browser_click" && !node.pressable)
++                    || (name == "browser_click" && !node.pressable && !node.selectable)
+                 {
+                     return Err("browser_input_unavailable");
+                 }
+@@ -575,11 +650,15 @@
+                     )
+                     .await
+                     .map_err(|_| "browser_node_stale")?;
++                let observed_value = node.option_value.clone();
+                 describe_input(&metadata, &mut node)?;
++                if node.selectable && node.option_value != observed_value {
++                    return Err("browser_node_stale");
++                }
+                 if !node.enabled
+                     || node.secure
+                     || (name == "browser_type" && !node.fillable)
+-                    || (name == "browser_click" && !node.pressable)
++                    || (name == "browser_click" && !node.pressable && !node.selectable)
+                 {
+                     return Err("browser_input_unavailable");
+                 }
+@@ -602,6 +681,33 @@
+                     .await
+                     .map_err(|_| "browser_node_stale")?;
+                 let object_id = bounded_id(&object["object"], "objectId")?;
++                let select_object = if node.selectable {
++                    let parent = node.select_parent.ok_or("browser_node_stale")?;
++                    let metadata = bound
++                        .connection
++                        .call(
++                            Some(&bound.session_id),
++                            "DOM.describeNode",
++                            json!({"backendNodeId":parent,"depth":0,"pierce":false}),
++                        )
++                        .await
++                        .map_err(|_| "browser_node_stale")?;
++                    if !describe_select(&metadata, parent)? {
++                        return Err("browser_input_unavailable");
++                    }
++                    let object = bound
++                        .connection
++                        .call(
++                            Some(&bound.session_id),
++                            "DOM.resolveNode",
++                            json!({"backendNodeId":parent,"objectGroup":"pi-controlled-dom"}),
++                        )
++                        .await
++                        .map_err(|_| "browser_node_stale")?;
++                    Some(bounded_id(&object["object"], "objectId")?)
++                } else {
++                    None
++                };
+                 let dialog_object = if let Some(backend) = element.dialog {
+                     let object = bound
+                         .connection
+@@ -639,6 +745,14 @@
+                         document_url: &frame.url,
+                         dialog_object_id: dialog_object.as_deref(),
+                     },
++                    None if node.selectable => ControlledCdpInput::DomSelectChecked {
++                        object_id: &object_id,
++                        select_object_id: select_object.as_deref().ok_or("browser_node_stale")?,
++                        label: node.option_label.as_deref().ok_or("browser_node_stale")?,
++                        value: node.option_value.as_deref(),
++                        document_url: &frame.url,
++                        dialog_object_id: dialog_object.as_deref(),
++                    },
+                     None => ControlledCdpInput::DomPressChecked {
+                         object_id: &object_id,
+                         document_url: &frame.url,
+@@ -653,9 +767,11 @@
+                 if response.get("exceptionDetails").is_some() {
+                     return Err("browser_input_unconfirmed");
+                 }
+-                let confirmed = text.is_some_and(|text| {
+-                    response["result"]["value"]["value"].as_str() == Some(text)
+-                });
++                let confirmed = (node.selectable
++                    && response["result"]["value"]["selected"] == true)
++                    || text.is_some_and(|text| {
++                        response["result"]["value"]["value"].as_str() == Some(text)
++                    });
+                 bound
+                     .connection
+                     .call(
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/session/page/tests.rs
+@@ -15,6 +15,54 @@
+ }
+ 
+ #[test]
++fn controlled_browser_page_options_require_metadata_and_keep_select_context() {
++    let raw = json!({"nodes":[
++        {"nodeId":"1","ignored":false,"role":{"value":"RootWebArea"},"childIds":["2"],"frameId":"frame"},
++        {"nodeId":"2","ignored":false,"role":{"value":"combobox"},"name":{"value":"Plan"},"backendDOMNodeId":20,"childIds":["3"]},
++        {"nodeId":"3","ignored":false,"role":{"value":"option"},"name":{"value":"Pro"},"backendDOMNodeId":21}
++    ]});
++    let (rows, snapshot) = ax_snapshot(&raw, &frame(), 512, 32).unwrap();
++    assert!(snapshot.nodes[2].needs_metadata);
++    assert!(!snapshot.nodes[2].fillable && !snapshot.nodes[2].pressable);
++    assert_eq!(rows[2]["value_description"], "Plan");
++    let mut option = snapshot.nodes[2].clone();
++    describe_input(
++        &json!({"node":{"backendNodeId":21,"nodeName":"OPTION","attributes":["value","pro"]}}),
++        &mut option,
++    )
++    .unwrap();
++    assert!(option.selectable);
++    assert_eq!(option.option_value.as_deref(), Some("pro"));
++    assert_eq!(option.select_parent, Some(20));
++    for name in ["DIV", "INPUT"] {
++        let mut custom = snapshot.nodes[2].clone();
++        describe_input(
++            &json!({"node":{"backendNodeId":21,"nodeName":name,"attributes":[]}}),
++            &mut custom,
++        )
++        .unwrap();
++        assert!(!custom.selectable);
++    }
++    for attrs in [json!(["disabled", ""]), json!(["multiple", ""])] {
++        assert!(!describe_select(
++            &json!({"node":{"backendNodeId":20,"nodeName":"SELECT","attributes":attrs}}),
++            20
++        )
++        .unwrap());
++    }
++    assert!(describe_select(
++        &json!({"node":{"backendNodeId":20,"nodeName":"SELECT","attributes":[]}}),
++        20
++    )
++    .unwrap());
++    assert!(!describe_select(
++        &json!({"node":{"backendNodeId":20,"nodeName":"DIV","attributes":[]}}),
++        20
++    )
++    .unwrap());
++}
++
++#[test]
+ fn controlled_browser_page_frame_proof_includes_fragment_and_refuses_unproven_subframes() {
+     let mut value = json!({"frameTree":{"frame":{"id":"frame","loaderId":"loader","url":"http://127.0.0.1:1234/form","urlFragment":"#one"}}});
+     assert_eq!(
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled.rs
+@@ -37,6 +37,14 @@
+         document_url: &'a str,
+         dialog_object_id: Option<&'a str>,
+     },
++    DomSelectChecked {
++        object_id: &'a str,
++        select_object_id: &'a str,
++        label: &'a str,
++        value: Option<&'a str>,
++        document_url: &'a str,
++        dialog_object_id: Option<&'a str>,
++    },
+ }
+ 
+ /// Canonical origin for typed navigation and live-document authorization.
+@@ -104,6 +112,18 @@
+     }
+ }
+ 
++const SELECT_CHECKED: &str = checked_dom_function!(
++    "function(expectedUrl, expectedDialog, expectedSelect, expectedLabel, expectedValue) {",
++    r#"
++    if (!(this instanceof w.HTMLOptionElement) || !(expectedSelect instanceof w.HTMLSelectElement) || this.closest('select') !== expectedSelect || !expectedSelect.isConnected || expectedSelect.ownerDocument !== w.document || expectedSelect.multiple || expectedSelect.matches(':disabled') || this.matches(':disabled') || this.label !== expectedLabel || this.getAttribute('value') !== expectedValue) throw new Error('input_unavailable');
++    const value = this.value;
++    Object.getOwnPropertyDescriptor(w.HTMLOptionElement.prototype, 'selected').set.call(this, true);
++    expectedSelect.dispatchEvent(new w.Event('input', {bubbles:true}));
++    expectedSelect.dispatchEvent(new w.Event('change', {bubbles:true}));
++    return {selected:this.isConnected && this.closest('select') === expectedSelect && expectedSelect.selectedOptions.length === 1 && expectedSelect.selectedOptions[0] === this && expectedSelect.value === value};
++"#
++);
++
+ impl CdpConnection {
+     pub(super) fn controlled_operation(&self) -> anyhow::Result<Option<Arc<Operation>>> {
+         match (&self.controlled_owner, controlled::current()) {
+@@ -180,6 +200,27 @@
+                     "arguments":[{"value":document_url},dialog_argument(dialog_object_id)?],"returnByValue":true}),
+                 )
+             }
++            ControlledCdpInput::DomSelectChecked {
++                object_id,
++                select_object_id,
++                label,
++                value,
++                document_url,
++                dialog_object_id,
++            } if !object_id.is_empty()
++                && object_id.len() <= 512
++                && !select_object_id.is_empty()
++                && select_object_id.len() <= 512
++                && label.len() <= 256
++                && value.is_none_or(|value| value.len() <= 16 * 1024) =>
++            {
++                controlled_url_origin(document_url).map_err(anyhow::Error::msg)?;
++                (
++                    "Runtime.callFunctionOn",
++                    json!({"objectId":object_id,"functionDeclaration":SELECT_CHECKED,
++                    "arguments":[{"value":document_url},dialog_argument(dialog_object_id)?,{"objectId":select_object_id},{"value":label},{"value":value}],"returnByValue":true}),
++                )
++            }
+             _ => anyhow::bail!("invalid controlled CDP input"),
+         };
+         self.call_admitted(Some(session_id), method, params, Some(operation), true)
+--- a/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled/dom_tests.rs
++++ b/rust/crates/cua-driver-core/src/browser/cdp_ws/controlled/dom_tests.rs
+@@ -88,6 +88,19 @@
+         )
+         .await
+         .unwrap();
++        conn.input(
++            "page",
++            ControlledCdpInput::DomSelectChecked {
++                object_id: "option",
++                select_object_id: "select",
++                label: text,
++                value: Some("pro"),
++                document_url: "http://localhost/form",
++                dialog_object_id: None,
++            },
++        )
++        .await
++        .unwrap();
+         assert!(conn
+             .input(
+                 "page",
+@@ -115,7 +128,7 @@
+     .await;
+     conn.shutdown().await.unwrap();
+     let messages = peer.await.unwrap();
+-    assert_eq!(messages.len(), 2);
++    assert_eq!(messages.len(), 3);
+     assert_eq!(messages[0]["params"]["functionDeclaration"], FILL_CHECKED);
+     assert_eq!(messages[0]["params"]["arguments"][0]["value"], text);
+     assert_eq!(
+@@ -124,6 +137,12 @@
+     );
+     assert_eq!(messages[1]["params"]["arguments"][1], json!({"value":null}));
+     assert_eq!(messages[1]["params"]["functionDeclaration"], PRESS_CHECKED);
++    assert_eq!(messages[2]["params"]["functionDeclaration"], SELECT_CHECKED);
++    assert_eq!(
++        messages[2]["params"]["arguments"][2],
++        json!({"objectId":"select"})
++    );
++    assert_eq!(messages[2]["params"]["arguments"][3], json!({"value":text}));
+     assert!(messages
+         .iter()
+         .all(|message| message["method"] == "Runtime.callFunctionOn"
