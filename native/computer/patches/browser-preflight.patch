@@ -1,0 +1,71 @@
+--- a/rust/crates/platform-macos/src/browser/controlled_browser.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser.rs
+@@ -95,7 +95,18 @@
+         let files = self.files.clone();
+         let worker = operation.clone();
+         let paths = operation
+-            .blocking(move || files.create(&worker, &qualified_bundle, &private_parent))
++            .blocking(move || {
++                // Cleanup depends on a readable process catalog. Reject a known
++                // broken environment before creating files or launching Chrome;
++                // otherwise the same failure needlessly quarantines the desktop.
++                with_image_preflight(
++                    || {
++                        worker.checkpoint()?;
++                        observe_images_below(&private_parent).map(|_| true)
++                    },
++                    || files.create(&worker, &qualified_bundle, &private_parent),
++                )
++            })
+             .await??;
+         let command = browser_command(&paths);
+         let pid = self.process.spawn(operation.clone(), command).await?;
+@@ -133,6 +144,16 @@
+     }
+ }
+ 
++fn with_image_preflight<T>(
++    observe: impl FnMut() -> Result<bool, &'static str>,
++    create: impl FnOnce() -> Result<T, &'static str>,
++) -> Result<T, &'static str> {
++    // The full catalog must be readable, not necessarily empty. This is only
++    // admission; exact root identity and terminal drain remain mandatory later.
++    wait_image_drain(observe, Instant::now() + Duration::from_secs(1))?;
++    create()
++}
++
+ fn wait_root_image(
+     pid: u32,
+     executable: &Path,
+--- a/rust/crates/platform-macos/src/browser/controlled_browser/readiness_tests.rs
++++ b/rust/crates/platform-macos/src/browser/controlled_browser/readiness_tests.rs
+@@ -1,5 +1,29 @@
+ use super::*;
+ 
++#[test]
++fn controlled_browser_preflight_unreadable_catalog_has_no_creation_effect() {
++    for code in ["image_path_unavailable", "image_catalog_unavailable", "cancelled"] {
++        let mut created = false;
++        assert_eq!(with_image_preflight(|| Err(code), || {
++            created = true;
++            Ok(())
++        }), Err(code));
++        assert!(!created);
++    }
++}
++
++#[test]
++fn controlled_browser_preflight_transient_read_retries_without_replaying_creation() {
++    let mut observations = [Err("image_catalog_changed"), Ok(true)].into_iter();
++    let mut creates = 0;
++    assert_eq!(with_image_preflight(|| observations.next().unwrap(), || {
++        creates += 1;
++        Err::<(), _>("original_create_failure")
++    }), Err("original_create_failure"));
++    assert_eq!(creates, 1);
++    assert!(observations.next().is_none());
++}
++
+ fn member() -> ImageProcess {
+     ImageProcess {
+         pid: 42,

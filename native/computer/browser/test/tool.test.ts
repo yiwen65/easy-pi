@@ -25,7 +25,7 @@ function deferred<T>() {
 	return { promise, resolve, reject };
 }
 
-function fixture(options: { web?: boolean; rejectNavigation?: boolean } = {}) {
+function fixture(options: { web?: boolean; rejectNavigation?: boolean; prepareFailure?: string } = {}) {
 	assert.ok(sdk);
 	const api = sdk;
 	const calls: string[] = [];
@@ -49,6 +49,12 @@ function fixture(options: { web?: boolean; rejectNavigation?: boolean } = {}) {
 				};
 				return {
 					startPrepare() {
+						if (options.prepareFailure) {
+							calls.push("prepare-refused");
+							result.reject(new api.ComputerError.Refused({ reason: options.prepareFailure }));
+							receipt.resolve({ operationId: "refused", cancelled: false, inputCommitted: false });
+							return;
+						}
 						complete("prepare", new api.ComputerResult.BrowserPrepared({ pid: 42, windowId: 7n }), true);
 					},
 					startNavigate() {
@@ -165,6 +171,36 @@ const execute = (ref: string) => ({
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
 });
+
+test(
+	"prepare preserves fixed preflight diagnostics without exposing arbitrary native text",
+	{ skip: !sdk },
+	async () => {
+		for (const reason of [
+			"image_path_unavailable",
+			"image_catalog_unavailable",
+			"image_catalog_changed",
+			"browser_parent_unqualified",
+			"private detail /secret",
+		]) {
+			const f = fixture({ prepareFailure: reason });
+			try {
+				await assert.rejects(f.tool.execute("prepare", { request: { op: "prepare" } }), (error: unknown) => {
+					assert.ok(error && typeof error === "object" && "details" in error);
+					assert.deepEqual(error.details, {
+						status: "paused",
+						completedSteps: 0,
+						code: reason.startsWith("private") ? "native_fault" : reason,
+					});
+					return true;
+				});
+				assert.deepEqual(f.calls, ["prepare-refused"]);
+			} finally {
+				await f.host.close();
+			}
+		}
+	},
+);
 
 test(
 	"browser bridge is lazy and sends one native segment through the ordinary outer resource",

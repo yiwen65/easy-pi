@@ -43,6 +43,7 @@
 ## Dependencies and parallel batches
 
 - Dependency graph: T-001 -> T-004; T-001 -> T-002 -> T-003; T-001 -> T-005; T-001 -> T-006; T-001 -> T-007. 全部串行；覆盖采集不依赖焦点修复完成，失败原样保留。T-005/006 为局部交付。
+- Recovery dependency: T-001 -> T-008 -> T-007 的后续 GUI；恢复与原生生命周期串行诊断。
 - Parallel batches: 无；同一 fixture、记录格式及桌面串行。
 - Serialization constraints: 同一桌面禁止并发；文档由 coordinator 维护。
 
@@ -188,6 +189,27 @@
 - Blocker: canonical TMPDIR 对照推进至 browser prepare outcome_unknown，关闭失败后 lease 为 D00000000000004f7；没有删除锁或重试。GUI 全部停止，候选源码/包未安装。原生关闭确切原因尚未证明。
 - Unblock condition: 用户确认受控恢复范围后，核验原生资源和锁身份、设计审计化恢复，再带有界诊断验证 prepare/close；禁止直接清锁。全图校验改为目标区域校验是另一独立待确认取舍。
 
+### [ ] T-008 — 授权恢复与浏览器生命周期修复
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 在保留隔离语义的前提下恢复已死亡测试 owner，取得 prepare/close 的确切错误并修复。
+- Inputs and prerequisites: 用户本轮明确同意受控租约恢复并修复；D04f7 原始证据、候选源码与已安装 SDK。
+- Scope or files: 一次性审计恢复工具、native/computer/browser、desktop/entry、原生 browser lifecycle 与最小回归。
+- Expected output: 不删除/替换锁 inode 的人工授权恢复记录；故障前后原生与模型验证。
+- Dependencies: T-001.
+- Execution steps:
+  1. 验证 account-home、私有权限、精确 inode/generation、无存活 owner/测试浏览器/renderer，在 exclusive flock 内原位恢复已授权 generation，记录审计。
+  2. 使用最小只准备/关闭探针保留原生错误分类，先确定首次分歧，再修复及资格回归。
+  3. 恢复真实模型 benchmark；输入/截图问题分别定位，不未经确认放宽全图校验。
+- Acceptance criteria:
+  - 恢复不抢活 owner、不删除锁、不自动清除任意 dirty generation；prepare/close 可重复通过，失败不隐藏。
+- Verification method:
+  - inode/marker/read-only process checks、原生有界诊断、定向测试、相同模型任务、npm run check。
+- Validation evidence: D04f7/04f8 均经精确 generation、无 owner/测试进程、私有权限与 exclusive flock 审计原位恢复；inode 未变。原版最小探针查明 image_path_unavailable，close Quarantined；PID 564 企业微信 IPCHelper 的 proc_pidpath 返回 ENOENT。已安装 browser-preflight 补丁及 canonical parent 修复，候选/安装 SDK/安装工具三次均 no-input 拒绝并 clean close，最终 C04fb。2 native、4 browser-tool、9 package 测试通过；desktop 124 pass/1 skip；UniFFI check、npm run check 通过。材料/原包备份 /tmp/epi-repair.BJD4uG。
+- Blocker: 企业微信正常退出重开未重启独立 launchd helper；已另行询问是否允许正常重启 helper，未获答复，不擅自终止。真实浏览器成功与模型复测尚未完成；当前仅完成 fail-before-effect/clean-close 修复。
+- Unblock condition: 用户允许正常重启该 helper 或环境恢复路径可读后，先直接 prepare/close，再恢复模型 benchmark；不得跳过不可读进程检查。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -216,6 +238,7 @@
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-09-24: 用户授权受控恢复与修复；T-008 开始。按 code-debug 的因果验证与现有任务计划串行推进，保留所有失败；未授权把全图校验直接弱化为局部校验。
 - 2026-09-24: T-007 首轮完成：image-first Chrome 1/5；semantic-first Chrome 1/5、官方 MiniWoB 子集 2/8。前述 18 次全部正常关闭；实际模型往返占首轮 Chrome 耗时约 97%–98%，未宣称提示策略提速。全 PNG hash 对变化倒计时产生 stale_image_observation；未放宽保护。
 - 2026-09-24: native browser 默认临时目录 prepare native_fault/关闭正常；发现 entry 的 /var alias 不满足 native canonical parent 契约，已写候选修复与回归。保持旧安装包、仅 TMPDIR=/private/tmp 对照后确实创建 Chrome profile，但 prepare outcome_unknown、shutdown/close unproved，lease D00000000000004f7。停止所有 GUI，不删除锁、不强杀或自动重试；lsof 无持有者、测试 PID 33473 与对应 browser/renderer 已退出，仍不等价于 native drain 证明。候选包未安装；T-007 阻塞于受控恢复授权和原生关闭诊断。
 - 2026-09-24: T-007 开始；已查官方 benchmark 文档与本地可用模型；使用专用 CfT/profile，不接触个人 Chrome 数据，授权真实 API 仍设回合/费用边界。
@@ -289,4 +312,4 @@ Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":
 
 - Result: partial
 - Evidence: T-001、T-005、T-006 完成；原版失败均保留。此前局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；通用确定性场景 50/50。新增真实模型十三场景单轮 3/13，额外 Chrome 五场景 1/5；不能用确定性结果代替模型表现。新 benchmark 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip 与 npm run check 通过。
-- Limitations: 当前 lease dirty，T-007 GUI 阻塞，规范化 parent 候选未安装，原生 prepare/close 故障未修复。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明普遍提速、彻底修复或所有应用稳定性。
+- Limitations: 最新 lease C04fb；已安装 canonical parent 与 browser-preflight 修复，真实故障环境下不再启动 Chrome 后隔离。企业微信独立 helper 路径不可读仍阻塞浏览器成功及模型复测，T-007 保持阻塞，T-008 仅部分完成。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明普遍提速、彻底修复或所有应用稳定性。

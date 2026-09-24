@@ -1,6 +1,12 @@
 # 真实模型测试报告 — 2026-09-24
 
-## 当前状态：停止 GUI，等待受控恢复决定
+## 最新修复状态
+
+后续获准受控恢复，原位恢复 D04f7 后取得确切错误：`image_path_unavailable`；企业微信独立 IPCHelper 的进程路径读取返回 ENOENT。正常退出重开企业微信未重启该 helper，正在等待单独正常重启授权。
+
+已安装 canonical parent 和 browser-preflight：同一异常环境，原版启动 Chrome 后 close=Quarantined；修复版在副作用前拒绝，inputCommitted=false，close 成功。候选、安装 SDK、安装 Computer 工具三次均保持 clean lease，最后 C04fb。固定错误码已对 agent 可见，未知原生文本仍隐藏。详见 `native/computer/patches/browser-preflight.md`；此轮没有新增模型成功样本，不改写下列历史分数。
+
+## 原始故障记录：当时停止 GUI，等待受控恢复决定
 
 最后一次原生浏览器准备对照出现 `outcome_unknown`，关闭证明失败，租约为 `pi-computer-desktop-v1 D 00000000000004f7`。没有删除锁、清除隔离或自动重试。只读 `lsof` 未发现锁持有者；测试 Chrome PID 33473 已退出；进程列表未发现该测试 browser/renderer。**进程已退出不等于原生清理证明成功。**
 
@@ -53,7 +59,7 @@
 - 新 benchmark 单测 11/11；directory/entry 定向 3/3；打包资格 9/9。
 - 桌面相关加载级测试 124 通过、1 跳过（renderer state test），不是全部通过；无真实 GUI 的该组不能代替本报告。
 - `npm run check` 已通过；最终文档/格式与定向测试结果见任务文档。
-- 当前安装包与 native SDK 未替换；候选包保留 `/tmp/epi-real-bench.iqOfvX/package-canonical`，并未冒充生产资格完成。
+- 原始测试结束时安装包尚未替换；后续已安装上述 preflight 修复，原包备份 `/tmp/epi-repair.BJD4uG/installed-before`。浏览器成功任务资格仍未完成。
 - WebArena/VisualWebArena 官方网站镜像、WorkArena ServiceNow 实例、OSWorld VM/任务资格未准备，未跑官方全量。Chrome 文件上传下载、跨应用办公文档、真实 IME、多屏及长时 soak 仍未覆盖。
 
 原始运行：`/tmp/epi-real-bench.iqOfvX/{smoke,smoke2,smoke3,smoke4,chrome-baseline,semantic,browser-smoke,browser-canonical-control}`。每组 contract、summary、每任务 trace/截图/result 保留；不同版本结果不混称正式 A/B。早期组只记脚本哈希，最终 runner 额外保存 sources 快照。

@@ -26,6 +26,10 @@ const safeCodes = new Set([
 	"browser_url_invalid",
 	"unexpected_modal_surface",
 	"native_busy",
+	"image_path_unavailable",
+	"image_catalog_unavailable",
+	"image_catalog_changed",
+	"browser_parent_unqualified",
 ]);
 
 /** One ordinary tool on the existing AgentSession loop and outer desktop scheduler. */
