@@ -17,6 +17,8 @@ const codes = new Set([
 	"stale_image_geometry",
 	"image_reference_required",
 	"controlled_target_stale",
+	"controlled_target_unproven",
+	"controlled_target_ambiguous",
 	"target_scope_incomplete",
 	"target_absent",
 	"target_not_editable",
@@ -86,8 +88,8 @@ const codes = new Set([
 	"quarantined",
 ]);
 
-export function segmentCode(value: string): string {
-	return codes.has(value) ? value : "native_fault";
+export function segmentCode(value: string, fallback = "native_fault"): string {
+	return codes.has(value) ? value : fallback;
 }
 
 /** Generated values are projected locally. Never invoke the FFI validator on the result hot path. */

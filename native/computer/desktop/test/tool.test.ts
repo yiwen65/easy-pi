@@ -21,7 +21,7 @@ if (allowed) {
 }
 const sdk = allowed ? candidateSdk() : undefined;
 
-function fixture(refuse = false, nativeFilteredOut = 0, onObserve?: () => void) {
+function fixture(refuse = false, nativeFilteredOut = 0, onObserve?: () => void, observationRefusal?: string) {
 	assert.ok(sdk);
 	const api = sdk;
 	const events: string[] = [];
@@ -141,6 +141,11 @@ function fixture(refuse = false, nativeFilteredOut = 0, onObserve?: () => void) 
 					startObserve() {
 						assert.equal(serial, 2, "semantic observation must use the selected child");
 						onObserve?.();
+						if (observationRefusal) {
+							reject(new api.ComputerError.Refused({ reason: observationRefusal }));
+							proof({ operationId: "observe", cancelled: false, inputCommitted: false });
+							return;
+						}
 						finish(
 							new api.ComputerResult.Observation({
 								value: {
@@ -351,6 +356,44 @@ test("proved no-input refusal is paused rather than host-native-fault unknown", 
 		await f.host.close();
 	}
 });
+
+for (const combined of [false, true]) {
+	for (const reason of ["controlled_target_unproven", "PRIVATE filename and window metadata"]) {
+		test(
+			`observation refusal is bounded and actionable (combined=${combined}, known=${reason.startsWith("controlled")})`,
+			{ skip: !allowed },
+			async () => {
+				const f = fixture(false, 0, undefined, reason);
+				try {
+					await f.publish("discover", await f.desktop.tool.execute("discover", { request: { op: "discover" } }));
+					if (!combined) await f.desktop.tool.execute("select", { request: { op: "select", ref: "window" } });
+					await assert.rejects(
+						f.desktop.tool.execute("read", {
+							request: combined ? { op: "select", ref: "window", observe: true } : { op: "observe" },
+						}),
+						(error: unknown) => {
+							assert.ok(error instanceof Error);
+							assert.doesNotMatch(error.message, /PRIVATE|filename and window metadata/);
+							if (reason === "controlled_target_unproven") {
+								assert.match(error.message, /controlled_target_unproven/);
+								assert.match(error.message, /Do not repeat.*same target/);
+							} else assert.match(error.message, /native_refused/);
+							assert.deepEqual((error as Error & { details: unknown }).details, {
+								status: "paused",
+								code: reason === "controlled_target_unproven" ? reason : "native_refused",
+								terminal: { inputCommitted: false, cancelled: false },
+							});
+							return true;
+						},
+					);
+					assert.ok(!f.events.includes("input"));
+				} finally {
+					await f.host.close();
+				}
+			},
+		);
+	}
+}
 
 test("desktop composition is lazy; visible discovery selects a runtime-owned child", { skip: !allowed }, async () => {
 	const f = fixture();

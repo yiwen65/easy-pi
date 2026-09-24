@@ -29,10 +29,39 @@ function recoveryGuidance(code: string | undefined): string {
 			return "Native input-state checking reports a held key or button. Ask the user to release it using their keyboard or remote-control client, then observe the actual effect before continuing. Do not synthesize releases or automatically retry. ";
 		case "foreground_target_changed":
 		case "foreground_focus_unproved":
+		case "foreground_activation_unknown":
 			return "Focus may have moved to a popup or another window. Do not keep activating or typing into the old target. Inspect fresh evidence of the prior effect; if you can judge it, use reconcile with previousEffect:'observed' and that fresh ref without sending input, then discover/select the actual focused surface. If the effect cannot be determined, stop and ask the user. ";
+		case "controlled_target_unproven":
+		case "controlled_target_ambiguous":
+			return "The native accessibility surface cannot be uniquely bound to this exact window. A visible screenshot does not prove semantic input support; system-hosted save panels may expose separate app and service surfaces. Do not repeat observe/select/activate on the same target without changed evidence. Do not infer ownership from matching titles or geometry. If no supported surface can be established, stop and report the unsupported step. ";
+		case "unexpected_modal_surface":
+			return "An attached modal surface blocks this parent window. Do not restore, activate, or type into the blocked parent. Inspect the dialog and select its own supported surface using fresh discovery; if exact ownership cannot be established, stop and report the unsupported step. ";
 		default:
 			return "";
 	}
+}
+
+function nativeFailure(
+	api: DesktopApi,
+	error: unknown,
+	receipt: CuaSdk.ComputerTerminal | undefined,
+	aborted: boolean,
+	segment: boolean,
+) {
+	const cancelled = api.ComputerError.Cancelled.instanceOf(error) || aborted;
+	const refused = api.ComputerError.Refused.instanceOf(error);
+	const unknown = receipt?.inputCommitted !== false || (!cancelled && !refused);
+	return {
+		status: unknown ? "outcome_unknown" : "paused",
+		code: unknown
+			? "outcome_unknown"
+			: cancelled
+				? "cancelled"
+				: refused
+					? segmentCode(error.inner.reason, segment ? "native_fault" : "native_refused")
+					: "native_fault",
+		terminal: { inputCommitted: receipt?.inputCommitted, cancelled: receipt?.cancelled },
+	};
 }
 
 export function createDesktopTool(session: ComputerSession<ControlledComputerSession>, getApi: () => DesktopApi) {
@@ -336,25 +365,9 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 							})
 							.catch(async (error: unknown) => {
 								const receipt = await call.receipt;
-								const cancelled = api.ComputerError.Cancelled.instanceOf(error) || nativeSignal.aborted;
-								const refused = api.ComputerError.Refused.instanceOf(error);
-								const unknown = receipt?.inputCommitted === true || (!cancelled && !refused);
-								const reason = receipt?.inputCommitted
-									? "outcome_unknown"
-									: cancelled
-										? "cancelled"
-										: refused
-											? segmentRequest
-												? segmentCode(error.inner.reason)
-												: "native_refused"
-											: "native_fault";
 								// Resolve a typed failure: ComputerHost intentionally redacts rejected results.
 								return {
-									failure: {
-										status: unknown ? "outcome_unknown" : "paused",
-										code: reason,
-										terminal: { inputCommitted: receipt?.inputCommitted, cancelled: receipt?.cancelled },
-									},
+									failure: nativeFailure(api, error, receipt, nativeSignal.aborted, !!segmentRequest),
 								};
 							}),
 					};
@@ -381,7 +394,10 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 						if (outcome.failure.code === "recovery_exhausted") return { content, details };
 						return freshEvidence(details, content);
 					}
-					throw new AgentToolError(`Computer ${outcome.failure.code}; do not replay input.`, outcome.failure);
+					throw new AgentToolError(
+						`Computer ${outcome.failure.code}; do not replay input. ${recoveryGuidance(outcome.failure.code)}`,
+						outcome.failure,
+					);
 				}
 				const result = outcome.value;
 				const api = getApi();
@@ -465,11 +481,23 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 						const child = target();
 						// Selection/adoption and its native terminal have already settled.
 						// Reuse this tool's scheduler permit, but track the read separately.
-						const observation = await session.run(
-							(_root, nativeSignal) =>
-								child.callNative((operation) => operation.startObserve(512, 32), nativeSignal),
-							signal,
-						);
+						const read = await session.run((_root, nativeSignal) => {
+							const call = child.callNative((operation) => operation.startObserve(512, 32), nativeSignal);
+							return {
+								...call,
+								result: call.result
+									.then((value) => ({ value }))
+									.catch(async (error: unknown) => ({
+										failure: nativeFailure(api, error, await call.receipt, nativeSignal.aborted, false),
+									})),
+							};
+						}, signal);
+						if ("failure" in read)
+							throw new AgentToolError(
+								`Computer ${read.failure.code}; do not replay input. ${recoveryGuidance(read.failure.code)}`,
+								read.failure,
+							);
+						const observation = read.value;
 						if (!api.ComputerResult.Observation.instanceOf(observation))
 							throw new Error("Unexpected selected-window observation");
 						const projection = projectObservation(observation.inner.value);

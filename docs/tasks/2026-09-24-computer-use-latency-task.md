@@ -146,6 +146,27 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-006 — 系统保存面板失败与替换输入
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 修复保存面板的窗口绑定与文件名追加，停止无效恢复循环。
+- Inputs and prerequisites: ses_01M38S9JB18FF6YT 12:29–12:34 失败记录。
+- Scope or files: native/computer/desktop/tool.ts、segment-projection.ts、test/tool.test.ts；后续原生远程面板与 Fill 通路。
+- Expected output: 可诊断的拒绝原因、可靠替换和保存后重新打开验证。
+- Dependencies: T-005.
+- Execution steps:
+  1. 保留捕获失败，建立独立 NSSavePanel 及原生错误读回。
+  2. 修复错误投影，随后证明远程窗口归属和替换选择范围。
+  3. 原生修复完成后运行独立保存/重开 oracle，不操作用户未保存文档。
+- Acceptance criteria:
+  - 不盲重放、不通过标题/矩形放宽归属；文件名精确替换，真实保存和重开一致。
+- Verification method:
+  - 桥接回归、native fixture、原生打包完整性及真实读回。
+- Validation evidence: 错误投影新增四例中三例修复前失败，修复后全通过；desktop 120 passed / 1 skipped，typecheck/root check/1428-file package 通过。已安装桥接修复，真实 fixture 正确显示 controlled_target_unproven 和零输入终态，干净关闭 C0325。保存和替换仍未修复，详见 docs/implementation/computer/2026-09-24-save-panel-failure.md。
+- Blocker: 原生远程面板绑定与合成全选失败的因果链尚未完整验证；不是租约或用户授权阻塞。
+- Unblock condition: 完成独立远程字段替换复现、原生归属证明及保存重开 oracle。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -193,5 +214,5 @@
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001、T-003、T-004、T-005 定向验证通过；6 次模型对照完成；快速截图和新 bridge 均已安装。T-002 仍待重启后的 Chrome 浮窗及完整任务验证。
+- Evidence: T-001、T-003、T-004、T-005 定向验证通过；6 次模型对照完成；快速截图和新 bridge 均已安装。T-006 的错误投影修复已安装，保存面板输入仍未修复；T-002 完整任务验收未通过。
 - Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未补齐 117.5 秒间隔的遥测。T-004 覆盖可捕获的正常退出信号；SIGKILL、断电、原生崩溃或无法确认 terminal 仍必须隔离，不能承诺永不出现脏租约。真实信号测试使用已安装 InteractiveMode 原型及真实 feature，替换 TUI 和 runtime disposer 外壳；未自动操作 AgentPort 停止按钮。已停止的旧 feature 仍需完整重启。
