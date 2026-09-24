@@ -27,7 +27,8 @@ Outside diagnostic input posting, a read-only CoreGraphics query reported key
 code 0 (A) held in both HID and combined session state. The native Unicode input
 carrier uses key code 0 and refuses to press a key already held. This supports
 the refusal but does not establish why the key is held. A remote-client stuck
-key or synthetic-input contamination remains unproved; no releases were forged.
+key or synthetic-input contamination remains unproved. No release was posted
+during the initial diagnosis; the later explicitly authorized recovery is below.
 
 ## Bounded repair
 
@@ -64,11 +65,25 @@ OS-held-key cause.
   succeeded, with matching native and fixture readbacks. Clean close left
   `C 0312`. No unknown input was replayed or guard disabled.
 
-## Remaining gate
+## Authorized held-key recovery and foreground verification
 
-The read-only CoreGraphics check still reported A held immediately before
-recovery. Have the user release it through their actual keyboard/remote client,
-re-read key state, then test synthetic text entry and readback in an isolated
-fixture. The successful accessibility fill does not validate synthetic key
-delivery or explain the stuck state. The already-stopped easy-pi process must
+The user reported pressing and releasing A, but CoreGraphics still reported
+key 0 held. A controlled comparison using the same native fixture succeeded
+with background synthetic input, then failed with foreground input: focus and
+Right dispatched, followed by `type_text` refused with
+`physical_input_held_at_target`; both readbacks remained empty (`C 0315`).
+
+After separate explicit user approval, one A key-up event was posted at the
+HID event tap, preserving current modifier flags. No key-down, automatic retry,
+or production guard change was made. Both HID and combined state immediately
+reported no held keys. The identical foreground sequence then succeeded twice:
+all three actions dispatched, text used foreground synthetic events, and native
+observe plus independent fixture checkpoints matched the exact expected text.
+The repeat run asserted these facts. Both test processes closed normally,
+leaving `C 0316` and `C 0317`. Post-test key state did not contain A (it contained
+57, the Caps Lock code; no additional release was attempted).
+
+This before/after establishes held A as the immediate cause and restores
+current foreground text entry. It does not establish which producer originally
+left A held or guarantee no recurrence. The already-stopped easy-pi process must
 be fully exited and restarted; lock recovery does not clear its stop latch.
