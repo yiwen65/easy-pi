@@ -612,10 +612,9 @@ export class AgentSession {
 				: undefined;
 
 			const content = hookResult?.content ?? result.content ?? [];
-			// Runs after the extension hook so images injected or replaced by extensions are normalized too.
 			const normalizedContent = await normalizeToolResultImages(content, {
-				autoResizeImages: this.settingsManager.getImageAutoResize(),
-			});
+						autoResizeImages: this.settingsManager.getImageAutoResize(),
+					});
 
 			if (!hookResult && normalizedContent === content) {
 				return undefined;

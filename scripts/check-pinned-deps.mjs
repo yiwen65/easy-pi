@@ -4,12 +4,14 @@ import { join } from "node:path";
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 const exactVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const ignoredDirectories = new Set([".git", "dist", "node_modules"]);
+// Generated evidence and packaged upstream sources are not authored workspace packages.
+const ignoredPaths = new Set([".artifacts", join("packages", "coding-agent", "computer")]);
 const packageJsonFiles = [];
 
 function collectPackageJsonFiles(directory) {
 	for (const entry of readdirSync(directory, { withFileTypes: true })) {
 		if (entry.isDirectory()) {
-			if (!ignoredDirectories.has(entry.name)) {
+			if (!ignoredDirectories.has(entry.name) && !ignoredPaths.has(join(directory, entry.name))) {
 				collectPackageJsonFiles(join(directory, entry.name));
 			}
 			continue;
