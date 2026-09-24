@@ -668,6 +668,8 @@ T-028 诊断与局部修复：/tmp/epi-desktop-gaps.9uZ7xI/diagnostic-hidden-cou
 
 T-028 动作提示修复：模型误把 semantic ref 当 image ref 时，原错误仅提示 observe again，诱发再次 observe 的无效循环。desktop/tool.ts 为 stale_image 明确提示 No input dispatched + capture + 新 Image ref，指出 Observation/element refs 不可授权坐标；未改任何校验或 native 输入。recovery-guidance 新测试在旧代码确切失败、修改后通过并验证错误前无输入、重新 capture 后可发单次动作；38 desktop/segment/recovery 测试、严格 native TS 和根 check 通过，四处无关格式变化已恢复。候选 package-guidance 已构建，尚未安装。整窗限制是有意保护，因此已单独请求用户允许受限局部像素校验；在回复前不修改该保护。最小提示修复不解决动态页原生失效根因，T-028 保持 in_progress。
 
+T-028 提示修复安装资格：/tmp/epi-desktop-gaps.9uZ7xI/guidance-probe.mjs 复用现有 owned GeneralFixture，先发送错误 semantic point ref、验证 clicks=0，再按 capture 提示用当前图片单次点击并独立读回 clicks=1。旧包在精确错误提示断言失败且关闭 C0717；候选 guidance-candidate.log 通过 C0718；可回退安装后 guidance-installed.log 再次通过 C0719。原包保存在 installed-before-guidance，当前 bridge be567fabe2499323b873e67148adc72e127f0f8a89d2e45d08d8e71f4b0c5b28，native dylib 1080e21b50fe3ef2d2a10099d884985c7196e65bab83026a1956e85a7db6788f 与原包相同。8 项 qualified packaging 已通过。model-guidance-installed 的真实 desktop chrome-tabs 通过（44.473s、11轮、0.0766236 USD），保留一次 stale_image_observation/inputCommitted=false 后切 semantic key 路径的恢复；本例未触发 JS stale_image 新提示，因此仅作为安装邻域，不代替确定性原失败回放，不认领模型提速。handle 39996 exit0，关闭证明通过。局部像素校验仍未获明确回复，整窗保护未改；Goal active。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
