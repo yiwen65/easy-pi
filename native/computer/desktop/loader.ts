@@ -45,6 +45,7 @@ export function loadDesktopSdk(sdkDirectory: string): typeof CuaSdk {
 		typeof sdk.ComputerOperation.prototype.startCapture !== "function" ||
 		typeof sdk.ComputerOperation.prototype.startImageClick !== "function" ||
 		typeof sdk.ComputerOperation.prototype.startImageScroll !== "function" ||
+		typeof sdk.ComputerOperation.prototype.startScrollIntoView !== "function" ||
 		typeof sdk.ComputerOperation.prototype.startImageKey !== "function" ||
 		typeof sdk.ComputerOperation.prototype.terminal !== "function" ||
 		typeof sdk.ComputerResult?.WindowSelected !== "function"

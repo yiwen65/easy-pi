@@ -29,7 +29,10 @@ export function createContextBrowserBinding(
 			const visible = view.consume();
 			const { request, observeAfter } = parseControlledBrowserInput(input);
 			if (
-				(request.op === "execute" || request.op === "click" || request.op === "select_option") &&
+				(request.op === "execute" ||
+					request.op === "click" ||
+					request.op === "select_option" ||
+					request.op === "scroll_into_view") &&
 				visible !== request.ref
 			) {
 				throw new AgentToolError("Computer observation is not in the current model view; observe again.", {

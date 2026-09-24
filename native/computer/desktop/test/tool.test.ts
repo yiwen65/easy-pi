@@ -136,6 +136,7 @@ function fixture(refuse = false, nativeFilteredOut = 0, onObserve?: () => void, 
 					startImageKey: action,
 					startImageScroll: action,
 					startClick: forbidden,
+					startScrollIntoView: forbidden,
 					startSegment: forbidden,
 					startCrossWindowDrag: forbidden,
 					startObserve() {

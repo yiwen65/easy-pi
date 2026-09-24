@@ -33,6 +33,7 @@ function fixture(
 		navigationCommitted?: boolean;
 		prepareFailure?: string;
 		clickEffect?: CuaSdk.ActionEffect;
+		scrollable?: boolean;
 		option?: boolean;
 		noise?: number;
 		blankStructure?: boolean;
@@ -62,7 +63,7 @@ function fixture(
 					calls.push(name);
 					result.resolve(value);
 					const terminal = { operationId: `op-${calls.length}`, cancelled: false, inputCommitted: committed };
-					if (name === "click" && options.clickTerminal)
+					if ((name === "click" || name === "scroll") && options.clickTerminal)
 						void options.clickTerminal.then(() => receipt.resolve(terminal));
 					else if (name === "observe" && snapshots > 1 && options.followupTerminal)
 						void options.followupTerminal.then(() => receipt.resolve(terminal));
@@ -125,7 +126,8 @@ function fixture(
 										...Array.from({ length: options.noise ?? 0 }, (_, index) => ({
 											elementIndex: BigInt(index + 2),
 											depth: 0,
-											role: "none",
+											role: options.blankStructure ? "generic" : "none",
+											actions: options.blankStructure ? ["scroll_into_view"] : [],
 											label: options.blankStructure ? " " : "structure".repeat(20),
 											inWebContent: true,
 											enabled: false,
@@ -135,7 +137,7 @@ function fixture(
 											elementIndex: 0n,
 											depth: 0,
 											role: "textbox",
-											actions: ["fill"],
+											actions: options.scrollable ? ["fill", "scroll_into_view"] : ["fill"],
 											label: "Name",
 											value: "",
 											enabled: true,
@@ -197,6 +199,19 @@ function fixture(
 									effect: options.clickEffect ?? api.ActionEffect.Unverifiable,
 									route: api.ActionRoute.Dom,
 									delivery: { mode: api.ActionDeliveryMode.Background, deliveredCount: 1 },
+								},
+							}),
+							true,
+						);
+					},
+					startScrollIntoView(token) {
+						assert.equal(token, `b-snapshot-${snapshots}:0`);
+						complete(
+							"scroll",
+							new api.ComputerResult.Action({
+								value: {
+									effect: options.clickEffect ?? api.ActionEffect.Unverifiable,
+									route: api.ActionRoute.Dom,
 								},
 							}),
 							true,
@@ -264,6 +279,80 @@ const execute = (ref: string) => ({
 		ref,
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
+});
+
+test(
+	"scroll requires a displayed capability and consumes its observation without clicking",
+	{ skip: !sdk },
+	async (t) => {
+		for (const scrollable of [false, true]) {
+			const f = fixture({ scrollable });
+			t.after(() => f.host.close());
+			const seen = await f.tool.execute("o", { request: { op: "observe" } });
+			const ref = seen.details.observationRef!;
+			const input = { request: { op: "scroll_into_view" as const, ref, target: `${ref}:0` } };
+			if (scrollable) {
+				assert.match(JSON.stringify(seen.content), /scroll_into_view/);
+				const result = await f.tool.execute("s", input);
+				assert.equal(result.details.status, "action_submitted");
+				assert.equal(result.details.effect, "unverifiable");
+				assert.equal(result.details.completedSteps, 0);
+			} else await assert.rejects(f.tool.execute("s", input), /action_unavailable/);
+			await assert.rejects(f.tool.execute("retry", input), /stale_observation/);
+			assert.deepEqual(f.calls, scrollable ? ["observe", "scroll"] : ["observe"]);
+		}
+	},
+);
+
+test("scroll follow-up waits for terminal and cancellation suppresses the read", { skip: !sdk }, async (t) => {
+	for (const cancel of [false, true]) {
+		const terminal = deferred<void>();
+		const controller = new AbortController();
+		const f = fixture({ scrollable: true, clickTerminal: terminal.promise });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		const ref = seen.details.observationRef!;
+		const pending = f.tool.execute(
+			"s",
+			{ request: { op: "scroll_into_view", ref, target: `${ref}:0` }, observeAfter: true },
+			controller.signal,
+		);
+		const outcome = pending.then(
+			(value) => ({ value }),
+			(error: unknown) => ({ error }),
+		);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(f.calls, ["observe", "scroll"]);
+		if (cancel) controller.abort();
+		terminal.resolve();
+		const result = await outcome;
+		if (cancel) assert.ok("error" in result);
+		else {
+			assert.ok("value" in result);
+			assert.equal(result.value.details.observationRef, "b-snapshot-2");
+		}
+		assert.deepEqual(f.calls, cancel ? ["observe", "scroll"] : ["observe", "scroll", "observe"]);
+	}
+});
+
+test("refused or unknown scrolling never starts a follow-up or replays", { skip: !sdk }, async (t) => {
+	assert.ok(sdk);
+	for (const effect of [sdk.ActionEffect.Refused, sdk.ActionEffect.Partial, sdk.ActionEffect.SuspectedNoop]) {
+		const f = fixture({ scrollable: true, clickEffect: effect });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		const ref = seen.details.observationRef!;
+		const input = {
+			request: { op: "scroll_into_view" as const, ref, target: `${ref}:0` },
+			observeAfter: true as const,
+		};
+		await assert.rejects(
+			f.tool.execute("s", input),
+			effect === sdk.ActionEffect.Refused ? /paused/ : /outcome_unknown/,
+		);
+		await assert.rejects(f.tool.execute("retry", input), /stale_observation/);
+		assert.deepEqual(f.calls, ["observe", "scroll"]);
+	}
 });
 
 test("filtered observations read fresh UI and grant only literal matches", { skip: !sdk }, async (t) => {

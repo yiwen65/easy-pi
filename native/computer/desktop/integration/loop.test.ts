@@ -126,6 +126,7 @@ describe.skipIf(!allowed)("desktop binding through actual AgentSession with faux
 							);
 						},
 						startClick: forbidden,
+						startScrollIntoView: forbidden,
 						startImageClick: forbidden,
 						startImageScroll: forbidden,
 						startNavigate: forbidden,

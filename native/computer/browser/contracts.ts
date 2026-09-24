@@ -28,7 +28,8 @@ export function parseControlledBrowserInput(input: unknown): ControlledBrowserIn
 		input.request.op === "observe" ||
 		input.request.op === "execute" ||
 		input.request.op === "click" ||
-		input.request.op === "select_option"
+		input.request.op === "select_option" ||
+		input.request.op === "scroll_into_view"
 	) {
 		const parsed = parseControlledComputerInput({ request: input.request });
 		return { ...parsed, ...(input.observeAfter ? { observeAfter: true as const } : {}) };

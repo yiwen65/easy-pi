@@ -7,7 +7,8 @@ import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 assert.equal(process.env.ALLOW_GUI_TESTS, "true");
-const [output, packageRoot, bundle] = process.argv.slice(2);
+const [output, packageRoot, bundle, scenario = "form"] = process.argv.slice(2);
+assert.ok(["form", "scroll"].includes(scenario));
 assert.ok([output, packageRoot, bundle].every((p) => p && isAbsolute(p)));
 mkdirSync(output, { mode: 0o700 });
 writeFileSync(join(output, "qualification.mjs"), readFileSync(new URL(import.meta.url)));
@@ -27,7 +28,7 @@ const server = createServer((request, response) => {
 	}
 	response.setHeader("Content-Type", "text/html; charset=utf-8");
 	response.end(
-		`<!doctype html><title>Owned combined observation</title><label>Name <input id="name"></label><label>Plan <select id="plan"><option>Free</option><option>Pro</option></select></label><button id="save">Save</button><p id="receipt"></p><script>document.querySelector('#save').onclick=()=>{const r={name:document.querySelector('#name').value,plan:document.querySelector('#plan').value};document.querySelector('#receipt').textContent='Saved '+JSON.stringify(r);fetch('/receipt',{method:'POST',body:JSON.stringify(r)})}</script>`,
+		`<!doctype html><title>Owned combined observation</title><label>Name <input id="name"></label><label>Plan <select id="plan"><option>Free</option><option>Pro</option></select></label>${scenario === "scroll" ? '<div style="height:2400px"></div>' : ""}<button id="save">Save</button><p id="receipt"></p><script>document.querySelector('#save').onclick=()=>{const rect=document.querySelector('#save').getBoundingClientRect();const r={name:document.querySelector('#name').value,plan:document.querySelector('#plan').value,...(${scenario === "scroll"} ? {scrolled:scrollY>1000,targetVisible:rect.top>=0&&rect.bottom<=innerHeight}: {})};document.querySelector('#receipt').textContent='Saved '+JSON.stringify(r);fetch('/receipt',{method:'POST',body:JSON.stringify(r)})}</script>`,
 	);
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -35,7 +36,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const manifest = join(output, "capabilities.yaml");
 writeFileSync(
 	manifest,
-	`version: 3\nexpires_after: 10m\nidle_timeout: 3m\nresources:\n  browser:\n    profiles: [{kind: isolated}]\n    origins: ["about:blank", "${origin}"]\nallow:\n  tools: [browser_prepare, get_browser_state, browser_navigate, browser_click, browser_type]\n`,
+	`version: 3\nexpires_after: 10m\nidle_timeout: 3m\nresources:\n  browser:\n    profiles: [{kind: isolated}]\n    origins: ["about:blank", "${origin}"]\nallow:\n  tools: [browser_prepare, get_browser_state, browser_navigate, browser_click, browser_type${scenario === "scroll" ? ", browser_scroll_into_view" : ""}]\n`,
 );
 try {
 	feature = createComputerFeature({ browserBundlePath: bundle, manifestPath: manifest });
@@ -93,6 +94,19 @@ try {
 		observeAfter: true,
 	});
 	assert.equal(result.details.status, "action_submitted");
+	if (scenario === "scroll") {
+		assert.ok(row(result, "button", "Save").actions.includes("scroll_into_view"));
+		result = await call({
+			request: {
+				op: "scroll_into_view",
+				ref: result.details.observationRef,
+				target: row(result, "button", "Save").ref,
+			},
+			observeAfter: true,
+		});
+		assert.equal(result.details.status, "action_submitted");
+		assert.ok(result.details.observationRef);
+	}
 	result = await call({
 		request: { op: "click", ref: result.details.observationRef, target: row(result, "button", "Save").ref },
 		observeAfter: true,
@@ -101,7 +115,11 @@ try {
 	assert.match(JSON.stringify(result.content), /Saved/);
 	const deadline = performance.now() + 2000;
 	while (!oracle && performance.now() < deadline) await delay(20);
-	assert.deepEqual(oracle, { name: "组合 café 你好", plan: "Pro" });
+	assert.deepEqual(oracle, {
+		name: "组合 café 你好",
+		plan: "Pro",
+		...(scenario === "scroll" ? { scrolled: true, targetVisible: true } : {}),
+	});
 	result = await call({ request: { op: "observe", text: "saved" } });
 	assert.equal(result.details.status, "observed");
 	assert.ok(result.details.filteredOut > 0);

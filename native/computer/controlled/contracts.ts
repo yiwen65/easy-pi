@@ -64,6 +64,10 @@ export const ControlledComputerInputSchema = Type.Object(
 				{ op: StringEnum(["select_option"] as const), ref: reference, target: reference },
 				{ additionalProperties: false },
 			),
+			Type.Object(
+				{ op: StringEnum(["scroll_into_view"] as const), ref: reference, target: reference },
+				{ additionalProperties: false },
+			),
 		]),
 	},
 	{ additionalProperties: false },
@@ -85,7 +89,9 @@ export function parseControlledComputerInput(input: unknown): ControlledComputer
 	)
 		throw new Error("Invalid computer observation filter");
 	if (
-		(input.request.op === "click" || input.request.op === "select_option") &&
+		(input.request.op === "click" ||
+			input.request.op === "select_option" ||
+			input.request.op === "scroll_into_view") &&
 		(!bounded(input.request.ref, 128) || !bounded(input.request.target, 128))
 	)
 		throw new Error("Invalid computer reference");

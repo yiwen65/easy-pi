@@ -195,6 +195,7 @@ interface VisibleObservation {
 	ref: string;
 	refs: Set<string>;
 	options: Set<string>;
+	scrollTargets: Set<string>;
 	selectors: Set<string>;
 }
 
@@ -233,7 +234,7 @@ export function createControlledComputerTool(
 			if (request.op === "observe" && "text" in request && profile !== "browser")
 				throw new Error("Text-filtered observation requires the browser profile");
 			if (
-				(request.op === "click" || request.op === "select_option") &&
+				(request.op === "click" || request.op === "select_option" || request.op === "scroll_into_view") &&
 				(previous?.ref !== request.ref || !previous.refs.has(request.target))
 			)
 				throw new AgentToolError("Computer paused: stale_observation; observe again.", {
@@ -244,6 +245,18 @@ export function createControlledComputerTool(
 			if (request.op === "select_option" && (profile !== "browser" || !previous?.options.has(request.target)))
 				throw new AgentToolError(
 					"Computer paused: action_unavailable; select_option requires a displayed option with that action. Observe again before a corrected request.",
+					{
+						status: "paused",
+						completedSteps: 0,
+						code: "action_unavailable",
+					},
+				);
+			if (
+				request.op === "scroll_into_view" &&
+				(profile !== "browser" || !previous?.scrollTargets.has(request.target))
+			)
+				throw new AgentToolError(
+					"Computer paused: action_unavailable; scroll_into_view requires a displayed browser target with that action. Observe again.",
 					{
 						status: "paused",
 						completedSteps: 0,
@@ -303,7 +316,9 @@ export function createControlledComputerTool(
 							? target.observe(512, 32, nativeSignal)
 							: request.op === "click" || request.op === "select_option"
 								? target.click(request.target, nativeSignal)
-								: target.plan(encodePlan(api, request), nativeSignal);
+								: request.op === "scroll_into_view"
+									? target.scrollIntoView(request.target, nativeSignal)
+									: target.plan(encodePlan(api, request), nativeSignal);
 					return {
 						cancel: call.cancel,
 						terminal: call.terminal,
@@ -316,7 +331,9 @@ export function createControlledComputerTool(
 								if (request.op === "execute" && api.ComputerResult.Plan.instanceOf(result))
 									return projectPlan(api, result.inner.value, request.steps.length);
 								if (
-									(request.op === "click" || request.op === "select_option") &&
+									(request.op === "click" ||
+										request.op === "select_option" ||
+										request.op === "scroll_into_view") &&
 									api.ComputerResult.Action.instanceOf(result)
 								) {
 									const effect = result.inner.value.effect;
@@ -391,7 +408,13 @@ export function createControlledComputerTool(
 					observation.elementsComplete === true &&
 					observation.truncated === false &&
 					observation.degraded !== true;
-				const view: VisibleObservation = { ref, refs: new Set(), options: new Set(), selectors: new Set() };
+				const view: VisibleObservation = {
+					ref,
+					refs: new Set(),
+					options: new Set(),
+					scrollTargets: new Set(),
+					selectors: new Set(),
+				};
 				const rows = observation.elements ?? [];
 				const counts = new Map<string, number>();
 				for (const row of rows) {
@@ -407,7 +430,13 @@ export function createControlledComputerTool(
 					profile === "browser"
 						? [...rows].sort(
 								(a, b) =>
-									Number((b.actions?.length ?? 0) > 0) - Number((a.actions?.length ?? 0) > 0) ||
+									Number(
+										b.actions?.some((action) => ["fill", "press", "select_option"].includes(action)) ?? false,
+									) -
+										Number(
+											a.actions?.some((action) => ["fill", "press", "select_option"].includes(action)) ??
+												false,
+										) ||
 									Number(Boolean(b.label?.trim() || b.value?.trim())) -
 										Number(Boolean(a.label?.trim() || a.value?.trim())),
 							)
@@ -442,7 +471,11 @@ export function createControlledComputerTool(
 						...(row.value !== undefined ? { value: row.value } : {}),
 						...(row.enabled !== undefined ? { enabled: row.enabled } : {}),
 						...(profile === "browser" && row.actions?.length
-							? { actions: row.actions.filter((action) => ["fill", "press", "select_option"].includes(action)) }
+							? {
+									actions: row.actions.filter((action) =>
+										["fill", "press", "select_option", "scroll_into_view"].includes(action),
+									),
+								}
 							: {}),
 						...(profile === "browser" && row.role === "option" && row.valueDescription !== undefined
 							? { group: row.valueDescription }
@@ -458,6 +491,8 @@ export function createControlledComputerTool(
 					bytes += size;
 					lines.push(line);
 					if (token) view.refs.add(token);
+					if (token && profile === "browser" && row.actions?.includes("scroll_into_view"))
+						view.scrollTargets.add(token);
 					if (
 						token &&
 						profile === "browser" &&

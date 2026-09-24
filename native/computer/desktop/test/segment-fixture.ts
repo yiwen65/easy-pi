@@ -275,6 +275,7 @@ export function fixture(
 					},
 					startPlan: forbidden,
 					startClick: forbidden,
+					startScrollIntoView: forbidden,
 					startImageClick: forbidden,
 					startImageKey: forbidden,
 					startImageScroll: forbidden,

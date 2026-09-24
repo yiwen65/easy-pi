@@ -222,6 +222,13 @@ export class ControlledComputerSession implements ComputerNativeSession {
 		return this.callNative((operation) => operation.startClick(elementToken), signal);
 	}
 
+	scrollIntoView(
+		elementToken: Parameters<NativeOperation["startScrollIntoView"]>[0],
+		signal?: AbortSignal,
+	): ControlledComputerCall {
+		return this.callNative((operation) => operation.startScrollIntoView(elementToken), signal);
+	}
+
 	plan(plan: Parameters<NativeOperation["startPlan"]>[0], signal?: AbortSignal): ControlledComputerCall {
 		return this.callNative((operation) => operation.startPlan(plan), signal);
 	}

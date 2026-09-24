@@ -63,7 +63,7 @@ async function fixture(option = false) {
 										elementIndex: 0n,
 										depth: 0,
 										role: option ? "option" : "textbox",
-										actions: option ? ["select_option"] : ["fill"],
+										actions: option ? ["select_option"] : ["fill", "scroll_into_view"],
 										label: "Name",
 										value: "",
 										enabled: true,
@@ -110,6 +110,15 @@ async function fixture(option = false) {
 					);
 				},
 				startSegment: forbidden,
+				startScrollIntoView() {
+					plans++;
+					finish(
+						new api.ComputerResult.Action({
+							value: { effect: api.ActionEffect.Unverifiable, route: api.ActionRoute.Dom },
+						}),
+						true,
+					);
+				},
 				startCrossWindowDrag: forbidden,
 				startPrepare: forbidden,
 				startNavigate: forbidden,
@@ -216,7 +225,7 @@ for (const visible of [true, false]) {
 
 for (const visible of [true, false])
 	for (const text of [undefined, "name"])
-		for (const action of ["execute", "click", "select_option"] as const) {
+		for (const action of ["execute", "click", "select_option", "scroll_into_view"] as const) {
 			test(
 				`browser ${action} requires the exact canonical observation: visible=${visible}, text=${text}`,
 				{ skip: !sdk },

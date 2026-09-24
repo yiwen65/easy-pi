@@ -4,6 +4,10 @@ These patches are build/source materials, not a standalone SDK installer. Curren
 
 The following chronological records retain their original qualification limits. Statements about then-pending stages are historical, not the current task status. P03/P04 patches are alternatives against the same pinned Cua base, **not sequential patches**. P05 is incremental against the qualified browser source. P06 discovery is cumulative after qualified P05; apply the fast-build patch after qualified discovery. Do not stack alternative P06 candidates or apply these increments to bare upstream.
 
+## Bounded browser scroll increment
+
+The current General SDK pins additionally include [browser-scroll-into-view.patch](browser-scroll-into-view.patch), applied after the qualified browser-listener-click source. See [scroll provenance and qualification](browser-scroll-into-view.md). Historical qualification records below are not claims about the current build.
+
 ## P06 discovery candidate (limited qualification)
 
 - [`p06-discovery.patch`](./p06-discovery.patch):37 Rust paths; SHA-256 `8314efe72f71e14b438776acbed0293fefd187f82d925c8b6a49f5dc4f489e51`. Cumulative after qualified P05, **an alternative to** the P06 patches below. Independent apply/byte/reverse proof: `.artifacts/computer/p06/discovery-eligible-patch-verification.json`.

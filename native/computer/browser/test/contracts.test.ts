@@ -29,6 +29,8 @@ test("browser protocol is fixed preparation/navigation plus the existing bounded
 	assert.deepEqual(parseControlledBrowserInput(click), click);
 	const option = { request: { op: "select_option", ref: "observation", target: "observation:1" } };
 	assert.deepEqual(parseControlledBrowserInput(option), option);
+	const scroll = { request: { op: "scroll_into_view", ref: "observation", target: "observation:2" } };
+	assert.deepEqual(parseControlledBrowserInput(scroll), scroll);
 });
 
 test("model input cannot choose executable/profile/session, script, foreground or credential URLs", () => {
@@ -42,6 +44,10 @@ test("model input cannot choose executable/profile/session, script, foreground o
 		{ op: "click", ref: "o", target: "界".repeat(100) },
 		{ op: "select_option", ref: "o", target: "t", value: "guessed" },
 		{ op: "select_option", ref: "o", target: "界".repeat(100) },
+		{ op: "scroll_into_view", ref: "o", target: "t", script: "arbitrary()" },
+		{ op: "scroll_into_view", ref: "o", target: "t", direction: "down" },
+		{ op: "scroll_into_view", ref: "o", target: "界".repeat(43) },
+		{ op: "scroll_into_view", ref: "界".repeat(43), target: "t" },
 		...[
 			"javascript:1",
 			"file:///private",
@@ -58,6 +64,7 @@ test("optional post-action observation is browser-only, true-only and does not l
 		{ op: "navigate", url: "https://example.test/" },
 		{ op: "click", ref: "o", target: "o:1" },
 		{ op: "select_option", ref: "o", target: "o:1" },
+		{ op: "scroll_into_view", ref: "o", target: "o:1" },
 		{ op: "execute", ref: "o", steps: [{ op: "fill", target: { ref: "o:1" }, text: "你好" }] },
 	]) {
 		const input = { request, observeAfter: true };

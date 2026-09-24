@@ -160,7 +160,7 @@ for (const id of selected) {
 			manifestPath = join(caseDir, "capabilities.yaml");
 			writeFileSync(
 				manifestPath,
-				`version: 3\nexpires_after: 10m\nidle_timeout: 3m\nresources:\n  browser:\n    profiles: [{kind: isolated}]\n    origins: ["about:blank", "${new URL(url).origin}"]\nallow:\n  tools: [browser_prepare, get_browser_state, browser_navigate, browser_click, browser_type]\n`,
+				`version: 3\nexpires_after: 10m\nidle_timeout: 3m\nresources:\n  browser:\n    profiles: [{kind: isolated}]\n    origins: ["about:blank", "${new URL(url).origin}"]\nallow:\n  tools: [browser_prepare, get_browser_state, browser_navigate, browser_click, browser_type, browser_scroll_into_view]\n`,
 			);
 		}
 		feature = createComputerFeature(mode === "browser" ? { browserBundlePath: bundle, manifestPath } : {});
