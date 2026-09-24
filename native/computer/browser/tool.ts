@@ -188,6 +188,9 @@ export function createControlledBrowserTool(
 								observationRef: observed.details.observationRef,
 								nativeComplete: observed.details.nativeComplete,
 								viewTruncated: observed.details.viewTruncated,
+								...(observed.details.presentationOmitted
+									? { presentationOmitted: observed.details.presentationOmitted }
+									: {}),
 							},
 						};
 					}

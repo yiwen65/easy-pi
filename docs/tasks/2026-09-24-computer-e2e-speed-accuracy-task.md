@@ -417,6 +417,28 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-018 — 浏览器观察展示冗余精简
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 减少模型接收的重复观察文本，不牺牲唯一内容、动作、状态值和新引用边界。
+- Inputs and prerequisites: T-017 已安装桥接及 model-scroll-installed/model-general-installed 原始观察；Chrome 样本展示层重复与空结构约占行文本 22%–37%，只作潜力估算。
+- Scope or files: controlled/tool.ts 浏览器展示投影、browser/tool.ts 合并元数据、browser/test/tool.test.ts；不改原生观察、授权、SDK、个人应用或原始会话记录。
+- Expected output: 展示冗余精简、反例测试、同任务真实输出字节对照及真实模型邻域。
+- Dependencies: T-013.
+- Execution steps:
+  1. 用真实 trace 区分纯展示副本与有意义信息，固定可省略条件。
+  2. 仅省略 enabled=false 且无文本/值/动作的 none 行，或当前输出已完整包含对应 StaticText 的无值无动作 InlineTextBox。过滤或预算丢弃的文字不能充当已展示依据。
+  3. 保留过滤前 selector 歧义计数；省略引用无输入授权；测试后独立打包与确定性 fixture，再模型复测。
+- Acceptance criteria:
+  - 同 fixture 完成相同业务结果和关闭，观察文本减少；模型成功率不下降，实测延迟与费用单独报告，不从字节减少推导稳定提速。
+- Verification method:
+  - 反例单测、provider context 与 legacy native 邻域、实际 Chrome 回执与原始输出、真实模型固定任务。
+- Validation evidence: 精简预期先红后绿；28 browser 测试通过，覆盖唯一文本/值/动作保留、预算未展示副本保留、重复 selector 不变唯一、丢弃引用拒绝、合并新观察计数与操作。54 context/desktop/segment、native TS、8 qualified package、根 check 通过。bridge-form 与 bridge-form-compact 相同六调用及独立回执，文本 15752→12010 字节（-23.8%）；scroll 七调用 20110→15026（-25.3%），实际滚动/可见目标回执相同；关闭 C06b0/C06b1。证据 /tmp/epi-browser-scroll.1dusJS；package-compact 可回退安装，旧包 installed-before-compact。model-compact-installed 五任务验证进行中；尚未将文本缩减声称模型延迟收益。
+- Installed model evidence: model-compact-installed 五项 5/5、零工具错误、正常关闭到 C06b6；scroll 18.733s/5、form 22.602s/6、dialog 24.131s/6、navigation 24.424s/7、click-tab-2 33.335s/11，总费用 0.128878 USD。click-tab-2 相较早先 7 回合出现额外搜索，初始可见动作/任务文字对照未丢失；早先样本还缺少能力限制提示，不能直接归因精简。随后冻结同一提示词/原生/seed，model-compact-control-tab 未精简 33.677s/9/0.0545032 USD，model-compact-repeat-tab 精简 33.586s/9/0.0454156 USD；均 rawReward=1、零工具错误、关闭。仅小样本顺序对照，不声称显著延迟改善。最终恢复精简安装，bridge SHA256 a8208f8e0164eded0a4bc5c5f7fc8b555b1a58e1433b4d861490ab3de2c811cc；保留原包和全部样本，后续继续模型往返与状态信息优化。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 

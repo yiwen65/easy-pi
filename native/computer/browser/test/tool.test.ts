@@ -39,6 +39,8 @@ function fixture(
 		option?: boolean;
 		noise?: number;
 		blankStructure?: boolean;
+		presentationNoise?: boolean;
+		presentationTextValue?: string;
 		duplicate?: boolean;
 		observeFailureAfter?: number;
 		clickTerminal?: Promise<void>;
@@ -186,6 +188,40 @@ function fixture(
 														actions: ["select_option"],
 													},
 												]
+											: []),
+										...(options.presentationNoise
+											? [
+													{
+														role: "StaticText",
+														label: "Repeated text",
+														suffix: "text",
+														...(options.presentationTextValue !== undefined
+															? { value: options.presentationTextValue }
+															: {}),
+													},
+													{ role: "InlineTextBox", label: "Repeated text", suffix: "duplicate" },
+													{ role: "InlineTextBox", label: "Unique fragment", suffix: "unique" },
+													{
+														role: "InlineTextBox",
+														label: "Repeated text",
+														suffix: "value",
+														value: "state",
+													},
+													{
+														role: "InlineTextBox",
+														label: "Repeated text",
+														suffix: "action",
+														actions: ["press"],
+													},
+													{ role: "none", label: "", suffix: "empty", enabled: false },
+													{ role: "none", label: "Structural text", suffix: "labelled", enabled: false },
+												].map(({ suffix, ...row }, index) => ({
+													...row,
+													elementIndex: BigInt(200 + index),
+													depth: 1,
+													inWebContent: true,
+													elementToken: `${snapshotId}:${suffix}`,
+												}))
 											: []),
 									],
 								},
@@ -448,6 +484,58 @@ test(
 		assert.deepEqual(f.calls, ["observe"]);
 	},
 );
+
+test(
+	"browser presentation compaction preserves unique text, values, actions and reference boundaries",
+	{ skip: !sdk },
+	async (t) => {
+		const f = fixture({ presentationNoise: true });
+		t.after(() => f.host.close());
+		const seen = await f.tool.execute("o", { request: { op: "observe" } });
+		const text = seen.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		for (const suffix of ["text", "unique", "value", "action", "labelled"])
+			assert.ok(text.includes(`b-snapshot-1:${suffix}`));
+		for (const suffix of ["duplicate", "empty"])
+			assert.ok(!text.includes(`b-snapshot-1:${suffix}`), `presentation-only ${suffix} should be omitted`);
+		assert.match(text, /Unique fragment/);
+		assert.match(text, /Structural text/);
+		assert.match(text, /"value":"state"/);
+		assert.match(text, /"actions":\["press"\]/);
+		assert.ok(!text.includes('"selector":{"role":"InlineTextBox","label":"Repeated text"}'));
+		assert.equal(seen.details.presentationOmitted, 2);
+		assert.equal(seen.details.viewTruncated, false);
+		await assert.rejects(
+			f.tool.execute("hidden", { request: { op: "click", ref: "b-snapshot-1", target: "b-snapshot-1:duplicate" } }),
+			/stale_observation/,
+		);
+		assert.deepEqual(f.calls, ["observe"]);
+	},
+);
+
+test("budget-dropped static text cannot suppress its visible inline copy", { skip: !sdk }, async (t) => {
+	const f = fixture({ presentationNoise: true, presentationTextValue: "large".repeat(1000) });
+	t.after(() => f.host.close());
+	const seen = await f.tool.execute("o", { request: { op: "observe" } });
+	const text = JSON.stringify(seen.content);
+	assert.ok(!text.includes("b-snapshot-1:text"));
+	assert.ok(text.includes("b-snapshot-1:duplicate"));
+	assert.equal(seen.details.viewTruncated, true);
+	assert.equal(seen.details.presentationOmitted, 1);
+});
+
+test("combined observations retain presentation counts and fresh actionable refs", { skip: !sdk }, async (t) => {
+	const f = fixture({ presentationNoise: true });
+	t.after(() => f.host.close());
+	const first = await f.tool.execute("o", { request: { op: "observe" } });
+	const next = await f.tool.execute("p", { ...execute(first.details.observationRef!), observeAfter: true });
+	assert.equal(next.details.presentationOmitted, 2);
+	assert.equal(next.details.observationRef, "b-snapshot-2");
+	const clicked = await f.tool.execute("c", {
+		request: { op: "click", ref: "b-snapshot-2", target: "b-snapshot-2:action" },
+	});
+	assert.equal(clicked.details.status, "action_submitted");
+	assert.deepEqual(f.calls, ["observe", "plan", "observe", "click"]);
+});
 
 test("post-action observe waits for terminal and preserves submission facts", { skip: !sdk }, async (t) => {
 	const terminal = deferred<void>();

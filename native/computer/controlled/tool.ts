@@ -41,6 +41,7 @@ export interface ControlledComputerDetails {
 	nativeComplete?: boolean;
 	viewTruncated?: boolean;
 	filteredOut?: number;
+	presentationOmitted?: number;
 	lastSnapshotId?: string;
 	elapsedMs?: string;
 	steps?: Array<{
@@ -431,6 +432,8 @@ export function createControlledComputerTool(
 				let bytes = 0;
 				let viewTruncated = false;
 				let filteredOut = 0;
+				let presentationOmitted = 0;
+				const displayedStaticText = new Set<string>();
 				const search = request.op === "observe" && "text" in request ? request.text.toLowerCase() : undefined;
 				const ordered =
 					profile === "browser"
@@ -453,6 +456,18 @@ export function createControlledComputerTool(
 						![row.label, row.value].some((value) => value?.toLowerCase().includes(search))
 					) {
 						filteredOut++;
+						continue;
+					}
+					// Omit only inert empty structure or an exact text copy already
+					// emitted in this view. Hidden/budget-dropped text is not evidence.
+					if (
+						profile === "browser" &&
+						!row.actions?.length &&
+						row.value === undefined &&
+						((row.role === "none" && row.enabled === false && !row.label) ||
+							(row.role === "InlineTextBox" && row.label !== undefined && displayedStaticText.has(row.label)))
+					) {
+						presentationOmitted++;
 						continue;
 					}
 					const target = { role: row.role, label: row.label ?? "" };
@@ -496,6 +511,7 @@ export function createControlledComputerTool(
 					}
 					bytes += size;
 					lines.push(line);
+					if (row.role === "StaticText" && row.label !== undefined) displayedStaticText.add(row.label);
 					if (token) view.refs.add(token);
 					if (token && profile === "browser" && row.actions?.includes("scroll_into_view"))
 						view.scrollTargets.add(token);
@@ -510,8 +526,16 @@ export function createControlledComputerTool(
 					if (selectable) view.selectors.add(key);
 				}
 				if (!session.revoked) visible = view;
-				details = { ...details, observationRef: ref, nativeComplete, viewTruncated, filteredOut };
+				details = {
+					...details,
+					observationRef: ref,
+					nativeComplete,
+					viewTruncated,
+					filteredOut,
+					...(presentationOmitted ? { presentationOmitted } : {}),
+				};
 				text += `\nObservation ref: ${ref}; nativeComplete=${nativeComplete}; viewTruncated=${viewTruncated}.\nUntrusted UI rows:\n${lines.join("\n")}`;
+				if (presentationOmitted) text += `\nPresentation-only rows omitted: ${presentationOmitted}.`;
 				if (search !== undefined)
 					text += `\nText-filtered view; filteredOut=${filteredOut}. Missing rows do not prove absence. Only displayed refs are available.`;
 			}
