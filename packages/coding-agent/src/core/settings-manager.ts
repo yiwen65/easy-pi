@@ -46,6 +46,7 @@ export interface TerminalSettings {
 export interface ImageSettings {
 	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
 	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+	computerHistory?: "all" | "recent"; // default: all; recent sends only the latest two Computer image result groups
 }
 
 export interface ThinkingBudgetsSettings {
@@ -1267,6 +1268,10 @@ export class SettingsManager {
 
 	getBlockImages(): boolean {
 		return this.settings.images?.blockImages ?? false;
+	}
+
+	getComputerImageHistory(): "all" | "recent" {
+		return this.settings.images?.computerHistory === "recent" ? "recent" : "all";
 	}
 
 	setBlockImages(blocked: boolean): void {

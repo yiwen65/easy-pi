@@ -14,7 +14,7 @@
 <!-- task-doc-section:scope-non-goals -->
 ## Scope and non-goals
 
-仅 pi 内 Computer 工具与定向性能验证。禁止放宽原生安全检查、操作用户业务窗口、调用网站 API；付费模型 A/B 等待单独授权。
+仅 pi 内 Computer 工具与定向性能验证。禁止放宽原生安全检查、操作用户业务窗口、调用网站 API；用户已授权最多 6 次真实模型 A/B，不执行模型返回动作。
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -28,7 +28,7 @@
 ## Assumptions and open questions
 
 - Assumption: 合并不依赖新信息的选择与观察可省去一轮模型请求；通过工具回归和本地计时验证。
-- Open question: 是否批准最多 6 次真实模型 A/B 请求，已异步询问；未批准不得调用。
+- Open question: 真实桌面仍由 PID 91484 占用，等待用户正常退出；快速截图模式启用待确认。已获授权的 6 次真实模型 A/B 全部完成。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -39,7 +39,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-002。
+- Dependency graph: T-001 -> T-003 -> T-002。
 - Parallel batches: 无，协调者串行执行。
 - Serialization constraints: 工具契约、实现和验证共用状态，串行修改。
 
@@ -73,16 +73,35 @@
 - Inputs and prerequisites: T-001；真实模型实验需用户授权。
 - Scope or files: 定向测试脚本、本文档、打包产物。
 - Expected output: 真实窗口证据与诚实的性能边界。
-- Dependencies: T-001.
+- Dependencies: T-003.
 - Execution steps:
   1. 运行本地窗口对照；获授权后最多 6 次模型请求，否则保留该验证缺口。
 - Acceptance criteria:
   - 原生动作与引用安全未退化，给出实际往返减少量，不虚构端到端收益。
 - Verification method:
   - 独立 fixture 与已有模型日志对照，检查 scoped diff。
-- Validation evidence: 打包校验成功（1428 files），候选位于 /tmp/easy-pi-computer-latency.WQKu7w/computer；未安装候选。lsof 确认 PID 91484 持有 D 0318，未干预运行中的会话。未调用真实模型。
-- Blocker: 真实窗口由当前 easy-pi 会话占用；付费模型 A/B 尚未获得单独授权。
-- Unblock condition: 用户正常退出持有者；明确允许最多 6 次模型请求或选择仅本地验证。
+- Validation evidence: bridge 打包校验成功（1428 files），候选位于 /tmp/easy-pi-computer-latency.WQKu7w/computer；未安装候选。PID 91484 仍运行，未干预桌面。6 次真实模型请求成功；独立 tsgo 构建检查失败于 src/extensions/index.ts:12 和 pi-child-session-host.ts:210 的源码/已安装 dist ExtensionAPI 类型不一致，未以失败输出覆盖安装。
+- Blocker: 真实窗口由当前 easy-pi 会话占用；快速模式启用未确认；安装前需解决现有 dist 声明漂移并重新验证编译。
+- Unblock condition: 用户正常退出持有者、确认截图策略后恢复 GUI 验证；一致的构建检查通过后安装。
+
+### [x] T-003 — 可选精简历史截图上下文
+
+- Status: done
+- Owner: coordinator
+- Objective: 根据已完成 A/B 实现最近两组 Computer 截图策略，默认仍保留全部，启用需用户确认。
+- Inputs and prerequisites: T-001；6 次 ABBAAB 固定请求回放结果。
+- Scope or files: core/computer/context.ts、sdk.ts、settings-manager.ts、对应测试与设置文档。
+- Expected output: 请求上下文投影，不改会话存储、文本、用户图片或当前图片字节。
+- Dependencies: T-001.
+- Execution steps:
+  1. 增加可选设置和纯投影；验证原图留存、跨窗口双图整组保留、最新引用安全。
+- Acceptance criteria:
+  - all 默认不变，recent 保留最近两组；SDK 接线及安全回归通过。
+- Verification method:
+  - 单元/SDK faux/Computer 边界测试和 root check；原会话离线投影与实测载荷对照。
+- Validation evidence: Computer 和 settings 定向 vitest 11 files / 191 passed，包含 7 项新测试；npm run check 通过，恢复其无关格式改动。A 23.588/29.043/33.368 秒；B 11.816/6.296/9.529 秒；6 次均返回 observe，未执行；实验为 SSE 固定历史回放，不是完整任务 A/B。
+- Blocker: None.
+- Unblock condition: None.
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -100,10 +119,30 @@
 - 2026-09-24: 建立串行任务；T-001 开始，等待付费请求授权期间先处理本地可验证路径。
 - 2026-09-24: T-001 回归、类型和仓库检查通过，标记 done；保留原生检查和历史截图，恢复仓库检查的无关格式改动。
 - 2026-09-24: T-002 开始；完成候选打包，发现桌面被 PID 91484 占用并请求正常退出，随后标记 blocked。模型测试授权亦待回复。
+- 2026-09-24: 用户批准最多 6 次真实请求，T-002 恢复 in_progress；ABBAAB 比较全历史与仅最近两张结果图片，固定任务/模型/低思考/传输，不执行返回动作。
+- 2026-09-24: 六次请求全部完成；新增 T-003 开始实现可选投影，T-002 的最终交付依赖 T-003。桌面占用仍未解除。
+- 2026-09-24: T-003 测试与仓库检查通过，标记 done；重新运行 desktop 全部定向测试，113 passed / 1 GUI skipped。T-002 等待桌面和设置选择，标记 blocked。独立构建发现源码与旧 dist 声明冲突，未安装。
+
+### 固定请求 A/B 证据
+
+同一原会话截止 03:05:42.658 UTC 的历史，gpt-6-astra / low / SSE，maxTokens 1024、maxRetries 0；按 ABBAAB 顺序请求，A/B 各自独立缓存键、同组重复相同载荷。每组仅 3 次，不提供可靠尾延迟或完整任务质量结论。
+
+| 指标 | A 全部截图 | B 最近两组 |
+| --- | --- | --- |
+| 图片数 | 15 | 2 |
+| 单次原始耗时（秒） | 23.588 / 29.043 / 33.368 | 11.816 / 6.296 / 9.529 |
+| 平均耗时（秒） | 28.666 | 9.214 |
+| 请求字节 | 10,285,111 | 654,384 |
+| 输入 token（含缓存） | 61,506 | 28,922 |
+| 返回动作 | 3 次 observe | 3 次 observe |
+
+固定请求平均耗时降低 67.9%，请求体降低 93.6%。首个请求两组均无缓存；后续两组均命中缓存，A 的缓存命中并未消除等待。序列化均低于 1.6ms，等待主要在流首事件之前；无法仅凭此区分上传、网络与服务端排队/处理。投影滚动时缓存边界和任务成功率尚未实测，不能外推整体任务速度。旧图片仍存档，模型失去旧图片视觉细节是明确代价，默认 all 未改。
+
+原始无凭据指标：`/tmp/easy-pi-computer-latency.WQKu7w/model-ab-results.jsonl`；实验脚本：同目录 `model-ab.mjs`，真实调用由 `PI_REAL_MODEL_EVAL=1` 门控；6 次额度已耗尽，未经新授权不重跑。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 本地测试通过；候选打包校验通过，T-002 待真实窗口及模型对照。
+- Evidence: T-001 与 T-003 本地测试通过；bridge 候选打包校验通过，6 次模型对照完成；T-002 待一致构建、安装与真实窗口验证。
 - Limitations: 不能把减少一轮调用换算成已证明的端到端加速；未改变生产截图策略，未补齐 117.5 秒间隔的遥测。

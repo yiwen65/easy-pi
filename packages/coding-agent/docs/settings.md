@@ -207,6 +207,14 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max. Applies to `@file` attachments, `read`, and images returned by tools |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+| `images.computerHistory` | `"all"` or `"recent"` | `"all"` | With a native Computer binding, `"recent"` sends only the latest two image-bearing Computer result groups; older screenshots become explicit text placeholders in model requests. Original session images and all text remain stored. User/other-tool images are unchanged; cross-window image pairs stay together. |
+
+Computer `"recent"` mode trades older visual recall for smaller requests. Record important
+screen facts in text before moving on, or keep `"all"` for tasks requiring older-image
+comparisons. Current screenshots are not resized or rewritten. This does not relax
+reference validation or renew old input authority. Moving the retention boundary can
+invalidate part of the provider cache; smaller requests do not guarantee lower latency
+for every workload. `images.blockImages` still overrides all image delivery.
 
 ### Shell
 
