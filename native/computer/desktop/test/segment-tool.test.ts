@@ -14,6 +14,29 @@ function segment(ref = "snapshot-1", text = "你好🦀"): Extract<DesktopInput[
 }
 
 test(
+	"window refs cannot authorize segments; errors explain how to obtain the right ref",
+	{ skip: !enabled },
+	async () => {
+		for (const image of [false, true]) {
+			const f = fixture();
+			try {
+				await f.setup(image);
+				await assert.rejects(
+					f.call({ ...segment("window"), actions: [{ op: "key", key: "Tab" }] }),
+					/stale_observation.*segment\.ref.*Observation ref.*Image ref.*window ref/,
+				);
+				assert.equal(f.segments.length, 0);
+				await f.call(image ? { op: "capture", maxDimension: 512 } : { op: "observe" });
+				await f.call({ ...segment(image ? "image-2" : "snapshot-2"), actions: [{ op: "key", key: "Tab" }] });
+				assert.equal(f.segments.length, 1);
+			} finally {
+				await f.host.close();
+			}
+		}
+	},
+);
+
+test(
 	"real segment values use partial retained rows, preserve identifier and publish one fresh image",
 	{ skip: !enabled },
 	async () => {

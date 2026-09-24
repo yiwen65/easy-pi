@@ -655,6 +655,8 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+			const definition = this._toolDefinitions.get(toolCall.name)?.definition;
+			const preservesComputerEvidence = definition !== undefined && this._computer?.tools.includes(definition);
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
 				? await runner.emitToolResult({
@@ -670,10 +672,14 @@ export class AgentSession {
 				: undefined;
 
 			const content = hookResult?.content ?? result.content ?? [];
-			// Runs after the extension hook so images injected or replaced by extensions are normalized too.
-			const normalizedContent = await normalizeToolResultImages(content, {
-				autoResizeImages: this.settingsManager.getImageAutoResize(),
-			});
+			// Computer binds refs and pixel coordinates to exact result bytes. Generic resizing would
+			// invalidate even untouched evidence. Keep extension changes: the final-context observer
+			// must still reject altered evidence. Only actual binding definitions get this exemption.
+			const normalizedContent = preservesComputerEvidence
+				? content
+				: await normalizeToolResultImages(content, {
+						autoResizeImages: this.settingsManager.getImageAutoResize(),
+					});
 
 			if (!hookResult && normalizedContent === content) {
 				return undefined;

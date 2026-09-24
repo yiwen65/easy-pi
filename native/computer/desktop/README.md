@@ -20,6 +20,16 @@ clicks, dragging, two-axis scrolling, and window actions. The closed schemas in
 `contracts.ts`, `segment-contracts.ts` and `drag-contracts.ts` define accepted
 requests; this is not an arbitrary script interface.
 
+References have distinct roles: `discover` returns window refs used only by
+`select`/`select_destination`; `segment.ref` requires the latest **Observation
+ref** from `observe` or **Image ref** from `capture` (or fresh segment evidence).
+An element ref belongs in `target.ref`, not `segment.ref`. For example, after
+selecting `w…`, an observation headed `Observation ref: s00000001` authorizes a
+segment with `ref: "s00000001"`, not `ref: "w…"` or `ref: "s00000001:13"`.
+Every Computer call consumes the previous evidence, even when rejected. After
+`stale_observation`, read again and use the newly returned evidence ref; selecting
+the window again does not grant input authority.
+
 The desktop route works with existing applications/browser profiles. Native
 routing prefers background delivery and automatically prepares or uses foreground
 delivery when needed; results report the actual route. Foreground work may
@@ -32,8 +42,13 @@ Fresh evidence is required across relevant changes; unknown input is never
 blindly replayed. Recovery stays in the original Agent loop and shared scheduler,
 with a bounded native budget, not a second planner or recording/replay system.
 
-Only current model-visible tool results grant image/element refs. Filtering,
-compaction, renewal and capability removal invalidate old evidence. Children get
+Only current model-visible tool results grant image/element refs. Computer binding
+results bypass generic tool-image resizing: changing screenshot bytes or dimensions
+after publication would invalidate both evidence fingerprints and pixel coordinates.
+Extension edits and context filtering still invalidate altered evidence. Provider
+image-size limits still apply; request a smaller native `capture.maxDimension`
+instead of resizing an already granted screenshot. Filtering, compaction, renewal
+and capability removal invalidate old evidence. Children get
 fresh bindings sharing the original host/scheduler; disposing a child does not
 close that host. Final owners must await feature close. Missing or failed
 rendering and emergency stop latch the feature, revoke descendants and stop the

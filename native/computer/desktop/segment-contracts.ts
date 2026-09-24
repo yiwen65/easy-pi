@@ -110,7 +110,11 @@ export const ComputerSegmentInputSchema = Type.Object(
 			{
 				op: Type.Literal("segment"),
 				previousEffect: Type.Optional(Type.Literal("observed")),
-				ref: reference,
+				ref: Type.String({
+					...reference,
+					description:
+						"Latest Observation ref from observe or Image ref from capture/fresh segment evidence. Never a discover/window ref or an element ref. Consumed by the next Computer call, even if rejected.",
+				}),
 				actions: Type.Array(action, { minItems: 1, maxItems: 64 }),
 				expected: Type.Union([
 					Type.Object({ kind: Type.Literal("value"), target, value: text }, closed),

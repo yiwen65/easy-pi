@@ -38,7 +38,11 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		return [source, destination] as const;
 	};
 	const paused = (reason: string): never => {
-		throw new AgentToolError(`Computer paused: ${reason}; observe again.`, { status: "paused", code: reason });
+		const guidance =
+			reason === "stale_observation"
+				? "Observe or capture again. Set segment.ref to the new Observation ref or Image ref, never a window ref or element ref; execute.ref requires the Observation ref. Every Computer call consumes the previous evidence."
+				: "observe again.";
+		throw new AgentToolError(`Computer paused: ${reason}; ${guidance}`, { status: "paused", code: reason });
 	};
 	const tool: AgentTool<typeof DesktopInputSchema, unknown> = {
 		name: "computer",
@@ -46,6 +50,8 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		description:
 			"Discover windows (optional literal, case-insensitive app/title filters and focused:true), explicitly select one returned ref, then observe semantic elements or capture an image. Focused child surfaces require their own selection; parent refs do not include them. " +
 			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
+			"Refs are not interchangeable: discover refs are for select/select_destination only. segment.ref must be the latest Observation ref from observe or Image ref from capture, not the selected window ref or an element ref. Element refs go in target.ref; point.ref uses the Image ref. " +
+			"Every Computer call consumes the previous evidence, including rejected calls; after stale_observation, observe/capture again and use the NEW evidence ref. " +
 			"Segment support requires the qualified native candidate; legacy execute/click/scroll/key routes remain available. " +
 			"Segments may automatically foreground the selected window with agent priority, without blocking physical input. " +
 			"For cross-window drag: keep the selected source, discover and select_destination using a new catalog ref, then capture_pair and drag_between using both images. " +
