@@ -643,6 +643,31 @@
 
 T-027 最终结论：候选不安装，源码和候选专用测试已精确撤回至原版；完整 patch、包和原始结果保存在 /tmp/epi-wrapped-text.7avBaa/{rejected.patch,package,staged-candidate,ab.json}。十二例全通过、全关闭 C0711，handle 78168 正常退出。页内标签 A=29.844/26.940/16.488s、9/9/5 轮；B=16.417/16.974/17.755s、5/5/5 轮；第三组反向慢 1.267s。输入 A=13.964/14.608/15.202s、4/4/4 轮；B=16.865/16.357/22.130s、4/4/5 轮，三组均慢，最后一次多一轮。不能凭这些小样本证明因果退化，也不能证明通用提速。观察空间被其他正文填满，输入观察字节 13231→13254，未减少上下文；标签前两组省下过滤/恢复观察、第三组原版本就无需补读。按最小复杂度原则拒绝默认加入父文本片段规则。候选 41 browser、58 context/desktop、严格 native TS、根 check 均通过，但正确性绿灯不替代性能资格。安装 bridge 仍为 4938b97cdf9e145e65351baf83ee73491bda550ef7ed9bd469571786a4e5beaf。下一步回到通用能力缺口及动作契约，不继续无依据地堆积投影启发式；Goal active。
 
+### [ ] T-028 — 原生桌面路径的通用能力缺口复测
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 区分 browser profile 缺失能力与原生 desktop 路径的真实失败，优先复用已存在的拖拽、键盘、窗口能力而不新增框架。
+- Inputs and prerequisites: T-026 浏览器路径 drag-box/login-user/chrome-tabs 失败；当前安装版未被 T-027 实验替换。
+- Scope or files: 现有 real-model/run.mjs 的 desktop 模式和固定三个任务，仍只允许 owned CfT 测试窗口。
+- Expected output: 三例真实模型 oracle/trace/关闭证据，定位首个动作契约或原生失败，不混算 browser/desktop 分数。
+- Dependencies: T-026, T-027.
+- Execution steps:
+  1. 原生 desktop 模式运行 drag-box、login-user、chrome-tabs，单任务 24 回合/180s，按独立 oracle 判定。
+  2. 检查实际调用、图片和 effect，区分不会表达、缺能力、拒绝、未投递与验证失败。
+  3. 有证据后修复最小责任点并回放；不放宽 secure/目标身份/权限或未知输入不重放。
+- Acceptance criteria:
+  - 三任务都有真实结果或明确停止原因；失败保留。
+  - 若做产品改动，须先复现再同路径验证；不能从可用 API 推断任务成功。
+- Verification method: /tmp/epi-desktop-gaps.9uZ7xI/model 原始 trace、图片、oracle、summary。
+- Validation evidence: 原安装版 gpt-6-sol/semantic/desktop/seed42 三例完成，handle 8256 exit1：drag-box 64.736s/11轮失败、login-user 40.045s/9轮失败、chrome-tabs 51.536s/14轮通过，3/3 正常关闭，报告费用 0.277290 USD。两个失败各有三次原生 stale_image_observation/inputCommitted=false，之后 recovery_exhausted；多标签成功也包含一次 stale_image 和 focus_effect_unknown，不称零错误。原生 ImageReference::matches 比较整张 PNG SHA256，revalidate 重新截图，定位到动态倒计时与模型往返冲突。
+- Blocker: None.
+- Unblock condition: None.
+
+T-028 诊断与局部修复：/tmp/epi-desktop-gaps.9uZ7xI/diagnostic-hidden-countdown 首次仅改 inline style，页面每秒 setAttribute(style) 将隐藏覆盖，37.927s/8轮仍失败；该实验无效，保留但不用于否定倒计时假设。改独立 CSS !important 并在一次计时更新后检查 computed visibility=hidden，diagnostic-hidden-countdown-verified 在原包完成拖拽+点击提交、raw reward oracle 通过（25.170s/6轮/0.0598752 USD）；计时和业务 oracle 未改。真实 trace 显示拖拽 dispatched/36 events、提交 dispatched/2 events，均无重放。仅诊断，不计入原始 benchmark 分数，不称产品修复。三个模型 handles 8256/85190/41095 均 terminal，无待运行 GUI。
+
+T-028 动作提示修复：模型误把 semantic ref 当 image ref 时，原错误仅提示 observe again，诱发再次 observe 的无效循环。desktop/tool.ts 为 stale_image 明确提示 No input dispatched + capture + 新 Image ref，指出 Observation/element refs 不可授权坐标；未改任何校验或 native 输入。recovery-guidance 新测试在旧代码确切失败、修改后通过并验证错误前无输入、重新 capture 后可发单次动作；38 desktop/segment/recovery 测试、严格 native TS 和根 check 通过，四处无关格式变化已恢复。候选 package-guidance 已构建，尚未安装。整窗限制是有意保护，因此已单独请求用户允许受限局部像素校验；在回复前不修改该保护。最小提示修复不解决动态页原生失效根因，T-028 保持 in_progress。
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 

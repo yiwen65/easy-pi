@@ -5,6 +5,38 @@ import { fixture } from "./segment-fixture.ts";
 const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
 
 test(
+	"semantic refs rejected as image points direct recovery to capture, not another observe",
+	{ skip: !enabled },
+	async () => {
+		const f = fixture();
+		try {
+			await f.setup();
+			await assert.rejects(
+				f.call({
+					op: "segment",
+					ref: "snapshot-1",
+					actions: [{ op: "click", point: { ref: "snapshot-1", x: 1, y: 1 } }],
+					expected: { kind: "visual", description: "Target opens" },
+				}),
+				/stale_image.*capture.*Image ref.*Observation/s,
+			);
+			assert.equal(f.segments.length, 0);
+			assert.equal(f.captures.length, 0);
+			await f.call({ op: "capture", maxDimension: 512 });
+			await f.call({
+				op: "segment",
+				ref: "image-2",
+				actions: [{ op: "click", point: { ref: "image-2", x: 1, y: 1 } }],
+				expected: { kind: "visual", description: "Target opens" },
+			});
+			assert.equal(f.segments.length, 1);
+		} finally {
+			await f.host.close();
+		}
+	},
+);
+
+test(
 	"changed image stops before input and explains how to obtain usable evidence without replay",
 	{ skip: !enabled },
 	async () => {

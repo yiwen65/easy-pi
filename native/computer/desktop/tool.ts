@@ -85,9 +85,11 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		const guidance =
 			reason === "stale_observation"
 				? "Observe or capture again. Set segment.ref to the new Observation ref or Image ref, never a window ref or element ref; execute.ref requires the Observation ref. Every Computer call consumes the previous evidence."
-				: reason === "previous_intent_unresolved"
-					? "Read fresh evidence of the current target and judge the prior effect. Use reconcile with that new ref and previousEffect:'observed' to record the judgement without new input; then discover/select the intended surface. Reads alone do not resolve prior effects: do not loop between observe and select. If the effect is still unknown, stop and ask the user; never invent confirmation or replay input."
-					: "observe again.";
+				: reason === "stale_image"
+					? "No input dispatched. Use capture, inspect the returned image, then use its new Image ref and recomputed image coordinates. Observation refs and element refs cannot authorize coordinate actions; observe alone does not refresh an image."
+					: reason === "previous_intent_unresolved"
+						? "Read fresh evidence of the current target and judge the prior effect. Use reconcile with that new ref and previousEffect:'observed' to record the judgement without new input; then discover/select the intended surface. Reads alone do not resolve prior effects: do not loop between observe and select. If the effect is still unknown, stop and ask the user; never invent confirmation or replay input."
+						: "observe again.";
 		throw new AgentToolError(`Computer paused: ${reason}; ${guidance}`, { status: "paused", code: reason });
 	};
 	const tool: AgentTool<typeof DesktopInputSchema, unknown> = {
