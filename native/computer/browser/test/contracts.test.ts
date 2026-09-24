@@ -16,6 +16,25 @@ test("observation text search is literal, bounded and exclusive to observe", () 
 		assert.throws(() => parseControlledBrowserInput({ request }), /Invalid/);
 });
 
+test("post-action text conditions are explicit, bounded and require an observation", () => {
+	for (const op of ["prepare", "navigate"] as const) {
+		const input = { request: { op, url: "about:blank" }, observeAfter: true, waitForText: "Record R-204" };
+		assert.deepEqual(parseControlledBrowserInput(input), input);
+	}
+	const click = { request: { op: "click", ref: "o", target: "t" }, observeAfter: true, waitForText: "你好" };
+	assert.deepEqual(parseControlledBrowserInput(click), click);
+	for (const waitForText of ["", " ", "界".repeat(86), "x".repeat(257)])
+		assert.throws(() => parseControlledBrowserInput({ ...click, waitForText }), /Invalid/);
+	assert.throws(
+		() => parseControlledBrowserInput({ request: { op: "navigate", url: "about:blank" }, waitForText: "Ready" }),
+		/Invalid/,
+	);
+	assert.throws(
+		() => parseControlledBrowserInput({ request: { op: "observe" }, observeAfter: true, waitForText: "Ready" }),
+		/Invalid/,
+	);
+});
+
 test("browser protocol is fixed preparation/navigation plus the existing bounded plan language", () => {
 	assert.deepEqual(parseControlledBrowserInput({ request: { op: "prepare" } }), { request: { op: "prepare" } });
 	for (const url of ["about:blank", "http://127.0.0.1:1234/form", "https://example.test/"]) {

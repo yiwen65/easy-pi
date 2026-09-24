@@ -21,7 +21,7 @@ if (allowed) {
 }
 const sdk = allowed ? loadDesktopSdk(process.env.CUA_DRIVER_TYPESCRIPT_DIR!) : undefined;
 
-async function fixture(option = false) {
+async function fixture(option = false, readyAfter = 0) {
 	assert.ok(sdk);
 	const api = sdk;
 	let plans = 0;
@@ -64,7 +64,7 @@ async function fixture(option = false) {
 										depth: 0,
 										role: option ? "option" : "textbox",
 										actions: option ? ["select_option"] : ["fill", "scroll_into_view"],
-										label: "Name",
+										label: observes >= readyAfter ? "Name" : "Pending",
 										value: "",
 										enabled: true,
 										inWebContent: true,
@@ -197,6 +197,32 @@ const execute = (ref: string) => ({
 });
 
 for (const visible of [true, false]) {
+	test(`waited observations only grant their final canonical view: visible=${visible}`, { skip: !sdk }, async (t) => {
+		const f = await fixture(false, 2);
+		t.after(() => f.close());
+		const seen = await f.tool.execute("open", {
+			request: { op: "prepare", url: "about:blank" },
+			observeAfter: true,
+			waitForText: "Name",
+		});
+		assert.ok(seen.details && typeof seen.details === "object" && "observationRef" in seen.details);
+		assert.equal(seen.details.observationRef, "browser-2");
+		assert.doesNotMatch(JSON.stringify(seen.content), /browser-1/);
+		f.binding.observeContext?.(false, [
+			{
+				role: "toolResult",
+				toolCallId: "open",
+				toolName: "computer",
+				content: visible ? seen.content : seen.content.slice(1),
+				isError: false,
+				timestamp: 1,
+			},
+		]);
+		if (visible) await f.tool.execute("fill", execute("browser-2"));
+		else await assert.rejects(f.tool.execute("fill", execute("browser-2")), /current model view/);
+		assert.equal(f.plans, visible ? 1 : 0);
+	});
+
 	test(`combined prepare requires its exact visible result: visible=${visible}`, { skip: !sdk }, async (t) => {
 		const f = await fixture();
 		t.after(() => f.close());

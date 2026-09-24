@@ -49,6 +49,19 @@ Cancellation, context filtering and retirement cannot grant late references.
 An explicit `observe` remains available when another read is actually needed.
 Fewer model round trips do not by themselves prove lower end-to-end latency.
 
+For an asynchronous update, optionally add `waitForText` with `observeAfter:true`.
+It matches a case-insensitive literal substring in a displayed label or value,
+limited to 256 UTF-8 bytes. It does not search hidden rows or execute expressions.
+Only the final view is returned; a match alone is not business success.
+Without this option there is no polling or added delay.
+
+Successful nonmatching reads may repeat within a one-second polling budget.
+An in-flight native read must still reach its terminal acknowledgement, so this
+is not a hard one-second wall-clock deadline. Read failures are never retried.
+Cancellation, retirement or timeout publishes no new reference. A timeout reports
+`observation_condition_timeout` while preserving the action facts; do not replay
+the action. Use a separate observation to decide what remains.
+
 ## Verification
 
 When a semantic view is truncated, request a fresh bounded text search:
@@ -71,6 +84,15 @@ select, save, visible receipt, independent receipt and native close:
 
 ```sh
 ALLOW_GUI_TESTS=true node native/computer/desktop/fixtures/real-model/observe-after.mjs \
+  /absolute/new-output /absolute/installed/computer /absolute/Chrome.app
+```
+
+Text-wait guards cover readiness, timeout, cancellation, a page leaving its
+allowed origin, and a native alert appearing during the wait. Each verifies one
+actual click and clean native closure; alerts are not automatically accepted:
+
+```sh
+ALLOW_GUI_TESTS=true node native/computer/desktop/fixtures/real-model/wait-guards.mjs \
   /absolute/new-output /absolute/installed/computer /absolute/Chrome.app
 ```
 

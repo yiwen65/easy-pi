@@ -33,6 +33,8 @@ function fixture(
 		navigationCommitted?: boolean;
 		prepareFailure?: string;
 		prepareTerminal?: Promise<void>;
+		readyAfter?: number;
+		onObserve?: (snapshot: number) => void;
 		clickEffect?: CuaSdk.ActionEffect;
 		scrollable?: boolean;
 		scrollFailure?: string;
@@ -114,6 +116,7 @@ function fixture(
 					},
 					startObserve() {
 						const snapshotId = `b-snapshot-${++snapshots}`;
+						options.onObserve?.(snapshots);
 						if (options.observeFailureAfter !== undefined && snapshots > options.observeFailureAfter) {
 							calls.push("observe-refused");
 							result.reject(new api.ComputerError.Refused({ reason: "browser_frame_changed" }));
@@ -178,7 +181,7 @@ function fixture(
 											depth: 0,
 											role: "textbox",
 											actions: options.scrollable ? ["fill", "scroll_into_view"] : ["fill"],
-											label: "Name",
+											label: options.readyAfter && snapshots >= options.readyAfter ? "Ready" : "Name",
 											value: "",
 											enabled: true,
 											inWebContent: options.web ?? true,
@@ -363,6 +366,123 @@ const execute = (ref: string) => ({
 		ref,
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
+});
+
+test("text wait returns the matching fresh view without replaying its action", { skip: !sdk }, async (t) => {
+	const f = fixture({ readyAfter: 2 });
+	t.after(() => f.host.close());
+	const result = await f.tool.execute("open", {
+		request: { op: "prepare", url: "about:blank" },
+		observeAfter: true,
+		waitForText: "READY",
+	});
+	assert.equal(result.details.observationRef, "b-snapshot-2");
+	assert.doesNotMatch(JSON.stringify(result.content), /b-snapshot-1/);
+	await f.tool.execute("click", { request: { op: "click", ref: "b-snapshot-2", target: "b-snapshot-2:0" } });
+	assert.deepEqual(f.calls, ["prepare", "navigate", "observe", "observe", "click"]);
+});
+
+test(
+	"matching wait results still drain native terminal and cannot publish after cancellation",
+	{ skip: !sdk },
+	async (t) => {
+		for (const cancel of [false, true]) {
+			const started = deferred<void>(),
+				terminal = deferred<void>(),
+				controller = new AbortController();
+			const f = fixture({
+				readyAfter: 2,
+				followupTerminal: terminal.promise,
+				onObserve: (n) => {
+					if (n === 2) started.resolve();
+				},
+			});
+			t.after(() => f.host.close());
+			let settled = false;
+			const pending = f.tool
+				.execute(
+					"open",
+					{ request: { op: "prepare", url: "about:blank" }, observeAfter: true, waitForText: "Ready" },
+					controller.signal,
+				)
+				.then(
+					(value) => {
+						settled = true;
+						return { value };
+					},
+					(error: unknown) => {
+						settled = true;
+						return { error };
+					},
+				);
+			await started.promise;
+			assert.equal(settled, false);
+			if (cancel) controller.abort();
+			terminal.resolve();
+			const outcome = await pending;
+			if (cancel) assert.ok("error" in outcome);
+			else {
+				assert.ok("value" in outcome);
+				assert.equal(outcome.value.details.observationRef, "b-snapshot-2");
+			}
+			assert.deepEqual(f.calls, ["prepare", "navigate", "observe", "observe"]);
+		}
+	},
+);
+
+test("text wait cancellation stops reads and preserves action facts without a new ref", { skip: !sdk }, async (t) => {
+	const f = fixture();
+	t.after(() => f.host.close());
+	const controller = new AbortController();
+	const pending = f.tool.execute(
+		"open",
+		{ request: { op: "prepare", url: "about:blank" }, observeAfter: true, waitForText: "Missing" },
+		controller.signal,
+	);
+	const rejected = assert.rejects(pending, (error: unknown) => {
+		assert.ok(error instanceof Error && "details" in error);
+		assert.deepEqual(error.details, {
+			status: "navigation_submitted",
+			completedSteps: 0,
+			effect: "Unverifiable",
+			route: "Dom",
+			observationError: "cancelled",
+		});
+		return true;
+	});
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(f.calls, ["prepare", "navigate", "observe"]);
+	controller.abort();
+	await rejected;
+	assert.deepEqual(f.calls, ["prepare", "navigate", "observe"]);
+});
+
+test("text wait times out without replay and never retries a refused read", { skip: !sdk }, async (t) => {
+	for (const refused of [false, true]) {
+		const f = fixture(refused ? { observeFailureAfter: 1 } : {});
+		t.after(() => f.host.close());
+		await assert.rejects(
+			f.tool.execute("open", {
+				request: { op: "prepare", url: "about:blank" },
+				observeAfter: true,
+				waitForText: "Missing",
+			}),
+			(error: unknown) => {
+				assert.ok(error instanceof Error && "details" in error);
+				assert.deepEqual(error.details, {
+					status: "navigation_submitted",
+					completedSteps: 0,
+					effect: "Unverifiable",
+					route: "Dom",
+					observationError: refused ? "browser_frame_changed" : "observation_condition_timeout",
+				});
+				return true;
+			},
+		);
+		assert.equal(f.calls.filter((x) => x === "navigate").length, 1);
+		assert.ok(f.calls.length <= 23);
+		if (refused) assert.deepEqual(f.calls, ["prepare", "navigate", "observe", "observe-refused"]);
+	}
 });
 
 test(

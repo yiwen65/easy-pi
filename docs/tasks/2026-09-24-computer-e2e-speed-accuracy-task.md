@@ -573,10 +573,10 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-025 — 瞬态观察的额外模型往返
+### [x] T-025 — 瞬态观察的额外模型往返
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: coordinator
 - Objective: 减少真实异步页面短暂 loading 状态导致的额外模型往返，同时不全局增加固定延时、不重放输入。
 - Inputs and prerequisites: T-024 两轮均 3 个 120ms loading 状态导致各 3 次模型 observe；不同正文版本 43.268s 模型时间对 4.200s 工具时间。
 - Scope or files: 现有 browser 观察路径与 dynamic fixture；先比较有界只读等待方案的成本和拒绝/取消语义，不增加后台常驻状态或输入重试。
@@ -591,9 +591,12 @@
   - 动态场景实测少往返且静态常见场景无不可接受延迟；否则不声称优化完成。
 - Verification method:
   - native/bridge 定向测试、真实静态和动态 UI、模型交错 A/B、独立回执与关闭证明。
-- Validation evidence: T-024 trace 已证实瞬态读取和额外 observe 序列；具体改造尚未决定或实现。
+- Validation evidence: T-024 trace 已证实瞬态读取和额外 observe 序列。现有 native get_browser_state 每次校验受控页面并重建 snapshot，bridge session.run 等待 terminal，context-binding 仅发布最终 canonical 结果。选择在既有 observeAfter 上提供可选 waitForText 条件，匹配实际显示的 label/value；不改 native、默认路径、调度器或常驻状态，不按 loading 文案自动猜测。读取失败不重试；一秒预算只限制追加读取，已经开始的原生读取仍必须排空，不能称硬一秒墙钟超时。实现及验证进行中。
+- Candidate checkpoint: 41 browser、23 context（含中间视图不发布和最终 canonical 匹配）、35 desktop/segment、8 package、native TS 和根 check 通过。四个实际 Chrome guard：ready 190.6ms、timeout 1054.2ms、cancel 251.8ms、foreign 205.3ms；每例独立点击回执恰好 1，未发布失败引用，关闭 C06db–de。原始 guard 在 /tmp/epi-observe-wait.lr55CY/guards.mjs，已整理 durable wait-guards.mjs，最终 durable 文件尚待串行执行。model-candidate 的动态 45.307s/11 回合、静态 23.765s/5 回合均通过；动态额外 observe 从 3 次降为 0，仍需交错对照，尚未替换安装版。当前 A/B、B/A、A/B 动静态共十二样本串行实验执行中，进程 handle 78380；保留所有结果于同目录 ab-* 和 ab.json，不可重启正在运行的实验。
 - Blocker: None.
 - Unblock condition: None.
+
+- Final qualification: /tmp/epi-observe-wait.lr55CY/ab.json、report.json 冻结 A/B、B/A、A/B 十二个模型样本，全通过、零工具错误、全关闭。动态 A=44.094/47.197/47.860s（14 回合），B=40.165/43.370/42.073s（11 回合）；逐对节省 3.929/3.827/5.787s。B 三次均使用明确文本条件并省掉三次独立 observe，工具阶段增加 317–380ms，但减少模型往返后端到端更快。静态两边均五回合、均不使用 waitForText；逐对节省 3.133/2.045/-1.537s，保留反向波动，不称静态提速或尾延迟已证明。AB 报告总费用 0.5923368 USD。durable guards-alert-final 五例全通过：ready 196.7ms、timeout 1027.1ms、cancel 261.4ms、foreign 170.6ms、native alert 173.0ms，各只点击一次、失败不发布引用，全部关闭至 C06f5；未自动接受 alert。已可回退安装 bridge 4938b97cdf9e145e65351baf83ee73491bda550ef7ed9bd469571786a4e5beaf，旧包 installed-before。model-installed 再次动态通过 38.684s/11 回合/0.0584356 USD，正文、顺序与所有最新 ref 校验通过，零工具错误，关闭 C06f6。根 check 最终通过并恢复四处无关格式变化；native/ABI 未改。上述 handle 78380 已正常退出，不再运行。
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -624,6 +627,9 @@
 
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
+
+- 2026-09-25: T-025 done：显式 waitForText 复用有界只读观察，无新动作类型/调度器/常驻状态，不改变默认立即观察。十二模型交错样本、五个真实边界、安装模型与定向测试均通过；只认领动态场景少三轮的局部收益，Goal 继续。
+- 2026-09-25: T-025 开始，coordinator 串行实验显式文本条件的有界只读等待，避免全局固定等待；优先检验取消、超时与未发布引用边界，再实测动态/静态模型。
 
 - 2026-09-25: T-024 done，新增动态记录 benchmark 已经实际模型验证，强化不同记录正文后依然准确，未放松观察边界。T-025 pending 记录新测得的等待成本；不是产品已修复或性能收益承诺。
 
@@ -739,5 +745,5 @@ Agent 新接口：`{"request":{"op":"select","ref":"当前窗口 ref","observe":
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001、T-005、T-006 完成；原版失败均保留。此前局部优化 60 次二进制 A/B 和 60 次安装 GUI 通过；通用确定性场景 50/50。新增真实模型十三场景单轮 3/13，额外 Chrome 五场景 1/5；不能用确定性结果代替模型表现。新 benchmark 11/11、directory/entry 3/3、打包 9/9、desktop 加载级 124 pass/1 skip 与 npm run check 通过。
-- Limitations: 最新已验证 lease C0605；T-008/009/010/011/014 完成，HTML dialog/select/加载期提示只读等待修复均已安装，同三任务真实模型 3/3，安装后加载期提示 7/7。T-012 启动端点偶发故障未证实原因；锁屏或不可读进程环境仍可阻塞新会话，不自动解锁/重启用户应用。不能宣称普遍提速。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性。
+- Evidence: 原版失败及不同版本的全部样本保留；此前二进制 A/B、安装 GUI 和确定性通用场景不能替代模型证据。HTML dialog/select/加载期 alert 修复已安装，具体分版本资格见 T-010/T-011。最近完成 T-022 AX 规范化、T-023 合并启动、T-024 动态记录 benchmark、T-025 显式文本等待；T-025 十二个动态/静态模型交错样本全部通过，动态各少三轮，五个真实边界 guard 与安装后模型通过；41 browser、23 context、35 desktop/segment、8 package、严格 native TS 和最终根 check 通过。不同任务/版本不混算成功率或提速。
+- Limitations: 最新已验证 clean lease C06f6。T-012 启动端点偶发故障原因仍未证实；锁屏或不可读进程环境仍可阻塞新会话，不自动解锁/重启用户应用。静态耗时有反向波动，不称普遍加速。T-004 焦点/输入投递、T-002 外部干扰/中途取消/长时会话、T-003 全局精简资格仍未完成；浏览器拖动、密码和多标签等通用能力未全覆盖。官方大型 benchmark 全量环境未部署；未证明彻底修复或所有应用稳定性，Goal 保持 active。
