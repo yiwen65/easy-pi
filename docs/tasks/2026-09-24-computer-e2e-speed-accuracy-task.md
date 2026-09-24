@@ -92,7 +92,7 @@
 
 ### [ ] T-003 — 成本归因与精简决策
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 逐项决定合并、缓存、保留或删除。
 - Inputs and prerequisites: 完整本地基线与干扰覆盖。
@@ -105,7 +105,7 @@
   - 业务结果等价，收益大于噪声，尾延迟和错误率不劣化；无证据不删除。
 - Verification method:
   - 单变量交错对照及必要的真实模型 E2E（须另行授权）。
-- Validation evidence: Not run.
+- Validation evidence: 2026-09-25 拖拽节奏归因，证据 /tmp/epi-drag-pacing.3mvVFk，安装 bridge be567fabe/native 1080e21b 未改变；macOS 26.5.1/25F80 arm64。复用 owned general fixture，独立进程串行按 200/3000/1000/1000/3000/200ms 请求，6/6 准确到达终点、native close/fixture exit0/clean lease，最后 C074a。200ms 的 segment 为 560.562/581.525ms；1000ms 为 1808.274/1870.871ms；3000ms 为 4956.329/5077.254ms。应用首个 drag 到 release 的接收间隔分别约 274–275、1489–1562、4652–4761ms，表明超额时间随移动步骤累计，不能归因于固定启动成本。原生 segment.rs 每步 move_pointer（含 input_check）后再 sleep(duration/steps)，工作耗时未从等待扣除。另一次 5000ms 的 sample 采样成功、自然关闭 C074b，执行栈包含 sleep 和 move_pointer 内 resolve_window_owner/foreground 检查；采样扰动运行不混入基线，不将采样比例当精确墙钟占比。下一项单变量实验是按总时长安排每步剩余等待，保持每事件目标检查、事件数、取消与释放，不新增调度器或缓存。尚未修改原生源码/安装资产，未声称优化成功。
 - Blocker: None.
 - Unblock condition: None.
 
