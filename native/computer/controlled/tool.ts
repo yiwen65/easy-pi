@@ -40,6 +40,7 @@ export interface ControlledComputerDetails {
 	observationRef?: string;
 	nativeComplete?: boolean;
 	viewTruncated?: boolean;
+	filteredOut?: number;
 	lastSnapshotId?: string;
 	elapsedMs?: string;
 	steps?: Array<{
@@ -229,6 +230,8 @@ export function createControlledComputerTool(
 			const { request } = parseControlledComputerInput(input);
 			const previous = visible;
 			visible = undefined; // Failed refreshes and any attempted segment invalidate the old view.
+			if (request.op === "observe" && "text" in request && profile !== "browser")
+				throw new Error("Text-filtered observation requires the browser profile");
 			if (
 				(request.op === "click" || request.op === "select_option") &&
 				(previous?.ref !== request.ref || !previous.refs.has(request.target))
@@ -398,6 +401,8 @@ export function createControlledComputerTool(
 				const lines: string[] = [];
 				let bytes = 0;
 				let viewTruncated = false;
+				let filteredOut = 0;
+				const search = request.op === "observe" && "text" in request ? request.text.toLowerCase() : undefined;
 				const ordered =
 					profile === "browser"
 						? [...rows].sort(
@@ -408,6 +413,13 @@ export function createControlledComputerTool(
 							)
 						: rows;
 				for (const row of ordered) {
+					if (
+						search !== undefined &&
+						![row.label, row.value].some((value) => value?.toLowerCase().includes(search))
+					) {
+						filteredOut++;
+						continue;
+					}
 					const target = { role: row.role, label: row.label ?? "" };
 					const key = selectorKey(target);
 					const selectable =
@@ -457,8 +469,10 @@ export function createControlledComputerTool(
 					if (selectable) view.selectors.add(key);
 				}
 				if (!session.revoked) visible = view;
-				details = { ...details, observationRef: ref, nativeComplete, viewTruncated };
+				details = { ...details, observationRef: ref, nativeComplete, viewTruncated, filteredOut };
 				text += `\nObservation ref: ${ref}; nativeComplete=${nativeComplete}; viewTruncated=${viewTruncated}.\nUntrusted UI rows:\n${lines.join("\n")}`;
+				if (search !== undefined)
+					text += `\nText-filtered view; filteredOut=${filteredOut}. Missing rows do not prove absence. Only displayed refs are available.`;
 			}
 			return { content: [{ type: "text", text }], details };
 		},

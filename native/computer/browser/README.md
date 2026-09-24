@@ -34,6 +34,20 @@ Fewer model round trips do not by themselves prove lower end-to-end latency.
 
 ## Verification
 
+When a semantic view is truncated, request a fresh bounded text search:
+
+```json
+{"request":{"op":"observe","text":"Tempor"}}
+```
+
+The filter is a case-insensitive literal substring of labels or values, limited
+to 256 UTF-8 bytes. It is not a regular expression, selector or script. The
+4 KiB display limit still applies. Each search rereads the current page and
+replaces previous grants; only displayed rows receive references. Selector
+uniqueness is checked against the full native observation, not just matches.
+`filteredOut` counts excluded rows; missing matches do not prove absence from
+the page. This option is not available to the native-window form profile.
+
 Contract, fake-native terminal/cancellation, and actual provider-context tests
 are under `test/`. The opt-in real Chrome qualification checks Unicode fill,
 select, save, visible receipt, independent receipt and native close:

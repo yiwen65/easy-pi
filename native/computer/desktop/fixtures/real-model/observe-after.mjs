@@ -102,6 +102,11 @@ try {
 	const deadline = performance.now() + 2000;
 	while (!oracle && performance.now() < deadline) await delay(20);
 	assert.deepEqual(oracle, { name: "组合 café 你好", plan: "Pro" });
+	result = await call({ request: { op: "observe", text: "saved" } });
+	assert.equal(result.details.status, "observed");
+	assert.ok(result.details.filteredOut > 0);
+	assert.match(JSON.stringify(result.content), /Saved/);
+	assert.equal(row(result, "textbox", "Name"), undefined);
 	console.log(JSON.stringify({ passed: true, calls: sequence, oracle }));
 } finally {
 	await feature?.close();

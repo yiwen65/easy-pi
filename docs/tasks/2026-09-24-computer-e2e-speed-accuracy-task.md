@@ -391,6 +391,8 @@
 本轮接续诊断：当前安装 fde462103 的八项 MiniWoB 原始 HTML 子集 5/8，通过 click-test-2、enter-text、click-checkboxes、choose-list、scroll-text；click-tab-2、drag-box、login-user 失败，8/8 cleanup=true。证据 /tmp/epi-observe-after.MCxmC4/miniwob-current，全部失败保留，不是全量官方分数。login-user 的 password 输入被原生 secure 判定有意禁止（page.rs describe_input 和输入入口均拒绝），不放宽该边界；drag-box 当前 browser 接口无拖拽能力。click-tab-2 已切换三个页内标签，但 4 KiB 投影包含大量空 generic/LabelText 节点，后续正文被截断；其点击目标本身为带事件的 span，并非语义 link，仍须独立验证可操作性。下一步先编码空结构挤占正文的投影回归，再验证文本优先策略；不能将投影改善等同原生 span 点击已支持。未改生产代码或已安装包。
 ## Execution log
 
+- 2026-09-24: T-015 第二阶段实现 browser observe.text（256 UTF-8 字节、有界字面包含搜索，4 KiB 输出保持），每次新原生读取且替换旧授权。过滤前全量计数确保重复 selector 不因过滤变唯一；未展示目标无授权。21 browser 契约/工具、15 context（含过滤后 provider omission）、native TS/npm check 通过。真实六调用 Unicode/select/save/筛选回执及关闭通过 C062c；试装包 package-search，旧包 installed-before-search。真实模型 model-search 找到 Tab #3 的 Tempor 并请求点击，此次首个阻断为 browser_input_unavailable，44.388s、12 回合、0.087366 USD、cleanup=true；不能把找到文字当作任务通过。已异步询问用户是否允许支持受控页面带点击处理器的普通 HTML 元素，尚未放宽原生角色白名单。第一阶段空结构排序与本阶段搜索分开留证；原始三轮失败均保留。
+
 - 2026-09-24: T-015 第一阶段优先非空文本已试装；实际 Chrome form/dialog 邻域 2/2，26.362/40.057s，各 6 回合、费用 0.030862/0.0259988 USD，均关闭。click-tab-2 的剩余失败没有隐藏；下一步提供有界的截断后读取再判断 span 能力。root check 自动格式化的四个无关文件已恢复。误用 chrome:form 的一次 harness 命令在任务名校验阶段失败，未调用模型或 native；随后使用实际 chrome-form 命名。历史 controlled SDK 指纹检查未绕过，现代 browser/context 和包验证均通过。
 
 - 2026-09-24: T-012 本轮仅失败日志诊断版 15/15，全部关闭 C061f，仍未复现端点错误。诊断 SDK/源码保留在 /tmp/epi-endpoint-stage.F4XCQO，工作源码已移除临时日志并 cmp 与诊断前一致；安装版本未变。不继续低信息重复跑，不放宽格式校验，T-012 根因仍未证明。接续 T-007：在当前 browser/observeAfter 安装版运行八项现有官方 MiniWoB HTML 子集，保留不支持能力的真实失败，不冒称全量官方分数。

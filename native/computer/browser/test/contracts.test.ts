@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseControlledBrowserInput } from "../contracts.ts";
 
+test("observation text search is literal, bounded and exclusive to observe", () => {
+	for (const text of ["Tempor", "你好", ".*", "x".repeat(256)])
+		assert.deepEqual(parseControlledBrowserInput({ request: { op: "observe", text } }), {
+			request: { op: "observe", text },
+		});
+	for (const request of [
+		{ op: "observe", text: "" },
+		{ op: "observe", text: " " },
+		{ op: "observe", text: "界".repeat(86) },
+		{ op: "prepare", text: "x" },
+	])
+		assert.throws(() => parseControlledBrowserInput({ request }), /Invalid/);
+});
+
 test("browser protocol is fixed preparation/navigation plus the existing bounded plan language", () => {
 	assert.deepEqual(parseControlledBrowserInput({ request: { op: "prepare" } }), { request: { op: "prepare" } });
 	for (const url of ["about:blank", "http://127.0.0.1:1234/form", "https://example.test/"]) {

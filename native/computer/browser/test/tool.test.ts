@@ -36,6 +36,7 @@ function fixture(
 		option?: boolean;
 		noise?: number;
 		blankStructure?: boolean;
+		duplicate?: boolean;
 		observeFailureAfter?: number;
 		clickTerminal?: Promise<void>;
 		followupTerminal?: Promise<void>;
@@ -153,6 +154,20 @@ function fixture(
 													},
 												]
 											: []),
+										...(options.duplicate
+											? [
+													{
+														elementIndex: 101n,
+														depth: 1,
+														role: "textbox",
+														label: "Name",
+														value: "unique-value",
+														actions: ["fill"],
+														inWebContent: true,
+														elementToken: `${snapshotId}:duplicate`,
+													},
+												]
+											: []),
 										...(options.option
 											? [
 													{
@@ -249,6 +264,31 @@ const execute = (ref: string) => ({
 		ref,
 		steps: [{ op: "fill" as const, target: { selector: { role: "textbox", label: "Name" } }, text: "value-Name" }],
 	},
+});
+
+test("filtered observations read fresh UI and grant only literal matches", { skip: !sdk }, async (t) => {
+	const f = fixture({ noise: 60, blankStructure: true });
+	t.after(() => f.host.close());
+	await f.tool.execute("first", { request: { op: "observe" } });
+	const seen = await f.tool.execute("search", { request: { op: "observe", text: "BODY AT END" } });
+	assert.equal(seen.details.observationRef, "b-snapshot-2");
+	assert.equal(seen.details.viewTruncated, false);
+	assert.match(JSON.stringify(seen.content), /Task body at end/);
+	assert.doesNotMatch(JSON.stringify(seen.content), /Name/);
+	await assert.rejects(f.tool.execute("hidden", execute(seen.details.observationRef!)), /stale_observation/);
+	const literal = await f.tool.execute("literal", { request: { op: "observe", text: ".*" } });
+	assert.doesNotMatch(JSON.stringify(literal.content), /Task body at end|Name/);
+	assert.deepEqual(f.calls, ["observe", "observe", "observe"]);
+});
+
+test("filtering does not turn duplicate selectors into unique targets", { skip: !sdk }, async (t) => {
+	const f = fixture({ duplicate: true });
+	t.after(() => f.host.close());
+	const seen = await f.tool.execute("o", { request: { op: "observe", text: "unique-value" } });
+	assert.match(JSON.stringify(seen.content), /duplicate/);
+	assert.doesNotMatch(JSON.stringify(seen.content), /selector/);
+	await assert.rejects(f.tool.execute("p", execute(seen.details.observationRef!)), /stale_observation/);
+	assert.equal(f.plans.length, 0);
 });
 
 test(

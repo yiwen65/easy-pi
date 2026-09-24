@@ -53,6 +53,10 @@ export const ControlledComputerInputSchema = Type.Object(
 		request: Type.Union([
 			ControlledFormInputSchema.properties.request,
 			Type.Object(
+				{ op: StringEnum(["observe"] as const), text: Type.String({ minLength: 1, maxLength: 256 }) },
+				{ additionalProperties: false },
+			),
+			Type.Object(
 				{ op: StringEnum(["click"] as const), ref: reference, target: reference },
 				{ additionalProperties: false },
 			),
@@ -74,6 +78,12 @@ export function parseControlledComputerInput(input: unknown): ControlledComputer
 	if (!Value.Check(ControlledComputerInputSchema, input)) throw new Error("Invalid computer request");
 	const bounded = (value: string, max: number) => Buffer.byteLength(value, "utf8") <= max;
 	const validSelector = (value: Selector) => bounded(value.role, 64) && bounded(value.label, 256);
+	if (
+		input.request.op === "observe" &&
+		"text" in input.request &&
+		(!input.request.text.trim() || !bounded(input.request.text, 256))
+	)
+		throw new Error("Invalid computer observation filter");
 	if (
 		(input.request.op === "click" || input.request.op === "select_option") &&
 		(!bounded(input.request.ref, 128) || !bounded(input.request.target, 128))
