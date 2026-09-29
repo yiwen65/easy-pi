@@ -32,7 +32,11 @@ export function fixture(
 			| "confirmed_boundary"
 			| "exhausted"
 			| "exhausted_result";
-		stopCode?: "stale_image_observation" | "physical_input_held_at_target";
+		stopCode?:
+			| "stale_image_observation"
+			| "physical_input_held_at_target"
+			| "target_occluded"
+			| "pointer_hit_changed";
 		hold?: "segment" | "capture" | "pair_capture";
 		terminalFailure?: boolean;
 		failCapture?: number;
@@ -270,7 +274,9 @@ export function fixture(
 						done(
 							"segment",
 							new sdk.ComputerResult.Segment({ value }),
-							options.stopCode === "stale_image_observation" ? false : !paused || options.mode === "prepared",
+							options.stopCode && options.stopCode !== "physical_input_held_at_target"
+								? false
+								: !paused || options.mode === "prepared",
 						);
 					},
 					startPlan: forbidden,

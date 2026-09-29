@@ -4,6 +4,67 @@ import { fixture } from "./segment-fixture.ts";
 
 const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
 
+test(
+	"hit mismatch guides fresh exact-target selection without relaxing native checks",
+	{ skip: !enabled },
+	async () => {
+		const f = fixture({ stopCode: "pointer_hit_changed" });
+		try {
+			await f.setup();
+			const result = await f.call({
+				op: "segment",
+				ref: "snapshot-1",
+				actions: [{ op: "click", target: { ref: "field" } }],
+				expected: { kind: "visual", description: "Target opens" },
+			});
+			const text = result.content
+				.filter((row) => row.type === "text")
+				.map((row) => row.text)
+				.join("\n");
+			assert.match(text, /inputCommitted=false.*observe.*exact.*element ref/s);
+			assert.match(text, /named control or matching visible text.*unnamed container/s);
+			assert.match(text, /Do not infer parent-child relationships/);
+			assert.match(text, /Do not switch to coordinates to bypass/);
+			assert.match(text, /unknown.*reconcile.*never replay/s);
+			assert.equal(f.segments.length, 1);
+			assert.match(JSON.stringify(result.details), /"inputCommitted":false/);
+		} finally {
+			await f.host.close();
+		}
+	},
+);
+
+test(
+	"occlusion explains explicit window activation without input fallback or automatic recovery",
+	{ skip: !enabled },
+	async () => {
+		const f = fixture({ stopCode: "target_occluded" });
+		try {
+			await f.setup();
+			const result = await f.call({
+				op: "segment",
+				ref: "snapshot-1",
+				actions: [{ op: "click", target: { ref: "field" } }],
+				expected: { kind: "visual", description: "Target opens" },
+			});
+			const text = result.content
+				.filter((row) => row.type === "text")
+				.map((row) => row.text)
+				.join("\n");
+			assert.match(text, /window screenshot.*other windows/s);
+			assert.match(text, /inputCommitted=false.*authorized.*window.*activate.*window_focused/s);
+			assert.match(text, /first observe.*new Observation ref \(not an Image ref\)/s);
+			assert.match(text, /observe.*fresh element refs/s);
+			assert.match(text, /Do not switch to coordinate clicks/);
+			assert.match(text, /unknown.*reconcile.*never repeat activation/s);
+			assert.match(JSON.stringify(result.details), /"inputCommitted":false/);
+			assert.equal(f.segments.length, 1);
+		} finally {
+			await f.host.close();
+		}
+	},
+);
+
 test("pointer-keyboard boundary explains fresh semantic recovery without replay", { skip: !enabled }, async () => {
 	const f = fixture({ mode: "confirmed_boundary" });
 	try {

@@ -29,6 +29,10 @@ function recoveryGuidance(code: string | undefined): string {
 			return "Image evidence changed. For coordinate actions, inspect a fresh capture and recompute coordinates; never reuse the old image ref. Use observe and its fresh Observation ref for keyboard actions, or fresh element refs with fill for editable fields. Split at navigation or UI-changing actions before choosing further coordinates. ";
 		case "physical_input_held_at_target":
 			return "Native input-state checking reports a held key or button. Ask the user to release it using their keyboard or remote-control client, then observe the actual effect before continuing. Do not synthesize releases or automatically retry. ";
+		case "target_occluded":
+			return "Another window covers the target; a window screenshot can omit other windows. Do not switch to coordinate clicks. Only if inputCommitted=false and bringing this selected window forward is authorized, first observe and use its new Observation ref (not an Image ref) for a separate segment with actions:[{op:'window',action:'activate'}], expected:{kind:'window_focused'}. After confirmed activation, observe for fresh element refs before choosing input. If activation is unknown, inspect and reconcile its effect; never repeat activation blindly. Do not close unrelated windows or bypass a modal surface. ";
+		case "pointer_hit_changed":
+			return "The live pointer hit does not match the authorized target. Only if inputCommitted=false, observe again and choose an exact fresh element ref whose named control or matching visible text expresses the intended target, not an unnamed container. Do not infer parent-child relationships from adjacent rows. Do not switch to coordinates to bypass this refusal. If prior input is unknown, inspect and reconcile its effect; never replay it. ";
 		case "foreground_target_changed":
 		case "foreground_focus_unproved":
 		case "foreground_activation_unknown":
