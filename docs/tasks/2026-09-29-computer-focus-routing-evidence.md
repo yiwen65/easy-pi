@@ -89,6 +89,32 @@ Therefore this is a best-case synchronization experiment, not a deployable
 generic synchronization policy or proof that refreshing an observation eliminates
 future focus races.
 
+## Public notification/counter follow-up
+
+Read-only follow-up on September 29 rejected two proposed generic completion
+signals; no new observer, queue or product code was introduced.
+
+- AX focused-element notifications report that focus changed. Their callback
+  identifies the affected accessibility element, not an acknowledgement of a
+  particular submitted click or its future asynchronous effects. Registration
+  can also return `kAXErrorNotificationUnsupported`. Notifications may help wake
+  a waiter for an explicit condition; they do not by themselves prove that the
+  input queue is drained or that subsequent keyboard input cannot be redirected.
+  See [AX notifications](https://developer.apple.com/documentation/applicationservices/axnotificationconstants_h)
+  and [observer registration](https://developer.apple.com/documentation/applicationservices/1462089-axobserveraddnotification).
+- `CGEventSourceCounterForEventType` counts events seen since Window Server
+  startup. It does not return a target-window handler completion receipt. The
+  SDK also warns that unequal key-down/up counts do not necessarily imply a held
+  key. See [Quartz event source](https://developer.apple.com/documentation/coregraphics/cgeventsource).
+  In current installed materials, `input/controlled.rs::hardware_stamp` uses
+  these counters for interference detection, not business completion. Do not
+  repurpose this guard as an input acknowledgement.
+
+These conclusions follow from the documented contracts and local SDK headers
+(`AXUIElement.h`, `CGEventSource.h`), not from a new runtime notification test.
+They do not prove that every possible platform-specific delivery approach is
+impossible. Adding observers solely to claim atomic routing is not justified.
+
 ## Decision boundary and next work
 
 - Preserve working element-bound AX batching; broad batch removal is unjustified.
