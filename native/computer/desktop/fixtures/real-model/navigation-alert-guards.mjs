@@ -110,7 +110,7 @@ for (const [index, alertMs] of timings.entries()) {
 		}
 		checkedPhase = phase;
 	} catch (error) {
-		failure = String(error);
+		failure = `${String(error)}${error?.inner?.reason ? `: ${error.inner.reason}` : ""}`;
 	} finally {
 		if (host)
 			try {

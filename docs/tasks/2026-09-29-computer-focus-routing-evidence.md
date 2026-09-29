@@ -200,3 +200,77 @@ divergence when one of the five broader failures recurs, using alternating
 artifacts and a fixed fixture. Do not remove the guards or add blind retries.
 Real-model qualification, arbitrary third-party async focus shifts, IME and
 cross-window cancellation remain separate, unqualified work.
+
+## Continued native-alert and real-model qualification
+
+Candidate navigation-alert guards passed 7/7: no-alert control and 0/10/100 ms
+alerts, the latter repeated. Navigate took 58.33–171.18 ms; every owner closed
+cleanly. Prompts remained opened, never automatically accepted. Evidence:
+`navigation-alert-canonical/` under the same temporary evidence directory.
+Two earlier harness admissions (`navigation-alert/`, `navigation-alert-cause/`)
+failed before any operation because the renderer path used macOS's `/tmp`
+symlink. Read-only inspection proved the lease remained clean and unowned.
+Using `/private/tmp` resolved the exact path refusal without changing policy.
+The guard now includes native `inner.reason` in its outer failure report;
+previously `ComputerError.Refused` hid this actionable cause. Root check passed.
+
+Current installed bridge/native hashes remain the baseline hashes above.
+Real `openai-codex/gpt-6-sol`, semantic strategy, seed 42, MiniWoB revision
+`33c3b4ddef8c6eb67c57a29663d844b1eda7e614`:
+
+| Profile / task | Result | Task time / turns |
+| --- | --- | --- |
+| browser / choose-list | PASS | 14.604 s / 4 |
+| browser / chrome-form | PASS | 21.947 s / 5 |
+| browser / chrome-dialog | PASS | 20.036 s / 5 |
+| desktop / chrome-form | FAIL, independent oracle | 25.872 s / 7 |
+| desktop / chrome-tabs | PASS, with recoveries | 85.563 s / 21 |
+
+Evidence: `model-installed-browser/`, `model-installed-desktop/`. All five
+cleanups passed. Reported costs were $0.0638852 and $0.1919692 respectively.
+Browser runs had no tool refusal codes. Desktop traces include
+`segment_boundary_required`, `previous_intent_unresolved`, `focus_effect_unknown`
+and `stale_observation`; success does not erase these extra turns. Tabs spent
+82.984 s in the model versus 2.498 s in tools. These are new current-state
+samples, not a matched speed comparison or official benchmark score.
+
+### Isolated background web-field failure
+
+The failed model form submitted two fills. Its first fill was reported as four
+background synthetic events; the second was correctly refused at the existing
+semantic boundary. Fresh AX readback still showed an empty first field. The
+model attempted another fill without explicit prior-effect reconciliation and
+was paused. This is a delivery problem followed by a separate recovery-contract
+problem, not evidence that the guard should be removed.
+
+`chrome-fill.mjs` removes the model from the experiment. It launches an owned
+CfT profile with a local one-input HTML page and an owned AppKit window, waits
+for the actual web AX field, then submits one exact-ref fill through the tool.
+CDP only reads the value and closes the owned browser. No unknown input is
+replayed. The control adds a tool `window.activate` segment with confirmed
+`window_focused` and obtains fresh refs before filling. Alternating A/B then
+B/A produced:
+
+| Mode | Value after fill | Cleanup |
+| --- | --- | --- |
+| Background, first | empty, despite dispatchedCount 4 | C084e |
+| Explicit foreground, first | exact `test café 你好` | C084f |
+| Explicit foreground, second | exact `test café 你好` | C0850 |
+| Background, second | empty, despite dispatchedCount 4 | C0851 |
+
+Logs are `chrome-fill-{background,foreground}-{ready,second}.log`. All native
+owners, fixture processes and owned Chrome process groups closed normally.
+Initial fixture attempts without waiting for web AX readiness failed before
+input; those logs remain and are not classified as delivery failures. The
+bounded readiness loop is diagnostic setup, not a proposed production polling
+policy. One background trace also records a different foreground application;
+this does not identify the cause of the five earlier general-suite failures.
+
+The source difference is concrete: `segment/target.rs::editor_requires_foreground`
+already treats non-native/web elements as needing foreground keyboard routing.
+The TypeText path uses this rule. Fill's synthetic fallback in `segment.rs`
+activates only for `AXTextArea`, missing web `AXTextField`. The four controlled
+samples support bringing web synthetic Fill into line with that existing rule;
+direct native AX writes should remain unchanged. No native repair for this
+newly isolated defect has been built or installed yet. Next: durable regression,
+minimal native route correction, targeted A/B, then real-model form recovery.
