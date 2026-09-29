@@ -11,6 +11,22 @@ const target = { selector: { role: "AXTextField", label: "Name", identifier: "na
 const request = (actions: unknown[], expected: unknown = { kind: "visual", description: "Expected result" }) =>
 	parseComputerSegmentInput({ request: { op: "segment", ref: "observation-one", actions, expected } }).request;
 
+test("genuine target click ABI is distinct from image click and refuses composite input", { skip: !enabled }, () => {
+	const api = sdk();
+	const encoded = encodeComputerSegment(api, request([{ op: "click", target: { ref: "s00000001:2" } }]), "intent");
+	const click = encoded.actions[0];
+	assert(api.ComputerInput.ClickTarget.instanceOf(click));
+	assert.equal(click.inner.reference, "s00000001:2");
+	assert.equal(api.ComputerInput.Click.instanceOf(click), false);
+	assert.doesNotThrow(() => api.validateComputerSegment(encoded));
+	for (const actions of [[click, click], [new api.ComputerInput.ClickTarget({ reference: "" })]]) {
+		assert.throws(
+			() => api.validateComputerSegment({ ...encoded, actions }),
+			(error: unknown) => api.ComputerError.Refused.instanceOf(error),
+		);
+	}
+});
+
 test(
 	"genuine segment codecs and native validator accept all action variants without creating a host",
 	{ skip: !enabled },

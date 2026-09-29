@@ -25,10 +25,10 @@ index cfd9819..c8d601c 100644
      /// sibling may already have replaced the same target's observation.
      pub fn remove_snapshot(&self, pid: i32, window_id: u64, snapshot_id: u32) {
 diff --git a/rust/crates/platform-macos/src/ax/cache.rs b/rust/crates/platform-macos/src/ax/cache.rs
-index e660c04..e8bdee9 100644
+index e660c04..4da38e1 100644
 --- a/rust/crates/platform-macos/src/ax/cache.rs
 +++ b/rust/crates/platform-macos/src/ax/cache.rs
-@@ -34,11 +34,48 @@ impl Drop for RetainedElement {
+@@ -34,11 +34,50 @@ impl Drop for RetainedElement {
  
  pub struct CachedSnapshot {
      pub elements: Vec<usize>,
@@ -42,8 +42,10 @@ index e660c04..e8bdee9 100644
 +pub struct ObservedTarget {
 +    pub parent: Option<usize>,
 +    pub role: String,
++    pub subrole: Option<String>,
 +    pub label: Option<String>,
 +    pub identifier: Option<String>,
++    pub value: Option<String>,
 +    pub rect: [f64; 4],
 +}
 +
@@ -77,7 +79,7 @@ index e660c04..e8bdee9 100644
              elements: nodes
                  .iter()
                  .filter(|node| node.element_index.is_some())
-@@ -100,6 +137,51 @@ mod tests {
+@@ -100,6 +139,51 @@ mod tests {
          unsafe { CFRetain(ptr as CFTypeRef) };
          CachedSnapshot {
              elements: vec![ptr],
@@ -95,8 +97,8 @@ index e660c04..e8bdee9 100644
 +        let mut original = payload(ptr);
 +        original.window_rect = Some([-100.0, 20.0, 640.0, 452.0]);
 +        original.targets.push(Some(ObservedTarget {
-+            parent: None, role: "AXButton".into(), label: Some("Accept".into()),
-+            identifier: Some("accept".into()), rect: [-80.0, 40.0, 100.0, 30.0],
++            parent: None, role: "AXButton".into(), subrole: None, label: Some("Accept".into()),
++            identifier: Some("accept".into()), value: None, rect: [-80.0, 40.0, 100.0, 30.0],
 +        }));
 +        let id = cache.publish(42, 7, original);
 +        for (pid, window, generation) in [(41, 7, id), (42, 8, id), (42, 7, id.wrapping_add(1))] {
@@ -130,7 +132,7 @@ index e660c04..e8bdee9 100644
      }
  
 diff --git a/rust/crates/platform-macos/src/tools/computer/observation/native.rs b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
-index 316c2a4..5deb842 100644
+index 316c2a4..10759e4 100644
 --- a/rust/crates/platform-macos/src/tools/computer/observation/native.rs
 +++ b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
 @@ -1,7 +1,7 @@
@@ -142,7 +144,7 @@ index 316c2a4..5deb842 100644
  };
  use core_foundation::{
      array::CFArray,
-@@ -617,8 +617,40 @@ impl Native<'_> {
+@@ -617,8 +617,41 @@ impl Native<'_> {
  }
  
  impl Scan<RetainedElement> {
@@ -168,8 +170,9 @@ index 316c2a4..5deb842 100644
 +            payload.targets.push(rect.filter(|rect| ObservedTarget::valid_rect(*rect))
 +                .filter(|_| !row.data.metadata_incomplete)
 +                .map(|rect| ObservedTarget {
-+                    parent: row.parent, role: row.data.role.clone(),
-+                    label: row.data.label.clone(), identifier: row.data.identifier.clone(), rect,
++                    parent: row.parent, role: row.data.role.clone(), subrole: row.data.subrole.clone(),
++                    label: row.data.label.clone(), identifier: row.data.identifier.clone(),
++                    value: row.data.value.clone(), rect,
 +                }));
 +        }
 +        native.checkpoint()?;
@@ -212,3 +215,399 @@ index a35d31f..a2aafcd 100644
                      },
                  );
                  if window == 0 {
+diff --git a/rust/crates/cua-driver-contract/src/computer_segment.rs b/rust/crates/cua-driver-contract/src/computer_segment.rs
+index 83722d0..a182b2c 100644
+--- a/rust/crates/cua-driver-contract/src/computer_segment.rs
++++ b/rust/crates/cua-driver-contract/src/computer_segment.rs
+@@ -106,6 +106,11 @@ pub enum ComputerInput {
+     Window {
+         action: ComputerWindowAction,
+     },
++    /// One primary click on an exact observed native identity. This does not
++    /// reinterpret an image point or perform AXPress on the caller's behalf.
++    ClickTarget {
++        reference: String,
++    },
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+diff --git a/rust/crates/cua-driver-sdk/src/computer/segment.rs b/rust/crates/cua-driver-sdk/src/computer/segment.rs
+index abb24ec..2e7cf02 100644
+--- a/rust/crates/cua-driver-sdk/src/computer/segment.rs
++++ b/rust/crates/cua-driver-sdk/src/computer/segment.rs
+@@ -103,6 +103,9 @@ pub fn validate(segment: &ComputerSegment) -> Result<(), &'static str> {
+     let mut scheduled_ms = 0u32;
+     for action in &segment.actions {
+         let valid = match action {
++            ComputerInput::ClickTarget { reference: value } => {
++                segment.actions.len() == 1 && reference(value)
++            }
+             ComputerInput::Focus { target } => address(target),
+             ComputerInput::Fill { target, text } => {
+                 text_bytes += text.len();
+@@ -574,6 +577,20 @@ mod tests {
+         assert!(validate(&segment(vec![ComputerInput::Focus { target }])).is_err());
+     }
+     #[test]
++    fn controlled_target_click_requires_one_bounded_explicit_reference() {
++        let click = ComputerInput::ClickTarget { reference: "s00000001:2".into() };
++        assert_eq!(validate(&segment(vec![click.clone()])), Ok(()));
++        for value in [String::new(), "x".repeat(129), "界".repeat(43)] {
++            assert!(validate(&segment(vec![ComputerInput::ClickTarget { reference: value }])).is_err());
++        }
++        for actions in [vec![click.clone(), click.clone()],
++            vec![ComputerInput::KeyDown { key: "shift".into() }, click.clone(),
++                ComputerInput::KeyUp { key: "shift".into() }],
++            vec![click, ComputerInput::TypeText { text: "not admitted".into() }]] {
++            assert!(validate(&segment(actions)).is_err());
++        }
++    }
++    #[test]
+     fn controlled_segment_rejects_duplicate_modifiers_and_zero_wheel() {
+         assert!(validate(&segment(vec![ComputerInput::Key {
+             key: "a".into(),
+diff --git a/rust/crates/cua-driver-sdk/src/computer/segment_native.rs b/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
+index e2bdd36..8efba60 100644
+--- a/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
++++ b/rust/crates/cua-driver-sdk/src/computer/segment_native.rs
+@@ -80,6 +80,11 @@ impl ComputerOperation {
+         if !valid_observation && !valid_image {
+             return Err(refused("stale_session_observation"));
+         }
++        if segment.actions.iter().any(|action| matches!(action, ComputerInput::ClickTarget { .. }))
++            && !valid_observation
++        {
++            return Err(refused("stale_session_observation"));
++        }
+         for action in &segment.actions {
+             let points = match action {
+                 ComputerInput::PointerMove { point }
+diff --git a/rust/crates/platform-macos/src/tools/computer/segment.rs b/rust/crates/platform-macos/src/tools/computer/segment.rs
+index 38c5ba6..1e58877 100644
+--- a/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -6,6 +6,7 @@ mod order_tests;
+ mod readiness;
+ mod selection;
+ mod target;
++mod target_click;
+ mod window;
+ use super::observation::{self, Native, Reader};
+ use crate::ax::{bindings, cache::RetainedElement};
+@@ -96,6 +97,7 @@ fn requires_semantic_boundary(action: &ComputerInput, dispatched: bool) -> bool
+         && matches!(
+             action,
+             ComputerInput::Focus { .. } | ComputerInput::Fill { .. } | ComputerInput::Window { .. }
++                | ComputerInput::ClickTarget { .. }
+         )
+ }
+ 
+@@ -107,6 +109,7 @@ fn requires_pointer_keyboard_boundary(previous: &[ComputerInput], action: &Compu
+         matches!(
+             input,
+             ComputerInput::Click { .. }
++                | ComputerInput::ClickTarget { .. }
+                 | ComputerInput::Drag { .. }
+                 | ComputerInput::ButtonDown { .. }
+         )
+@@ -386,6 +389,7 @@ impl Context {
+             None
+         };
+         match action {
++            ComputerInput::ClickTarget { reference } => self.click_target(events, reference),
+             ComputerInput::Focus { target } | ComputerInput::Fill { target, .. } => {
+                 let element = self.resolve(target)?;
+                 let ptr = element.as_ptr() as bindings::AXUIElementRef;
+diff --git a/rust/crates/platform-macos/src/tools/computer/segment/readiness.rs b/rust/crates/platform-macos/src/tools/computer/segment/readiness.rs
+index ce6762d..0362b84 100644
+--- a/rust/crates/platform-macos/src/tools/computer/segment/readiness.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment/readiness.rs
+@@ -26,6 +26,7 @@ pub(super) fn before_action(
+         // Keyboard routing reads the focused editor; TypeText can write AX
+         // selected text. Window activation can fall back to an AX window root.
+         ComputerInput::Focus { .. }
++        | ComputerInput::ClickTarget { .. }
+         | ComputerInput::Fill { .. }
+         | ComputerInput::TypeText { .. }
+         | ComputerInput::Key { .. }
+diff --git a/rust/crates/platform-macos/src/tools/computer/segment/readiness/tests.rs b/rust/crates/platform-macos/src/tools/computer/segment/readiness/tests.rs
+index 4342824..edc2d53 100644
+--- a/rust/crates/platform-macos/src/tools/computer/segment/readiness/tests.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment/readiness/tests.rs
+@@ -42,6 +42,7 @@ fn structural_actions() -> Vec<ComputerInput> {
+         reference: "observation:1".into(),
+     };
+     vec![
++        ComputerInput::ClickTarget { reference: "s00000001:1".into() },
+         ComputerInput::Focus {
+             target: target.clone(),
+         },
+@@ -200,7 +201,7 @@ fn controlled_image_readiness_skip_never_creates_cached_success() {
+     }
+     assert_eq!(
+         (checks.get(), prepares.get(), prepared.get()),
+-        (11, 1, true)
++        (12, 1, true)
+     );
+ }
+ 
+@@ -288,6 +289,7 @@ fn controlled_image_readiness_does_not_remove_the_existing_semantic_boundary() {
+         let semantic = matches!(
+             action,
+             ComputerInput::Focus { .. } | ComputerInput::Fill { .. } | ComputerInput::Window { .. }
++                | ComputerInput::ClickTarget { .. }
+         );
+         assert_eq!(before_action(&action, || Ok(())), Ok(()));
+         assert_eq!(
+diff --git a/rust/crates/platform-macos/src/tools/computer/segment/order_tests.rs b/rust/crates/platform-macos/src/tools/computer/segment/order_tests.rs
+index f1bd357..a088e94 100644
+--- a/rust/crates/platform-macos/src/tools/computer/segment/order_tests.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment/order_tests.rs
+@@ -23,6 +23,7 @@ fn controlled_pointer_press_requires_boundary_for_new_keyboard_input_only() {
+         },
+     ];
+     for pointer in [
++        ComputerInput::ClickTarget { reference: "s00000001:1".into() },
+         ComputerInput::Click {
+             point: point.clone(),
+             button: ComputerMouseButton::Left,
+@@ -90,6 +91,7 @@ fn controlled_queued_input_requires_a_boundary_before_synchronous_mutations() {
+         reference: "s00000001:1".into(),
+     };
+     for action in [
++        ComputerInput::ClickTarget { reference: "s00000001:1".into() },
+         ComputerInput::Focus {
+             target: target.clone(),
+         },
+diff --git a/rust/crates/platform-macos/src/tools/computer/segment/target_click.rs b/rust/crates/platform-macos/src/tools/computer/segment/target_click.rs
+new file mode 100644
+index 0000000..1b699bb
+--- /dev/null
++++ b/rust/crates/platform-macos/src/tools/computer/segment/target_click.rs
+@@ -0,0 +1,206 @@
++//! Exact observed native target; no pixel fallback or identity reconstruction.
++use super::*;
++use crate::ax::cache::{CachedSnapshot, ObservedTarget};
++use cua_driver_core::element_token::parse_token;
++
++fn center(target: [f64; 4], window: [f64; 4]) -> Result<(f64, f64, f64, f64), &'static str> {
++    if !ObservedTarget::valid_rect(target) || !ObservedTarget::valid_rect(window)
++        || target[0] < window[0] || target[1] < window[1]
++        || target[0] + target[2] > window[0] + window[2]
++        || target[1] + target[3] > window[1] + window[3]
++    {
++        return Err("target_geometry_unknown");
++    }
++    let x = target[0] + target[2] / 2.0;
++    let y = target[1] + target[3] / 2.0;
++    Ok((x, y, x - window[0], y - window[1]))
++}
++
++fn unchanged(original: &ObservedTarget, data: &observation::Data, rect: [f64; 4]) -> bool {
++    !data.metadata_incomplete && data.enabled != Some(false)
++        && data.subrole.as_deref() != Some("AXSecureTextField")
++        && original.role == data.role && original.subrole == data.subrole && original.label == data.label
++        && original.identifier == data.identifier && original.value == data.value && original.rect == rect
++}
++
++fn covers_target(other: &crate::windows::WindowInfo, target_z: usize, x: f64, y: f64) -> bool {
++    // WindowInfo normalizes CG's front-to-back enumeration: larger is in front.
++    other.z_index > target_z && other.is_on_screen && other.on_current_space != Some(false)
++        && x >= other.bounds.x && y >= other.bounds.y
++        && x < other.bounds.x + other.bounds.width
++        && y < other.bounds.y + other.bounds.height
++}
++
++impl Context {
++    pub(super) fn click_target(
++        &self,
++        events: &mut Events,
++        reference: &str,
++    ) -> Result<(ActionRoute, bool), &'static str> {
++        if events.held() || events.dispatched {
++            return Err("segment_boundary_required");
++        }
++        let element = self.reference(reference)?;
++        let (generation, index) = parse_token(reference).ok_or("stale_session_observation")?;
++        let target = self.operation.session.native_window()?;
++        let cached = self.state.element_cache
++            .retained_snapshot(target.pid, u64::from(target.window_id), generation)
++            .ok_or("stale_session_observation")?;
++        let original = cached.targets.get(index).and_then(Option::as_ref)
++            .ok_or("target_geometry_unknown")?;
++        if matches!(original.role.as_str(), "AXWindow" | "AXApplication" | "AXWebArea" | "AXScrollArea") {
++            return Err("target_pointer_route_unsupported");
++        }
++        let window = cached.window_rect.ok_or("target_geometry_unknown")?;
++        let position = center(original.rect, window)?;
++        let foreground = self.foreground();
++        events.foreground = foreground;
++        let check = || {
++            self.input_check(foreground, false)?;
++            self.check_click_target(&cached, index, &element, position)
++        };
++        // Each primary independently checks current identity/geometry/hit.
++        // A change caused by pointer tracking stops before down. The existing
++        // Events owner releases an admitted down even on cancellation.
++        events.move_pointer(position, &check)?;
++        events.button_down(ComputerMouseButton::Left, 1, &check)?;
++        events.button_up(ComputerMouseButton::Left)?;
++        events.click_feedback();
++        Ok((ActionRoute::SyntheticEvents, foreground))
++    }
++
++    fn check_click_target(
++        &self,
++        cached: &CachedSnapshot,
++        selected: usize,
++        element: &RetainedElement,
++        position: (f64, f64, f64, f64),
++    ) -> Result<(), &'static str> {
++        // A removed retained handle may no longer answer AXWindow. Establish
++        // membership through the live tree first so replacement is reported as
++        // stale evidence, not an opaque native membership fault.
++        self.live()?;
++        let target = self.operation.session.native_window()?;
++        let native = Native { operation: &self.operation };
++        let tree = observation::scan_general(&native, native.general_input_window()?);
++        if !tree.structurally_complete() {
++            return Err("target_scope_incomplete");
++        }
++        let mut index = selected;
++        for depth in 0..=32 {
++            native.checkpoint()?;
++            let original = cached.targets.get(index).and_then(Option::as_ref)
++                .ok_or("target_geometry_unknown")?;
++            let ptr = *cached.elements.get(index).filter(|ptr| **ptr != 0)
++                .ok_or("stale_session_observation")?;
++            let row = tree.rows.iter().find(|row| unsafe {
++                core_foundation::base::CFEqual(ptr as CFTypeRef, row.element.as_ptr() as CFTypeRef) != 0
++            }).ok_or("stale_session_observation")?;
++            let rect = self.operation.primary(false, || unsafe {
++                bindings::element_screen_rect(row.element.as_ptr() as _)
++            })?.ok_or("target_geometry_unknown")?;
++            // Ancestor descriptions may change independently (e.g. a page
++            // title). Only the explicitly selected target binds descriptions.
++            if (index == selected && !unchanged(original, &row.data, rect))
++                || row.data.role != original.role || rect != original.rect
++            {
++                return Err("stale_session_observation");
++            }
++            match (original.parent, row.parent) {
++                (None, None) => break,
++                (Some(old), Some(now)) if depth < 32 => {
++                    let old_ptr = *cached.elements.get(old).filter(|ptr| **ptr != 0)
++                        .ok_or("stale_session_observation")?;
++                    let parent = tree.rows.get(now).ok_or("stale_session_observation")?;
++                    if unsafe { core_foundation::base::CFEqual(old_ptr as CFTypeRef, parent.element.as_ptr() as CFTypeRef) } == 0 {
++                        return Err("stale_session_observation");
++                    }
++                    index = old;
++                }
++                _ => return Err("stale_session_observation"),
++            }
++        }
++        let windows = self.operation.primary(false, crate::windows::general_visible_windows_with_space_snapshot)?;
++        let window = crate::windows::general_point_window_in(&windows.windows, target.pid, target.window_id,
++            cached.window_rect.ok_or("target_geometry_unknown")?)?;
++        if window.layer != 0 || !window.is_on_screen || window.on_current_space != Some(true) {
++            return Err("target_pointer_route_unsupported");
++        }
++        if windows.windows.iter().any(|other| {
++            covers_target(other, window.z_index, position.0, position.1)
++        }) {
++            return Err("target_occluded");
++        }
++        let hit = self.operation.primary(false, || unsafe {
++            bindings::element_at_screen_position(target.pid, position.0, position.1)
++        })?.ok_or("pointer_hit_unknown")?;
++        let hit = unsafe {
++            let owned = RetainedElement::retain(hit as usize);
++            CFRelease(hit as CFTypeRef);
++            owned
++        };
++        // Initial candidate requires the exact hit, not merely a containing
++        // group. This cannot silently click a different descendant or overlay.
++        if !native.same(element, &hit) {
++            return Err("pointer_hit_changed");
++        }
++        self.member(element)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn target_click_occlusion_uses_normalized_front_order_and_space() {
++        let mut other = crate::windows::WindowInfo {
++            window_id: 1, pid: 1, app_name: "owned".into(), title: String::new(),
++            bounds: crate::windows::WindowBounds { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
++            layer: 0, z_index: 9, is_on_screen: true,
++            current_space_id: Some(1), on_current_space: Some(true), space_ids: Some(vec![1]),
++        };
++        assert!(covers_target(&other, 8, 50.0, 40.0));
++        assert!(!covers_target(&other, 9, 50.0, 40.0));
++        assert!(!covers_target(&other, 10, 50.0, 40.0));
++        assert!(!covers_target(&other, 8, 110.0, 40.0));
++        other.on_current_space = Some(false);
++        assert!(!covers_target(&other, 8, 50.0, 40.0));
++        other.on_current_space = None;
++        assert!(covers_target(&other, 8, 50.0, 40.0));
++        other.is_on_screen = false;
++        assert!(!covers_target(&other, 8, 50.0, 40.0));
++    }
++    #[test]
++    fn target_click_center_uses_original_geometry_and_never_clamps() {
++        let window = [-100.0, 20.0, 200.0, 100.0];
++        assert_eq!(center([-80.0, 30.0, 40.0, 20.0], window), Ok((-60.0, 40.0, 40.0, 20.0)));
++        for rect in [[-101.0, 30.0, 40.0, 20.0], [-80.0, 19.0, 40.0, 20.0],
++            [90.0, 30.0, 40.0, 20.0], [-80.0, 110.0, 40.0, 20.0],
++            [f64::NAN, 30.0, 40.0, 20.0], [-80.0, 30.0, 0.0, 20.0]] {
++            assert!(center(rect, window).is_err());
++        }
++    }
++    #[test]
++    fn target_click_description_and_geometry_changes_do_not_retarget() {
++        let original = ObservedTarget { parent: Some(0), role: "AXButton".into(), subrole: None,
++            label: Some("Accept".into()), identifier: Some("accept".into()), value: None, rect: [10.0, 20.0, 80.0, 25.0] };
++        let data = observation::Data { role: original.role.clone(), label: original.label.clone(),
++            identifier: original.identifier.clone(), enabled: Some(true), ..Default::default() };
++        assert!(unchanged(&original, &data, original.rect));
++        for fault in 0..8 {
++            let mut changed = data.clone();
++            let mut rect = original.rect;
++            match fault {
++                0 => changed.role = "AXTextField".into(),
++                1 => changed.label = Some("Reject".into()),
++                2 => changed.identifier = Some("other".into()),
++                3 => changed.enabled = Some(false),
++                4 => changed.metadata_incomplete = true,
++                5 => changed.subrole = Some("AXSecureTextField".into()),
++                6 => changed.value = Some("different displayed text".into()),
++                _ => rect[0] += 1.0,
++            }
++            assert!(!unchanged(&original, &changed, rect));
++        }
++    }
++}
+diff --git a/rust/crates/platform-macos/src/windows.rs b/rust/crates/platform-macos/src/windows.rs
+index c3b9d42..57ba8ec 100644
+--- a/rust/crates/platform-macos/src/windows.rs
++++ b/rust/crates/platform-macos/src/windows.rs
+@@ -78,6 +78,15 @@ pub(crate) fn general_windows_with_space_snapshot() -> WindowEnumeration {
+     enumerate_windows(kCGWindowListExcludeDesktopElements, LayerFilter::General)
+ }
+ 
++/// Occlusion needs the visible stacking order, not the all-window catalog order.
++/// Keep accessory layers and per-window Space metadata in this snapshot.
++pub(crate) fn general_visible_windows_with_space_snapshot() -> WindowEnumeration {
++    enumerate_windows(
++        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
++        LayerFilter::General,
++    )
++}
++
+ pub(crate) fn general_window_in(windows: &[WindowInfo], pid: i32, id: u32) -> Option<&WindowInfo> {
+     let mut matching = windows.iter().filter(|w| w.pid == pid && w.window_id == id);
+     let window = matching.next()?;

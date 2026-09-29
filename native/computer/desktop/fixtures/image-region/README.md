@@ -36,3 +36,16 @@ This is a bounded regression, not a general security proof or a speed benchmark.
 It does not cover post-move races, inaccessible canvas
 subtargets or model task success. The fixed 150 ms delay is fixture display
 settling, not a production wait strategy.
+
+Append `target` as the final argument to validate the separate native-target
+candidate against the same six click cases (not scroll). It selects with semantic
+observation, resolves the fixture's unique `owned-target` reference, mutates the
+fixture, then submits `click` with `target.ref`. There is no image/coordinate
+fallback. Replacement/movement must return `stale_session_observation`; covers
+must return `pointer_hit_changed`, with the same zero-input and cleanup gates.
+These candidate results do not qualify the independent local-pixel path.
+
+Target mode also accepts `window-cover` and `window-behind`. A second owned
+window has identical bounds and is ordered in front of or behind the selected
+window. The front case requires `target_occluded` and zero clicks in either
+window; the behind case requires exactly one click on the original target.

@@ -8,7 +8,10 @@ import { dirname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 
 assert.equal(process.env.ALLOW_GUI_TESTS, "true");
-const [fixturePath, bridgePath, mode, output] = process.argv.slice(2);
+const [fixturePath, bridgePath, mode, output, addressing = "image"] = process.argv.slice(2);
+assert.ok(["image", "target"].includes(addressing));
+assert.ok(addressing !== "target" || !mode.startsWith("scroll-"));
+assert.ok(!mode.startsWith("window-") || addressing === "target");
 assert.ok(
 	[
 		"distant",
@@ -17,6 +20,8 @@ assert.ok(
 		"cover",
 		"transparent-cover",
 		"reorder-cover",
+		"window-cover",
+		"window-behind",
 		"scroll-distant",
 		"scroll-replace",
 		"scroll-move",
@@ -82,7 +87,15 @@ try {
 	const inventory = await call({ op: "discover", title: "easy-pi-owned-region-guard" });
 	const rows = inventory.content[0].text.split("\n").slice(1).filter(Boolean).map(JSON.parse);
 	assert.equal(rows.length, 1);
-	const view = await call({ op: "select", ref: rows[0].ref, observe: "image" });
+	const view = await call({ op: "select", ref: rows[0].ref, observe: addressing === "target" ? true : "image" });
+	let target;
+	if (addressing === "target") {
+		const elements = view.content[0].text.split("\n").slice(1).filter(Boolean).map(JSON.parse);
+		const matches = elements.filter((row) => row.identifier === "owned-target");
+		assert.equal(matches.length, 1);
+		assert.ok(matches[0].ref);
+		target = { ref: matches[0].ref };
+	}
 	if (mode.startsWith("scroll-")) {
 		fixture.stdin.write("state\n");
 		assert.equal((await event("state")).scrollY, 500);
@@ -91,11 +104,13 @@ try {
 	await event("mutated");
 	action = await call({
 		op: "segment",
-		ref: view.details.imageRef,
+		ref: addressing === "target" ? view.details.observationRef : view.details.imageRef,
 		actions: [
-			mode.startsWith("scroll-")
-				? { op: "scroll", point: { ref: view.details.imageRef, x: 160, y: 226 }, deltaX: 0, deltaY: 5 }
-				: { op: "click", point: { ref: view.details.imageRef, x: 160, y: 226 } },
+			addressing === "target"
+				? { op: "click", target }
+				: mode.startsWith("scroll-")
+					? { op: "scroll", point: { ref: view.details.imageRef, x: 160, y: 226 }, deltaX: 0, deltaY: 5 }
+					: { op: "click", point: { ref: view.details.imageRef, x: 160, y: 226 } },
 		],
 		expected: {
 			kind: "visual",
@@ -107,7 +122,7 @@ try {
 	if (mode === "scroll-distant") {
 		assert.notEqual(oracle.scrollY, 500);
 		assert.equal(action.details.actions[0]?.dispatch, "dispatched");
-	} else if (mode === "distant") {
+	} else if (mode === "distant" || mode === "window-behind") {
 		assert.equal(oracle.clicks, 1);
 		assert.equal(oracle.covered, 0);
 		assert.equal(action.details.actions[0]?.dispatch, "dispatched");
@@ -115,7 +130,16 @@ try {
 		assert.equal(oracle.clicks, 0);
 		assert.equal(oracle.covered, 0);
 		assert.equal(action.details.actions[0]?.dispatch, "not_dispatched");
-		assert.equal(action.details.actions[0]?.code, "stale_image_observation");
+		assert.equal(
+			action.details.actions[0]?.code,
+			addressing === "image"
+				? "stale_image_observation"
+				: mode === "window-cover"
+					? "target_occluded"
+					: ["move", "replace"].includes(mode)
+						? "stale_session_observation"
+						: "pointer_hit_changed",
+		);
 		assert.equal(action.details.terminal.inputCommitted, false);
 		if (mode.startsWith("scroll-")) {
 			assert.equal(oracle.scrollY, 500);
@@ -149,6 +173,7 @@ const passed =
 	lease.startsWith("pi-computer-desktop-v1 C ");
 const report = {
 	mode,
+	addressing,
 	passed,
 	failure,
 	closed,

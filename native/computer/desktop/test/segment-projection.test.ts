@@ -8,6 +8,17 @@ import { projectSegment, segmentCode } from "../segment-projection.ts";
 import { candidateSdk } from "./sdk.ts";
 
 const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
+test("target click refusals preserve safe categories without exposing native details", () => {
+	for (const code of [
+		"pointer_hit_changed",
+		"target_occluded",
+		"target_pointer_route_unsupported",
+		"target_membership_unknown",
+	]) {
+		assert.equal(segmentCode(code), code);
+		assert.equal(segmentCode(`${code}: private detail`), "native_fault");
+	}
+});
 test("replacement selection refusal stays explicit while unknown native messages remain redacted", () => {
 	assert.equal(segmentCode("replacement_selection_unproved"), "replacement_selection_unproved");
 	assert.equal(segmentCode("PRIVATE selection payload"), "native_fault");

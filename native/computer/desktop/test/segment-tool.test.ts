@@ -36,6 +36,55 @@ test(
 	},
 );
 
+test("target clicks reject retired evidence, image-only targets and reselection", { skip: !enabled }, async () => {
+	for (const boundary of ["observe", "capture", "reselect"] as const) {
+		const f = fixture({ windowIds: [1n, 2n] });
+		try {
+			await f.setup();
+			if (boundary === "reselect") await f.setup();
+			else await f.call(boundary === "observe" ? { op: "observe" } : { op: "capture", maxDimension: 512 });
+			await assert.rejects(
+				f.call({ ...segment(), actions: [{ op: "click", target: { ref: "field" } }] }),
+				/stale_observation/,
+			);
+			if (boundary === "capture") {
+				await f.call({ op: "capture", maxDimension: 512 });
+				await assert.rejects(
+					f.call({ ...segment("image-3"), actions: [{ op: "click", target: { ref: "field" } }] }),
+					/stale_element/,
+				);
+			}
+			assert.equal(f.segments.length, 0);
+		} finally {
+			await f.host.close();
+		}
+	}
+});
+
+test("target click cancellation drains the terminal without reading or replaying", { skip: !enabled }, async () => {
+	const f = fixture({ hold: "segment" });
+	try {
+		await f.setup();
+		const controller = new AbortController();
+		const request = { ...segment(), actions: [{ op: "click" as const, target: { ref: "field" } }] };
+		const pending = f.call(request, controller.signal);
+		await f.entered.promise;
+		controller.abort();
+		f.desktop.clear();
+		f.held.resolve();
+		await pending;
+		assert.equal(f.segments.length, 1);
+		assert.ok(f.events.includes("cancel"));
+		assert.ok(f.events.includes("segment:terminal"));
+		assert.ok(!f.events.includes("capture"));
+		await assert.rejects(f.call(request), /stale_observation/);
+		assert.equal(f.segments.length, 1);
+	} finally {
+		f.held.resolve();
+		await f.host.close();
+	}
+});
+
 test(
 	"real segment values use partial retained rows, preserve identifier and publish one fresh image",
 	{ skip: !enabled },

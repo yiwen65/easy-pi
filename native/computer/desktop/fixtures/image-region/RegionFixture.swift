@@ -17,6 +17,7 @@ final class Fixture: NSObject {
     let backdrop = Backdrop(frame: NSRect(x: 0, y: 0, width: 640, height: 420))
     var button: NSButton!
     var existingCover: NSButton?
+    var otherWindow: NSWindow?
     var scroll: NSScrollView?
     var retiredScroll: NSScrollView?
     var clicks = 0
@@ -61,7 +62,15 @@ final class Fixture: NSObject {
         DispatchQueue.main.async { emit(["event": "ready"]) }
     }
     func mutate() {
-        if mode == "distant" || mode == "scroll-distant" { backdrop.changed = true; backdrop.needsDisplay = true }
+        if mode == "window-cover" || mode == "window-behind" {
+            let other = NSWindow(contentRect: NSRect(x: 160, y: 180, width: 640, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+            other.title = "easy-pi-owned-region-other"
+            other.animationBehavior = .none
+            let cover = makeButton(); cover.action = #selector(intercepted)
+            other.contentView?.addSubview(cover)
+            other.order(mode == "window-cover" ? .above : .below, relativeTo: window.windowNumber)
+            otherWindow = other
+        } else if mode == "distant" || mode == "scroll-distant" { backdrop.changed = true; backdrop.needsDisplay = true }
         else if mode == "scroll-replace", let previous = scroll {
             retiredScroll = previous
             previous.removeFromSuperview()

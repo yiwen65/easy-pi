@@ -68,6 +68,7 @@ export function encodeComputerSegment(
 			case "button_up":
 				return new api.ComputerInput.ButtonUp({ button: buttons[step.button] });
 			case "click":
+				if ("target" in step) return new api.ComputerInput.ClickTarget({ reference: step.target.ref });
 				return new api.ComputerInput.Click({
 					point: point(step.point),
 					button: buttons[step.button ?? "left"],

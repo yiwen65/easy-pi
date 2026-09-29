@@ -47,7 +47,7 @@
 - Decision: 锁定生成器已可重建，无须新增依赖。N-API runtime 按模块动态装载 FFI，不手写枚举布局；新 ABI 仍须实际加载和调用验证。
 - Decision: 用户已批准独立的原生目标引用点击候选，不以截图像素为依据；安装仍以负例与真实模型通过为门槛。
 
-### Approved candidate contract, execution not yet implemented
+### Approved candidate contract, isolated implementation under validation
 
 - 模型仍使用 `op: click`，但只能二选一：现有 `point`，或新 `target: {ref}`；不增加另一种工具。
 - 初版目标引用分支只允许一个动作、左键单击，不接受 locator、按钮/次数参数、同时指定 point 或跨窗口地址。
@@ -109,9 +109,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-002 — 实现并验证候选执行路径
+### [x] T-002 — 实现并验证候选执行路径
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 将明确 target ref 的点击贯通到原生派发，不新增缓存/生命周期。
 - Inputs and prerequisites: T-001 的契约和锁定工具。
@@ -127,13 +127,13 @@
   - 动态内容正例与替换/移动/可见透明覆盖/重排负例全部通过。
 - Verification method:
   - 定点 Rust/TS 测试、npm run check、所有新 GUI 回归。
-- Validation evidence: 快照证据基础补丁已落到隔离源码并通过原生缓存测试 6/6、core 缓存回归 9/9、SDK segment 回归 11/11；npm run check exit 0。点击动作、GUI 负例和新 ABI 尚未实现/测试，因此 T-002 保持 in_progress。
+- Validation evidence: 独立源已实现 ClickTarget 与 TS 严格单动作契约，真实生成 ABI 并重复检查通过。SDK segment 12/12；最新 platform segment 30/30；实际加载 TS contract/codec/projection 27/27；tool lifecycle 21/21（包括目标点击旧观察、图像引用、换窗口与取消）。候选 v6 的 8 个真实 GUI 正负例全通过且全部正常关闭、clean lease。此前 v1/v2/v3/v4 失败保留；最终 npm run check exit 0、无关 formatter 副作用已撤回、补丁应用检查通过。此状态只代表候选执行路径验证，不是发布资格。
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-003 — 真实模型、速度与安装资格
 
-- Status: pending
+- Status: in_progress
 - Owner: coordinator
 - Objective: 用业务 oracle 和可比测量确认候选改善真实任务。
 - Inputs and prerequisites: T-002 全部通过、现有模型授权与隔离 CfT。
@@ -164,7 +164,7 @@
 ## Risks and blockers
 
 新动作可能只是把复杂度转移到 schema；T-001 必须先证明现有引用/缓存可复用。
-观察时几何、懒加载、AX hit 稳定性、ABI 生成是尚未完成的实现条件，不是已经解决的事实。
+观察时几何与 ABI 已实现并经定点验证；Chrome 懒加载、AX hit 稳定性、指针移动后竞态与真实模型仍是待验证边界。
 现有 target-region 候选不能当作稳定发布；模型页内标签失败仍在分母。
 未知输入不重放、进程/窗口边界与关闭排空不得为了通过测试删除。
 
@@ -182,9 +182,18 @@
 - 2026-09-29: 持久补丁 `native/computer/patches/native-target-click-candidate.patch`，SHA256 `c2381566a20e1f00faa7649781db04ad40d4021094f45e246a6a6f2519715929`；对原始材料 `git apply --check` 通过。根 `npm run check` 通过；其四处无关 formatter 改动已逐块撤回，用户 LEARNS.md 等改动保留。
 - 2026-09-29: 核对安装版 bridge a28cd243、native a1f1aea2、NAPI 1f3296c1，全部未变。无 GUI owner 启动。T-002 下一步：在该隔离源实现单动作 ClickTarget 的 schema/native admission、实时身份/几何/遮挡命中 guard，先原生定点测试，再生成 ABI 与桥接；不要把当前基础补丁当成可安装候选。
 
+- 2026-09-29: 完整候选贯通 ClickTarget（单动作、左键、具体 ref）、原生观察缓存与真实生成 ABI。坐标/拖拽不改。v1 GUI distant/move 通过，replace 零输入但错误为 native_fault，失败保留在 `/tmp/epi-pointer-boundary.PFHOUz/native-target-gui1-replace/result.json`。
+- 2026-09-29: replacement guard 改为先在 live tree 证明成员，再查询 retained handle 的 AXWindow；移除旧 handle 优先查询。另发现桥接未允许 pointer_hit_changed 等固定安全分类，新增失败后通过的分类回归；含私有详情的字符串仍脱敏。
+- 2026-09-29: v2/v3 distant 误拒绝 target_occluded。纯测试复现候选 z_index 比较方向写反，修正为 higher-is-front；v4 原有六例及 window-cover 通过，但 window-behind 仍失败。失败样本均未丢弃。
+- 2026-09-29: 诊断5c 在同一时刻读取 CG 全部窗口与可见窗口：other 8852 / target 8842 在 all 中顺序 0/5，在 visible 中为 19/18；原生记录 other z238 > target z233。证实全部窗口目录不能作为该用例的可见遮挡顺序。新分支改用 on-screen 全层级枚举，保留 Space、身份和几何验证；原坐标/拖拽路径不变。诊断代码已从源码撤除，诊断产物不得安装。
+- 2026-09-29: v6 native `5cd76a602dc7c48f8eef26055559d281a4451b2e35225204b863f01ac1d0b739`，bridge `9eaca8676322c237077fbe3c17f0e603f1fd8334a5c4eaf0219f9bfbcc0f07e2`，patch `223ff26143c9b56555579752ba425691b650baf80faa02ddc053c2ac18e70f15`。`native-target-gui6-{window-behind,window-cover,distant,move,replace,cover,transparent-cover,reorder-cover}/result.json` 八例全通过；clean lease 0915..091c。正例各一次点击，六负例均零点击。产物位于 `/tmp/epi-pointer-boundary.PFHOUz/native-target-package6`，单独验证、未安装。
+- 2026-09-29: 最新 canonical generate 和 --check 通过，Rust segment 30/30、TS schema/codec/projection 27/27、tool integration 21/21。integration 新测试最初误用已经消耗的 image ref，按真实消费契约重新 capture 后通过；没有修改产品去适配错误测试。安装 bridge a28cd243/native a1f1aea2 再次核对未变。
+
+- 2026-09-29: 最终 npm run check exit 0；复核并撤回四个无关 formatter 文件变动。48 项 TS 测试整体重跑通过。T-002 -> done；T-003 coordinator -> in_progress，下一步为实际模型入口预算验证和独立候选 Chrome 模型 smoke，不安装。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 完成；快照证据基础已实现，26 个定点原生测试及根检查通过，补丁可应用。绑定工具可重复生成。安装版未改动。
-- Limitations: 尚无 ClickTarget 动作执行、GUI 负例、真实性能或安装资格结果。T-002 实施中；T-003 未开始；完整持续优化 Goal 保持 active。
+- Evidence: T-001 完成；v6 动作候选贯通原生 ABI，最新 Rust segment 30/30、TS 48/48、真实 GUI 8/8，补丁可应用；旧引用/跨窗口/取消有工具层集成验证。安装版未改动。
+- Limitations: 指针移动后竞态、真实 Chrome/模型和可比速度未完成；T-002 候选实现完成，T-003 实施中；完整持续优化 Goal 保持 active。安装门槛未满足。

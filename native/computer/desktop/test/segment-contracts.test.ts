@@ -19,6 +19,29 @@ function rejects(input: unknown): void {
 	assert.throws(() => parseComputerSegmentInput(input), { message: "Invalid computer segment" });
 }
 
+test("target click is an explicit single reference, never a locator or implicit point fallback", () => {
+	const click = { op: "click", target: { ref: "s00000001:2" } };
+	const input = segment([click]);
+	assert.deepEqual(parseComputerSegmentInput(input), input);
+	for (const invalid of [
+		{ ...click, point },
+		{ ...click, button: "left" },
+		{ ...click, count: 1 },
+		{ ...click, target: { selector: { label: "Save" } } },
+		{ ...click, target: { ref: "" } },
+		{ ...click, target: { ref: "界".repeat(43) } },
+		{ ...click, target: { ref: "\ud800" } },
+	])
+		rejects(segment([invalid]));
+	for (const actions of [
+		[click, move],
+		[move, click],
+		[click, click],
+		[{ op: "key_down", key: "shift" }, click, { op: "key_up", key: "shift" }],
+	])
+		rejects(segment(actions));
+});
+
 test("all action variants, optional defaults and expected variants retain their model shape", () => {
 	const actions = [
 		{ op: "focus", target },

@@ -63,6 +63,17 @@ const action = Type.Union([
 	Type.Object(
 		{
 			op: Type.Literal("click"),
+			target: Type.Object({ ref: reference }, closed),
+		},
+		{
+			...closed,
+			description:
+				"Single left click on an exact element ref from the latest observe. Must be the only action; moved, replaced or covered targets are refused.",
+		},
+	),
+	Type.Object(
+		{
+			op: Type.Literal("click"),
 			point,
 			button: Type.Optional(Type.Union(button.anyOf, { default: "left" })),
 			count: Type.Optional(Type.Integer({ minimum: 1, maximum: 2, default: 1 })),
@@ -185,7 +196,9 @@ export function parseComputerSegmentInput(input: unknown): ComputerSegmentInput 
 				if (!buttons.delete(step.button)) throw new Error("Invalid computer segment");
 				break;
 			case "click":
-				if (buttons.has(step.button ?? "left")) throw new Error("Invalid computer segment");
+				if ("target" in step) {
+					if (request.actions.length !== 1) throw new Error("Invalid computer segment");
+				} else if (buttons.has(step.button ?? "left")) throw new Error("Invalid computer segment");
 				break;
 			case "scroll":
 				if (step.deltaX === 0 && step.deltaY === 0) throw new Error("Invalid computer segment");
