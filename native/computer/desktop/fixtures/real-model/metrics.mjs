@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 
+export function meteredStream(stream, meter, reportedCost) {
+	return (model, context, options) => {
+		meter.start(reportedCost());
+		return stream(model, context, { ...options, maxTokens: 2048, maxRetries: 0 });
+	};
+}
+
 export function createRequestMeter(now = () => performance.now()) {
 	let turns = 0;
 	let modelMs = 0;

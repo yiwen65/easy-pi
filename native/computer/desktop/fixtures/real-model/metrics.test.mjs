@@ -1,6 +1,89 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequestMeter, providerFailure, summarize } from "./metrics.mjs";
+import { Agent } from "../../../../../packages/agent/dist/index.js";
+import { createAssistantMessageEventStream } from "../../../../../packages/ai/dist/utils/event-stream.js";
+import { createRequestMeter, meteredStream, providerFailure, summarize } from "./metrics.mjs";
+
+test("real Agent invocation stops before request 25 and never counts the synthetic error twice", async () => {
+	const meter = createRequestMeter();
+	let calls = 0;
+	let toolCalls = 0;
+	const errors = [];
+	const model = {
+		id: "local-budget-fixture",
+		name: "Local budget fixture",
+		provider: "fixture",
+		api: "openai-responses",
+		reasoning: false,
+		input: ["text"],
+		contextWindow: 100000,
+		maxTokens: 4096,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	};
+	const backend = (_model, _context, options) => {
+		calls++;
+		assert.ok(calls <= 24);
+		assert.equal(options.maxTokens, 2048);
+		assert.equal(options.maxRetries, 0);
+		const stream = createAssistantMessageEventStream();
+		const message = {
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			content: [{ type: "toolCall", id: `call-${calls}`, name: "next", arguments: { turn: calls } }],
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "done", reason: "toolUse", message });
+		return stream;
+	};
+	const agent = new Agent({
+		streamFn: backend,
+		initialState: {
+			model,
+			tools: [
+				{
+					name: "next",
+					label: "Next",
+					description: "Local fixture only",
+					parameters: {
+						type: "object",
+						properties: { turn: { type: "integer" } },
+						required: ["turn"],
+						additionalProperties: false,
+					},
+					async execute() {
+						toolCalls++;
+						return { content: [{ type: "text", text: "Continue" }], details: {} };
+					},
+				},
+			],
+		},
+	});
+	agent.streamFunction = meteredStream(agent.streamFunction, meter, () => 0);
+	agent.subscribe((event) => {
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			meter.finish();
+			if (event.message.stopReason === "error") errors.push(event.message.errorMessage);
+		}
+	});
+	await agent.prompt("Run the local tool until the request budget stops you.");
+	assert.equal(calls, 24);
+	assert.equal(toolCalls, 24);
+	assert.equal(meter.turns, 24);
+	assert.equal(errors.length, 1);
+	assert.match(errors[0], /Model budget exhausted/);
+	assert.ok(meter.modelMs >= 0);
+});
 
 test("request admission bounds real invocations and counts each interval once", () => {
 	let now = 100;

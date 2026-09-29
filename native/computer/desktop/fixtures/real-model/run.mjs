@@ -17,7 +17,7 @@ import {
 } from "../../../../../packages/coding-agent/dist/index.js";
 import { launchChrome } from "./chrome.mjs";
 import { closeNative } from "./lifecycle.mjs";
-import { createRequestMeter, providerFailure, summarize } from "./metrics.mjs";
+import { createRequestMeter, meteredStream, providerFailure, summarize } from "./metrics.mjs";
 import { caseIds, checkOracle, chromeTasks, pageHtml } from "./tasks.mjs";
 
 // Explicit opt-in: this is never imported by default tests or CI.
@@ -203,12 +203,8 @@ for (const id of selected) {
 			resourceLoader,
 		}));
 		await session.bindExtensions({});
-		const stream = session.agent.streamFunction;
-		session.agent.streamFunction = (chosen, context, options) => {
-			// onProviderContext is best-effort observation, not an admission gate.
-			meter.start(totalCost + cost);
-			return stream(chosen, context, { ...options, maxTokens: 2048, maxRetries: 0 });
-		};
+		// onProviderContext is best-effort observation, not an admission gate.
+		session.agent.streamFunction = meteredStream(session.agent.streamFunction, meter, () => totalCost + cost);
 		session.subscribe((event) => {
 			if (event.type === "message_end" && event.message.role === "assistant") {
 				if (["error", "aborted"].includes(event.message.stopReason)) assistantErrors.push(event.message.stopReason);

@@ -80,7 +80,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-002 -> T-003。
+- Dependency graph: T-001 -> T-002 -> T-004 -> T-003；T-003 的首次真实模型诊断已完成，新增 T-004 修复已复现的直接文本子节点误拒绝后继续资格验证。
 - Parallel batches: 无；各任务共享动作枚举、生成绑定与同一桌面 owner，串行执行。
 - Serialization constraints: 所有 GUI 串行；不启动子 agent；仅 coordinator 更新本文件。
 
@@ -133,13 +133,13 @@
 
 ### [ ] T-003 — 真实模型、速度与安装资格
 
-- Status: in_progress
+- Status: blocked
 - Owner: coordinator
 - Objective: 用业务 oracle 和可比测量确认候选改善真实任务。
 - Inputs and prerequisites: T-002 全部通过、现有模型授权与隔离 CfT。
 - Scope or files: real-model runner、owned fixtures、候选打包/pins 与证据记录。
 - Expected output: 保留失败的交错样本与明确安装/不安装结论。
-- Dependencies: T-002
+- Dependencies: T-002, T-004
 - Execution steps:
   1. 验证修复后的模型请求预算确实在实际调用入口生效。
   2. 运行标签、滚动、表单和相关通用回归，比较任务成功、轮数、工具/模型时间。
@@ -149,7 +149,29 @@
   - 保护、准确性和速度证据足够；不足时明确保留未安装状态。
 - Verification method:
   - 真实 AgentSession、独立页面 oracle、进程关闭/租约读回及哈希核对。
-- Validation evidence: Not run.
+- Validation evidence: 请求预算通过真实 Agent 循环（本地 stream、无网络）验证 24 次后端调用，第 25 次拒绝；metrics 6/6，npm run check exit 0。v6 真实 gpt-6-sol 两例：click-tab-2 失败（57.98s/9轮），scroll-text 通过（116.29s/14轮），总 reported cost 0.1382168 USD，均正常关闭。数据 `/tmp/epi-pointer-boundary.PFHOUz/native-target-model6/summary.json`；不是可比性能提升证据。
+- Blocker: Chrome 链接实际命中其原有 AXStaticText 直接子节点，精确同对象规则误拒绝；模型标签任务未达安装门槛。
+- Unblock condition: T-004 受限子节点实现与负例通过，然后重跑真实模型与相关回归；不安装现有失败候选。
+
+### [ ] T-004 — 修复已观察直接文本子节点的命中契约
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 允许链接、按钮、单选控件命中同次观察已存在的直接 AXStaticText 子节点，不接受任意后代。
+- Inputs and prerequisites: 用户已明确回复允许此受限子节点支持；T-002 候选与 Chrome 因果对照。
+- Scope or files: 原生 target_click.rs 及候选补丁；owned Chrome fixture、定点测试。
+- Expected output: 无诊断代码、单独打包的候选及父子正负例。
+- Dependencies: T-002
+- Execution steps:
+  1. 复用原生缓存证明父子双方原生身份、原始几何及直接父子关系。
+  2. 拒绝新增、替换、移动、覆盖和非文本后代；保留原有八例。
+  3. 重建、定点测试与真实 GUI 验证后恢复 T-003。
+- Acceptance criteria:
+  - 原有文字子节点点击一次；错误目标负例零点击；无自动输入重放。
+  - 不以标签/几何相同代替身份，不更改坐标/拖拽契约。
+- Verification method:
+  - Rust/TS 定点测试、真实 owned Chrome oracle、关闭与租约读回、根检查。
+- Validation evidence: 已诊断未实施。`/tmp/epi-target-chrome-6otb2T/result.json` 链接零点击，native selected29 AXLink / hit30 AXStaticText，old_parent 与 live_parent 均29；`/tmp/epi-target-chrome-liFlcb/result.json` 直接指定同类文本目标点击一次。诊断源码已撤回，与 v6 冻结源 SHA 相同；诊断 dylib 不能安装。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -191,9 +213,11 @@
 
 - 2026-09-29: 最终 npm run check exit 0；复核并撤回四个无关 formatter 文件变动。48 项 TS 测试整体重跑通过。T-002 -> done；T-003 coordinator -> in_progress，下一步为实际模型入口预算验证和独立候选 Chrome 模型 smoke，不安装。
 
+- 2026-09-29: 请求预算入口集成已通过；候选提交 538d9f4cd。v6 真实模型两例一过一败，失败保留。Chrome 最小对照确认 AXLink 的实时 hit 是原有直接 AXStaticText 子节点，指定文本则成功。用户已授权受限子节点支持；T-004 开始，T-003 因资格依赖转 blocked，持续 Goal 仍 active。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
 - Evidence: T-001 完成；v6 动作候选贯通原生 ABI，最新 Rust segment 30/30、TS 48/48、真实 GUI 8/8，补丁可应用；旧引用/跨窗口/取消有工具层集成验证。安装版未改动。
-- Limitations: 指针移动后竞态、真实 Chrome/模型和可比速度未完成；T-002 候选实现完成，T-003 实施中；完整持续优化 Goal 保持 active。安装门槛未满足。
+- Limitations: 真实模型标签任务失败，T-004 受限子节点实施中；T-003 待其验证后恢复。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。
