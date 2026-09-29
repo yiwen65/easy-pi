@@ -394,17 +394,53 @@
              let geometry = &image.geometry;
              let result = ToolResult::text("Controlled exact-window image; bytes in typed result")
                  .with_structured(json!({
+@@ -382,7 +399,9 @@
+                     ImageAction::Scroll(_) => "image_scroll",
+                 },
+                 || {
+-                    let validate = || -> Result<(), &'static str> {
++                    let cached = cua_driver_core::element_cache::current_runtime_cache::<crate::ax::cache::CachedSnapshot>()
++                        .and_then(|cache| cache.retained_snapshot(target.pid, u64::from(target.window_id)));
++                    let validate = || -> Result<Option<[u32; 4]>, &'static str> {
+                         if !target_matches(&args, &worker) {
+                             return Err("controlled_target_stale");
+                         }
+@@ -408,13 +427,18 @@
+                         if !tree.complete() {
+                             return Err(tree.failure.unwrap_or("condition_unknown"));
+                         }
+-                        Ok(())
++                        image_snapshot::region(cached.as_ref(), &reference, &native, &tree, x, y,
++                            matches!(action, ImageAction::Scroll(_)))
+                     };
+-                    if let Err(reason) = validate() {
+-                        return refusal(reason);
+-                    }
++                    let region = match validate() {
++                        Ok(region) => region,
++                        Err(reason) => return refusal(reason),
++                    };
+                     match crate::input::controlled::pointer(
+-                        &worker, &reference, x, y, action, validate,
++                        &worker, &reference, x, y, action, region, || {
++                            if validate()? != region { return Err("stale_image_observation"); }
++                            Ok(())
++                        },
+                     ) {
+                         Ok(()) => ToolResult::text(
+                             "Image-bound pointer input dispatched; effect unverified",
 --- /dev/null
 +++ b/rust/crates/platform-macos/src/tools/computer/image_snapshot.rs
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,305 @@
 +//! Capture-time AX evidence in the existing snapshot owner, not a second cache.
 +use super::observation::{self, Native, Reader, Scan};
 +use crate::ax::{
 +    bindings,
 +    cache::{CachedSnapshot, ImageSnapshot, ImageTarget, RetainedElement},
 +};
-+use cua_driver_contract::computer_image::ComputerImage;
-+use cua_driver_core::controlled::Operation;
++use core_foundation::base::{CFRelease, CFTypeRef};
++use cua_driver_contract::computer_image::{ComputerImage, ComputerImageGeometry};
++use cua_driver_core::controlled::{ImageReference, Operation};
 +
 +pub(super) struct Prepared {
 +    tree: Scan<RetainedElement>,
@@ -418,14 +454,14 @@
 +        .primary(false, || unsafe {
 +            bindings::element_screen_rect(element.as_ptr() as bindings::AXUIElementRef)
 +        })?
-+        .ok_or("image_target_geometry_unproved")?;
++        .ok_or("target_geometry_unknown")?;
 +    if !value.iter().all(|value| value.is_finite())
 +        || value[2] <= 0.0
 +        || value[3] <= 0.0
 +        || !(value[0] + value[2]).is_finite()
 +        || !(value[1] + value[3]).is_finite()
 +    {
-+        return Err("image_target_geometry_unproved");
++        return Err("target_geometry_unknown");
 +    }
 +    Ok(value)
 +}
@@ -435,7 +471,7 @@
 +    // Do not enable AX or change focus in an image-only observation.
 +    let tree = observation::scan_general(&native, native.general_window()?);
 +    if !tree.structurally_complete() {
-+        return Err("image_target_tree_incomplete");
++        return Err("condition_unknown");
 +    }
 +    let mut targets = Vec::new();
 +    for (index, row) in tree.rows.iter().enumerate() {
@@ -464,7 +500,7 @@
 +        // identity, membership and ancestry before using these facts.
 +        for target in &self.targets {
 +            if rect(&native, &self.tree.rows[target.index].element)? != target.rect {
-+                return Err("image_target_geometry_changed");
++                return Err("stale_image_observation");
 +            }
 +        }
 +        let mut payload = self.tree.payload(true);
@@ -474,6 +510,231 @@
 +            targets: self.targets,
 +        });
 +        Ok(payload)
++    }
++}
++
++fn pixel_region(
++    geometry: &ComputerImageGeometry,
++    rect: [f64; 4],
++) -> Result<[u32; 4], &'static str> {
++    geometry.validate()?;
++    if geometry.crop_x != 0
++        || geometry.crop_y != 0
++        || geometry.crop_width != geometry.source_width
++        || geometry.crop_height != geometry.source_height
++    {
++        return Err("target_geometry_unknown");
++    }
++    let [x, y, width, height] = rect;
++    if !rect.iter().all(|value| value.is_finite()) || width <= 0.0 || height <= 0.0 {
++        return Err("target_geometry_unknown");
++    }
++    let left = (x - geometry.desktop_x) * f64::from(geometry.output_width) / geometry.window_width;
++    let top = (y - geometry.desktop_y) * f64::from(geometry.output_height) / geometry.window_height;
++    let right =
++        (x + width - geometry.desktop_x) * f64::from(geometry.output_width) / geometry.window_width;
++    let bottom = (y + height - geometry.desktop_y) * f64::from(geometry.output_height)
++        / geometry.window_height;
++    if ![left, top, right, bottom]
++        .iter()
++        .all(|value| value.is_finite())
++        || left < 0.0
++        || top < 0.0
++        || right > f64::from(geometry.output_width)
++        || bottom > f64::from(geometry.output_height)
++    {
++        return Err("target_geometry_unknown");
++    }
++    let (left, top, right, bottom) = (
++        left.floor() as u32,
++        top.floor() as u32,
++        right.ceil() as u32,
++        bottom.ceil() as u32,
++    );
++    if right <= left || bottom <= top {
++        return Err("target_geometry_unknown");
++    }
++    Ok([left, top, right - left, bottom - top])
++}
++
++/// None means no local proof was captured, not that a failed identity check may
++/// fall back. Every observed mismatch below is a refusal, before primary input.
++pub(super) fn region(
++    cached: Option<&CachedSnapshot>,
++    reference: &ImageReference,
++    native: &Native<'_>,
++    live: &Scan<RetainedElement>,
++    x: u32,
++    y: u32,
++    scroll: bool,
++) -> Result<Option<[u32; 4]>, &'static str> {
++    let Some(cached) = cached else {
++        return Ok(None);
++    };
++    let Some(image) = &cached.image else {
++        return Ok(None);
++    };
++    reference.addresses(&image.image_id, x, y)?;
++    if reference.geometry() != &image.geometry {
++        return Err("stale_image_observation");
++    }
++    let point = image.geometry.desktop_pixel_center(x, y)?;
++    let target = native.operation.session.native_window()?;
++    let hit = native
++        .operation
++        .primary(false, || unsafe {
++            bindings::element_at_screen_position(target.pid, point.0, point.1)
++        })?
++        .ok_or("pointer_hit_unknown")?;
++    let hit = unsafe {
++        let owned = RetainedElement::retain(hit as usize);
++        CFRelease(hit as CFTypeRef);
++        owned
++    };
++    let mut index = cached
++        .elements
++        .iter()
++        .position(|ptr| {
++            *ptr != 0
++                && unsafe {
++                    core_foundation::base::CFEqual(*ptr as CFTypeRef, hit.as_ptr() as CFTypeRef)
++                        != 0
++                }
++        })
++        .ok_or("stale_image_observation")?;
++    let mut selected = None;
++    let mut ancestry = Vec::new();
++    let mut steps = 0;
++    loop {
++        steps += 1;
++        if steps > 512 {
++            return Err("controlled_target_unproven");
++        }
++        ancestry.push(index);
++        let original = image
++            .targets
++            .iter()
++            .find(|entry| entry.index == index)
++            .ok_or("target_geometry_unknown")?;
++        let ptr = *cached
++            .elements
++            .get(index)
++            .ok_or("stale_image_observation")?;
++        let row = live
++            .rows
++            .iter()
++            .find(|row| unsafe {
++                core_foundation::base::CFEqual(ptr as CFTypeRef, row.element.as_ptr() as CFTypeRef)
++                    != 0
++            })
++            .ok_or("stale_image_observation")?;
++        if row.data.role != original.role || rect(native, &row.element)? != original.rect {
++            return Err("stale_image_observation");
++        }
++        let same_parent = match (original.parent, row.parent) {
++            (None, None) => true,
++            (Some(old), Some(now)) => cached.elements.get(old).is_some_and(|ptr| {
++                live.rows.get(now).is_some_and(|parent| unsafe {
++                    core_foundation::base::CFEqual(
++                        *ptr as CFTypeRef,
++                        parent.element.as_ptr() as CFTypeRef,
++                    ) != 0
++                })
++            }),
++            _ => false,
++        };
++        if !same_parent {
++            return Err("stale_image_observation");
++        }
++        if selected.is_none()
++            && ((!scroll && steps == 1) || (scroll && original.role == "AXScrollArea"))
++        {
++            selected = Some(original);
++        }
++        match original.parent {
++            Some(parent) => index = parent,
++            None => break,
++        }
++    }
++    let Some(selected) = selected else {
++        return Ok(None);
++    };
++    // A live hit that existed in the old tree is not necessarily the old hit:
++    // an overlapping sibling can change stacking without changing any pixels,
++    // identity or geometry. Only accept capture geometry that uniquely assigns
++    // this point to the hit and its ancestors. Do not fall back on ambiguity.
++    if image.targets.iter().any(|entry| {
++        let [left, top, width, height] = entry.rect;
++        !ancestry.contains(&entry.index)
++            && point.0 >= left && point.1 >= top
++            && point.0 < left + width && point.1 < top + height
++    }) {
++        return Err("stale_image_observation");
++    }
++    if !scroll
++        && matches!(
++            selected.role.as_str(),
++            "AXWindow" | "AXApplication" | "AXWebArea" | "AXScrollArea"
++        )
++    {
++        return Ok(None);
++    }
++    let [left, top, width, height] = selected.rect;
++    if point.0 < left || point.1 < top || point.0 >= left + width || point.1 >= top + height {
++        return Err("pointer_hit_unknown");
++    }
++    pixel_region(&image.geometry, selected.rect).map(Some)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn geometry() -> ComputerImageGeometry {
++        ComputerImageGeometry {
++            desktop_x: -100.0,
++            desktop_y: 20.0,
++            window_width: 100.0,
++            window_height: 80.0,
++            source_width: 200,
++            source_height: 160,
++            crop_x: 0,
++            crop_y: 0,
++            crop_width: 200,
++            crop_height: 160,
++            output_width: 100,
++            output_height: 80,
++        }
++    }
++    #[test]
++    fn image_region_maps_negative_origin_and_rounds_outward() {
++        assert_eq!(
++            pixel_region(&geometry(), [-98.75, 22.25, 3.5, 4.5]),
++            Ok([1, 2, 4, 5])
++        );
++        let mut scaled = geometry();
++        scaled.output_width = 50;
++        scaled.output_height = 40;
++        assert_eq!(
++            pixel_region(&scaled, [-98.0, 22.0, 4.0, 4.0]),
++            Ok([1, 1, 2, 2])
++        );
++    }
++    #[test]
++    fn image_region_refuses_partial_outside_nonfinite_empty_and_crop_without_clamping() {
++        for rect in [
++            [-101.0, 20.0, 3.0, 3.0],
++            [-1.0, 20.0, 3.0, 3.0],
++            [-99.0, 19.0, 3.0, 3.0],
++            [-99.0, 99.0, 3.0, 3.0],
++            [-99.0, 20.0, 0.0, 3.0],
++            [-99.0, 20.0, 3.0, f64::NAN],
++        ] {
++            assert!(pixel_region(&geometry(), rect).is_err());
++        }
++        let mut cropped = geometry();
++        cropped.crop_x = 1;
++        cropped.crop_width = 199;
++        assert!(pixel_region(&cropped, [-98.0, 22.0, 4.0, 4.0]).is_err());
 +    }
 +}
 --- a/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
@@ -486,3 +747,143 @@
                      },
                  );
                  if window == 0 {
+--- a/rust/crates/platform-macos/src/input/controlled.rs
++++ b/rust/crates/platform-macos/src/input/controlled.rs
+@@ -54,6 +54,14 @@
+     reference: &ImageReference,
+     operation: &Operation,
+ ) -> Result<(), &'static str> {
++    revalidate_region(reference, operation, None)
++}
++
++pub(crate) fn revalidate_region(
++    reference: &ImageReference,
++    operation: &Operation,
++    region: Option<[u32; 4]>,
++) -> Result<(), &'static str> {
+     let target = operation.session.native_window()?;
+     if !reference.target_matches(target.pid as u32, u64::from(target.window_id)) {
+         return Err("controlled_target_stale");
+@@ -63,7 +71,11 @@
+         operation,
+         geometry.output_width.max(geometry.output_height),
+     )?;
+-    if !reference.matches(&image) {
++    let matches = match region {
++        Some([x, y, width, height]) => reference.matches_region(&image, x, y, width, height)?,
++        None => reference.matches(&image),
++    };
++    if !matches {
+         return Err("stale_image_observation");
+     }
+     operation.checkpoint()
+@@ -134,13 +146,14 @@
+     x: u32,
+     y: u32,
+     action: ImageAction,
++    region: Option<[u32; 4]>,
+     validate_target: impl Fn() -> Result<(), &'static str>,
+ ) -> Result<(), &'static str> {
+     let target = operation.session.native_window()?;
+     let hardware = hardware_stamp()?;
+     let geometry = reference.geometry();
+     let point = geometry.desktop_pixel_center(x, y)?;
+-    revalidate(reference, operation)?;
++    revalidate_region(reference, operation, region)?;
+     let source = CGEventSource::new(CGEventSourceStateID::Private)
+         .map_err(|_| "pointer_event_unavailable")?;
+     // Group only this move/down/up, never distinct clicks on the same window.
+@@ -233,7 +246,7 @@
+     checked_primary(operation, &check, || moved.post_to_pid(target.pid))?;
+     // Hover is itself committed input and may change the picture. Refuse that
+     // change instead of assuming a tracking move is visually inert.
+-    revalidate(reference, operation)?;
++    revalidate_region(reference, operation, region)?;
+     if !live() {
+         return Err("controlled_target_stale");
+     }
+--- a/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -188,16 +188,16 @@
+     }
+ 
+     fn point(&self, point: &ComputerPoint) -> Result<(f64, f64, f64, f64), &'static str> {
+-        self.point_with_route(point).map(|(point, _)| point)
++        self.point_with_route(point, None).map(|(point, _)| point)
+     }
+ 
+     fn point_with_route(
+         &self,
+         point: &ComputerPoint,
++        local: Option<bool>,
+     ) -> Result<((f64, f64, f64, f64), bool), &'static str> {
+         self.live()?;
+         let image = self.image.as_ref().ok_or("image_reference_required")?;
+-        crate::input::controlled::revalidate(image, &self.operation)?;
+         image.addresses(&point.image_ref, point.x as u32, point.y as u32)?;
+         let target = self.operation.session.native_window()?;
+         if !image.target_matches(target.pid as u32, target.window_id as u64) {
+@@ -211,12 +211,22 @@
+             target.window_id,
+             [g.desktop_x, g.desktop_y, g.window_width, g.window_height],
+         )?;
++        let screen_route = crate::input::controlled::popup_click::use_screen_route(window.layer, &window.title);
++        let region = if let Some(scroll) = local.filter(|_| !screen_route) {
++            let cached = self.state.element_cache.retained_snapshot(target.pid, u64::from(target.window_id));
++            let native = Native { operation: &self.operation };
++            let tree = observation::scan_general(&native, native.general_input_window()?);
++            if !tree.structurally_complete() { return Err("condition_unknown"); }
++            super::image_snapshot::region(cached.as_ref(), image, &native, &tree,
++                point.x as u32, point.y as u32, scroll)?
++        } else { None };
++        crate::input::controlled::revalidate_region(image, &self.operation, region)?;
+         // Image addresses name pixels. Use the addressed pixel's center,
+         // including fractional model coordinates within the final edge pixel.
+         let (x, y) = g.desktop_pixel_center(point.x as u32, point.y as u32)?;
+         Ok((
+             (x, y, x - g.desktop_x, y - g.desktop_y),
+-            crate::input::controlled::popup_click::use_screen_route(window.layer, &window.title),
++            screen_route,
+         ))
+     }
+ 
+@@ -598,7 +608,8 @@
+                         button,
+                         count,
+                     } => {
+-                        let (position, screen_route) = self.point_with_route(point)?;
++                        let local = (*count == 1).then_some(false);
++                        let (position, screen_route) = self.point_with_route(point, local)?;
+                         if screen_route {
+                             if events.held() {
+                                 return Err("route_change_with_held_input");
+@@ -620,6 +631,9 @@
+                             return Ok((ActionRoute::GlobalInput, true));
+                         }
+                         events.move_pointer(position, &check)?;
++                        if local.is_some() {
++                            self.point_with_route(point, local)?;
++                        }
+                         for click in 1..=*count {
+                             events.button_down(*button, i64::from(click), &check)?;
+                             events.button_up(*button)?;
+@@ -632,7 +646,9 @@
+                         delta_y,
+                         unit,
+                     } => {
+-                        events.move_pointer(self.point(point)?, &check)?;
++                        let (position, _) = self.point_with_route(point, Some(true))?;
++                        events.move_pointer(position, &check)?;
++                        self.point_with_route(point, Some(true))?;
+                         events.scroll(*delta_x, *delta_y, *unit, &check)?;
+                     }
+                     ComputerInput::Drag {
+@@ -783,7 +799,7 @@
+                 if requires_pointer_keyboard_boundary(&segment.actions[..index], action) {
+                     return Err("segment_boundary_required");
+                 }
+-                if index == 0 {
++                if index == 0 && !matches!(action, ComputerInput::Click { .. } | ComputerInput::Scroll { .. }) {
+                     if let Some(image) = &self.image {
+                         crate::input::controlled::revalidate(image, &self.operation)?;
+                     }

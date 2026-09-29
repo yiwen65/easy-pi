@@ -4,6 +4,11 @@
 replaced and covered target negatives pass. This patch is an incomplete native
 candidate, not an approved production relaxation or a verified speedup.
 
+The sections through “Required next integration” are historical notes for the
+comparison-only/capture-only revisions. The final section records the current
+consumer, hashes and verification; earlier “no consumer/no GUI” statements do
+not describe the current candidate.
+
 ## Scope
 
 `target-region-candidate.patch` applies to the current frozen core source under
@@ -127,3 +132,59 @@ its target contract, without declaring those general cases solved. A target
 change after a tracking move must report that committed move while withholding
 down/wheel. Run owned GUI negatives, existing general scenarios and matched
 real-model A/B before installing anything.
+
+## Current consumer and GUI qualification (2026-09-29)
+
+Patch SHA256: `94fc708d6d5ad3a35723cc9219d2dadc16d7a16f0dcc5231915752094a4445cf`.
+Candidate native SHA256: `7778c6ee5e5f202aa53fc130d35683891858ef1e16ed9fc17df6ab61c067d419`.
+
+Single-click and scroll validation now binds retained capture metadata to the
+exact image ID, verifies live hit identity, original ancestry, parent identity,
+role and geometry, and compares the full target rectangle (scroll: containing
+AXScrollArea). PID/window identity, geometry, occlusion, coordinate boundaries,
+cancellation and input ownership remain checked. Validation runs before and
+after tracking movement. Drag, multi-click and popup-screen paths stay on
+whole-image comparison. Missing optional capture metadata keeps that old path;
+proved mismatch refuses. No public mode, ABI, service or second cache was added.
+
+The first consumer was the legacy image-action path. Trace inspection showed
+the initial 14/14 general GUI run used segment instead, so it was NOT evidence
+of local comparison. The actual segment route was then connected. New native
+refusal names initially projected as native_fault; existing error contracts
+are now reused, notably stale_image_observation.
+
+Artifacts under `/tmp/epi-pointer-boundary.PFHOUz/`:
+
+- `region-baseline-distant`: installed native a1f1aea refused an unchanged
+  target after a distant color change; zero clicks, positive oracle failed.
+- `region-final-{distant,replace,move,cover,transparent-cover}`: candidate
+  aa118c47 passed all five strict GUI cases; clean leases through C08b0.
+- `general-target-region-final`: that candidate passed 14/14 general cases.
+- `region-final-reorder-cover`: aa118c47 FAILED an added adversarial case.
+  Two same-looking controls kept identity, parent and geometry but changed
+  stacking order. The covering control received one click. Pixel equality and
+  cached membership did not establish original hit identity.
+- Repair: reject ambiguous capture geometry when a retained non-ancestor
+  target also covers the point. Do not fall back or replay on this ambiguity.
+  This deliberately conservative rule may also reject overlapping AX decoration.
+- `region-fixed-{reorder-cover,distant,replace,move,cover,transparent-cover}`:
+  current native 7778c6ee passes 6/6. Positive: exactly one target click.
+  Five negatives: zero target/cover clicks, not_dispatched,
+  stale_image_observation, inputCommitted=false. Every owner closed normally,
+  fixture exit 0, clean leases C08c2–C08c7. Failure artifacts are retained.
+- Current release build passes with existing unused-shutdown/duplicate-rpath
+  warnings. Patch applies to untouched frozen materials. Pixel mapping: 2/2.
+- `general-target-region-fixed`: current native passes 14/14 general GUI
+  scenarios after the ambiguity repair, including click, scroll, drag, pointer
+  cancellation, focus boundary, stale references, text editing and web form.
+- Root npm run check passes. Its four unrelated formatter-only edits were
+  inspected and reverted; unrelated user work is preserved. git diff --check
+  flags literal blank-context lines inside the generated unified patch and a
+  pre-existing user LEARNS.md EOF change; no source whitespace repair is implied.
+
+Durable reproducer: `native/computer/desktop/fixtures/image-region/README.md`.
+Installed artifacts and pinned inputs remain unchanged. The candidate has not
+passed scroll-container negatives, post-tracking races or matched real-model
+A/B. Capture latency/memory and missing geometry/AX-hidden subtargets need
+qualification. These bounded results do not establish universal correctness or
+end-to-end speedup. The old SDK lifecycle fixture issue above remains unresolved.
