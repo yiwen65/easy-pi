@@ -1,6 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { providerFailure, summarize } from "./metrics.mjs";
+import { createRequestMeter, providerFailure, summarize } from "./metrics.mjs";
+
+test("request admission bounds real invocations and counts each interval once", () => {
+	let now = 100;
+	const meter = createRequestMeter(() => now);
+	for (let i = 0; i < 24; i++) {
+		meter.start(0);
+		now += 10;
+		meter.finish();
+		meter.finish();
+	}
+	assert.throws(() => meter.start(0), /budget exhausted/);
+	now += 1000;
+	meter.finish(); // synthetic failure with no admitted request
+	assert.equal(meter.turns, 24);
+	assert.equal(meter.modelMs, 240);
+	const expensive = createRequestMeter(() => now);
+	assert.throws(() => expensive.start(10), /budget exhausted/);
+	assert.equal(expensive.turns, 0);
+});
 
 test("provider failures retain categories, never arbitrary credential-bearing payloads", () => {
 	assert.equal(providerFailure("403 https://user:secret@example.test?key=private"), "provider_access_denied");

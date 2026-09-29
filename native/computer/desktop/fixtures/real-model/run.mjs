@@ -17,7 +17,7 @@ import {
 } from "../../../../../packages/coding-agent/dist/index.js";
 import { launchChrome } from "./chrome.mjs";
 import { closeNative } from "./lifecycle.mjs";
-import { providerFailure, summarize } from "./metrics.mjs";
+import { createRequestMeter, providerFailure, summarize } from "./metrics.mjs";
 import { caseIds, checkOracle, chromeTasks, pageHtml } from "./tasks.mjs";
 
 // Explicit opt-in: this is never imported by default tests or CI.
@@ -130,10 +130,8 @@ for (const id of selected) {
 	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 	const url = `http://127.0.0.1:${server.address().port}${mini ? `/miniwob/${id.slice(8)}.html` : "/"}`;
 	let chrome, feature, session, failure, taskStartedAt, taskMs, cleanup;
-	let turns = 0,
-		cost = 0,
-		modelMs = 0,
-		modelStart = 0;
+	let cost = 0;
+	const meter = createRequestMeter();
 	const assistantErrors = [];
 	const calls = [],
 		tokenUsage = [],
@@ -206,19 +204,15 @@ for (const id of selected) {
 		}));
 		await session.bindExtensions({});
 		const stream = session.agent.streamFunction;
-		session.agent.streamFunction = (chosen, context, options) =>
-			stream(chosen, context, { ...options, maxTokens: 2048, maxRetries: 0 });
-		const observe = session.agent.onProviderContext;
-		session.agent.onProviderContext = (chosen, context) => {
-			assert.ok(turns < 24 && totalCost + cost < 10, "Model budget exhausted");
-			observe?.(chosen, context);
-			turns++;
-			modelStart = performance.now();
+		session.agent.streamFunction = (chosen, context, options) => {
+			// onProviderContext is best-effort observation, not an admission gate.
+			meter.start(totalCost + cost);
+			return stream(chosen, context, { ...options, maxTokens: 2048, maxRetries: 0 });
 		};
 		session.subscribe((event) => {
 			if (event.type === "message_end" && event.message.role === "assistant") {
 				if (["error", "aborted"].includes(event.message.stopReason)) assistantErrors.push(event.message.stopReason);
-				modelMs += performance.now() - modelStart;
+				meter.finish();
 				const usage = event.message.usage;
 				if (usage) {
 					tokenUsage.push(usage);
@@ -276,7 +270,7 @@ for (const id of selected) {
 			);
 		}
 		assert.equal(assistantErrors.length, 0, "Model request failed; see retained provider trace");
-		assert.ok(turns > 0 && calls.length > 0 && checkOracle(id, oracle), "Independent task oracle failed");
+		assert.ok(meter.turns > 0 && calls.length > 0 && checkOracle(id, oracle), "Independent task oracle failed");
 	} catch (error) {
 		failure = { name: error.name, message: error.message.slice(0, 500) };
 	} finally {
@@ -312,10 +306,10 @@ for (const id of selected) {
 			attemptMs: performance.now() - setupStart,
 			taskMs,
 			setupMs,
-			modelMs,
+			modelMs: meter.modelMs,
 			toolMs: calls.reduce((sum, call) => sum + call.ms, 0),
 			calls,
-			turns,
+			turns: meter.turns,
 			cost,
 			tokenUsage,
 			oracle,
@@ -333,7 +327,11 @@ for (const id of selected) {
 			join(output, "summary.json"),
 			JSON.stringify({ totalCost, metrics: summarize(summaries), samples: summaries }, null, 2),
 		);
-		console.log(id, sample.passed ? "PASS" : "FAIL", JSON.stringify({ taskMs, turns, cost, failure, cleanup }));
+		console.log(
+			id,
+			sample.passed ? "PASS" : "FAIL",
+			JSON.stringify({ taskMs, turns: meter.turns, cost, failure, cleanup }),
+		);
 	}
 	if (!cleanup) break;
 }

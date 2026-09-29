@@ -1,5 +1,31 @@
 import assert from "node:assert/strict";
 
+export function createRequestMeter(now = () => performance.now()) {
+	let turns = 0;
+	let modelMs = 0;
+	let started;
+	return {
+		start(reportedCost) {
+			assert.ok(turns < 24 && reportedCost < 10, "Model budget exhausted");
+			assert.equal(started, undefined, "Overlapping model request");
+			turns++;
+			started = now();
+		},
+		finish() {
+			if (started !== undefined) {
+				modelMs += now() - started;
+				started = undefined;
+			}
+		},
+		get turns() {
+			return turns;
+		},
+		get modelMs() {
+			return modelMs;
+		},
+	};
+}
+
 export function providerFailure(message) {
 	if (!message) return undefined;
 	if (/UND_ERR_CONNECT_TIMEOUT|connect.*timed? ?out/i.test(message)) return "provider_connect_timeout";

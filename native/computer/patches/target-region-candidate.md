@@ -216,3 +216,36 @@ now consumes fixture responses so the second state read cannot reuse the first.
 The older failed artifact is retained. Broad model and race qualification remain.
 `general-target-region-v5` also passes all 14 general GUI scenarios against the
 same native revision; this remains a one-run screening, not a statistical claim.
+
+## Real-model qualification: not ready for installation
+
+`model-region-v5-desktop/` preserves serial real openai-codex/gpt-6-sol,
+semantic/desktop, seed 42 runs against native fe94cdfd and unchanged MiniWoB
+HTML/evaluator. Both native owners and CfT process groups closed cleanly.
+
+- click-tab-2 FAILED: 148.504 seconds, 30 tool calls, reported cost $0.1918864.
+  Four stale_image_observation refusals remain. The retained image-9.png shows
+  the model's (35,253) coordinate on the visible Tempor link; this does not
+  establish which native freshness/identity check refused it. Other failures
+  include stale_image, stale_observation, focus_not_supported and unresolved
+  intent. Do not weaken the unresolved-input guard to make this task pass.
+- scroll-text PASSED: 50.772 seconds, 12 requests, 11 tool calls, $0.0949544.
+  Tool time 1.147 seconds. One sample is not an A/B speedup.
+- Total reported cost $0.2868408. This result blocks promotion despite 9/9 owned
+  widget negatives and 14/14 general regressions.
+
+The failed task exposed a separate harness defect: modelMs=282.409 seconds
+exceeded taskMs=148.504 seconds. run.mjs enforced budgets in onProviderContext,
+but agent-loop.ts catches that observer's errors and continues the request.
+After the 24th counter increment, later requests could run without advancing
+the timing origin. Thus the reported 24 turns is not a trustworthy request
+count and the failed task's modelMs is invalid. Original evidence is unchanged.
+
+Harness repair moves admission to the actual streamFunction wrapper. A request
+meter rejects request 25 and cost >=10 before calling the provider; finish
+consumes a timing origin once, so synthetic error messages cannot double count.
+metrics.test.mjs passes 5/5, including deterministic 24-request exhaustion,
+zero-admission cost exhaustion and duplicate completion. Root check passes.
+The corrected harness still needs a real-model rerun; no retrospective metrics
+were invented. Next product diagnostic should distinguish missing capture AX
+proof, hit/ancestry ambiguity and local pixel changes on this concrete link.
