@@ -1,0 +1,214 @@
+diff --git a/rust/crates/cua-driver-core/src/element_cache.rs b/rust/crates/cua-driver-core/src/element_cache.rs
+index cfd9819..c8d601c 100644
+--- a/rust/crates/cua-driver-core/src/element_cache.rs
++++ b/rust/crates/cua-driver-core/src/element_cache.rs
+@@ -137,6 +137,21 @@ impl<S: SnapshotPayload> ElementCacheCore<S> {
+         drop(retired);
+     }
+ 
++    /// Clone only the exact observed generation. Native inspection happens
++    /// after releasing the cache lock; replacement never retargets a reference.
++    pub fn retained_snapshot(&self, pid: i32, window_id: u64, snapshot_id: u32) -> Option<S>
++    where
++        S: Clone,
++    {
++        if current_runtime_scope() != self.runtime_scope {
++            return None;
++        }
++        self.inner.lock().ok()?.get(&pid)?
++            .iter()
++            .find(|entry| entry.window_id == window_id && entry.id == snapshot_id)
++            .map(|entry| entry.payload.clone())
++    }
++
+     /// Retire only the controlled session's exact published generation; a
+     /// sibling may already have replaced the same target's observation.
+     pub fn remove_snapshot(&self, pid: i32, window_id: u64, snapshot_id: u32) {
+diff --git a/rust/crates/platform-macos/src/ax/cache.rs b/rust/crates/platform-macos/src/ax/cache.rs
+index e660c04..e8bdee9 100644
+--- a/rust/crates/platform-macos/src/ax/cache.rs
++++ b/rust/crates/platform-macos/src/ax/cache.rs
+@@ -34,11 +34,48 @@ impl Drop for RetainedElement {
+ 
+ pub struct CachedSnapshot {
+     pub elements: Vec<usize>,
++    pub window_rect: Option<[f64; 4]>,
++    /// Aligned with elements. Missing facts do not prevent observation, but
++    /// cannot authorize a reference-based pointer action.
++    pub targets: Vec<Option<ObservedTarget>>,
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct ObservedTarget {
++    pub parent: Option<usize>,
++    pub role: String,
++    pub label: Option<String>,
++    pub identifier: Option<String>,
++    pub rect: [f64; 4],
++}
++
++impl ObservedTarget {
++    pub fn valid_rect(rect: [f64; 4]) -> bool {
++        rect.iter().all(|value| value.is_finite())
++            && rect[2] > 0.0 && rect[3] > 0.0
++            && (rect[0] + rect[2]).is_finite()
++            && (rect[1] + rect[3]).is_finite()
++    }
++}
++
++impl Clone for CachedSnapshot {
++    fn clone(&self) -> Self {
++        let elements = self.elements.clone();
++        let targets = self.targets.clone();
++        for ptr in &elements {
++            if *ptr != 0 {
++                unsafe { CFRetain(*ptr as CFTypeRef) };
++            }
++        }
++        Self { elements, window_rect: self.window_rect, targets }
++    }
+ }
+ 
+ impl CachedSnapshot {
+     pub fn from_nodes(nodes: &[AXNode]) -> Self {
+         Self {
++            window_rect: None,
++            targets: Vec::new(),
+             elements: nodes
+                 .iter()
+                 .filter(|node| node.element_index.is_some())
+@@ -100,6 +137,51 @@ mod tests {
+         unsafe { CFRetain(ptr as CFTypeRef) };
+         CachedSnapshot {
+             elements: vec![ptr],
++            window_rect: None,
++            targets: Vec::new(),
++        }
++    }
++
++    #[test]
++    fn observed_target_evidence_is_exact_generation_scoped_and_released() {
++        let value = CFString::new("observed-target-lifetime");
++        let ptr = value.as_concrete_TypeRef() as usize;
++        let base = unsafe { CFGetRetainCount(ptr as CFTypeRef) };
++        let cache = ElementCache::new();
++        let mut original = payload(ptr);
++        original.window_rect = Some([-100.0, 20.0, 640.0, 452.0]);
++        original.targets.push(Some(ObservedTarget {
++            parent: None, role: "AXButton".into(), label: Some("Accept".into()),
++            identifier: Some("accept".into()), rect: [-80.0, 40.0, 100.0, 30.0],
++        }));
++        let id = cache.publish(42, 7, original);
++        for (pid, window, generation) in [(41, 7, id), (42, 8, id), (42, 7, id.wrapping_add(1))] {
++            assert!(cache.retained_snapshot(pid, window, generation).is_none());
++        }
++        cua_driver_core::tool::with_runtime_scope("other-target-runtime".into(), || {
++            assert!(cache.retained_snapshot(42, 7, id).is_none());
++        });
++        let retained = cache.retained_snapshot(42, 7, id).unwrap();
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base + 2);
++        let next = cache.publish(42, 7, CachedSnapshot::from_nodes(&[]));
++        assert!(cache.retained_snapshot(42, 7, id).is_none());
++        cache.remove_snapshot(42, 7, id);
++        assert!(cache.retained_snapshot(42, 7, next).is_some());
++        drop(cache);
++        assert_eq!(retained.targets[0].as_ref().unwrap().label.as_deref(), Some("Accept"));
++        assert_eq!(retained.window_rect, Some([-100.0, 20.0, 640.0, 452.0]));
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base + 1);
++        drop(retained);
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base);
++    }
++
++    #[test]
++    fn observed_target_geometry_rejects_nonfinite_empty_and_overflow_without_clamping() {
++        assert!(ObservedTarget::valid_rect([-100.0, -200.0, 10.0, 20.0]));
++        for rect in [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, -1.0],
++            [f64::NAN, 0.0, 1.0, 1.0], [0.0, f64::INFINITY, 1.0, 1.0],
++            [f64::MAX, 0.0, f64::MAX, 1.0]] {
++            assert!(!ObservedTarget::valid_rect(rect));
+         }
+     }
+ 
+diff --git a/rust/crates/platform-macos/src/tools/computer/observation/native.rs b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+index 316c2a4..5deb842 100644
+--- a/rust/crates/platform-macos/src/tools/computer/observation/native.rs
++++ b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+@@ -1,7 +1,7 @@
+ use super::{Data, Reader, Scan};
+ use crate::ax::{
+     bindings::*,
+-    cache::{CachedSnapshot, RetainedElement},
++    cache::{CachedSnapshot, ObservedTarget, RetainedElement},
+ };
+ use core_foundation::{
+     array::CFArray,
+@@ -617,8 +617,40 @@ impl Native<'_> {
+ }
+ 
+ impl Scan<RetainedElement> {
++    /// Attach optional pointer evidence to the same observation owner. All AX
++    /// reads remain on its tracked worker and honor cancellation admission.
++    pub fn pointer_payload(&self, native: &Native<'_>) -> Result<CachedSnapshot, &'static str> {
++        let mut payload = self.payload(true);
++        if !self.structurally_complete() {
++            return Ok(payload);
++        }
++        let target = native.operation.session.native_window()?;
++        let windows = native.operation.primary(false, crate::windows::general_windows_with_space_snapshot)?;
++        payload.window_rect = crate::windows::general_window_in(&windows.windows, target.pid, target.window_id)
++            .map(|window| [window.bounds.x, window.bounds.y, window.bounds.width, window.bounds.height]);
++        if payload.window_rect.is_none() {
++            return Ok(payload);
++        }
++        for row in &self.rows {
++            native.checkpoint()?;
++            let rect = native.operation.primary(false, || unsafe {
++                element_screen_rect(row.element.as_ptr() as AXUIElementRef)
++            })?;
++            payload.targets.push(rect.filter(|rect| ObservedTarget::valid_rect(*rect))
++                .filter(|_| !row.data.metadata_incomplete)
++                .map(|rect| ObservedTarget {
++                    parent: row.parent, role: row.data.role.clone(),
++                    label: row.data.label.clone(), identifier: row.data.identifier.clone(), rect,
++                }));
++        }
++        native.checkpoint()?;
++        Ok(payload)
++    }
++
+     pub fn payload(&self, general: bool) -> CachedSnapshot {
+         CachedSnapshot {
++            window_rect: None,
++            targets: Vec::new(),
+             elements: self
+                 .rows
+                 .iter()
+diff --git a/rust/crates/platform-macos/src/tools/computer.rs b/rust/crates/platform-macos/src/tools/computer.rs
+index 50488e1..310a59d 100644
+--- a/rust/crates/platform-macos/src/tools/computer.rs
++++ b/rust/crates/platform-macos/src/tools/computer.rs
+@@ -198,7 +198,10 @@ pub(super) async fn observe(
+                     max_depth as usize,
+                     true,
+                 );
+-                let payload = tree.payload(true);
++                let payload = match tree.pointer_payload(&native) {
++                    Ok(payload) => payload,
++                    Err(code) => return refusal(code),
++                };
+                 if !target_matches(&args, &worker) {
+                     return refusal("controlled_target_stale");
+                 }
+diff --git a/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs b/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
+index a35d31f..a2aafcd 100644
+--- a/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
++++ b/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
+@@ -315,6 +315,8 @@ mod native {
+                     u64::from(window),
+                     CachedSnapshot {
+                         elements: vec![*ptr],
++                        window_rect: None,
++                        targets: Vec::new(),
+                     },
+                 );
+                 if window == 0 {
