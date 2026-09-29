@@ -207,3 +207,282 @@
 +    assert!(reference.matches_region(&invalid, 1, 1, 3, 3).is_err());
 +    assert!(!format!("{reference:?}").contains("255, 255"));
 +}
+--- a/rust/crates/cua-driver-core/src/element_cache.rs
++++ b/rust/crates/cua-driver-core/src/element_cache.rs
+@@ -135,6 +135,20 @@
+             })
+         };
+         drop(retired);
++    }
++
++    /// Retain the current payload for native inspection without holding the
++    /// cache lock across AX calls. The caller must check its own observation ID.
++    pub fn retained_snapshot(&self, pid: i32, window_id: u64) -> Option<S>
++    where
++        S: Clone,
++    {
++        if current_runtime_scope() != self.runtime_scope {
++            return None;
++        }
++        self.inner.lock().ok()?.get(&pid)?
++            .iter().find(|entry| entry.window_id == window_id)
++            .map(|entry| entry.payload.clone())
+     }
+ 
+     /// Retire only the controlled session's exact published generation; a
+--- a/rust/crates/platform-macos/src/ax/cache.rs
++++ b/rust/crates/platform-macos/src/ax/cache.rs
+@@ -34,11 +34,41 @@
+ 
+ pub struct CachedSnapshot {
+     pub elements: Vec<usize>,
++    pub image: Option<ImageSnapshot>,
+ }
+ 
++/// Geometry and identity evidence captured alongside one image. Handles are
++/// owned by CachedSnapshot.elements; indices never grant authority by themselves.
++#[derive(Clone)]
++pub struct ImageSnapshot {
++    pub image_id: String,
++    pub geometry: cua_driver_contract::computer_image::ComputerImageGeometry,
++    pub targets: Vec<ImageTarget>,
++}
++
++#[derive(Clone)]
++pub struct ImageTarget {
++    pub index: usize,
++    pub parent: Option<usize>,
++    pub role: String,
++    pub rect: [f64; 4],
++}
++
++impl Clone for CachedSnapshot {
++    fn clone(&self) -> Self {
++        for ptr in &self.elements {
++            if *ptr != 0 {
++                unsafe { CFRetain(*ptr as CFTypeRef) };
++            }
++        }
++        Self { elements: self.elements.clone(), image: self.image.clone() }
++    }
++}
++
+ impl CachedSnapshot {
+     pub fn from_nodes(nodes: &[AXNode]) -> Self {
+         Self {
++            image: None,
+             elements: nodes
+                 .iter()
+                 .filter(|node| node.element_index.is_some())
+@@ -100,6 +130,7 @@
+         unsafe { CFRetain(ptr as CFTypeRef) };
+         CachedSnapshot {
+             elements: vec![ptr],
++            image: None,
+         }
+     }
+ 
+@@ -152,6 +183,45 @@
+     }
+ 
+     #[test]
++    fn image_snapshot_retains_handles_until_inspection_finishes_and_stays_scoped() {
++        let value = CFString::new("image-target-retained-evidence");
++        let ptr = value.as_concrete_TypeRef() as usize;
++        let base = unsafe { CFGetRetainCount(ptr as CFTypeRef) };
++        let cache = ElementCache::new();
++        let mut original = payload(ptr);
++        original.image = Some(ImageSnapshot {
++            image_id: "image-before".into(),
++            geometry: cua_driver_contract::computer_image::ComputerImageGeometry {
++                desktop_x: 0.0, desktop_y: 0.0, window_width: 8.0, window_height: 8.0,
++                source_width: 8, source_height: 8, crop_x: 0, crop_y: 0,
++                crop_width: 8, crop_height: 8, output_width: 8, output_height: 8,
++            },
++            targets: vec![ImageTarget { index: 0, parent: None, role: "AXButton".into(), rect: [1.0, 1.0, 2.0, 2.0] }],
++        });
++        let first = cache.publish(1, 2, original);
++        let retained = cache.retained_snapshot(1, 2).unwrap();
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base + 2);
++        assert!(cache.retained_snapshot(2, 2).is_none());
++        assert!(cache.retained_snapshot(1, 3).is_none());
++        cua_driver_core::tool::with_runtime_scope("foreign-image-scope".into(), || {
++            assert!(cache.retained_snapshot(1, 2).is_none());
++        });
++        // Replacing the current observation must not mutate the old retained facts.
++        let second = cache.publish(1, 2, CachedSnapshot::from_nodes(&[]));
++        cache.remove_snapshot(1, 2, first);
++        assert!(cache.retained_snapshot(1, 2).unwrap().image.is_none());
++        let image = retained.image.as_ref().unwrap();
++        assert_eq!(image.image_id, "image-before");
++        assert_eq!(image.targets[0].rect, [1.0, 1.0, 2.0, 2.0]);
++        assert_eq!(image.targets[0].index, 0);
++        cache.remove_snapshot(1, 2, second);
++        assert!(cache.retained_snapshot(1, 2).is_none());
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base + 1);
++        drop(retained);
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base);
++    }
++
++    #[test]
+     fn abandoned_preparation_releases_native_payload_without_replacing_snapshot() {
+         let original = CFString::new("cua-driver-original-published-native-work");
+         let replacement = CFString::new("cua-driver-abandoned-prepared-native-work");
+--- a/rust/crates/platform-macos/src/tools/computer/observation/native.rs
++++ b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
+@@ -619,6 +619,7 @@
+ impl Scan<RetainedElement> {
+     pub fn payload(&self, general: bool) -> CachedSnapshot {
+         CachedSnapshot {
++            image: None,
+             elements: self
+                 .rows
+                 .iter()
+--- a/rust/crates/platform-macos/src/tools/computer.rs
++++ b/rust/crates/platform-macos/src/tools/computer.rs
+@@ -2,6 +2,7 @@
+ //! unchanged registry authorization. One tracked blocking owner includes focus
+ //! cleanup; no old timeout, overlay, selection or pixel fallback.
+ mod keyboard;
++mod image_snapshot;
+ mod observation;
+ pub mod segment;
+ pub(super) use keyboard::press_key;
+@@ -139,7 +140,7 @@
+     operation: Arc<Operation>,
+ ) -> ToolResult {
+     if args["include_screenshot"] == true {
+-        return capture(args, operation).await;
++        return capture(state, args, operation).await;
+     }
+     if !target_matches(&args, &operation)
+         || args["include_screenshot"] != false
+@@ -241,7 +242,7 @@
+     }
+ }
+ 
+-async fn capture(args: Value, operation: Arc<Operation>) -> ToolResult {
++async fn capture(state: Arc<ToolState>, args: Value, operation: Arc<Operation>) -> ToolResult {
+     if !target_matches(&args, &operation)
+         || args["include_accessibility_tree"] != false
+         || ["screenshot_out_file", "query"]
+@@ -261,11 +262,27 @@
+     match operation.blocking(move || {
+         if !target_matches(&args, &worker) { return refusal("controlled_target_stale"); }
+         with_capture_cleanup(&worker, || {
++            // Missing AX evidence keeps the existing full-image route, never
++            // grants local eligibility and never triggers readiness/focus writes.
++            let prepared = image_snapshot::prepare(&worker).ok();
+             let image = match crate::capture::controlled::capture(&worker, maximum as u32) {
+                 Ok(image) => image,
+                 Err(reason) => return refusal(reason),
+             };
+             if !target_matches(&args, &worker) { return refusal("controlled_target_stale"); }
++            let payload = prepared.and_then(|prepared| prepared.bind(&worker, &image).ok())
++                .unwrap_or_else(|| crate::ax::cache::CachedSnapshot::from_nodes(&[]));
++            let published = worker.primary(false, || state.element_cache.publish(
++                image.pid as i32, image.window_id, payload,
++            ));
++            let Ok(id) = published else { return refusal("controlled_cancelled"); };
++            let cache = state.element_cache.clone();
++            let pid = image.pid as i32;
++            let window_id = image.window_id;
++            if worker.remember_snapshot(id, move || cache.remove_snapshot(pid, window_id, id)).is_err() {
++                state.element_cache.remove_snapshot(pid, window_id, id);
++                return refusal("controlled_cancelled");
++            }
+             let geometry = &image.geometry;
+             let result = ToolResult::text("Controlled exact-window image; bytes in typed result")
+                 .with_structured(json!({
+--- /dev/null
++++ b/rust/crates/platform-macos/src/tools/computer/image_snapshot.rs
+@@ -0,0 +1,79 @@
++//! Capture-time AX evidence in the existing snapshot owner, not a second cache.
++use super::observation::{self, Native, Reader, Scan};
++use crate::ax::{
++    bindings,
++    cache::{CachedSnapshot, ImageSnapshot, ImageTarget, RetainedElement},
++};
++use cua_driver_contract::computer_image::ComputerImage;
++use cua_driver_core::controlled::Operation;
++
++pub(super) struct Prepared {
++    tree: Scan<RetainedElement>,
++    targets: Vec<ImageTarget>,
++}
++
++fn rect(native: &Native<'_>, element: &RetainedElement) -> Result<[f64; 4], &'static str> {
++    native.checkpoint()?;
++    let value = native
++        .operation
++        .primary(false, || unsafe {
++            bindings::element_screen_rect(element.as_ptr() as bindings::AXUIElementRef)
++        })?
++        .ok_or("image_target_geometry_unproved")?;
++    if !value.iter().all(|value| value.is_finite())
++        || value[2] <= 0.0
++        || value[3] <= 0.0
++        || !(value[0] + value[2]).is_finite()
++        || !(value[1] + value[3]).is_finite()
++    {
++        return Err("image_target_geometry_unproved");
++    }
++    Ok(value)
++}
++
++pub(super) fn prepare(operation: &Operation) -> Result<Prepared, &'static str> {
++    let native = Native { operation };
++    // Do not enable AX or change focus in an image-only observation.
++    let tree = observation::scan_general(&native, native.general_window()?);
++    if !tree.structurally_complete() {
++        return Err("image_target_tree_incomplete");
++    }
++    let mut targets = Vec::new();
++    for (index, row) in tree.rows.iter().enumerate() {
++        if let Ok(rect) = rect(&native, &row.element) {
++            targets.push(ImageTarget {
++                index,
++                parent: row.parent,
++                role: row.data.role.clone(),
++                rect,
++            });
++        }
++        native.checkpoint()?;
++    }
++    Ok(Prepared { tree, targets })
++}
++
++impl Prepared {
++    pub(super) fn bind(
++        self,
++        operation: &Operation,
++        image: &ComputerImage,
++    ) -> Result<CachedSnapshot, &'static str> {
++        let native = Native { operation };
++        // AX and SCK are not atomic. Reject local eligibility if any retained
++        // geometry changed across capture; dispatch must still prove live hit
++        // identity, membership and ancestry before using these facts.
++        for target in &self.targets {
++            if rect(&native, &self.tree.rows[target.index].element)? != target.rect {
++                return Err("image_target_geometry_changed");
++            }
++        }
++        let mut payload = self.tree.payload(true);
++        payload.image = Some(ImageSnapshot {
++            image_id: image.image_id.clone(),
++            geometry: image.geometry.clone(),
++            targets: self.targets,
++        });
++        Ok(payload)
++    }
++}
+--- a/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
++++ b/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
+@@ -315,6 +315,7 @@
+                     u64::from(window),
+                     CachedSnapshot {
+                         elements: vec![*ptr],
++                        image: None,
+                     },
+                 );
+                 if window == 0 {
