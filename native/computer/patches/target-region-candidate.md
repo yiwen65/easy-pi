@@ -327,3 +327,34 @@ Next discriminating observation: compare snapshot AXChildren identities with
 the post-hit tree and identify why optional capture metadata is intermittently
 discarded; preserve both failure causes instead of treating every stale refusal
 as a pixel mismatch.
+
+## Separating lazy tree population from overlap refusal
+
+Diagnostic native 983fd59f (`target-region-diagnostic-build5`), owned page
+`/tmp/epi-region-chrome-Ubh6Lg`: rows whose geometry includes the click contain
+only AXWindow/AXGroup, not webpage text. This rules out treating the initial
+51-row capture as already containing the text target. No bind_geometry mismatch
+was logged; intermittent loss of optional metadata is still not fully localized.
+
+Diagnostic native 2bec6004 (`target-region-diagnostic-build6`) adds a fresh
+read-only scan after each repeated hit query. In
+`/tmp/epi-region-chrome-EsT4uE`, the fresh tree has 57 rows, and retries 1–4
+match AXStaticText exactly at fresh index 30. The original 51-row tree does not.
+CFEqual identity comparison therefore works once that subtree is represented;
+do not replace it with labels, bounds, or invented stable IDs.
+
+After the explicitly undispatched first call, a fresh capture and second click
+reach hit_index=30. The remaining refusal is then the candidate's own overlap
+rule: index 33 AXGroup covers the point but is not in ancestry
+[30,29,28,27,25,24,4,3,2,1,0]. This is a distinct first divergence, before local
+pixel comparison. A bounding box's overlap alone does not establish that a
+container is an intercepting surface. Simply deleting the rule would regress
+the verified same-looking reorder-cover negative, so no relaxation was made.
+
+Both tests deliver zero clicks and close normally, clean leases C0900/C0901.
+Diagnostic sources are staged separately; native candidate source restored.
+Next design must reconcile two requirements: original hit identity through lazy
+AX tree population, and real occlusion/stacking evidence rather than treating
+every non-ancestor bounding rectangle as interception. Fixed waits, blanket
+AXGroup exemptions and rebinding an old image to a new target are not supported
+by this evidence. Current candidate remains unqualified and uninstalled.
