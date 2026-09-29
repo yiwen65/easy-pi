@@ -249,3 +249,49 @@ zero-admission cost exhaustion and duplicate completion. Root check passes.
 The corrected harness still needs a real-model rerun; no retrospective metrics
 were invented. Next product diagnostic should distinguish missing capture AX
 proof, hit/ancestry ambiguity and local pixel changes on this concrete link.
+
+## Chrome hit-test first divergence
+
+An isolated loopback page reproduces a clickable styled span and unrelated
+100 ms clock. Diagnostic-only builds log branch names, AX roles/indices and
+rectangles, never labels or personal UI content. They are NOT install candidates:
+native 9eaba5ba and 901bf1ac include extra temporary logging not represented in
+the candidate patch; their staging source hashes preserve the exact diagnostic
+source. Source logging was removed after the experiments. The shared release
+build directory still contains the diagnostic binary; rebuild before packaging
+a production candidate. Installed artifact and pins remain unchanged.
+
+Reproducer: `/tmp/epi-pointer-boundary.PFHOUz/region-chrome-diagnostic.mjs`.
+Isolated profile/screenshot directories and observations:
+
+- `/tmp/epi-region-chrome-w2Ex5d`: dynamic page, capture_bound then refused,
+  zero clicks. Native 9eaba5ba.
+- `/tmp/epi-region-chrome-OHDjz2`: static page, no_image_metadata fallback,
+  exactly one click. This is not a clean clock-only causal comparison because
+  capture readiness also differed; do not attribute it solely to animation.
+- `/tmp/epi-region-chrome-y8x7lw`: dynamic page, native 901bf1ac reports
+  capture_bound, image_id_bound, then hit_missing. Live hit is AXScrollArea,
+  desktop rect [100,243,1100,707], absent from the retained 51-row snapshot.
+  The live scan also has 51 rows. Refusal precedes local pixel comparison.
+- `/tmp/epi-region-chrome-OtP2gh`: adding semantic observe followed by fresh
+  capture reproduces the same hit_missing and zero clicks. This excludes the
+  simple hypothesis that one prior semantic read alone resolves the mismatch.
+- `/tmp/epi-region-chrome-Y4ImgT`: harness error, capture omitted required
+  maxDimension. Corrected in the script; not counted as a product failure.
+- `/tmp/epi-region-chrome-nfh6WY`: foreground activation control returned
+  outcome_unknown, so no subsequent click ran. It does not establish a
+  successful foreground comparison or justify replaying window activation.
+
+All six native owners/CfT groups closed, clean leases C08f7–C08fc. The minimal
+page establishes a concrete Chrome identity mismatch; it does not yet prove
+the exact same branch caused every MiniWoB refusal. Next: distinguish host
+scroll-area hit behavior, asynchronous renderer hit-testing and foreground
+state without weakening capture identity or substituting geometry as identity.
+
+Primary references consulted: Apple documents that
+[AXUIElementCopyElementAtPosition](https://developer.apple.com/documentation/applicationservices/1462077-axuielementcopyelementatposition)
+takes an application or system-wide object and performs z-order hit testing.
+Do not pass arbitrary AX children as though that were documented. Chromium's
+[mac hit-test test](https://chromium.googlesource.com/chromium/src/+/HEAD/content/browser/accessibility/hit_testing_mac_browsertest.mm)
+checks internal web-root hit identity, which is not proof that the external
+macOS API returns the same object in our observed environment.
