@@ -187,13 +187,45 @@ try {
 			height = png.readUInt32BE(20);
 		const point = { ref: view.details.imageRef, x: Math.floor(width / 4), y: Math.floor(height / 2) };
 		const action =
-			scenario === "pointer-click"
+			scenario === "pointer-click" || scenario === "pointer-focus-boundary"
 				? { op: "click", point }
 				: scenario === "pointer-scroll"
 					? { op: "scroll", point, deltaX: 0, deltaY: 5 }
 					: { op: "drag", from: point, to: { ...point, x: Math.floor((width * 3) / 4) }, durationMs: 200 };
-		await call({ op: "segment", ref: view.details.imageRef, actions: [action], expected: visual });
+		const result = await call({
+			op: "segment",
+			ref: view.details.imageRef,
+			actions:
+				scenario === "pointer-focus-boundary"
+					? [action, { op: "type_text", text: "MUST NOT REACH OTHER" }]
+					: [action],
+			expected: visual,
+		});
+		if (scenario === "pointer-focus-boundary") {
+			const shifted = await event((row) => row.event === "focus-shifted");
+			assert.equal(shifted.keyWindow, "easy-pi-owned-general-second");
+			await event((row) => row.event === "pointer-released" && row.count === 1);
+			assert.equal(result.details.firstUnfinishedAction, 1);
+			assert.equal(result.details.actions[0].dispatch, "dispatched");
+			assert.equal(result.details.actions[1].dispatch, "not_dispatched");
+			assert.equal(result.details.actions[1].code, "segment_boundary_required");
+		}
 		const actual = await state();
+		if (scenario === "pointer-focus-boundary") {
+			assert.equal(actual.clicks, 1);
+			assert.equal(actual.releases, 1);
+			assert.equal(actual.other, "untouched");
+			assert.equal(actual.primaryKeys, "");
+			const fresh = await call({ op: "observe" });
+			await call({ op: "reconcile", ref: fresh.details.observationRef, previousEffect: "observed" });
+			await fill(await select("second"), "fresh target only", "other-editor");
+			const recovered = await state();
+			assert.equal(recovered.clicks, 1, "recovery must not replay the click");
+			assert.equal(recovered.releases, 1);
+			assert.equal(recovered.primaryKeys, "");
+			assert.equal(recovered.other, "fresh target only");
+			log.push({ recoveryOracle: recovered });
+		}
 		if (scenario === "pointer-click") assert.equal(actual.clicks, 1);
 		if (scenario === "pointer-scroll") assert.ok(actual.scrolls > 0);
 		if (scenario === "pointer-drag") {

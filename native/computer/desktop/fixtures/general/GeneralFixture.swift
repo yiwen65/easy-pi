@@ -12,6 +12,8 @@ final class Canvas: NSView {
     var drags = 0
     var releases = 0
     var last = NSPoint.zero
+    var onClick: (() -> Void)?
+    var receivedKeys = ""
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
@@ -19,7 +21,8 @@ final class Canvas: NSView {
         NSColor.systemBlue.setFill(); NSRect(x: 30, y: 30, width: 180, height: 100).fill()
         ("Owned canvas: click, scroll, drag" as NSString).draw(at: NSPoint(x: 30, y: 170), withAttributes: [.foregroundColor: NSColor.black])
     }
-    override func mouseDown(with event: NSEvent) { clicks += 1; last = convert(event.locationInWindow, from: nil) }
+    override func mouseDown(with event: NSEvent) { clicks += 1; last = convert(event.locationInWindow, from: nil); onClick?() }
+    override func keyDown(with event: NSEvent) { receivedKeys += event.characters ?? "" }
     override func mouseDragged(with event: NSEvent) {
         drags += 1; last = convert(event.locationInWindow, from: nil)
         if drags == 1 { emit(["event": "drag-started"]) }
@@ -60,6 +63,16 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
             """, baseURL: nil)
         } else if mode.hasPrefix("pointer-") {
             window.contentView?.addSubview(canvas)
+            if mode == "pointer-focus-boundary" {
+                second.contentView?.addSubview(other)
+                canvas.onClick = { [self] in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(5)) {
+                        self.second.makeKeyAndOrderFront(nil)
+                        self.second.makeFirstResponder(self.other)
+                        emit(["event": "focus-shifted", "keyWindow": NSApp.keyWindow?.title ?? ""])
+                    }
+                }
+            }
         } else if mode == "native-batch" || mode == "mixed-batch" {
             batchFirst.stringValue = "original"; batchFirst.setAccessibilityIdentifier("general-editor")
             batchSecond.stringValue = "untouched"; batchSecond.setAccessibilityIdentifier("other-editor")
@@ -84,6 +97,7 @@ final class Fixture: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
     func state(_ id: String) {
         var row: [String: Any] = ["event": "state", "id": id, "body": editor.string, "other": other.string,
+            "primaryKeys": canvas.receivedKeys,
             "clicks": canvas.clicks, "scrolls": canvas.scrolls, "drags": canvas.drags, "releases": canvas.releases,
             "lastX": canvas.last.x, "lastY": canvas.last.y, "submitted": submitted,
             "active": NSApp.isActive, "keyWindow": NSApp.keyWindow?.title ?? ""]

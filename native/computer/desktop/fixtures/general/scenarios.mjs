@@ -5,6 +5,7 @@ export const scenarios = [
 	"mixed-batch",
 	"window-switch",
 	"pointer-click",
+	"pointer-focus-boundary",
 	"pointer-scroll",
 	"pointer-drag",
 	"pointer-cancel",
@@ -15,6 +16,7 @@ export const scenarios = [
 ];
 
 export const protectionScenarios = new Set([
+	"pointer-focus-boundary",
 	"stale-reference",
 	"stale-image",
 	"cancel-restart",

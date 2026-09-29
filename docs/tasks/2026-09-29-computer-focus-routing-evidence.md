@@ -1,6 +1,7 @@
 # Computer input routing: focused experiments
 
-Status: unresolved product defect; no production or installed-package change.
+Status: approved limited mitigation implemented and tested in an isolated
+candidate; installation withheld pending unexplained broader GUI failures.
 
 ## Contract and current implementation
 
@@ -122,9 +123,8 @@ impossible. Adding observers solely to claim atomic routing is not justified.
 - Investigate a real application-observable completion condition or stronger
   target-bound delivery for the synthetic-input fallback before promoting local
   waiting into production. Fixed sleep is not a consumption acknowledgement.
-- A pointer-to-keyboard segment boundary remains a possible limited mitigation,
-  not an approved or complete fix. User approval for removing that intentional
-  batch combination remains outstanding.
+- The user approved the limited pointer-to-keyboard segment boundary. The
+  candidate below implements it; this is not a complete focus-race fix.
 - Do not claim AX property writes preserve every application's keyboard handlers,
   editor semantics or IME behavior. Those require separate qualification.
 - Preserve the adversarial reproducer as durable executable coverage when the
@@ -132,3 +132,71 @@ impossible. Adding observers solely to claim atomic routing is not justified.
 
 The full Computer Use goal remains incomplete. Select/navigation-alert prior
 qualification is independent of this new focus-race evidence.
+
+## Approved boundary candidate
+
+The native segment loop now refuses TypeText, Key and KeyDown after an explicit
+Click, Drag or ButtonDown in the same segment, before target activation or new
+input dispatch. It reports `segment_boundary_required` and preserves the known
+dispatched prefix. KeyUp and ButtonUp are not blocked by this new rule; existing
+owned-input draining remains enabled. Internal focus routes, direct AX fills,
+pointer movement and scrolling are unchanged. No new scheduler or persistent
+state was introduced.
+
+Patch: `native/computer/patches/pointer-keyboard-boundary.patch`, SHA-256
+`eb77ee730b5a78eb0be8168dcdf582c30c1c36d8e29667606dd898837f470efe`.
+Candidate native library SHA-256:
+`b5ab897ec0f8d724436d42c93b6b41fc81f38218266cef699ca61a46985807cb`.
+NAPI remains
+`1f3296c11bc25b1586670678f59297dbca425a6173b0151df7f8aee85de71b52`.
+Pinned inputs identify this as a candidate, not a qualified release. The installed
+package above was not replaced. The isolated package is currently
+`/tmp/epi-pointer-boundary.PFHOUz/candidate-package`; to execute it, place it next
+to coding-agent's `dist` under a distinct candidate directory, not over the install.
+
+Build used the installed source materials as its baseline, the existing reviewed
+offline environment, `cargo build --release --locked --offline -p cua-driver-sdk`,
+and unchanged Cargo.lock. Forward patch validation against installed sources and
+reverse validation against candidate sources passed. Existing upstream Rust
+warnings about unused shutdown/unsafe and duplicate rpaths remain; they were not
+silently repaired as part of this patch.
+
+### Verification and failures retained
+
+Evidence directory: `/tmp/epi-pointer-boundary.PFHOUz` (temporary).
+
+| Check | Result |
+| --- | --- |
+| Original isolated focus reproducer with new guard assertion | Installed version fails; candidate passes; both close cleanly |
+| Native segment ordering tests | 3/3 pass |
+| Targeted desktop recovery/segment/tool tests | 39/39 pass |
+| Package qualification tests | 8/8 pass |
+| Strict desktop typecheck and root `npm run check` | Pass; unrelated automatic formatter changes restored |
+| Initial existing general fixture suite | Candidate 13/13 pass |
+| Expanded durable suite, two rounds | Candidate 23/28 pass; all cleanup checks pass |
+| Same expanded suite, installed baseline | 13/14 pass; only new boundary rule fails as expected |
+| Alternating candidate/baseline on five affected modes, three rounds | 15/15 candidate and 15/15 baseline pass with temporary activation/resign-key logging |
+| Durable boundary plus complete fresh-target recovery | Pass, 744.61 ms including bridge load; no model latency; clean C083f |
+
+The expanded suite's five candidate failures are not discarded:
+`pointer-drag` was refused before dispatch with `stale_image_observation`;
+`stale-reference`, `stale-image`, `unicode-edit` and `continuous-edit` encountered
+`foreground_target_changed` during synthetic editing. No automatic replay was
+attempted. The boundary rule cannot directly reject these first-action fills or
+drags, but that source fact does not establish the failures' cause. The installed
+baseline did not reproduce them; subsequent alternating runs also did not.
+There is no evidence yet to blame external user input or to claim these failures
+are fixed. Installation remains withheld.
+
+The new durable `pointer-focus-boundary` scenario waits for actual fixture
+focus-shift and release receipts, verifies neither window received the blocked
+text, observes and reconciles the prefix, selects the sibling window and fills
+it through the real tool. Exact fixture and AX readback prove completion; the
+original canvas receives no keys and its click/release counts stay at one.
+This proves a supported recovery path, not merely successful refusal.
+
+Next discriminating work: capture focus/window/image identity at the first
+divergence when one of the five broader failures recurs, using alternating
+artifacts and a fixed fixture. Do not remove the guards or add blind retries.
+Real-model qualification, arbitrary third-party async focus shifts, IME and
+cross-window cancellation remain separate, unqualified work.

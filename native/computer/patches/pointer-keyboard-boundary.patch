@@ -1,0 +1,132 @@
+--- a/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -96,7 +96,21 @@
+         && matches!(
+             action,
+             ComputerInput::Focus { .. } | ComputerInput::Fill { .. } | ComputerInput::Window { .. }
++        )
++}
++
++fn requires_pointer_keyboard_boundary(previous: &[ComputerInput], action: &ComputerInput) -> bool {
++    matches!(
++        action,
++        ComputerInput::TypeText { .. } | ComputerInput::Key { .. } | ComputerInput::KeyDown { .. }
++    ) && previous.iter().any(|input| {
++        matches!(
++            input,
++            ComputerInput::Click { .. }
++                | ComputerInput::Drag { .. }
++                | ComputerInput::ButtonDown { .. }
+         )
++    })
+ }
+ 
+ impl Context {
+@@ -757,6 +771,14 @@
+                 self.operation.begin_segment_action(index as u32)?;
+                 begun = true;
+                 self.live()?;
++                // Explicit pointer presses may asynchronously redirect keyboard
++                // focus inside the same PID. End this segment before admitting
++                // new keyboard input; owned releases remain allowed and Drop
++                // drains any remaining obligations. Internal focus routes and
++                // synchronous AX fills do not create this boundary.
++                if requires_pointer_keyboard_boundary(&segment.actions[..index], action) {
++                    return Err("segment_boundary_required");
++                }
+                 if index == 0 {
+                     if let Some(image) = &self.image {
+                         crate::input::controlled::revalidate(image, &self.operation)?;
+--- a/rust/crates/platform-macos/src/tools/computer/segment/order_tests.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment/order_tests.rs
+@@ -1,6 +1,90 @@
+ use super::*;
+ 
+ #[test]
++fn controlled_pointer_press_requires_boundary_for_new_keyboard_input_only() {
++    let point = ComputerPoint {
++        image_ref: "image".into(),
++        x: 1.0,
++        y: 1.0,
++    };
++    let target = ComputerElementAddress::Reference {
++        reference: "s1:1".into(),
++    };
++    let keyboard = [
++        ComputerInput::TypeText {
++            text: "new input".into(),
++        },
++        ComputerInput::Key {
++            key: "a".into(),
++            modifiers: vec![],
++        },
++        ComputerInput::KeyDown {
++            key: "shift".into(),
++        },
++    ];
++    for pointer in [
++        ComputerInput::Click {
++            point: point.clone(),
++            button: ComputerMouseButton::Left,
++            count: 1,
++        },
++        ComputerInput::Drag {
++            from: point.clone(),
++            to: point.clone(),
++            duration_ms: 200,
++        },
++        ComputerInput::ButtonDown {
++            button: ComputerMouseButton::Left,
++        },
++    ] {
++        let mut previous = vec![pointer];
++        for action in &keyboard {
++            assert!(requires_pointer_keyboard_boundary(&previous, action));
++            assert!(!requires_pointer_keyboard_boundary(&[], action));
++        }
++        // A release must neither be blocked nor erase the boundary.
++        for release in [
++            ComputerInput::KeyUp {
++                key: "shift".into(),
++            },
++            ComputerInput::ButtonUp {
++                button: ComputerMouseButton::Left,
++            },
++        ] {
++            assert!(!requires_pointer_keyboard_boundary(&previous, &release));
++            previous.push(release);
++        }
++        assert!(requires_pointer_keyboard_boundary(&previous, &keyboard[0]));
++    }
++    for prior in [
++        ComputerInput::Focus {
++            target: target.clone(),
++        },
++        ComputerInput::Fill {
++            target: target.clone(),
++            text: "value".into(),
++        },
++        ComputerInput::PointerMove {
++            point: point.clone(),
++        },
++        ComputerInput::Scroll {
++            point,
++            delta_x: 0.0,
++            delta_y: 1.0,
++            unit: ComputerScrollUnit::Line,
++        },
++        keyboard[0].clone(),
++    ] {
++        for action in &keyboard {
++            assert!(!requires_pointer_keyboard_boundary(
++                std::slice::from_ref(&prior),
++                action
++            ));
++        }
++    }
++}
++
++#[test]
+ fn controlled_queued_input_requires_a_boundary_before_synchronous_mutations() {
+     let target = ComputerElementAddress::Reference {
+         reference: "s00000001:1".into(),

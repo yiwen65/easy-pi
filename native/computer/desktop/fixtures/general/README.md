@@ -14,7 +14,7 @@ ALLOW_GUI_TESTS=true node native/computer/desktop/fixtures/save-panel/benchmark.
   "$fixture_dir/results" 5 general
 ```
 
-The count is rounds, not A/B pairs in this mode: thirteen scenarios per round,
+The count is rounds, not A/B pairs in this mode: fourteen scenarios per round,
 fresh process/feature each time, serial execution, no retry. The save-panel
 suite remains independently runnable for save/reopen and modal-sheet coverage.
 
@@ -26,6 +26,7 @@ suite remains independently runnable for save/reopen and modal-sheet coverage.
 | mixed-batch | Fill a document editor, then request a native field write | Synthetic first input, refused synchronous suffix, untouched second field; fresh exact ref and explicit judgement permit the second fill |
 | window-switch | Main → second → main, edit each | Both editor strings, no cross-window contamination |
 | pointer-click | Image-bound click | Exactly one owned canvas mouse-down |
+| pointer-focus-boundary | Click asynchronously switches to a sibling window before queued typing | Click delivered/released once; text suffix refused; fresh observation, reconciliation and selection allow an exact edit of the sibling without replaying the click |
 | pointer-scroll | Image-bound scroll | Owned canvas receives nonzero scroll event |
 | pointer-drag | Image-bound 200 ms drag | Mouse-down, drag events and endpoint in destination region |
 | pointer-cancel | Abort a 3 s drag after the first received drag event, then reopen the session | Exactly one down/up, no follow-up click, no late drag after close, new session clicks once |
