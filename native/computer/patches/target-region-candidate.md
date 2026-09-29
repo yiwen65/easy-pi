@@ -295,3 +295,35 @@ Do not pass arbitrary AX children as though that were documented. Chromium's
 [mac hit-test test](https://chromium.googlesource.com/chromium/src/+/HEAD/content/browser/accessibility/hit_testing_mac_browsertest.mm)
 checks internal web-root hit identity, which is not proof that the external
 macOS API returns the same object in our observed environment.
+
+## Read-only hit refresh experiment
+
+Diagnostic native b4ca0a40 (`target-region-diagnostic-build3`) repeats the same
+hit lookup five times with 100 ms run-loop pumping, without dispatching input.
+`/tmp/epi-region-chrome-8WPQZ0`: retry 0 remains AXScrollArea; retries 1–4 become
+AXStaticText. None matches a live-scan handle. The original scroll area's parent
+does match live row 25 (AXGroup). This supports asynchronous hit refinement but
+does not establish that waiting restores the required identity proof.
+
+Diagnostic native bcb8478e (`target-region-diagnostic-build4`) adds read-only
+parent tracing. `/tmp/epi-region-chrome-C6Wses`: refined AXStaticText has parents
+AXGroup -> AXGroup -> AXWebArea -> AXScrollArea; none of these four handles
+matches the original live tree. Thus simply normalizing one internal text child
+to its parent is not supported by this experiment. No identity test was bypassed.
+
+`/tmp/epi-region-chrome-NgFgAo` adds one fresh-capture attempt only after explicit
+not_dispatched/inputCommitted=false. First attempt repeats that ancestry
+mismatch. Second capture lacks optional image metadata and falls back to the
+whole-image path, which refuses the dynamic page. Both attempts deliver zero
+clicks. This does not justify repeated input or installing a fixed sleep.
+
+All three attempts close native/CfT normally, clean leases C08fd–C08ff. Probe:
+`/tmp/epi-pointer-boundary.PFHOUz/region-chrome-diagnostic.mjs` (updated to include
+the bounded second attempt). Diagnostic sources are frozen in their staging
+directories; candidate native source has again been restored byte-for-byte.
+Release build directory remains diagnostic, not eligible for installation.
+No production candidate change or performance claim follows from these reads.
+Next discriminating observation: compare snapshot AXChildren identities with
+the post-hit tree and identify why optional capture metadata is intermittently
+discarded; preserve both failure causes instead of treating every stale refusal
+as a pixel mismatch.
