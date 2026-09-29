@@ -68,7 +68,7 @@ const action = Type.Union([
 		{
 			...closed,
 			description:
-				"Single left click on an exact element ref from the latest observe. Must be the only action; moved, replaced or covered targets are refused.",
+				"Single left click on an exact element ref from the latest observe, including AXStaticText when its visible text is the intended click target. Prefer that named target over an unnamed container or image coordinates. Must be the only action; moved, replaced or covered targets are refused.",
 		},
 	),
 	Type.Object(
