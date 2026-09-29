@@ -1,7 +1,8 @@
 # Computer input routing: focused experiments
 
-Status: approved limited mitigation implemented and tested in an isolated
-candidate; installation withheld pending unexplained broader GUI failures.
+Status: approved pointer/keyboard boundary plus web-fill foreground repair
+installed with rollback on September 29 after targeted qualification. Earlier
+unexplained failures remain recorded; the broad Computer Use goal is incomplete.
 
 ## Contract and current implementation
 
@@ -10,7 +11,7 @@ acknowledgement is not evidence of the receiving window or business completion.
 Do not replay uncertain input. Preserve target checks, permission boundaries,
 owned-input release, native close and desktop-lease safety.
 
-Installed bridge SHA-256:
+Historical baseline bridge SHA-256 (replaced; see final installation below):
 `b7e5a5a776add72063fb6b25d7ba65f859bca9f3c468b3f3e7414bf6d479e8a5`.
 
 The installed source materials contain the current native implementation under
@@ -253,10 +254,10 @@ B/A produced:
 
 | Mode | Value after fill | Cleanup |
 | --- | --- | --- |
-| Background, first | empty, despite dispatchedCount 4 | C084e |
+| Background, first | empty, despite deliveredCount 4 | C084e |
 | Explicit foreground, first | exact `test café 你好` | C084f |
 | Explicit foreground, second | exact `test café 你好` | C0850 |
-| Background, second | empty, despite dispatchedCount 4 | C0851 |
+| Background, second | empty, despite deliveredCount 4 | C0851 |
 
 Logs are `chrome-fill-{background,foreground}-{ready,second}.log`. All native
 owners, fixture processes and owned Chrome process groups closed normally.
@@ -272,5 +273,57 @@ The TypeText path uses this rule. Fill's synthetic fallback in `segment.rs`
 activates only for `AXTextArea`, missing web `AXTextField`. The four controlled
 samples support bringing web synthetic Fill into line with that existing rule;
 direct native AX writes should remain unchanged. No native repair for this
-newly isolated defect has been built or installed yet. Next: durable regression,
-minimal native route correction, targeted A/B, then real-model form recovery.
+newly isolated defect had been built at that checkpoint. The following section
+records subsequent implementation and installation.
+
+## Web Fill repair and final installation
+
+`native/computer/patches/web-fill-foreground.patch` extends the existing Fill
+activation condition to non-native/web elements. The prior direct native AX
+write branch is unchanged; there is no new scheduler, retry or ABI change.
+Provenance and complete commands are in `native/computer/patches/web-fill-foreground.md`.
+The durable model-free background fill guard failed before the patch with an
+empty DOM value after reported background delivery, then passed on the candidate
+and installed versions, including exact fresh AX readback and untouched competitor.
+
+Qualification retained all attempts:
+
+- 27 native segment tests, 40 targeted bridge tests, 14 evaluator/lifecycle tests,
+  8 package tests, strict desktop typecheck and root check passed.
+- Candidate general suite 14/14; final repeated suite 28/28, with clean native
+  close and fixture exit for every sample. Existing native AX batching,
+  pointer-to-keyboard refusal/recovery and cancellation remained operational.
+- New native library navigation-alert guards 7/7, navigate 51.22–71.51 ms;
+  prompts remained opened and every owner closed. No automatic dismissal.
+- First real-model candidate form failed in 45.425 s / 11 turns / $0.0670028:
+  initial semantic content was not ready, then screenshot-based actions hit the
+  pointer boundary and repeated stale images exhausted recovery. Retained in
+  `model-web-fill-candidate/`; not attributed to successful Fill qualification.
+- Tool description and `segment_boundary_required` guidance now describe the
+  actual split rule, optional one-time semantic refresh, fresh Observation refs
+  for keyboard actions and explicit prefix judgement before the undelivered
+  suffix. No intent state or freshness check was weakened. Its regression failed
+  before the wording change and passed after it, still refusing unresolved input.
+- With the corrected contract, real model form passed in 48.881 s / 10 turns /
+  $0.072026; 46.613 s model and 2.240 s tool time. One synthetic multi-fill
+  boundary remained. This is correctness evidence, not a speedup claim.
+
+The package was installed only after those later qualification checks, from the
+same hashed candidate that passed the model case. Before replacement, no lease
+owner was present and the lease was clean C088d. The prior installed package is
+retained at `/tmp/epi-pointer-boundary.PFHOUz/installed-before-web-fill` (not deleted).
+New installed bridge SHA256:
+`a28cd24362cafaef2549fb2955cc782dec9da208a97113a257f5b205a90ddf44`;
+native library SHA256:
+`a1f1aea264a8dbc6792a10bb66123c3d93cd908427cd1f0607c78b4c3c1a2f82`.
+Post-install background fill passed, clean C088e; pointer focus boundary plus
+fresh-target recovery passed, clean C088f. Existing running processes may retain
+the previous loaded native library; these checks use fresh processes.
+
+Evidence remains under `/tmp/epi-pointer-boundary.PFHOUz`: `general-web-fill-final/`,
+`navigation-alert-web-fill/`, `model-web-fill-contract/`, `durable-fill-installed/`
+and `boundary-installed.log`. The earlier five general-suite failures remain
+unexplained and are not relabeled as fixed. This installation is a bounded
+repair, not proof of arbitrary external focus-race safety, universal capability
+or full official benchmark coverage. Next work remains model call reduction,
+broader task coverage and first-divergence evidence for intermittent failures.

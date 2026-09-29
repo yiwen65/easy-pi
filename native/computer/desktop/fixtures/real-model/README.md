@@ -32,7 +32,16 @@ PI_REAL_MODEL_EVAL=1 ALLOW_GUI_TESTS=true node native/computer/desktop/fixtures/
   all openai-codex gpt-6-sol semantic desktop
 ```
 
-The output directory must not already exist. Replace `all` with comma-separated task IDs to run a bounded subset. Strategies: `baseline`, `efficient` (image-first batching), `semantic` (AX-first, fresh returned evidence). Mode `browser` exercises the experimental bounded DOM profile instead; its capabilities are narrower and results must not be pooled with desktop results. Optional final argument is the numeric seed (default `42`). Cross-tab retention is not yet independently qualified in browser mode.
+The output directory must not already exist. Replace `all` with comma-separated task IDs to run a bounded subset. Strategies: `baseline`, `efficient` (image-first batching), `semantic` (AX-first, fresh returned evidence). Mode `browser` exercises the experimental bounded DOM profile instead; its capabilities are narrower and results must not be pooled with desktop results. Optional trailing arguments are the numeric seed (default `42`) and an absolute candidate `bridge.js` path (default: installed package). This allows candidate qualification without replacing the installation; the contract records its path and hashes. Cross-tab retention is not yet independently qualified in browser mode.
+
+The model-free `background-fill-guard.mjs` accepts absolute output directory,
+CfT bundle, compiled `../general/GeneralFixture.swift` binary and bridge paths,
+then optional `background` (default) or `foreground`. Run with
+`ALLOW_GUI_TESTS=true`. It establishes an owned competing window, observes the
+web field, sends one fill, and checks exact DOM/AX values plus an unchanged
+competing editor. Foreground mode explicitly activates Chrome first as a causal
+control. All input goes through the tool; no fill is replayed. Failed samples
+and awaited native/fixture/browser cleanup are retained in `result.json`.
 
 Limits: 24 model turns/task, 180 seconds for model/tool execution, 2048 output tokens/turn, no provider retry. Reported cumulative cost at/above USD 10 prevents starting another request/task; this is **not a prepaid hard spending cap**, because an in-flight response may cross the threshold and provider cost reporting can be incomplete. Setup and cleanup are separately timed. Cancellation waits for native drain, not a fabricated timeout success. Run processes serially; cost limits do not aggregate automatically across separate invocations.
 

@@ -33,8 +33,9 @@ const [
 	strategy = "baseline",
 	mode = "desktop",
 	seed = "42",
+	bridgePath = fileURLToPath(new URL("../../../../../packages/coding-agent/computer/bridge.js", import.meta.url)),
 ] = process.argv.slice(2);
-assert.ok([output, bundle, miniRoot].every((value) => value && isAbsolute(value)));
+assert.ok([output, bundle, miniRoot, bridgePath].every((value) => value && isAbsolute(value)));
 assert.ok(["baseline", "efficient", "semantic"].includes(strategy));
 assert.ok(["desktop", "browser"].includes(mode));
 assert.match(seed, /^[0-9]{1,9}$/);
@@ -47,7 +48,6 @@ for (const name of ["run.mjs", "chrome.mjs", "tasks.mjs", "metrics.mjs", "lifecy
 	writeFileSync(join(sourceDirectory, name), readFileSync(new URL(`./${name}`, import.meta.url)));
 }
 const sha = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
-const bridgePath = fileURLToPath(new URL("../../../../../packages/coding-agent/computer/bridge.js", import.meta.url));
 const { createComputerFeature } = createRequire(import.meta.url)(bridgePath);
 // Match CLI/RPC initialization: SDK embedding does not install the proxy dispatcher.
 configureHttpDispatcher(30_000);
@@ -68,6 +68,7 @@ writeFileSync(
 			probeSha256: sha(fileURLToPath(import.meta.url)),
 			fixtureSha256: sha(fileURLToPath(new URL("./tasks.mjs", import.meta.url))),
 			bridgeSha256: sha(bridgePath),
+			bridgePath,
 			nativeSha256: sha(
 				join(dirname(bridgePath), "sdk/node_modules/@trycua/cua-driver-darwin-arm64/libcua_driver_sdk.dylib"),
 			),

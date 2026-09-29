@@ -22,6 +22,8 @@ export type DesktopApi = ComputerPlanApi &
 
 function recoveryGuidance(code: string | undefined): string {
 	switch (code) {
+		case "segment_boundary_required":
+			return "Split between explicit click/drag/button_down and new keyboard input, or before fill/focus/window after synthetic input. Inspect the dispatched prefix; observe for a fresh Observation ref before keyboard input or an exact element ref for fill. If its effect is established, use previousEffect:'observed' and only the not_dispatched suffix. Never replay the dispatched prefix. ";
 		case "stale_image_observation":
 		case "stale_image_geometry":
 			return "Image evidence changed. For coordinate actions, inspect a fresh capture and recompute coordinates; never reuse the old image ref. Use observe and its fresh Observation ref for keyboard actions, or fresh element refs with fill for editable fields. Split at navigation or UI-changing actions before choosing further coordinates. ";
@@ -100,7 +102,8 @@ export function createDesktopTool(session: ComputerSession<ControlledComputerSes
 		description:
 			"Discover windows (optional literal, case-insensitive app/title filters and focused:true), explicitly select one returned ref, then observe semantic elements or capture an image. Focused child surfaces require their own selection; parent refs do not include them. " +
 			"Use select with observe:true for semantic evidence, or observe:'image' for a screenshot and Image ref (up to 2048px, no AX enablement). Both return fresh evidence in the selection call, avoiding a separate read round. Omit observe only when no immediate evidence is needed. " +
-			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. Prefer structure and scoped locators; use pixels when structure is insufficient. Submit known dependencies together in a segment; stop at new information. " +
+			"Observe accepts an optional literal, case-insensitive text filter over labels, identifiers and values before its output budget; filtered rows grant no references. If an initial view lacks expected controls, observe once more: app accessibility content may initialize asynchronously. Prefer structure and scoped locators; use pixels when structure is insufficient. " +
+			"Batch native AX fills when supported. End a segment after explicit click/drag/button_down before new keyboard input; synthetic input also prevents later fill/focus/window in the same segment. Inspect fresh evidence before the remaining work; never replay a dispatched prefix. " +
 			"Refs are not interchangeable: discover refs are for select/select_destination only. segment.ref must be the latest Observation ref from observe or Image ref from capture, not the selected window ref or an element ref. Element refs go in target.ref; point.ref uses the Image ref. " +
 			"Every Computer call consumes the previous evidence, including rejected calls; after stale_observation, observe/capture again and use the NEW evidence ref. " +
 			"Image freshness requires unchanged captured pixels and geometry, not merely a recent timestamp. Split after navigation or UI-changing clicks before using further coordinates; inspect fresh evidence and recompute them. Prefer observe plus fill with a fresh exact element ref for editable fields; use an Observation ref for keyboard-only segments. " +

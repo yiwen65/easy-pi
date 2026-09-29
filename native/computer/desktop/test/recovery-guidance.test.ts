@@ -4,6 +4,43 @@ import { fixture } from "./segment-fixture.ts";
 
 const enabled = process.env.ALLOW_NATIVE_LOAD_TESTS === "true";
 
+test("pointer-keyboard boundary explains fresh semantic recovery without replay", { skip: !enabled }, async () => {
+	const f = fixture({ mode: "confirmed_boundary" });
+	try {
+		await f.setup(true);
+		const result = await f.call({
+			op: "segment",
+			ref: "image-1",
+			actions: [
+				{ op: "click", point: { ref: "image-1", x: 1, y: 1 } },
+				{ op: "type_text", text: "new text" },
+			],
+			expected: { kind: "window_focused" },
+		});
+		const text = result.content
+			.filter((row) => row.type === "text")
+			.map((row) => row.text)
+			.join("\n");
+		assert.match(text, /Action 2 of 2 was not dispatched/);
+		assert.match(text, /explicit click\/drag\/button_down.*new keyboard input/s);
+		assert.match(text, /observe.*Observation ref.*keyboard/s);
+		assert.match(text, /previousEffect:'observed'.*not_dispatched suffix/s);
+		assert.match(text, /Never replay the dispatched prefix/);
+		await assert.rejects(
+			f.call({
+				op: "segment",
+				ref: "image-2",
+				actions: [{ op: "type_text", text: "new text" }],
+				expected: { kind: "visual", description: "Field filled" },
+			}),
+			/previous_intent_unresolved/,
+		);
+		assert.equal(f.segments.length, 1);
+	} finally {
+		await f.host.close();
+	}
+});
+
 test("legacy refusal explains segment recovery without resolving unknown input", { skip: !enabled }, async () => {
 	const f = fixture({ mode: "partial" });
 	try {

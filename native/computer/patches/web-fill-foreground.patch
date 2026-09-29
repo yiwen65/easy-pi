@@ -1,0 +1,15 @@
+--- a/rust/crates/platform-macos/src/tools/computer/segment.rs
++++ b/rust/crates/platform-macos/src/tools/computer/segment.rs
+@@ -418,7 +418,11 @@
+                         Ok((ActionRoute::Accessibility, false))
+                     }
+                     ComputerInput::Fill { text, .. } => {
+-                        if data.role == "AXTextArea" && !self.foreground() {
++                        // Web fields need the same foreground keyboard route
++                        // as TypeText; AX focus alone does not deliver PID keys.
++                        if (data.role == "AXTextArea" || !self.native_text(&element))
++                            && !self.foreground()
++                        {
+                             self.operation.session.recover_intent(&self.intent_ref)?;
+                             self.activate()?;
+                         }
