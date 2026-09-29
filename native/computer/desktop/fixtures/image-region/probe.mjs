@@ -9,7 +9,19 @@ import { createInterface } from "node:readline";
 
 assert.equal(process.env.ALLOW_GUI_TESTS, "true");
 const [fixturePath, bridgePath, mode, output] = process.argv.slice(2);
-assert.ok(["distant", "replace", "move", "cover", "transparent-cover", "reorder-cover"].includes(mode));
+assert.ok(
+	[
+		"distant",
+		"replace",
+		"move",
+		"cover",
+		"transparent-cover",
+		"reorder-cover",
+		"scroll-distant",
+		"scroll-replace",
+		"scroll-move",
+	].includes(mode),
+);
 assert.ok([fixturePath, bridgePath, output].every((path) => path && isAbsolute(path)));
 mkdirSync(output);
 const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -27,8 +39,8 @@ const timer = setTimeout(stop, 60000);
 async function event(name) {
 	const started = Date.now();
 	while (Date.now() - started < 5000) {
-		const found = events.find((x) => x.event === name);
-		if (found) return found;
+		const index = events.findIndex((x) => x.event === name);
+		if (index >= 0) return events.splice(index, 1)[0];
 		if (controller.signal.aborted) throw new Error("aborted");
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
@@ -71,20 +83,31 @@ try {
 	const rows = inventory.content[0].text.split("\n").slice(1).filter(Boolean).map(JSON.parse);
 	assert.equal(rows.length, 1);
 	const view = await call({ op: "select", ref: rows[0].ref, observe: "image" });
+	if (mode.startsWith("scroll-")) {
+		fixture.stdin.write("state\n");
+		assert.equal((await event("state")).scrollY, 500);
+	}
 	fixture.stdin.write("mutate\n");
 	await event("mutated");
 	action = await call({
 		op: "segment",
 		ref: view.details.imageRef,
-		actions: [{ op: "click", point: { ref: view.details.imageRef, x: 160, y: 226 } }],
+		actions: [
+			mode.startsWith("scroll-")
+				? { op: "scroll", point: { ref: view.details.imageRef, x: 160, y: 226 }, deltaX: 0, deltaY: 5 }
+				: { op: "click", point: { ref: view.details.imageRef, x: 160, y: 226 } },
+		],
 		expected: {
 			kind: "visual",
-			description: "Owned target clicked once; negative target changes must not receive input",
+			description: "Owned target receives the requested input; changed targets must not receive input",
 		},
 	});
 	fixture.stdin.write("state\n");
 	oracle = await event("state");
-	if (mode === "distant") {
+	if (mode === "scroll-distant") {
+		assert.notEqual(oracle.scrollY, 500);
+		assert.equal(action.details.actions[0]?.dispatch, "dispatched");
+	} else if (mode === "distant") {
 		assert.equal(oracle.clicks, 1);
 		assert.equal(oracle.covered, 0);
 		assert.equal(action.details.actions[0]?.dispatch, "dispatched");
@@ -94,6 +117,10 @@ try {
 		assert.equal(action.details.actions[0]?.dispatch, "not_dispatched");
 		assert.equal(action.details.actions[0]?.code, "stale_image_observation");
 		assert.equal(action.details.terminal.inputCommitted, false);
+		if (mode.startsWith("scroll-")) {
+			assert.equal(oracle.scrollY, 500);
+			assert.equal(oracle.retiredScrollY, 500);
+		}
 	}
 } catch (error) {
 	failure = `${String(error)}${error?.inner?.reason ? `: ${error.inner.reason}` : ""}`;

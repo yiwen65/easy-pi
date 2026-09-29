@@ -17,6 +17,8 @@ final class Fixture: NSObject {
     let backdrop = Backdrop(frame: NSRect(x: 0, y: 0, width: 640, height: 420))
     var button: NSButton!
     var existingCover: NSButton?
+    var scroll: NSScrollView?
+    var retiredScroll: NSScrollView?
     var clicks = 0
     var covered = 0
     func makeButton() -> NSButton {
@@ -28,11 +30,26 @@ final class Fixture: NSObject {
     }
     @objc func clicked() { clicks += 1 }
     @objc func intercepted() { covered += 1 }
+    func makeScroll() -> NSScrollView {
+        let view = NSScrollView(frame: NSRect(x: 80, y: 150, width: 320, height: 130))
+        view.hasVerticalScroller = true
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 1200))
+        content.setAccessibilityElement(true)
+        content.setAccessibilityRole(.group)
+        view.documentView = content
+        view.contentView.scroll(to: NSPoint(x: 0, y: 500))
+        view.reflectScrolledClipView(view.contentView)
+        return view
+    }
     func start() {
         window.title = "easy-pi-owned-region-guard"
         window.animationBehavior = .none
         window.contentView = backdrop
         button = makeButton(); backdrop.addSubview(button)
+        if mode.hasPrefix("scroll-") {
+            button.removeFromSuperview()
+            let view = makeScroll(); backdrop.addSubview(view); scroll = view
+        }
         if mode == "reorder-cover" {
             let cover = makeButton()
             cover.setAccessibilityIdentifier("owned-existing-cover")
@@ -44,7 +61,12 @@ final class Fixture: NSObject {
         DispatchQueue.main.async { emit(["event": "ready"]) }
     }
     func mutate() {
-        if mode == "distant" { backdrop.changed = true; backdrop.needsDisplay = true }
+        if mode == "distant" || mode == "scroll-distant" { backdrop.changed = true; backdrop.needsDisplay = true }
+        else if mode == "scroll-replace", let previous = scroll {
+            retiredScroll = previous
+            previous.removeFromSuperview()
+            let view = makeScroll(); backdrop.addSubview(view); scroll = view
+        } else if mode == "scroll-move" { scroll?.setFrameOrigin(NSPoint(x: 300, y: 30)) }
         else if mode == "reorder-cover", let cover = existingCover {
             backdrop.addSubview(cover, positioned: .above, relativeTo: button)
         } else if mode == "replace" {
@@ -71,7 +93,7 @@ DispatchQueue.global().async {
     while let line = readLine() {
         DispatchQueue.main.async {
             if line == "mutate" { fixture.mutate() }
-            else if line == "state" { emit(["event": "state", "clicks": fixture.clicks, "covered": fixture.covered]) }
+            else if line == "state" { emit(["event": "state", "clicks": fixture.clicks, "covered": fixture.covered, "scrollY": fixture.scroll?.contentView.bounds.origin.y ?? 0, "retiredScrollY": fixture.retiredScroll?.contentView.bounds.origin.y ?? 500]) }
             else if line == "quit" { app.terminate(nil) }
         }
     }

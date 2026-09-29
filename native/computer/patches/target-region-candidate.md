@@ -188,3 +188,31 @@ passed scroll-container negatives, post-tracking races or matched real-model
 A/B. Capture latency/memory and missing geometry/AX-hidden subtargets need
 qualification. These bounded results do not establish universal correctness or
 end-to-end speedup. The old SDK lifecycle fixture issue above remains unresolved.
+
+## Scroll-container regression and repair
+
+Current patch: `ac145feaba1a9f7592dcc7189d32754c5d00ff12c91dfe10dc84341faddedafb`.
+Current native: `fe94cdfd8a9e2e482950f214f849c7decc98799558dc73e08429ec68b8412011`.
+These supersede the preceding revision hashes; still not installed.
+
+Added owned NSScrollView scenarios with actual clip-offset readback before and
+after input. Distant animation succeeded (500 to 550) and replacement refused,
+but `region-scroll-move-strict` FAILED against native 7778c6ee: moving a blank
+white container left the pixels effectively unchanged. The live hit no longer
+had a scroll ancestor; region() returned None before checking captured competing
+geometry. Whole-image fallback then dispatched a wheel to the old location.
+Offset stayed 500, but inputCommitted=true violated the negative oracle.
+
+Repair: perform the captured-point ambiguity check before the no-scroll-ancestor
+fallback. This preserves evidence of the original target even when the live
+ancestry no longer contains a scroll area. No new mechanism or permission added.
+
+Native fe94cdfd passes the original failure in `region-scroll-move-fixed`:
+not_dispatched, stale_image_observation, inputCommitted=false, offsets 500.
+`region-v5-{scroll-replace,scroll-distant,distant,replace,move,cover,transparent-cover,reorder-cover}`
+passes all eight neighbors. Total 9/9, all normal closures and clean leases
+C08dc–C08e4. Build and frozen-source patch-application checks pass. The probe
+now consumes fixture responses so the second state read cannot reuse the first.
+The older failed artifact is retained. Broad model and race qualification remain.
+`general-target-region-v5` also passes all 14 general GUI scenarios against the
+same native revision; this remains a one-run screening, not a statistical claim.

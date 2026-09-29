@@ -11,7 +11,8 @@ ALLOW_GUI_TESTS=true node native/computer/desktop/fixtures/image-region/probe.mj
 ```
 
 Repeat with fresh output directories for `replace`, `move`, `cover`,
-`transparent-cover`, and `reorder-cover`. Run only one desktop owner at a time;
+`transparent-cover`, `reorder-cover`, `scroll-distant`, `scroll-replace`, and
+`scroll-move`. Run only one desktop owner at a time;
 inspect closure and clean lease before proceeding after a failure. The bridge
 must retain its package's expected relative imports.
 
@@ -26,7 +27,12 @@ Reports preserve native/bridge/fixture/probe hashes, calls, timing and counters.
 but raises the previously covered one. It detects confusing cached membership
 with original hit identity. A pre-fix candidate dispatched to this wrong control.
 
-This is a click regression, not a general security proof or a speed benchmark.
-It does not cover scroll-container changes, post-move races, inaccessible canvas
+Scroll cases first assert the actual clip offset is 500. `scroll-distant`
+requires a changed offset after public-tool dispatch; replacing/moving the
+container must leave both current and retained-old offsets unchanged at 500,
+with the same strict pre-input refusal assertions as click negatives.
+
+This is a bounded regression, not a general security proof or a speed benchmark.
+It does not cover post-move races, inaccessible canvas
 subtargets or model task success. The fixed 150 ms delay is fixture display
 settling, not a production wait strategy.

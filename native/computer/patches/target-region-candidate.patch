@@ -656,9 +656,6 @@
 +            None => break,
 +        }
 +    }
-+    let Some(selected) = selected else {
-+        return Ok(None);
-+    };
 +    // A live hit that existed in the old tree is not necessarily the old hit:
 +    // an overlapping sibling can change stacking without changing any pixels,
 +    // identity or geometry. Only accept capture geometry that uniquely assigns
@@ -671,6 +668,9 @@
 +    }) {
 +        return Err("stale_image_observation");
 +    }
++    let Some(selected) = selected else {
++        return Ok(None);
++    };
 +    if !scroll
 +        && matches!(
 +            selected.role.as_str(),
