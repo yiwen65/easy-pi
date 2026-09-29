@@ -150,7 +150,7 @@
 - Verification method:
   - 真实 AgentSession、独立页面 oracle、进程关闭/租约读回及哈希核对。
 - Validation evidence: 请求预算通过真实 Agent 循环（本地 stream、无网络）验证 24 次后端调用，第 25 次拒绝；metrics 6/6，npm run check exit 0。v6 真实 gpt-6-sol 两例：click-tab-2 失败（57.98s/9轮），scroll-text 通过（116.29s/14轮），总 reported cost 0.1382168 USD，均正常关闭。数据 `/tmp/epi-pointer-boundary.PFHOUz/native-target-model6/summary.json`；不是可比性能提升证据。
-- Blocker: Chrome 链接实际命中其原有 AXStaticText 直接子节点，精确同对象规则误拒绝；模型标签任务未达安装门槛。
+- Blocker: 原有直接文本链接已能点击，但按钮隐藏文本尚不在观察缓存中；模型标签任务还存在错误选取无名容器及坐标回退问题，未达安装门槛。
 - Unblock condition: T-004 受限子节点实现与负例通过，然后重跑真实模型与相关回归；不安装现有失败候选。
 
 ### [ ] T-004 — 修复已观察直接文本子节点的命中契约
@@ -171,7 +171,7 @@
   - 不以标签/几何相同代替身份，不更改坐标/拖拽契约。
 - Verification method:
   - Rust/TS 定点测试、真实 owned Chrome oracle、关闭与租约读回、根检查。
-- Validation evidence: 已诊断未实施。`/tmp/epi-target-chrome-6otb2T/result.json` 链接零点击，native selected29 AXLink / hit30 AXStaticText，old_parent 与 live_parent 均29；`/tmp/epi-target-chrome-liFlcb/result.json` 直接指定同类文本目标点击一次。诊断源码已撤回，与 v6 冻结源 SHA 相同；诊断 dylib 不能安装。
+- Validation evidence: v14/v18原生已实现唯一、原有直接AXStaticText子节点校验及只读命中预查询，Rust31/31、TS48/48，原AppKit8/8；Chrome链接/单选正例和替换文本、移动文本、替换父节点、嵌套交互控件、覆盖五负例通过，cover重复2/2。按钮隐藏文本仍拒绝；缓存补充提案待授权。后续恢复提示回归28/28，根检查通过。真实模型diagnostic17成功切换两个标签，仍在无名容器选择后失败，保留全部失败和中断；不得安装。完整路径与哈希见执行日志。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -214,6 +214,27 @@
 - 2026-09-29: 最终 npm run check exit 0；复核并撤回四个无关 formatter 文件变动。48 项 TS 测试整体重跑通过。T-002 -> done；T-003 coordinator -> in_progress，下一步为实际模型入口预算验证和独立候选 Chrome 模型 smoke，不安装。
 
 - 2026-09-29: 请求预算入口集成已通过；候选提交 538d9f4cd。v6 真实模型两例一过一败，失败保留。Chrome 最小对照确认 AXLink 的实时 hit 是原有直接 AXStaticText 子节点，指定文本则成功。用户已授权受限子节点支持；T-004 开始，T-003 因资格依赖转 blocked，持续 Goal 仍 active。
+
+- 2026-09-29: v8 子节点候选独立 Chrome 八项中六项达到严格 oracle，按钮与覆盖仍失败；所有计数均无错误目标点击。diagnostic9 排除 first_hit 比较，diagnostic10 证明命中不在树、缓存无子节点，diagnostic11 证明命中为 AXStaticText，rect [157,355,46,16]。匹配 Chrome 153.0.8010.52 的 Chromium `BrowserAccessibility::IsLeaf` 明确隐藏唯一文本子节点（https://raw.githubusercontent.com/chromium/chromium/153.0.8010.52/ui/accessibility/platform/browser_accessibility.cc）。主干 `CachingAsyncHitTest` 使用缓存/近似同步结果并触发异步真实命中；这解释覆盖先移动后拒绝的可能机制，尚未以本地时序证明，不能声称根因已完全闭环。
+- 2026-09-29: diagnostic9/10/11 只用于定位，未安装。诊断日志已从工作源撤回，target_click.rs 与 v8 冻结源 SHA256 同为 35c6434e41f8a4de8507b457b43cc0aaf20f44e3a7f79cfb26f84d846310cb28。根 npm run check exit 0；四个无关 formatter 差异已撤回。下一步只读验证观察阶段是否能取得隐藏文本的原始身份/直接父关系，不能直接放行未观察节点，也不能通过重复命中或固定等待宣称遮挡可靠。
+
+- 2026-09-29: diagnostic12 实测 AXTitleUIElement 无值，AXChildren / AXChildrenInNavigationOrder / AXVisibleChildren 均为空。diagnostic13 仅连续读取32次命中、无鼠标移动/点击：button 在 sample3/2371us 从原按钮转为 AXStaticText，AXParent 与原按钮 CFEqual；cover 在 sample4/1227us 从原链接文本转为别的父节点。原始追踪分别保存为 `native-target-child-diagnostic13-{button,cover}/native-read-trace.txt`。这些只读强制拒绝构建不计产品测试通过。
+- 2026-09-29: v14 将一次只读命中预查询放在现有树校验之前，结果立即释放、不作为放行证据；最终命中检查仍保留，无固定等待/输入重试，不声称异步结果具有确定新鲜度。原生31/31、桥接48/48；Chrome链接/单选及五负例通过，cover两次均在移动前拒绝；AppKit原有8/8通过。native ef424a8390425aef0f193daf05d0c0a960e360054eae8c8b0a045bc7823928ad，patch16a6fba599c908a89cd0f748297f1cb74268a3b2d675889072390a37f6a57e3a，补丁应用检查通过。按钮限制仍存在；用户新的隐藏节点观察补充提案尚待回复。真实模型 click-tab-2 正在独立诊断，不作为安装授权替代。
+
+- 2026-09-29: v14 真实模型 click-tab-2 仍失败，64.38s/9轮、reported cost 0.0701396 USD，cleanup/clean lease0943。首次 target 点击被 target_occluded 拒绝，而非文字子节点错误；随后模型两次坐标回退耗尽恢复预算。保留 `/tmp/epi-pointer-boundary.PFHOUz/native-target-model14/summary.json`，不能算性能提升。
+- 2026-09-29: diagnostic15 将最小链接放到相同上方坐标(171,311)，复现窗口级拒绝；可见遮挡窗口9503、PID72727、layer0、rect(22,39,800,727)，ps验证进程为LocalSend。未关闭或修改它。`native-target-upper-diagnostic15-link/native-occlusion-trace.txt` 留存。此例拒绝正确，窗口截图不显示外部遮挡，模型盲目坐标回退。
+- 2026-09-29: 使用已有显式 window/activate 动作：刚select后立即激活报 foreground_focus_unproved，零点击并正常清理（`native-target-upper-diagnostic15-activate`）；等待真实网页AX目标出现后，在新进程/新租约中仅激活一次，再observe和点击，相同位置成功（`native-target-upper-diagnostic15-ready-activate`、lease0946）。没有重放未知动作。下一步补 target_occluded 的有条件恢复提示及工具回归，再跑真实模型；启动早期激活未知另保留为待排查，不靠固定等待/放宽焦点证明掩盖。diagnostic15日志已撤回，安装版未改。
+
+- 2026-09-29: v16 模型仍失败（59.35s/12轮，cost0.0550632 USD），模型误用 Image ref 激活；修正恢复提示明确先 observe、使用 Observation ref。diagnostic17 中模型随后正确激活，两个页内标签点击均已派发并切换，但选取无名 AXGroup 行45而非 Tempor AXStaticText 行46，pointer_hit_changed 后两次坐标重试耗尽预算。该样本90.39s/18轮、cost0.1164084 USD，cleanup=true、clean0949，不计成功。
+- 2026-09-29: 最小 span.onclick 夹具直接指定原有 AXStaticText 成功一次点击，零覆盖点击，clean094a，证据 `native-target-text17/result.json`。未放宽任意 AXGroup 或隐藏子节点规则。针对 pointer_hit_changed 新增有条件的新观察/精确目标选择提示；先见回归失败，再修复后28/28通过。target_occluded 的新观察激活提示一并提交 `1b54a8d8b`。根 npm run check exit0，无关四文件格式化已撤回。
+- 2026-09-29: 撤除全部临时遮挡日志并重建，v18 native恢复为ef424a83、patch16a6fba5，与v14原生一致。v18真实模型在55.36s中断（不是180s超时证据），cost0.0611416 USD，cleanup=true、CfT正常退出、clean094b；结果保留为失败/中断，不重分类为成功。确认进程句柄已不存在且租约干净后，启动独立v18b复测；当前安装版仍未改变。
+
+- 2026-09-29: v18b 真实模型通过 click-tab-2，独立oracle done=true/rawReward=1，76.35s/16轮，model74.50s/tool1.79s，cost0.0746276 USD，clean094c。真实轨迹包含旧image误用、坐标拒绝及旧intent效果未知，最后显式reconcile后使用AXStaticText46完成；此次未触发pointer_hit_changed新提示，因此不能将通过因果归于该提示。安装版三哈希再次验证未变。下一步针对已证实可点击的AXStaticText补充模型schema说明，以减少不必要坐标回退；不改原生保护或续期预算。
+- 2026-09-29: v19仅修改目标点击schema说明，明确已观察可见文本可作为意图目标；没有新字段/自动选择/身份放宽。schema13/13、根npm run check通过，无关formatter差异撤回。独立v19模型复测已启动，结果未出；本变更仍待行为评估。
+
+- 2026-09-29: v19标签任务通过（done=true/rawReward=1），38.14s/9轮，model34.97s/tool3.14s，cost0.0714264 USD；三次输入全为target.ref，无坐标回退/拒绝，正常关闭、clean094d。schema说明提交 `af7f489e7`，55项TS定点重跑全过，根检查通过。与v18b单次76.35s不同，不能据此宣称稳定快一倍；已启动同版本标签重复+scroll-text两例串行回归，独立输出 `native-target-model19-repeat-scroll`。按钮隐藏子节点仍待授权/修复，未安装。
+
+- 2026-09-29: v19重复标签再次通过，仍9轮但85.66s（model84.40s/tool1.24s），不能宣称稳定耗时改善；scroll-text也通过，70.19s/15轮（model68.32s/tool1.83s），其中Submit原生点击仍pointer_hit_changed，模型使用已有focus+Space完成，不能算按钮点击缺陷修复。两例done=true/rawReward=1，cost合计0.1905528 USD，正常退出、clean094e/094f。下一轮继续Chrome表单/导航/弹窗场景；隐藏文本观察补充仍待明确授权，不安装，Goal保持active。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
