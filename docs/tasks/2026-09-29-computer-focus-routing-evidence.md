@@ -327,3 +327,56 @@ unexplained and are not relabeled as fixed. This installation is a bounded
 repair, not proof of arbitrary external focus-race safety, universal capability
 or full official benchmark coverage. Next work remains model call reduction,
 broader task coverage and first-divergence evidence for intermittent failures.
+
+## Post-install task expansion and latency attribution
+
+The installed a28cd243/a1f1aea2 artifact was rechecked before serial real-model
+MiniWoB runs. Same model (`openai-codex/gpt-6-sol`), seed 42 and pinned HTML
+revision; no page/evaluator changes, native guard weakening or input replay.
+
+| Task | Desktop result / time / turns | Browser result / time / turns |
+| --- | --- | --- |
+| enter-text | PASS / 20.937 s / 6 | Not run in this expansion |
+| choose-list | PASS / 29.307 s / 8 | Not run in this expansion |
+| click-tab-2 | FAIL / 61.416 s / 11 | PASS / 31.282 s / 9 |
+| scroll-text | PASS / 62.733 s / 15 | PASS / 17.096 s / 4 |
+
+All six owners/Chrome groups closed cleanly. Desktop reported cost $0.2631248;
+browser $0.0773136. Evidence: `model-installed-miniwob-desktop/` and
+`model-installed-miniwob-browser/` under the same temporary directory. Profiles
+have different capabilities, so these are separate qualification samples, not
+an A/B speedup estimate or an official aggregate score.
+
+Desktop failures/recoveries remain in the denominator: five
+`stale_image_observation`, two `use_segment_for_unresolved_intent` and one
+`stale_observation` across four tasks. In click-tab-2, the model focused a tab's
+AXGroup rather than clicking it, then two image clicks were refused before
+dispatch. A later keyboard action was delivered; the model subsequently tried
+legacy execute on the still unresolved segment and stopped after refusal. Raw
+reward remained zero and the episode unfinished. Browser mode completed the
+same page task using its existing bounded DOM capability. The desktop failure
+does not justify removing the unresolved-intent guard.
+
+Measured desktop model time was 20.182/28.345/60.252/61.160 s, versus tool time
+0.739/0.942/1.131/1.528 s respectively. Those categories establish where latency
+accumulated, not whether tokens, provider queueing, network or reasoning caused
+it. Reducing unnecessary model turns remains higher-leverage than speculative
+native micro-optimization; a future intervention still requires matched A/B.
+
+Read-only observation audit found anonymous empty AXGroup rows occupied
+35.7–41.5% of emitted row bytes in these four desktop tasks (repeated observations
+counted). They may still carry usable scope references, so none were removed.
+Repeated selector objects accounted for 10,054 of 82,682 row bytes (12.16%), but
+their presence also signals unique-label legacy eligibility; deleting them would
+not be information-neutral. No payload rewrite was promoted from byte counts
+alone. The temporary `observation-cost.mjs` computes counts from retained tool
+text, not model hidden reasoning.
+
+The intentional whole-window image guarantee still blocks dynamic-page pixel
+actions. An explicit asynchronous question asks whether to prototype local
+target-neighborhood validation for clicks/scrolls while retaining process/window,
+geometry/occlusion and coordinate checks, with moved/replaced/covered-target
+negative controls and unchanged drag policy. No answer has been received at this
+checkpoint; no implementation or relaxation is authorized by this evidence.
+Other supported profiles and tests remain available, so this is not a blocked
+or completed overall Goal.
