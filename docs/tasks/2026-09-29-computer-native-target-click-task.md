@@ -150,7 +150,7 @@
 - Verification method:
   - 真实 AgentSession、独立页面 oracle、进程关闭/租约读回及哈希核对。
 - Validation evidence: 请求预算通过真实 Agent 循环（本地 stream、无网络）验证 24 次后端调用，第 25 次拒绝；metrics 6/6，npm run check exit 0。v6 真实 gpt-6-sol 两例：click-tab-2 失败（57.98s/9轮），scroll-text 通过（116.29s/14轮），总 reported cost 0.1382168 USD，均正常关闭。数据 `/tmp/epi-pointer-boundary.PFHOUz/native-target-model6/summary.json`；不是可比性能提升证据。
-- Blocker: 原有直接文本链接已能点击，但按钮隐藏文本尚不在观察缓存中；模型标签任务还存在错误选取无名容器及坐标回退问题，未达安装门槛。
+- Blocker: v23 修复只读缓存就绪时序并通过33项Chrome及8项AppKit回归；真实模型表单受遮挡后耗尽轮数，导航页面空白，尚未达到安装门槛。
 - Unblock condition: T-004 受限子节点实现与负例通过，然后重跑真实模型与相关回归；不安装现有失败候选。
 
 ### [ ] T-004 — 修复已观察直接文本子节点的命中契约
@@ -171,7 +171,7 @@
   - 不以标签/几何相同代替身份，不更改坐标/拖拽契约。
 - Verification method:
   - Rust/TS 定点测试、真实 owned Chrome oracle、关闭与租约读回、根检查。
-- Validation evidence: v14/v18原生已实现唯一、原有直接AXStaticText子节点校验及只读命中预查询，Rust31/31、TS48/48，原AppKit8/8；Chrome链接/单选正例和替换文本、移动文本、替换父节点、嵌套交互控件、覆盖五负例通过，cover重复2/2。按钮隐藏文本仍拒绝；缓存补充提案待授权。后续恢复提示回归28/28，根检查通过。真实模型diagnostic17成功切换两个标签，仍在无名容器选择后失败，保留全部失败和中断；不得安装。完整路径与哈希见执行日志。
+- Validation evidence: v23 补充同快照隐藏直接文字缓存及有界只读就绪；cache所有权7项此前通过，最新segment31/31、就绪4/4、native加载TS55/55、ABI及根检查通过。Chrome33/33（含21次按钮正例）、AppKit8/8，负例零输入且全部正常退出、clean lease。真实模型表单/导航仍失败，历史失败保留；不得安装。完整路径与哈希见执行日志。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -236,9 +236,25 @@
 
 - 2026-09-29: v19重复标签再次通过，仍9轮但85.66s（model84.40s/tool1.24s），不能宣称稳定耗时改善；scroll-text也通过，70.19s/15轮（model68.32s/tool1.83s），其中Submit原生点击仍pointer_hit_changed，模型使用已有focus+Space完成，不能算按钮点击缺陷修复。两例done=true/rawReward=1，cost合计0.1905528 USD，正常退出、clean094e/094f。下一轮继续Chrome表单/导航/弹窗场景；隐藏文本观察补充仍待明确授权，不安装，Goal保持active。
 
+- 2026-09-29: 用户已明确批准受限观察补充：按钮中心命中的直接AXStaticText可在观察时缓存，即使AXChildren未列出；点击仍验证原始父子身份、几何、关系及遮挡，新增/替换/移动负例与真实模型通过前不安装。T-004继续实施，仅复用现有快照owner，不发布隐藏节点的新模型引用、不新增生命周期。扩展前v19 Chrome表单失败于Submit命中、导航靠键盘通过、dialog触及180s截止；三例全部正常关闭，保留原结果，随后停止该旧候选的同类付费重试。
+
+- 2026-09-29: v20 候选 native SHA256 `bbe7e0dc2640dedc4a14f7a0f217ba64e15630c19dd95ea2f448aaabd96b74ff`，bridge `f925d375efa460669d8c31dfca692753e5216a6d6b697733ace5bdcf5de64799`，补丁 `e3b1d6af85adffb2f72a35a18e2b73d523b806da197ef85ff0b9a47508217421`。补丁应用检查、ABI check、TS55、cache7通过。Chrome 13项输出 `native-target-child20b-*`（clean0954–0960），另有按钮独立正例 clean0953；AppKit8项 `native-target-gui20-*`（clean0961–0968）全部通过，替换、移动、覆盖、新增文本均零输入。路径均在 `/tmp/epi-pointer-boundary.PFHOUz/`。
+- 2026-09-29: SDK全组snapshot生命周期首次0/5：旧native夹具缺少built-in cache注册，随后共享锁中毒使其他项连带失败。历史独立未修改基线已复现同因（见 `native/computer/patches/target-region-candidate.md`），不改生产注册来迎合旧夹具。隔离重跑 `snapshot_lifecycle_tests::sdk_ -- --test-threads=1` 2/2通过；三项旧native夹具仍未通过。模型评估器metrics/lifecycle/tasks共16/16通过。已启动v20真实模型三项，结果待收集；未安装。
+
+- 2026-09-29: v20真实模型三项结束（`native-target-model20-chrome/summary.json`）：form在180.00s/13轮截止，model178.07s、tool1.887s，尚未发出Submit点击，不能判定按钮修复失败或成功；navigation在24.83s/3轮因provider_error结束，尚未输入；dialog通过40.72s/8轮，model39.66s、tool1.030s，Open与Confirm均使用target.ref且无拒绝，独立回执comment精确为`approved 你好`。三项cleanup=true、clean0969–096b，reported cost合计0.1768024 USD；1/3通过，全部失败保留，不安装。根`npm run check`完整通过；已撤回四个无关文件的formatter副作用。
+
+- 2026-09-29: 根格式化后的按钮单独正例再次失败：`native-target-child20-formatted-button/result.json`，同一native/bridge哈希，pointer_hit_changed、inputCommitted=false、clicks=0，正常关闭clean096c。此前13/13不能代表稳定修复；停止新增付费样本，v20仍禁止安装。下一步单独diagnostic21只记录观察命中是否已有/缓存、点击命中父节点或缓存子节点的布尔值，不记录UI正文、不放宽输入门槛；生产候选补丁不包含该诊断代码。
+
+- 2026-09-29: diagnostic21在独立新窗口连续8例中7过1失败（`native-target-diagnostic21-button-0`至`-7`，clean096d–0974）。通过轨迹均为观察known=false/cached=true，点击两次检查hidden=true/cached_child_hit=true；第7号失败轨迹为观察known=true（命中已有树节点，未缓存隐藏子节点），随后点击hidden=false/parent_hit=false/cached_child_hit=false，零输入。首次分歧已定位到观察漏缓存，不能把之后的正确拒绝删掉；下一步针对异步只读命中就绪做可取消、限时、无输入重放的实验，先验证是否需要等待及成本，不增加无条件sleep。诊断版native `022dd623acca72b255d24f9012521e06e1a321c6e94190319b4734136b88c6e9`；其补丁单独在临时目录，不进入生产候选补丁。Chromium官方源码说明CachingAsyncHitTest会立即返回近似值并异步更新缓存：[接口说明](https://chromium.googlesource.com/chromium/src/+/464f9d90f102390b2af873421bf9a2ae879dd1da/content/browser/accessibility/browser_accessibility_manager.h)。该历史源码支持机制解释，不是本机153版本的精确时序保证。
+
+- 2026-09-29: diagnostic22第1号新窗口复现漏缓存：首次known=true且initial_parent=true，只读等待后第1次读（1684µs）得到direct_child=true；诊断仍故意保留原缓存缺失，点击零输入拒绝，clean0976。v23据此只在leaf web按钮仍命中自身时做可取消只读就绪轮询，间隔至多1ms、between-read settling budget10ms，已经命中子节点零等待；超时仍不缓存，不重放输入，点击校验完全不变。已移除所有诊断输出。
+- 2026-09-29: v23补丁应用检查、ABI check、Rust新增就绪4/4、原segment31/31、真实native加载TS55/55通过。Chrome 33/33（21个独立按钮正例+链接/单选+10负例，clean0977–0997），AppKit8/8（clean0998–099f）；均正常关闭。证据`/tmp/epi-pointer-boundary.PFHOUz/native-target-child23-*`与`native-target-gui23-*`。native SHA256 `fbf69abaee3b1c5ee75b0781c7d99b636cd5da8beef3dfebb3a380a646fce2b1`，patch `514a4f0c7abf15294b51b934b31560378f83b339a73bd3463699ca0d945207b7`。根检查与真实模型资格继续；旧候选失败不删除，仍未安装。
+
+- 2026-09-29: v23根`npm run check`完整通过，四个无关formatter修改已撤回；真实模型`native-target-model23-chrome`两项0/2、cleanup全真、clean09a0/09a1。form114.04s/24轮，model110.84s/tool3.068s，已得到精确正确oracle但未在轮数内正常结束，故仍失败；Submit两次target_occluded，显式activate后仍遮挡，最后focus+Space提交。此前City读回一度为`Hangzhou..`，来源未证实，模型修正后oracle正确。navigation39.56s/9轮，model38.52s/tool1.016s，发出GET /records，最终截图仍白页，无业务oracle；不是pointer_hit_changed。两项reported cost合计0.3143588 USD，不归因于已修复的缓存漏读，不删除失败、不增加轮数换绿。下一步区分可见遮挡、Chrome绘制/页面状态和模型预算；不关闭个人应用、不放宽点击保护。安装版未动。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 完成；v6 动作候选贯通原生 ABI，最新 Rust segment 30/30、TS 48/48、真实 GUI 8/8，补丁可应用；旧引用/跨窗口/取消有工具层集成验证。安装版未改动。
-- Limitations: 真实模型标签任务失败，T-004 受限子节点实施中；T-003 待其验证后恢复。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。
+- Evidence: T-001 完成；v23 Rust segment31/31、就绪4/4、TS55/55、Chrome33/33及AppKit8/8、ABI与根检查通过。已用读时序实验定位并修复v20间歇漏缓存；最新真实模型表单/导航仍失败，均正常关闭。补丁可应用；未安装。
+- Limitations: v23表单遇遮挡、绕行后耗尽轮数；导航白页原因待分辨。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。

@@ -25,10 +25,10 @@ index cfd9819..c8d601c 100644
      /// sibling may already have replaced the same target's observation.
      pub fn remove_snapshot(&self, pid: i32, window_id: u64, snapshot_id: u32) {
 diff --git a/rust/crates/platform-macos/src/ax/cache.rs b/rust/crates/platform-macos/src/ax/cache.rs
-index e660c04..4da38e1 100644
+index e660c04..3d6ca98 100644
 --- a/rust/crates/platform-macos/src/ax/cache.rs
 +++ b/rust/crates/platform-macos/src/ax/cache.rs
-@@ -34,11 +34,50 @@ impl Drop for RetainedElement {
+@@ -34,11 +34,53 @@ impl Drop for RetainedElement {
  
  pub struct CachedSnapshot {
      pub elements: Vec<usize>,
@@ -36,6 +36,8 @@ index e660c04..4da38e1 100644
 +    /// Aligned with elements. Missing facts do not prevent observation, but
 +    /// cannot authorize a reference-based pointer action.
 +    pub targets: Vec<Option<ObservedTarget>>,
++    /// Observation-only hit evidence; not addressable by model element tokens.
++    pub hit_children: Vec<(usize, RetainedElement, ObservedTarget)>,
 +}
 +
 +#[derive(Clone, Debug, PartialEq)]
@@ -67,7 +69,7 @@ index e660c04..4da38e1 100644
 +                unsafe { CFRetain(*ptr as CFTypeRef) };
 +            }
 +        }
-+        Self { elements, window_rect: self.window_rect, targets }
++        Self { elements, window_rect: self.window_rect, targets, hit_children: self.hit_children.clone() }
 +    }
  }
  
@@ -76,16 +78,38 @@ index e660c04..4da38e1 100644
          Self {
 +            window_rect: None,
 +            targets: Vec::new(),
++            hit_children: Vec::new(),
              elements: nodes
                  .iter()
                  .filter(|node| node.element_index.is_some())
-@@ -100,6 +139,51 @@ mod tests {
+@@ -100,6 +142,72 @@ mod tests {
          unsafe { CFRetain(ptr as CFTypeRef) };
          CachedSnapshot {
              elements: vec![ptr],
 +            window_rect: None,
 +            targets: Vec::new(),
++            hit_children: Vec::new(),
 +        }
++    }
++
++    #[test]
++    fn hidden_hit_children_share_snapshot_lifetime_without_granting_tokens() {
++        let value = CFString::new("hidden-text-lifetime");
++        let ptr = value.as_concrete_TypeRef() as usize;
++        let base = unsafe { CFGetRetainCount(ptr as CFTypeRef) };
++        let mut snapshot = CachedSnapshot::from_nodes(&[]);
++        snapshot.hit_children.push((0, unsafe { RetainedElement::retain(ptr) }, ObservedTarget {
++            parent: Some(0), role: "AXStaticText".into(), subrole: None,
++            label: None, identifier: None, value: Some("Text".into()), rect: [0.0, 0.0, 20.0, 10.0],
++        }));
++        assert_eq!(snapshot.len(), 0);
++        assert!(snapshot.retain(0).is_none());
++        let cloned = snapshot.clone();
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base + 2);
++        drop(snapshot);
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base + 1);
++        drop(cloned);
++        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, base);
 +    }
 +
 +    #[test]
@@ -132,7 +156,7 @@ index e660c04..4da38e1 100644
      }
  
 diff --git a/rust/crates/platform-macos/src/tools/computer/observation/native.rs b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
-index 316c2a4..10759e4 100644
+index 316c2a4..ba9b18a 100644
 --- a/rust/crates/platform-macos/src/tools/computer/observation/native.rs
 +++ b/rust/crates/platform-macos/src/tools/computer/observation/native.rs
 @@ -1,7 +1,7 @@
@@ -144,7 +168,84 @@ index 316c2a4..10759e4 100644
  };
  use core_foundation::{
      array::CFArray,
-@@ -617,8 +617,41 @@ impl Native<'_> {
+@@ -163,10 +163,54 @@ fn readiness_settle(error: AXError) -> Result<bool, &'static str> {
+     }
+ }
+ 
++// Chromium's synchronous hit can initially be the button itself while its
++// renderer resolves the hidden text child. Only that pending case may wait.
++// An exhausted budget preserves the last read, never fabricates child evidence.
++fn settle_button_hit<T>(
++    mut read: impl FnMut() -> Result<(T, bool), &'static str>,
++    mut pause: impl FnMut() -> Result<bool, &'static str>,
++) -> Result<T, &'static str> {
++    loop {
++        let (hit, pending) = read()?;
++        if !pending || !pause()? {
++            return Ok(hit);
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod readiness_tests {
+     use super::*;
+     #[test]
++    fn button_hit_ready_never_waits() {
++        assert_eq!(settle_button_hit(|| Ok((2, false)), || panic!("ready hit must not wait")), Ok(2));
++    }
++    #[test]
++    fn button_hit_waits_only_for_pending_parent() {
++        let reads = std::cell::Cell::new(0);
++        let pauses = std::cell::Cell::new(0);
++        assert_eq!(settle_button_hit(|| {
++            reads.set(reads.get() + 1);
++            Ok((reads.get(), reads.get() < 3))
++        }, || { pauses.set(pauses.get() + 1); Ok(true) }), Ok(3));
++        assert_eq!((reads.get(), pauses.get()), (3, 2));
++    }
++    #[test]
++    fn button_hit_budget_never_grants_a_missing_child() {
++        let reads = std::cell::Cell::new(0);
++        assert_eq!(settle_button_hit(|| { reads.set(reads.get() + 1); Ok(("parent", true)) }, || Ok(false)), Ok("parent"));
++        assert_eq!(reads.get(), 1);
++    }
++    #[test]
++    fn button_hit_errors_stop_before_another_read_or_wait() {
++        for error in ["cancelled", "deadline_expired", "accessibility_permission_denied", "controlled_target_stale"] {
++            assert_eq!(settle_button_hit::<()>(|| Err(error), || panic!("read error must stop")), Err(error));
++            let reads = std::cell::Cell::new(0);
++            assert_eq!(settle_button_hit(|| { reads.set(reads.get() + 1); Ok(((), true)) }, || Err(error)), Err(error));
++            assert_eq!(reads.get(), 1);
++        }
++    }
++    #[test]
+     fn controlled_general_action_metadata_failure_does_not_cut_the_tree() {
+         let mut incomplete = false;
+         assert_eq!(
+@@ -237,6 +281,21 @@ mod readiness_tests {
+ }
+ 
+ impl Native<'_> {
++    pub fn direct_text_child(&self, parent: &RetainedElement, child: &RetainedElement) -> Result<Option<Data>, &'static str> {
++        let direct = self.operation.primary(false, || unsafe {
++            let Some(actual) = copy_element_attr(child.as_ptr() as AXUIElementRef, "AXParent") else {
++                return false;
++            };
++            let same = CFEqual(actual as CFTypeRef, parent.as_ptr() as CFTypeRef) != 0;
++            CFRelease(actual as CFTypeRef);
++            same
++        })?;
++        if !direct { return Ok(None); }
++        let data = self.general_data(child)?;
++        Ok((data.role == "AXStaticText" && !data.metadata_incomplete && data.enabled != Some(false))
++            .then_some(data))
++    }
++
+     pub fn needs_preparation(&self) -> Result<bool, &'static str> {
+         let target = self.operation.session.native_window()?;
+         let stamp = target.process_stamp.ok_or("controlled_target_unproven")?;
+@@ -617,8 +676,103 @@ impl Native<'_> {
  }
  
  impl Scan<RetainedElement> {
@@ -174,6 +275,67 @@ index 316c2a4..10759e4 100644
 +                    label: row.data.label.clone(), identifier: row.data.identifier.clone(),
 +                    value: row.data.value.clone(), rect,
 +                }));
++            // Prime Chromium's asynchronous hit while the remaining geometry
++            // reads run. This result is discarded, never admission evidence.
++            if row.web && row.data.role == "AXButton" {
++                if let Some(rect) = rect.filter(|rect| ObservedTarget::valid_rect(*rect)) {
++                    native.operation.primary(false, || unsafe {
++                        if let Some(hit) = element_at_screen_position(target.pid, rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0) {
++                            CFRelease(hit as CFTypeRef);
++                        }
++                    })?;
++                }
++            }
++        }
++        for (index, row) in self.rows.iter().enumerate() {
++            if !row.web || row.data.role != "AXButton" || self.rows.iter().any(|child| child.parent == Some(index)) {
++                continue;
++            }
++            let Some(original) = payload.targets[index].as_ref() else { continue; };
++            let rect = original.rect;
++            let point = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
++            let started = std::time::Instant::now();
++            let hit = settle_button_hit(|| {
++                let hit = native.operation.primary(false, || unsafe {
++                    element_at_screen_position(target.pid, point.0, point.1)
++                })?;
++                let hit = hit.map(|ptr| unsafe {
++                    let owned = RetainedElement::retain(ptr as usize);
++                    CFRelease(ptr as CFTypeRef);
++                    owned
++                });
++                let pending = hit.as_ref().is_some_and(|hit| native.same(&row.element, hit));
++                Ok((hit, pending))
++            }, || {
++                native.checkpoint()?;
++                let Some(remaining) = std::time::Duration::from_millis(10).checked_sub(started.elapsed()) else {
++                    return Ok(false);
++                };
++                std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
++                native.checkpoint()?;
++                Ok(true)
++            })?;
++            let Some(hit) = hit else { continue; };
++            if self.rows.iter().any(|known| native.same(&known.element, &hit)) { continue; }
++            // Missing optional hit evidence never breaks ordinary observation.
++            let data = match native.direct_text_child(&row.element, &hit) {
++                Ok(Some(data)) => data,
++                Ok(None) | Err("observation_read_failed" | "observation_attribute_type" | "target_membership_unknown" | "observation_role_missing") => {
++                    native.checkpoint()?;
++                    continue;
++                }
++                Err(code) => return Err(code),
++            };
++            let child_rect = native.operation.primary(false, || unsafe {
++                element_screen_rect(hit.as_ptr() as AXUIElementRef)
++            })?;
++            let Some(child_rect) = child_rect.filter(|rect| ObservedTarget::valid_rect(*rect)) else { continue; };
++            if point.0 < child_rect[0] || point.1 < child_rect[1]
++                || point.0 >= child_rect[0] + child_rect[2] || point.1 >= child_rect[1] + child_rect[3] { continue; }
++            payload.hit_children.push((index, hit, ObservedTarget {
++                parent: Some(index), role: data.role, subrole: data.subrole, label: data.label,
++                identifier: data.identifier, value: data.value, rect: child_rect,
++            }));
 +        }
 +        native.checkpoint()?;
 +        Ok(payload)
@@ -183,6 +345,7 @@ index 316c2a4..10759e4 100644
          CachedSnapshot {
 +            window_rect: None,
 +            targets: Vec::new(),
++            hit_children: Vec::new(),
              elements: self
                  .rows
                  .iter()
@@ -203,15 +366,16 @@ index 50488e1..310a59d 100644
                      return refusal("controlled_target_stale");
                  }
 diff --git a/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs b/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
-index a35d31f..a2aafcd 100644
+index a35d31f..4692ca2 100644
 --- a/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
 +++ b/rust/crates/cua-driver-sdk/src/snapshot_lifecycle_tests.rs
-@@ -315,6 +315,8 @@ mod native {
+@@ -315,6 +315,9 @@ mod native {
                      u64::from(window),
                      CachedSnapshot {
                          elements: vec![*ptr],
 +                        window_rect: None,
 +                        targets: Vec::new(),
++                        hit_children: Vec::new(),
                      },
                  );
                  if window == 0 {
@@ -381,10 +545,10 @@ index f1bd357..a088e94 100644
          },
 diff --git a/rust/crates/platform-macos/src/tools/computer/segment/target_click.rs b/rust/crates/platform-macos/src/tools/computer/segment/target_click.rs
 new file mode 100644
-index 0000000..1b699bb
+index 0000000..1d5c2a4
 --- /dev/null
 +++ b/rust/crates/platform-macos/src/tools/computer/segment/target_click.rs
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,303 @@
 +//! Exact observed native target; no pixel fallback or identity reconstruction.
 +use super::*;
 +use crate::ax::cache::{CachedSnapshot, ObservedTarget};
@@ -418,6 +582,23 @@ index 0000000..1b699bb
 +        && y < other.bounds.y + other.bounds.height
 +}
 +
++fn observed_text_child(targets: &[Option<ObservedTarget>], selected: usize, x: f64, y: f64) -> Option<usize> {
++    let parent = targets.get(selected)?.as_ref()?;
++    if !matches!(parent.role.as_str(), "AXLink" | "AXButton" | "AXRadioButton") {
++        return None;
++    }
++    let mut matches = targets.iter().enumerate().filter_map(|(index, target)| {
++        let child = target.as_ref()?;
++        (child.parent == Some(selected) && child.role == "AXStaticText"
++            && ObservedTarget::valid_rect(child.rect)
++            && x >= child.rect[0] && y >= child.rect[1]
++            && x < child.rect[0] + child.rect[2] && y < child.rect[1] + child.rect[3])
++            .then_some(index)
++    });
++    let first = matches.next()?;
++    matches.next().is_none().then_some(first)
++}
++
 +impl Context {
 +    pub(super) fn click_target(
 +        &self,
@@ -442,9 +623,15 @@ index 0000000..1b699bb
 +        let position = center(original.rect, window)?;
 +        let foreground = self.foreground();
 +        events.foreground = foreground;
++        let first_hit = std::cell::Cell::new(None);
 +        let check = || {
 +            self.input_check(foreground, false)?;
-+            self.check_click_target(&cached, index, &element, position)
++            let hit = self.check_click_target(&cached, index, &element, position)?;
++            if first_hit.get().is_some_and(|original| original != hit) {
++                return Err("pointer_hit_changed");
++            }
++            first_hit.set(Some(hit));
++            Ok(())
 +        };
 +        // Each primary independently checks current identity/geometry/hit.
 +        // A change caused by pointer tracking stops before down. The existing
@@ -462,12 +649,21 @@ index 0000000..1b699bb
 +        selected: usize,
 +        element: &RetainedElement,
 +        position: (f64, f64, f64, f64),
-+    ) -> Result<(), &'static str> {
++    ) -> Result<usize, &'static str> {
 +        // A removed retained handle may no longer answer AXWindow. Establish
 +        // membership through the live tree first so replacement is reported as
 +        // stale evidence, not an opaque native membership fault.
 +        self.live()?;
 +        let target = self.operation.session.native_window()?;
++        // Chromium may answer the first synchronous hit from approximate/cache
++        // data while scheduling a renderer hit. Start that read before the
++        // existing tree validation; never admit its result or wait/retry input.
++        // The final hit below remains a required check, not a freshness proof.
++        self.operation.primary(false, || unsafe {
++            if let Some(hit) = bindings::element_at_screen_position(target.pid, position.0, position.1) {
++                CFRelease(hit as CFTypeRef);
++            }
++        })?;
 +        let native = Native { operation: &self.operation };
 +        let tree = observation::scan_general(&native, native.general_input_window()?);
 +        if !tree.structurally_complete() {
@@ -526,18 +722,83 @@ index 0000000..1b699bb
 +            CFRelease(hit as CFTypeRef);
 +            owned
 +        };
-+        // Initial candidate requires the exact hit, not merely a containing
-+        // group. This cannot silently click a different descendant or overlay.
-+        if !native.same(element, &hit) {
-+            return Err("pointer_hit_changed");
-+        }
-+        self.member(element)
++        let hidden = cached.hit_children.iter().enumerate().find(|(_, (parent, _, _))| *parent == selected);
++        let hit_index = if let Some((index, (_, observed, original))) = hidden {
++            if cached.targets[selected].as_ref().is_none_or(|parent| parent.role != "AXButton")
++                || !native.same(observed, &hit) {
++                return Err("pointer_hit_changed");
++            }
++            let data = native.direct_text_child(element, &hit)?
++                .ok_or("stale_session_observation")?;
++            let rect = self.operation.primary(false, || unsafe {
++                bindings::element_screen_rect(hit.as_ptr() as _)
++            })?.ok_or("target_geometry_unknown")?;
++            if !unchanged(original, &data, rect) {
++                return Err("stale_session_observation");
++            }
++            cached.elements.len() + index
++        } else if native.same(element, &hit) {
++            selected
++        } else {
++            // Only one already-observed direct text child at the original
++            // center is admitted. Never infer identity from role or geometry.
++            let child_index = observed_text_child(&cached.targets, selected, position.0, position.1)
++                .ok_or("pointer_hit_changed")?;
++            let ptr = *cached.elements.get(child_index).filter(|ptr| **ptr != 0)
++                .ok_or("stale_session_observation")?;
++            if unsafe { core_foundation::base::CFEqual(ptr as CFTypeRef, hit.as_ptr() as CFTypeRef) } == 0 {
++                return Err("pointer_hit_changed");
++            }
++            let row = tree.rows.iter().find(|row| native.same(&row.element, &hit))
++                .ok_or("stale_session_observation")?;
++            let parent = row.parent.and_then(|index| tree.rows.get(index))
++                .ok_or("stale_session_observation")?;
++            if !native.same(&parent.element, element) {
++                return Err("stale_session_observation");
++            }
++            let rect = self.operation.primary(false, || unsafe {
++                bindings::element_screen_rect(hit.as_ptr() as _)
++            })?.ok_or("target_geometry_unknown")?;
++            let original = cached.targets[child_index].as_ref().ok_or("target_geometry_unknown")?;
++            if !unchanged(original, &row.data, rect) {
++                return Err("stale_session_observation");
++            }
++            child_index
++        };
++        self.member(element)?;
++        Ok(hit_index)
 +    }
 +}
 +
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++    #[test]
++    fn target_click_text_child_is_direct_observed_unique_and_role_bounded() {
++        let parent = ObservedTarget { parent: None, role: "AXLink".into(), subrole: None,
++            label: Some("Target".into()), identifier: None, value: None, rect: [0.0, 0.0, 100.0, 40.0] };
++        let child = ObservedTarget { parent: Some(0), role: "AXStaticText".into(),
++            value: Some("Target".into()), rect: [20.0, 10.0, 60.0, 20.0], ..parent.clone() };
++        let mut targets = vec![Some(parent.clone()), Some(child.clone())];
++        assert_eq!(observed_text_child(&targets, 0, 50.0, 20.0), Some(1));
++        assert_eq!(observed_text_child(&targets, 0, 10.0, 20.0), None);
++        for role in ["AXButton", "AXRadioButton", "AXGroup", "AXWebArea", "AXTextField"] {
++            targets[0].as_mut().unwrap().role = role.into();
++            assert_eq!(observed_text_child(&targets, 0, 50.0, 20.0).is_some(),
++                matches!(role, "AXButton" | "AXRadioButton"));
++        }
++        targets[0] = Some(parent);
++        targets.push(Some(child.clone()));
++        assert_eq!(observed_text_child(&targets, 0, 50.0, 20.0), None);
++        targets.pop();
++        targets[1].as_mut().unwrap().parent = Some(2);
++        assert_eq!(observed_text_child(&targets, 0, 50.0, 20.0), None);
++        targets[1] = Some(child);
++        targets[1].as_mut().unwrap().role = "AXButton".into();
++        assert_eq!(observed_text_child(&targets, 0, 50.0, 20.0), None);
++        targets[1] = None;
++        assert_eq!(observed_text_child(&targets, 0, 50.0, 20.0), None);
++    }
 +    #[test]
 +    fn target_click_occlusion_uses_normalized_front_order_and_space() {
 +        let mut other = crate::windows::WindowInfo {
