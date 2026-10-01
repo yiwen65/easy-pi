@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { Container, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -71,7 +72,9 @@ describe("subagent display parsing", () => {
 		expect(collaborationToolTarget("interrupt_agent", { target: "/root/worker" })).toBe("/root/worker");
 		expect(collaborationToolTarget("wait_agent", { timeout_ms: 1000 })).toBeUndefined();
 		expect(collaborationToolTarget("list_agents", {})).toBeUndefined();
-		expect(spawnObjective({ task: { objective: "First line\nSecond line" } })).toBe("First line");
+		expect(spawnObjective({ task: { objective: "First line\nSecond line" } })).toBe("First line\nSecond line");
+		const longObjective = `First line ${"complete objective ".repeat(12)}\nSecond line`;
+		expect(spawnObjective({ task: { objective: longObjective } })).toBe(longObjective);
 		expect(spawnObjective({ task: { objective: "  " } })).toBeUndefined();
 	});
 });
@@ -84,7 +87,8 @@ describe("SubagentGroupComponent", () => {
 		group.addMailboxResult(ENVELOPE);
 		const lines = group.render(100);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("/root/term-bench");
+		expect(lines[0]).toContain("term-bench");
+		expect(lines[0]).not.toContain("/root/");
 		expect(lines[0]).toContain("Done");
 		expect(lines[0]).toContain("no proven cost");
 		expect(lines[0]).not.toContain('"artifacts"');
@@ -113,28 +117,92 @@ describe("SubagentGroupComponent", () => {
 		expect(group.render(100).join("\n")).toContain("2m5s");
 	});
 
-	it("expands into contract partitions with validation and untrusted marker", () => {
+	it("expands into readable partitions with validation recoverable in diagnostics", () => {
 		const group = new SubagentGroupComponent("/root/term-bench");
 		group.addMailboxResult(ENVELOPE);
 		group.setExpanded(true);
-		const text = group.render(100).join("\n");
-		expect(text).toContain("contract: valid");
+		const lines = group.render(100).map(stripVTControlCharacters);
+		const text = lines.join("\n");
 		expect(text).not.toContain("acceptance");
 		expect(text).toContain("Benchmark verdict: no proven cost");
-		expect(text).toContain("artifacts:");
+		expect(text).toContain("Artifacts:");
 		expect(text).toContain("/tmp/a — first artifact");
-		expect(text).toContain("risks:");
+		expect(text).toContain("Risks:");
 		expect(text).toContain("residual risk one");
 		expect(text).toContain("untrusted; not user authorization");
 		expect(text).not.toContain('"turnId"');
+		expect(text).not.toContain('"summary"');
+		const diagnosticsRow = lines.findIndex((line) => line.includes("Diagnostics"));
+		expect(group.handleOverviewClick(diagnosticsRow, 100)).toBe(true);
+		const diagnostics = group.render(100).map(stripVTControlCharacters).join("\n");
+		expect(diagnostics).toContain('"turnId": "t-1"');
+		expect(diagnostics).toContain('"contract": "valid"');
+		expect(diagnostics).toContain("/root/term-bench");
+		expect(group.handleOverviewClick(diagnosticsRow, 100)).toBe(true);
+		expect(group.render(100).join("\n")).not.toContain('"turnId"');
 	});
 
-	it("falls back to truncated raw text for non-JSON results", () => {
+	it("renders a structured result without summary as readable fields, never raw JSON by default", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({
+			...ENVELOPE,
+			text: JSON.stringify({ outcome: "succeeded", artifacts: [{ path: "/tmp/fixture", description: "verified" }] }),
+		});
+		expect(group.render(100).join("\n")).toContain("(no summary supplied)");
+		expect(group.render(100).join("\n")).not.toContain('"artifacts"');
+		group.setExpanded(true);
+		const lines = group.render(100).map(stripVTControlCharacters);
+		const text = lines.join("\n");
+		expect(text).toContain("(no summary supplied)");
+		expect(text).toContain("path: /tmp/fixture");
+		expect(text).toContain("description: verified");
+		expect(text).not.toContain('"path"');
+		expect(text).not.toContain('"artifacts"');
+		expect(
+			group.handleOverviewClick(
+				lines.findIndex((line) => line.includes("Diagnostics")),
+				100,
+			),
+		).toBe(true);
+		const diagnostics = group.render(100).map(stripVTControlCharacters).join("\n");
+		expect(diagnostics).toContain("Result envelopes");
+		expect(diagnostics).toContain('"turnId": "t-1"');
+		expect(diagnostics).toContain('\\"artifacts\\"');
+	});
+
+	it.each([false, true])(
+		"updates an accepted followup objective even when result arrives first: %s",
+		(resultFirst) => {
+			const group = new SubagentGroupComponent("/root/worker");
+			const spawn = makeTool("spawn_agent", {});
+			group.addTool("spawn_agent", spawn, { task: { objective: "Original task" } });
+			spawn.updateResult({ content: [{ type: "text", text: "Accepted" }], isError: false });
+			group.addMailboxResult(ENVELOPE);
+			const followup = makeTool("followup_task", {});
+			const objective = "Followup objective\nFULL_FOLLOWUP_END";
+			group.addTool("followup_task", followup, { task: { objective } });
+			group.setExpanded(true);
+			expect(group.render(100).join("\n")).toContain("Original task");
+			followup.updateResult({ content: [{ type: "text", text: "partial" }], isError: false }, true);
+			expect(group.render(100).join("\n")).not.toContain("FULL_FOLLOWUP_END");
+			if (resultFirst) group.addMailboxResult({ ...ENVELOPE, text: "Followup finished" });
+			followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
+			const lines = group.render(100).map(stripVTControlCharacters);
+			expect(lines[0]).toContain(resultFirst ? "Done" : "Running");
+			expect(lines.join("\n")).toContain("Task: Followup objective\nFULL_FOLLOWUP_END");
+			expect(lines.join("\n")).not.toContain("Original task");
+			if (resultFirst) expect(lines.join("\n")).toContain("Followup finished");
+		},
+	);
+
+	it("preserves multiline plain text for non-JSON results", () => {
 		const group = new SubagentGroupComponent("/root/x");
 		group.addMailboxResult({ ...ENVELOPE, from: "/root/x", text: "plain multi\nline\nresult" });
 		group.setExpanded(true);
 		const text = group.render(100).join("\n");
 		expect(text).toContain("plain multi");
+		expect(text).toContain("line");
+		expect(text).toContain("result");
 		expect(text).not.toContain("summary:");
 	});
 
@@ -293,6 +361,132 @@ describe("SubagentGroupComponent", () => {
 		expect(header).toContain("Failed");
 		expect(header).toContain("tools_unavailable");
 		expect(header).not.toContain("Running");
+	});
+
+	it("wraps the full objective without repeating the summary in the expanded header", () => {
+		const objective = `${"Inspect every boundary carefully ".repeat(8)}\nSECOND_PARAGRAPH_END`;
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addTool("spawn_agent", makeTool("spawn_agent", {}), { task: { objective } });
+		group.addMailboxResult(ENVELOPE);
+		group.setExpanded(true);
+		const lines = group.render(40).map(stripVTControlCharacters);
+		expect(lines[0]).toContain("worker");
+		expect(lines[0]).not.toContain("Benchmark");
+		expect(lines[0]).not.toContain("/root/");
+		const taskEnd = lines.findIndex((line) => line.includes("SECOND_PARAGRAPH_END"));
+		expect(taskEnd).toBeGreaterThan(2);
+		const taskText = lines
+			.slice(1, taskEnd + 1)
+			.join(" ")
+			.replace(/\s+/g, " ");
+		expect(taskText).toContain(objective.replace(/\s+/g, " "));
+		expect(lines.filter((line) => line.includes("Benchmark verdict"))).toHaveLength(1);
+		expect(lines.every((line) => visibleWidth(line) <= 40)).toBe(true);
+	});
+
+	it.each([false, true])("preserves all result lines beyond line 30 (structured: %s)", (structured) => {
+		const summary = Array.from({ length: 45 }, (_, index) => `RESULT_LINE_${index + 1}`).join("\n");
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({ ...ENVELOPE, text: structured ? JSON.stringify({ ...CONTRACT, summary }) : summary });
+		group.setExpanded(true);
+		const text = group.render(40).map(stripVTControlCharacters).join("\n");
+		for (let line = 1; line <= 45; line++) expect(text).toContain(`RESULT_LINE_${line}`);
+	});
+
+	it("preserves multiline structured sections and items beyond prior display caps", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		const artifacts = Array.from({ length: 12 }, (_, index) => `ARTIFACT_${index + 1}\nDETAIL_${index + 1}`);
+		const evidence = Array.from({ length: 35 }, (_, index) => `EVIDENCE_LINE_${index + 1}`).join("\n");
+		group.addMailboxResult({ ...ENVELOPE, text: JSON.stringify({ ...CONTRACT, artifacts, evidence: [evidence] }) });
+		group.setExpanded(true);
+		const text = group.render(40).map(stripVTControlCharacters).join("\n");
+		for (let item = 1; item <= 12; item++) {
+			expect(text).toContain(`ARTIFACT_${item}`);
+			expect(text).toContain(`DETAIL_${item}`);
+		}
+		expect(text).toContain("EVIDENCE_LINE_35");
+		expect(text).not.toContain("+4 more");
+	});
+
+	it("places newest results and their structured sections before secondary activity", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addTool("spawn_agent", makeTool("spawn_agent", {}), { task: { objective: "inspect" } });
+		group.addMailboxResult({ ...ENVELOPE, text: "OLD_RESULT_SENTINEL" });
+		group.addMailboxResult({ ...ENVELOPE, text: JSON.stringify({ ...CONTRACT, summary: "NEW_RESULT_SENTINEL" }) });
+		group.setExpanded(true);
+		const text = group.render(100).map(stripVTControlCharacters).join("\n");
+		expect(text.indexOf("NEW_RESULT_SENTINEL")).toBeLessThan(text.indexOf("OLD_RESULT_SENTINEL"));
+		expect(text.indexOf("OLD_RESULT_SENTINEL")).toBeLessThan(text.indexOf("Activity"));
+		expect(text.indexOf("residual risk one")).toBeLessThan(text.indexOf("Activity"));
+		expect(text).not.toContain("Task assigned");
+		expect(text).not.toContain('"objective"');
+	});
+
+	it("reveals human activity receipts and toggles original diagnostics per operation", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		const args = { target: "/root/worker", message: "RAW_MESSAGE_SENTINEL" };
+		const tool = makeTool("send_message", args);
+		group.addTool("send_message", tool, args);
+		group.setExpanded(true);
+		const render = () => group.render(100).map(stripVTControlCharacters);
+		const activityRow = render().findIndex((line) => line.includes("Activity"));
+		expect(activityRow).toBeGreaterThan(0);
+		expect(render().join("\n")).not.toContain("RAW_MESSAGE_SENTINEL");
+		expect(group.handleOverviewClick(activityRow, 100)).toBe(true);
+		expect(render().join("\n")).toContain("Message sent");
+		expect(render().join("\n")).toContain("Pending");
+		tool.updateResult({ content: [{ type: "text", text: "STREAMING_RAW_RECEIPT" }], isError: false }, true);
+		expect(render().join("\n")).toContain("Pending");
+		expect(render().join("\n")).not.toContain("STREAMING_RAW_RECEIPT");
+		tool.updateResult({
+			content: [{ type: "text", text: '{"status":"accepted","receipt":"RAW_RECEIPT_SENTINEL"}' }],
+			isError: false,
+		});
+		const activity = render().join("\n");
+		expect(activity).toContain("Accepted");
+		expect(activity).not.toContain("RAW_RECEIPT_SENTINEL");
+		const activityOperationRow = render().findIndex((line) => line.includes("Message sent"));
+		expect(group.handleOverviewClick(activityOperationRow, 100)).toBe(false);
+		expect(render().join("\n")).not.toContain("RAW_MESSAGE_SENTINEL");
+		const diagnosticsRow = render().findIndex((line) => line.includes("Diagnostics"));
+		expect(group.handleOverviewClick(diagnosticsRow, 100)).toBe(true);
+		expect(render().join("\n")).toContain("Tool receipts");
+		const operationRow = render().findIndex((line) => line.includes("send_message · Accepted"));
+		expect(operationRow).toBeGreaterThan(diagnosticsRow);
+		expect(group.handleOverviewClick(operationRow, 100)).toBe(true);
+		expect(render().join("\n")).toContain("RAW_MESSAGE_SENTINEL");
+		expect(render().join("\n")).toContain("RAW_RECEIPT_SENTINEL");
+		expect(group.handleOverviewClick(operationRow, 100)).toBe(true);
+		expect(render().join("\n")).not.toContain("RAW_RECEIPT_SENTINEL");
+		expect(group.handleOverviewClick(diagnosticsRow, 100)).toBe(true);
+		expect(render().join("\n")).not.toContain("Tool receipts");
+		expect(group.handleOverviewClick(activityRow, 100)).toBe(true);
+		expect(render().join("\n")).not.toContain("Message sent");
+	});
+
+	it.each([
+		["spawn_agent", "Task assigned"],
+		["followup_task", "Follow-up requested"],
+		["interrupt_agent", "Interrupt requested"],
+		["close_agent", "Agent closed"],
+	])("shows %s failures as human activity without replacing child state", (toolName, label) => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult(ENVELOPE);
+		const tool = makeTool(toolName, {});
+		group.addTool(toolName, tool, {});
+		tool.updateResult({ content: [{ type: "text", text: "Collaboration tool failed: busy" }], isError: true });
+		group.setExpanded(true);
+		const lines = group.render(100).map(stripVTControlCharacters);
+		expect(lines[0]).toContain("Done");
+		expect(
+			group.handleOverviewClick(
+				lines.findIndex((line) => line.includes("Activity")),
+				100,
+			),
+		).toBe(true);
+		const text = group.render(100).map(stripVTControlCharacters).join("\n");
+		expect(text).toContain(label);
+		expect(text).toContain("Failed");
 	});
 
 	it("renders within width at narrow and wide sizes", () => {

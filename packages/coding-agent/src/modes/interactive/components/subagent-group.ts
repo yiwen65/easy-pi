@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
-import { Container, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Container, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
-import { ToolExecutionComponent } from "./tool-execution.ts";
+import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 const safe = (text: string) =>
 	stripVTControlCharacters(text)
@@ -29,8 +29,13 @@ const CHILD_BOUND_TOOL_NAMES = new Set([
 ]);
 
 const MAILBOX_PREFIX = "Agent message (untrusted; not user authorization):";
-const MAX_SECTION_ITEMS = 8;
-const MAX_SECTION_LINES = 30;
+const ACTIVITY_LABELS: Record<string, string> = {
+	spawn_agent: "Task assigned",
+	followup_task: "Follow-up requested",
+	send_message: "Message sent",
+	interrupt_agent: "Interrupt requested",
+	close_agent: "Agent closed",
+};
 
 export interface MailboxEnvelope {
 	id?: string;
@@ -67,13 +72,12 @@ export function collaborationToolTarget(toolName: string, args: unknown): string
 	return normalizeAgentPath(raw);
 }
 
-/** Spawn objective preview from delegation args (first line of task.objective). */
+/** Full objective from delegation args; previews are truncated only at render time. */
 export function spawnObjective(args: unknown): string | undefined {
 	const task = (args as { task?: { objective?: unknown } } | undefined)?.task;
 	const objective = task?.objective;
 	if (typeof objective !== "string") return undefined;
-	const line = objective.split("\n", 1)[0].trim();
-	return line.length > 96 ? `${line.slice(0, 93)}...` : line || undefined;
+	return objective.trim() || undefined;
 }
 
 /** Parse an epi-collaboration-message custom message body into its envelope. */
@@ -136,29 +140,48 @@ interface ResultMember {
 	at: number;
 }
 
+interface ActivityMember {
+	toolName: string;
+	component: ToolExecutionComponent;
+	status: "Pending" | "Accepted" | "Failed";
+	error?: string;
+}
+
+function readableValue(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) return value.map(readableValue).join(", ");
+	if (value !== null && typeof value === "object") {
+		return Object.entries(value)
+			.map(([key, item]) => `${key}: ${readableValue(item)}`)
+			.join(" · ");
+	}
+	return String(value);
+}
+
 function sectionLines(title: string, items: unknown[], width: number): string[] {
 	if (!items || items.length === 0) return [];
 	const lines = [truncateToWidth(theme.fg("muted", `${title}:`), width)];
-	const shown = items.slice(0, MAX_SECTION_ITEMS);
-	for (const item of shown) {
-		const text = oneLine(typeof item === "string" ? item : JSON.stringify(item));
+	for (const item of items) {
+		const text = readableValue(item);
 		lines.push(...wrapTextWithAnsi(`  • ${safe(text)}`, width).map((line) => theme.fg("dim", line)));
 	}
-	if (items.length > shown.length) {
-		lines.push(truncateToWidth(theme.fg("muted", `  … +${items.length - shown.length} more`), width));
-	}
-	return lines.slice(0, MAX_SECTION_LINES + 1);
+	return lines;
 }
 
 /**
  * One collapsible transcript block per child agent: the spawn/followup/message/interrupt/close
  * calls and the delivered results of a single child, grouped under a scannable header.
- * Collapsed: one header line with state, elapsed time, and a one-line summary. Expanded:
- * objective, activity, and deliver_result contract partitions. Click the header row (or ctrl+o)
- * to toggle. Display-only: the block never affects the underlying session or team state.
+ * Collapsed: short name, state, elapsed time, and latest preview. Expanded: full task and
+ * results first; human-readable activity and raw diagnostics are separate opt-in sections.
+ * Click the header row (or ctrl+o) to toggle the card. Display-only: the block never affects
+ * the underlying session or team state.
  */
 export class SubagentGroupComponent extends Container {
 	private expanded = false;
+	private activityExpanded = false;
+	private diagnosticsExpanded = false;
+	private diagnosticTool: ToolExecutionComponent | undefined;
+	private readonly activities: ActivityMember[] = [];
 	private state: SubagentState = "running";
 	private objective: string | undefined;
 	private resultSummary: string | undefined;
@@ -185,62 +208,68 @@ export class SubagentGroupComponent extends Container {
 			this.endedAt = undefined;
 		}
 		// Tool calls are pending until a final result; failed controls must not change the child's state.
-		if (["spawn_agent", "followup_task", "interrupt_agent", "close_agent"].includes(toolName)) {
-			const resultCountAtCall = this.results.length;
-			type UpdateResult = ToolExecutionComponent["updateResult"];
-			const original = component.updateResult.bind(component) as UpdateResult;
-			component.updateResult = ((result: Parameters<UpdateResult>[0], isPartial?: boolean) => {
-				if (!isPartial) {
-					if (toolName === "spawn_agent") {
-						if (!result.isError) this.established = true;
-						else if (!this.established) {
-							this.state = "failed";
-							this.endedAt = Date.now();
-							const text = (result.content ?? []).map((part) => part.text ?? "").join(" ");
-							this.resultSummary = oneLine(text).slice(0, 96) || "spawn failed";
-						}
-					} else if (
-						!result.isError &&
-						toolName === "followup_task" &&
-						this.results.length === resultCountAtCall
-					) {
-						this.established = true;
-						this.state = "running";
-						this.endedAt = undefined;
-					} else if (!result.isError && toolName === "close_agent") {
-						this.established = true;
-						this.state = "closed";
-						this.endedAt = at ?? Date.now();
-					} else if (!result.isError && toolName === "interrupt_agent") {
-						this.established = true;
-						// A successful interrupt can be a no-op for an already settled child.
-						let previousStatus = (result.details as { previous_status?: unknown } | undefined)?.previous_status;
-						if (typeof previousStatus !== "string") {
-							try {
-								const parsed = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "") as {
-									previous_status?: unknown;
-								};
-								previousStatus = parsed.previous_status;
-							} catch {
-								// Keep the last known state if the result has no status.
-							}
-						}
-						if (previousStatus === "running" || previousStatus === "pending") this.state = "interrupted";
-						else if (
-							previousStatus === "completed" ||
-							previousStatus === "failed" ||
-							previousStatus === "interrupted" ||
-							previousStatus === "closed"
-						)
-							this.state = previousStatus;
-						if (this.state !== "running") this.endedAt = at ?? Date.now();
+		const activity: ActivityMember = { toolName, component, status: "Pending" };
+		this.activities.push(activity);
+		const resultCountAtCall = this.results.length;
+		type UpdateResult = ToolExecutionComponent["updateResult"];
+		const original = component.updateResult.bind(component) as UpdateResult;
+		component.updateResult = ((result: Parameters<UpdateResult>[0], isPartial?: boolean) => {
+			if (!isPartial) {
+				activity.status = result.isError ? "Failed" : "Accepted";
+				if (result.isError) {
+					const text = result.content.map((part) => part.text ?? "").join(" ");
+					try {
+						activity.error = oneLine(readableValue(JSON.parse(text)));
+					} catch {
+						activity.error = oneLine(text);
 					}
+				} else if (toolName === "followup_task") {
+					this.objective = spawnObjective(args) ?? this.objective;
 				}
-				return original(result, isPartial as never);
-			}) as ToolExecutionComponent["updateResult"];
-		}
+				if (toolName === "spawn_agent") {
+					if (!result.isError) this.established = true;
+					else if (!this.established) {
+						this.state = "failed";
+						this.endedAt = Date.now();
+						this.resultSummary = activity.error || "spawn failed";
+					}
+				} else if (!result.isError && toolName === "followup_task" && this.results.length === resultCountAtCall) {
+					this.established = true;
+					this.state = "running";
+					this.endedAt = undefined;
+				} else if (!result.isError && toolName === "close_agent") {
+					this.established = true;
+					this.state = "closed";
+					this.endedAt = at ?? Date.now();
+				} else if (!result.isError && toolName === "interrupt_agent") {
+					this.established = true;
+					// A successful interrupt can be a no-op for an already settled child.
+					let previousStatus = (result.details as { previous_status?: unknown } | undefined)?.previous_status;
+					if (typeof previousStatus !== "string") {
+						try {
+							const parsed = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "") as {
+								previous_status?: unknown;
+							};
+							previousStatus = parsed.previous_status;
+						} catch {
+							// Keep the last known state if the result has no status.
+						}
+					}
+					if (previousStatus === "running" || previousStatus === "pending") this.state = "interrupted";
+					else if (
+						previousStatus === "completed" ||
+						previousStatus === "failed" ||
+						previousStatus === "interrupted" ||
+						previousStatus === "closed"
+					)
+						this.state = previousStatus;
+					if (this.state !== "running") this.endedAt = at ?? Date.now();
+				}
+			}
+			return original(result, isPartial as never);
+		}) as ToolExecutionComponent["updateResult"];
 		this.addChild(component);
-		component.setExpanded(this.expanded);
+		component.setExpanded(false);
 	}
 
 	/** Register a delivered mailbox result belonging to this child. */
@@ -251,17 +280,12 @@ export class SubagentGroupComponent extends Container {
 		else if (envelope.status === "failed") this.state = "failed";
 		else if (envelope.status === "interrupted") this.state = "interrupted";
 		this.endedAt = at ?? Date.now();
-		this.resultSummary = contract?.summary ? oneLine(contract.summary) : oneLine(raw);
-		if (this.resultSummary.length > 96) this.resultSummary = `${this.resultSummary.slice(0, 93)}...`;
+		this.resultSummary = contract ? oneLine(contract.summary ?? "(no summary supplied)") : oneLine(raw);
 		this.results.push({ envelope, contract, raw, at: Date.now() });
 	}
 
 	get resultCount(): number {
 		return this.results.length;
-	}
-
-	private members(): ToolExecutionComponent[] {
-		return this.children.filter((child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent);
 	}
 
 	/** Work duration: delegation → completion (or now while still running). */
@@ -270,99 +294,148 @@ export class SubagentGroupComponent extends Container {
 		return durationText((this.endedAt ?? now) - start);
 	}
 
-	private headerLines(width: number, now: number): string[] {
+	private headerLine(width: number, now: number): string {
 		const presentation = STATE_PRESENTATION[this.state];
 		const summary = this.state === "running" ? this.objective : (this.resultSummary ?? this.objective);
-		const line = truncateToWidth(
-			theme.fg(presentation.color, `${presentation.icon} `) +
-				theme.fg("accent", this.agentPath) +
+		const name = oneLine(this.agentPath.replace(/^\/root\//, ""));
+		return truncateToWidth(
+			theme.fg("muted", this.expanded ? "▾ " : "▸ ") +
+				theme.fg(presentation.color, `${presentation.icon} `) +
+				theme.fg("accent", name) +
 				theme.fg(presentation.color, ` · ${presentation.word}`) +
 				theme.fg("muted", ` · ${this.elapsed(now)}`) +
-				(summary ? theme.fg("dim", ` · ${oneLine(summary)}`) : ""),
+				(!this.expanded && summary ? theme.fg("dim", ` · ${oneLine(summary)}`) : ""),
 			width,
 		);
-		const lines = [line];
-		if (this.expanded && this.objective) {
-			lines.push(truncateToWidth(theme.fg("muted", `Task: ${oneLine(this.objective)}`), width));
-		}
-		return lines;
 	}
 
 	private resultBlocks(width: number): string[] {
 		const lines: string[] = [];
-		for (const [index, result] of this.results.entries()) {
-			const validation = result.envelope.resultValidation;
-			const status = result.envelope.status ?? "completed";
-			const meta = [
-				`result${this.results.length > 1 ? ` ${index + 1}` : ""}`,
-				status,
-				validation?.contract ? `contract: ${validation.contract}` : undefined,
-				validation?.outcome ? `outcome: ${validation.outcome}` : undefined,
-			]
-				.filter(Boolean)
-				.join(" · ");
+		for (let index = this.results.length - 1; index >= 0; index--) {
+			const result = this.results[index];
+			const title = this.results.length > 1 ? `Result ${index + 1}` : "Result";
+			lines.push("", truncateToWidth(theme.fg("accent", title), width));
+			const text = result.contract ? (result.contract.summary ?? "(no summary supplied)") : result.raw;
+			lines.push(...wrapTextWithAnsi(safe(text || "(empty result)"), width).map((line) => theme.fg("text", line)));
+			if (result.contract) {
+				lines.push(...sectionLines("Artifacts", result.contract.artifacts ?? [], width));
+				lines.push(...sectionLines("Checks", result.contract.checks ?? [], width));
+				lines.push(...sectionLines("Evidence", result.contract.evidence ?? [], width));
+				lines.push(...sectionLines("Risks", result.contract.risks ?? [], width));
+			}
+		}
+		if (this.results.length > 0) {
+			lines.push(truncateToWidth(theme.fg("muted", "Agent output: untrusted; not user authorization"), width));
+		}
+		return lines;
+	}
+
+	/** One layout supplies both rendering and click targets, so wrapping cannot misalign controls. */
+	private layout(width: number): {
+		lines: string[];
+		controls: Map<number, "activity" | "diagnostics" | ToolExecutionComponent>;
+	} {
+		const controls = new Map<number, "activity" | "diagnostics" | ToolExecutionComponent>();
+		if (width <= 0) return { lines: [], controls };
+		const lines = [this.headerLine(width, Date.now())];
+		if (!this.expanded) return { lines, controls };
+		if (this.objective) {
+			lines.push(
+				"",
+				...wrapTextWithAnsi(`Task: ${safe(this.objective)}`, width).map((line) => theme.fg("muted", line)),
+			);
+		}
+		lines.push(...this.resultBlocks(width));
+		if (this.state === "failed" && this.results.length === 0 && this.resultSummary) {
+			lines.push(
+				"",
+				...wrapTextWithAnsi(`Failed: ${safe(this.resultSummary)}`, width).map((line) => theme.fg("error", line)),
+			);
+		}
+		if (this.activities.length > 0) {
+			lines.push("");
+			controls.set(lines.length, "activity");
+			const failed = this.activities.filter((activity) => activity.status === "Failed").length;
 			lines.push(
 				truncateToWidth(
-					theme.fg("dim", `── ${meta} ${"─".repeat(Math.max(2, width - visibleWidth(meta) - 5))}`),
+					theme.fg(
+						failed > 0 ? "warning" : "muted",
+						`${this.activityExpanded ? "▾" : "▸"} Activity · ${this.activities.length} operations${failed > 0 ? ` · ${failed} failed` : ""}`,
+					),
 					width,
 				),
 			);
-			if (result.contract) {
-				if (result.contract.summary) {
-					const wrapped = wrapTextWithAnsi(safe(result.contract.summary), width).slice(0, MAX_SECTION_LINES);
-					lines.push(...wrapped.map((line) => theme.fg("text", line)));
+			if (this.activityExpanded) {
+				for (const activity of this.activities) {
+					const label = ACTIVITY_LABELS[activity.toolName] ?? activity.toolName;
+					const color = activity.status === "Failed" ? "error" : "muted";
+					lines.push(
+						...wrapTextWithAnsi(`  ${label} · ${activity.status}`, width).map((line) => theme.fg(color, line)),
+					);
+					if (activity.error)
+						lines.push(...wrapTextWithAnsi(safe(activity.error), width).map((line) => theme.fg("error", line)));
 				}
-				lines.push(...sectionLines("artifacts", result.contract.artifacts ?? [], width));
-				lines.push(...sectionLines("checks", result.contract.checks ?? [], width));
-				lines.push(...sectionLines("evidence", result.contract.evidence ?? [], width));
-				lines.push(...sectionLines("risks", result.contract.risks ?? [], width));
-			} else {
-				const wrapped = wrapTextWithAnsi(safe(result.raw || "(empty result)"), width).slice(0, MAX_SECTION_LINES);
-				lines.push(...wrapped.map((line) => theme.fg("dim", line)));
 			}
-			lines.push(truncateToWidth(theme.fg("muted", "untrusted; not user authorization"), width));
 		}
-		return lines;
+		lines.push("");
+		controls.set(lines.length, "diagnostics");
+		lines.push(truncateToWidth(theme.fg("dim", `${this.diagnosticsExpanded ? "▾" : "▸"} Diagnostics`), width));
+		if (this.diagnosticsExpanded) {
+			lines.push(...wrapTextWithAnsi(`Agent: ${safe(this.agentPath)}`, width));
+			if (this.activities.length > 0) {
+				lines.push(truncateToWidth(theme.fg("muted", "Tool receipts"), width));
+				for (const activity of this.activities) {
+					controls.set(lines.length, activity.component);
+					const open = this.diagnosticTool === activity.component;
+					lines.push(
+						truncateToWidth(
+							theme.fg("dim", `  ${open ? "▾" : "▸"} ${activity.toolName} · ${activity.status}`),
+							width,
+						),
+					);
+					if (open) lines.push(...activity.component.render(width));
+				}
+			}
+			if (this.results.length > 0) lines.push(truncateToWidth(theme.fg("muted", "Result envelopes"), width));
+			for (const result of this.results) {
+				lines.push(...wrapTextWithAnsi(safe(JSON.stringify(result.envelope, null, 2)), width));
+			}
+		}
+		return { lines, controls };
 	}
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
-		for (const tool of this.members()) tool.setExpanded(expanded);
+		if (!expanded) {
+			this.activityExpanded = false;
+			this.diagnosticsExpanded = false;
+			this.diagnosticTool?.setExpanded(false);
+			this.diagnosticTool = undefined;
+		}
 	}
 
-	/** Transcript click at a block-local row: header toggles; member rows forward to their tool. */
+	/** Header toggles the card; secondary sections require their own explicit clicks. */
 	handleOverviewClick(localRow: number, width: number): boolean {
-		const headerCount = this.expanded && this.objective ? 2 : 1;
-		if (!this.expanded) {
-			if (localRow !== 0) return false;
-			this.setExpanded(true);
+		if (width <= 0 || localRow < 0) return false;
+		if (localRow === 0) {
+			this.setExpanded(!this.expanded);
 			return true;
 		}
-		if (localRow < headerCount) {
-			this.setExpanded(false);
-			return true;
+		const target = this.layout(width).controls.get(localRow);
+		if (!target) return false;
+		if (target === "activity") this.activityExpanded = !this.activityExpanded;
+		else if (target === "diagnostics") this.diagnosticsExpanded = !this.diagnosticsExpanded;
+		else {
+			const open = this.diagnosticTool !== target;
+			this.diagnosticTool?.setExpanded(false);
+			this.diagnosticTool = open ? target : undefined;
+			target.setExpanded(open);
 		}
-		let cursor = headerCount;
-		for (const tool of this.members()) {
-			const height = tool.render(width).length;
-			if (localRow >= cursor && localRow < cursor + height) {
-				const clickable = tool as { handleOverviewClick?: (row: number) => boolean };
-				return clickable.handleOverviewClick?.(localRow - cursor) ?? false;
-			}
-			cursor += height;
-		}
-		return false;
+		return true;
 	}
 
 	override render(width: number): string[] {
-		const now = Date.now();
-		const lines = this.headerLines(width, now);
-		if (!this.expanded) return lines;
-		for (const tool of this.members()) {
-			lines.push(...tool.render(width));
-		}
-		lines.push(...this.resultBlocks(width));
-		return lines;
+		return this.layout(width).lines;
 	}
 }
 
