@@ -40,7 +40,8 @@ test("real mouse clicks collapse compaction body and padding without copying, wh
 	const tui = new TuiAltScreen(terminal, undefined, undefined, {
 		copySelection,
 		onContentClick: (click) =>
-			click.scrollView === scrollView && component.handleContentClick(click.row, terminal.columns),
+			click.scrollView === scrollView &&
+			(tui.getRenderedContentClickHandler(scrollView, component)?.(click.row, click.col) ?? false),
 	});
 	tui.setLayoutRoot(scrollView);
 	tui.start();

@@ -14,6 +14,7 @@ export interface EasyPiLandingTelemetry {
 export interface EasyPiStartupHeaderOptions {
 	getExpandedHints: () => readonly string[];
 	getTelemetry: () => EasyPiLandingTelemetry;
+	getInteractionHint?: () => string;
 	expanded?: boolean;
 }
 
@@ -21,11 +22,13 @@ export interface EasyPiStartupHeaderOptions {
 export class EasyPiStartupHeader implements Component {
 	private readonly getExpandedHints: () => readonly string[];
 	private readonly getTelemetry: () => EasyPiLandingTelemetry;
+	private readonly getInteractionHint: (() => string) | undefined;
 	private expanded: boolean;
 
 	constructor(options: EasyPiStartupHeaderOptions) {
 		this.getExpandedHints = options.getExpandedHints;
 		this.getTelemetry = options.getTelemetry;
+		this.getInteractionHint = options.getInteractionHint;
 		this.expanded = options.expanded ?? false;
 	}
 
@@ -49,7 +52,7 @@ export class EasyPiStartupHeader implements Component {
 
 		lines.push("");
 		lines.push(...this.renderResources(safeWidth));
-		lines.push("");
+		lines.push(this.getInteractionHint ? this.center(theme.fg("dim", this.getInteractionHint()), safeWidth) : "");
 
 		if (this.expanded) {
 			lines.push(this.center(theme.fg("dim", "shortcuts"), safeWidth));

@@ -307,9 +307,16 @@ describe("Grok transcript components", () => {
 		group.addTool(latest);
 		try {
 			expect(stripAnsi(group.render(100)[0])).toContain("◆ bash  echo latest");
+			expect(stripAnsi(group.render(100)[0])).toMatch(/^▸/);
+			if (state === "error") {
+				expect(stripAnsi(group.render(100)[0])).toContain("1 failed");
+				expect(stripAnsi(group.render(2)[0])).toBe("▸!");
+			}
+			expectFits(group, [1, 2, 4, 20, 80]);
 			group.completeTurn();
 			expect(stripAnsi(group.render(100)[0])).toContain("◆ bash  echo latest");
 			group.setExpanded(true);
+			expect(stripAnsi(group.render(100)[0])).toMatch(/^▾/);
 			expect(stripAnsi(group.render(100).join("\n"))).toContain("/tmp/older.ts");
 			group.setExpanded(false);
 			expect(stripAnsi(group.render(100)[0])).toContain("◆ bash  echo latest");
@@ -531,7 +538,7 @@ describe("Grok transcript components", () => {
 		// Internal assistant/tool boundaries keep the latest thinking visible.
 		const activeFrame = group.render(80).join("\n");
 		const active = stripAnsi(activeFrame);
-		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "✦ second reasoning")));
+		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ second reasoning")));
 		expect(active).toContain("✦ second reasoning");
 		expect(active).not.toContain("first reasoning");
 		expect(active).not.toContain("Thinking...");
@@ -540,7 +547,7 @@ describe("Grok transcript components", () => {
 		group.completeTurn();
 		const collapsedFrame = group.render(80).join("\n");
 		const collapsed = stripAnsi(collapsedFrame);
-		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "✦ second reasoning")));
+		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ second reasoning")));
 		expect(group.entryCount).toBe(2);
 		expect(group.render(80)).toHaveLength(1);
 		expect(collapsed).toContain("✦ second reasoning");
@@ -603,7 +610,7 @@ describe("Grok transcript components", () => {
 			vi.advanceTimersByTime(10_000);
 			expect(stripAnsi(group.render(80)[0])).toBe(completed);
 			expect(requestRender).not.toHaveBeenCalled();
-			expectFits(group, [4, 12, 24, 80]);
+			expectFits(group, [1, 2, 4, 12, 24, 80]);
 		} finally {
 			group.dispose();
 			vi.useRealTimers();

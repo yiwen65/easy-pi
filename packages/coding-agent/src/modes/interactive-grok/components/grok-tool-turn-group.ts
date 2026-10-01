@@ -1,4 +1,10 @@
-import { Container, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	Container,
+	recordRenderedContentClickHandler,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { LiveLineScroller } from "../../interactive/components/live-line-scroller.ts";
 import { theme } from "../../interactive/theme/theme.ts";
 import { flattenInline } from "./grok-inline-text.ts";
@@ -20,6 +26,7 @@ import { GrokToolExecutionComponent } from "./grok-tool-execution.ts";
 export class GrokToolTurnGroupComponent extends Container {
 	private readonly scroller: LiveLineScroller;
 	private groupExpanded = false;
+	private disposed = false;
 
 	constructor(ui?: TUI) {
 		super();
@@ -37,6 +44,7 @@ export class GrokToolTurnGroupComponent extends Container {
 
 	/** Stop the idle scroll timer. Called when the group leaves the transcript. */
 	dispose(): void {
+		this.disposed = true;
 		this.scroller.dispose();
 	}
 
@@ -127,15 +135,18 @@ export class GrokToolTurnGroupComponent extends Container {
 		this.scroller.setText(flattenInline(tool.summarizeCurrentArgs()));
 
 		const settled = this.activeTool() === undefined && tools.length > 1;
+		const failures = tools.filter((entry) => entry.getGrokState() === "error").length;
 		const suffix = settled ? ` · ${tools.length} tools` : "";
+		const prefix = `${this.groupExpanded ? "▾" : "▸"}${failures ? `! ${failures} failed · ` : " "}`;
 		const gap = "  ";
 		const head =
+			theme.fg(failures ? "warning" : "muted", prefix) +
 			theme.fg(tool.stateColor(), `${tool.stateSymbol()} `) +
 			theme.fg("toolTitle", theme.bold(tool.getGrokToolName()));
 		const available = Math.max(1, width - visibleWidth(suffix));
 		const summaryWidth = Math.max(
 			0,
-			available - visibleWidth(`${tool.stateSymbol()} ${tool.getGrokToolName()}${gap}`),
+			available - visibleWidth(`${prefix}${tool.stateSymbol()} ${tool.getGrokToolName()}${gap}`),
 		);
 		const summary = this.scroller.window(summaryWidth);
 		const body = summary ? head + theme.fg("muted", gap + summary) : head;
@@ -145,10 +156,44 @@ export class GrokToolTurnGroupComponent extends Container {
 	override render(width: number): string[] {
 		if (width <= 0) return [];
 		const summary = this.collapsedLine(width);
-		if (this.groupExpanded) {
-			return [summary, ...super.render(width)];
-		}
-		if (this.toolCount === 0) return [];
-		return [summary];
+		const expanded = this.groupExpanded;
+		const lines = [summary];
+		const ranges: Array<{
+			tool: GrokToolExecutionComponent;
+			start: number;
+			height: number;
+			compactHeader: boolean;
+			expanded: boolean;
+		}> = [];
+		if (expanded) {
+			for (const child of this.children) {
+				const childLines = child.render(width);
+				if (child instanceof GrokToolExecutionComponent)
+					ranges.push({
+						tool: child,
+						start: lines.length,
+						height: childLines.length,
+						compactHeader: childLines[0] === child.overviewLine(width),
+						expanded: child.isExpanded(),
+					});
+				lines.push(...childLines);
+			}
+		} else if (this.toolCount === 0) return [];
+		const rowCount = lines.length;
+		recordRenderedContentClickHandler(this, lines, (localRow) => {
+			if (this.disposed || this.groupExpanded !== expanded || localRow < 0 || localRow >= rowCount) return false;
+			if (localRow === 0) {
+				this.groupExpanded = !expanded;
+				if (expanded) for (const tool of this.tools()) tool.setExpanded(false);
+				return true;
+			}
+			const target = ranges.find((range) => localRow >= range.start && localRow < range.start + range.height);
+			if (!target || !target.compactHeader || !this.children.includes(target.tool) || localRow !== target.start)
+				return false;
+			// Use the painted disclosure state, not height or a possibly unseen new state.
+			target.tool.setExpanded(!target.expanded);
+			return true;
+		});
+		return lines;
 	}
 }

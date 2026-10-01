@@ -55,6 +55,17 @@ describe("EasyPiStartupHeader", () => {
 		expect(lines.filter((line) => stripTerminalSequences(line).trim().length > 0)).toHaveLength(3);
 	});
 
+	test("mode-aware local hint replaces the spacer without adding header height", () => {
+		let mode = "keyboard only; opens fullscreen";
+		const header = createHeader({ getInteractionHint: () => `Alt+Z local block · ${mode}` });
+		expect(plain(header.render(100))).toContain("Alt+Z local block · keyboard only; opens fullscreen");
+		expect(header.render(100)).toHaveLength(createHeader().render(100).length);
+		mode = "click or keyboard";
+		expect(plain(header.render(100))).toContain("Alt+Z local block · click or keyboard");
+		for (const width of [1, 24, 40, 80])
+			expect(header.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+	});
+
 	test("only shows the tagline when it fits in full", () => {
 		expect(plain(createHeader().render(40))).not.toContain("The deepest truths");
 		expect(plain(createHeader().render(41))).toContain("The deepest truths are often the simplest");

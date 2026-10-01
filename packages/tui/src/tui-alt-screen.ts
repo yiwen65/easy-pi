@@ -31,9 +31,12 @@ import {
 } from "./terminal-image.ts";
 import {
 	type Component,
+	Container,
 	CURSOR_MARKER,
 	compositeTuiLine,
 	type OverlayHandle,
+	type RenderedChildOffset,
+	type RenderedContentClickHandler,
 	TuiBase,
 	type TuiStopOptions,
 	VIEWPORT_TUI,
@@ -177,7 +180,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private previousScreenHeight = 0;
 	private layoutRoot: Component | undefined;
 	private currentLayout: LayoutFrame | undefined;
-	private readonly implicitDocument: Component;
+	private readonly implicitDocument: Container;
 	private readonly implicitScrollView: ScrollView;
 	private readonly flashes: AltScreenFlashContainer;
 	private altScreenActive = false;
@@ -193,6 +196,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionAutoScrollDirection: -1 | 0 | 1 = 0;
 	private selectionAutoScrollTimer?: NodeJS.Timeout;
 	private selectionPressActive = false;
+	private selectionPressCell?: { x: number; y: number };
 	private scrollbarDrag?: ScrollbarDrag;
 	private scrollbarHover?: ScrollView;
 	private activeSearch?: ActiveSearch;
@@ -214,12 +218,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		options: TuiAltScreenOptions = {},
 	) {
 		super(terminal, showHardwareCursor, logDirectory);
-		this.implicitDocument = {
-			render: (width) => super.render(width),
-			invalidate: () => {
-				for (const child of this.children) child.invalidate();
-			},
-		};
+		this.implicitDocument = new Container();
 		this.implicitScrollView = new ScrollView(this.implicitDocument, { follow: "end", primary: true });
 		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
 		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 3));
@@ -231,6 +230,60 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copySelection = options.copySelection;
 		this.addInputListener((data) => this.handleViewportInput(data));
+	}
+
+	/** Last displayed child ranges in ScrollView content rows; never renders components. */
+	getRenderedChildOffsets(scrollView: ScrollView, container: Container): RenderedChildOffset[] | undefined {
+		const frame = this.currentLayout;
+		if (
+			!this.altScreenActive ||
+			!frame ||
+			frame.width !== Math.max(1, this.terminal.columns) ||
+			frame.height !== Math.max(1, this.terminal.rows)
+		)
+			return undefined;
+		const scrollBox = getScrollViewBox(frame, scrollView);
+		const contentBox = scrollBox?.children[0];
+		if (!contentBox) return undefined;
+		const visit = (box: typeof contentBox): RenderedChildOffset[] | undefined => {
+			const ranges = box.containerOffsets?.get(container);
+			if (ranges) return ranges.map((range) => ({ ...range, start: box.rect.y - contentBox.rect.y + range.start }));
+			if (box.scrollView) return undefined;
+			for (const child of box.children) {
+				const match = visit(child);
+				if (match) return match;
+			}
+			return undefined;
+		};
+		return visit(contentBox);
+	}
+
+	/** Trusted component-local controls captured by the last displayed content frame; never renders. */
+	getRenderedContentClickHandler(
+		scrollView: ScrollView,
+		component: Component,
+	): RenderedContentClickHandler | undefined {
+		const frame = this.currentLayout;
+		if (
+			!this.altScreenActive ||
+			!frame ||
+			frame.width !== Math.max(1, this.terminal.columns) ||
+			frame.height !== Math.max(1, this.terminal.rows)
+		)
+			return undefined;
+		const contentBox = getScrollViewBox(frame, scrollView)?.children[0];
+		if (!contentBox) return undefined;
+		const visit = (box: typeof contentBox): RenderedContentClickHandler | undefined => {
+			const handler = box.contentClickHandlers?.get(component);
+			if (handler) return handler;
+			if (box.scrollView) return undefined;
+			for (const child of box.children) {
+				const match = visit(child);
+				if (match) return match;
+			}
+			return undefined;
+		};
+		return visit(contentBox);
 	}
 
 	get viewportTop(): number {
@@ -263,6 +316,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	protected override beforeTerminalStart(): void {
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
+		this.selectionPressCell = undefined;
 		this.stopScrollbarHover();
 		this.stopScrollbarDrag();
 		this.flashes.dispose();
@@ -304,6 +358,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
+		this.selectionPressCell = undefined;
 		this.stopScrollbarHover();
 		this.stopScrollbarDrag();
 		this.flashes.dispose();
@@ -550,6 +605,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
+			this.selectionPressCell = undefined;
 			this.stopSelectionAutoScroll();
 			this.stopScrollbarHover();
 			this.stopScrollbarDrag();
@@ -781,6 +837,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!target) return false;
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
+		this.selectionPressCell = undefined;
 		this.selectionAnchor = undefined;
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
@@ -967,18 +1024,40 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const button = event.button & 3;
 		if (button !== 0 && !(event.release && button === 3)) return;
 		const anchorScrollView = this.selectionAnchor?.scrollView;
-		const point = this.getSelectionPoint(event, anchorScrollView);
+		let point = this.getSelectionPoint(event, anchorScrollView);
 		if (event.release) {
 			if (!this.selectionPressActive) return;
 			this.selectionPressActive = false;
 			this.stopSelectionAutoScroll();
 			if (!this.selectionAnchor) return;
+			// Reading anchors can move logical content rows while the pointer stays still.
+			// A character click follows the currently displayed cell, never that numeric drift.
+			if (
+				!this.selectionDragged &&
+				this.selectionGranularity === "character" &&
+				this.selectionPressCell?.x === event.x &&
+				this.selectionPressCell.y === event.y
+			) {
+				const scrollView =
+					!this.hasOverlay() && this.currentLayout
+						? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
+						: undefined;
+				point = this.getSelectionPoint(event, scrollView);
+				this.selectionAnchor = point;
+				this.selectionFocus = point;
+			}
+			this.selectionPressCell = undefined;
 			this.updateSelectionFocus(point);
+			const releasedUrl = getOsc8LinkAtColumn(
+				this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
+				Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
+			);
 			const clickedUrl =
 				!this.selectionDragged &&
 				this.selectionAnchor.scrollView === point.scrollView &&
 				this.selectionAnchor.row === point.row &&
-				this.selectionAnchor.col === point.col
+				this.selectionAnchor.col === point.col &&
+				this.pressedUrl === releasedUrl
 					? this.pressedUrl
 					: undefined;
 			this.pressedUrl = undefined;
@@ -1031,9 +1110,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (
 				!this.selectionDragged &&
 				this.selectionGranularity === "character" &&
-				this.selectionAnchor.scrollView === point.scrollView &&
-				this.selectionAnchor.row === point.row &&
-				this.selectionAnchor.col === point.col
+				this.selectionPressCell?.x === event.x &&
+				this.selectionPressCell.y === event.y
 			) {
 				return;
 			}
@@ -1047,6 +1125,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = true;
+		this.selectionPressCell = { x: event.x, y: event.y };
 		const scrollView =
 			!this.hasOverlay() && this.currentLayout
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
@@ -1300,6 +1379,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (this.stopped || !this.altScreenActive) return;
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
+		this.implicitDocument.children = this.children;
 		const root = this.layoutRoot ?? this.implicitScrollView;
 		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
 		if (this.refreshSearch(nextLayout)) {

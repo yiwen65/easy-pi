@@ -283,6 +283,18 @@ const image = new Image(
 );
 ```
 
+## Transcript Interaction and Displayed Geometry
+
+The built-in transcript has a configurable local action, `app.transcript.toggle` (default `alt+o`). It opens a keyboard selector for individual Thinking, tool, background-task, subagent, and compaction blocks. Selecting toggles that block only; `app.tools.expand` (`ctrl+o`) remains the global default and never implicitly opens subagent Diagnostics. Regular mode is keyboard-only: choosing a local block switches to fullscreen history. Fullscreen also supports stationary header clicks. Closing or cancelling a selector restores the editor focus without rewriting its draft.
+
+For fullscreen hit-testing, `TuiAltScreen.getRenderedChildOffsets(scrollView, container)` returns `{ component, start, height }` entries in ScrollView content coordinates from the **last displayed frame**. It does not call `render()` or measure newly changed children. It returns `undefined` before a displayed frame, while inactive, after resize/reset, or for opaque custom containers whose child geometry is unavailable. Skip stale mouse clicks rather than recomputing a different layout; revalidate that the hit component still belongs to the live transcript. A keyboard command may explicitly establish a frame with `renderNow()` before using the snapshot. Regular mode may measure its document independently.
+
+For components with secondary controls, `TuiAltScreen.getRenderedContentClickHandler(scrollView, component)` returns the trusted component-local `(row, col) => boolean` handler captured from that displayed frame, with the same stale-frame guards. Use it rather than recalculating a card's current internal layout: an unseen result may otherwise shift a painted Activity/Diagnostics row. A captured handler's refusal is authoritative; do not retry the row against fresh geometry. Successful mouse folding detaches end-follow at the current scroll position before the next layout, keeping the expanded header/reading anchor visible. The fullscreen bottom action (default `end`) restores follow.
+
+`ScrollView.scrollRevision` records explicit scroll requests, including clamped requests. Layout/reading-anchor maintenance does not advance it. Applications can use it to invalidate a selected prompt identity after manual scrolling without confusing layout maintenance with user input. History navigation should use `scrollTo(row, { disableFollow: true })`; `scrollToEnd()` restores end-follow.
+
+Built-in display conventions: user timestamps are local `HH:mm`; human durations use `formatWorkedDuration`; long displayed paths are tail-elided while the raw full value remains available for insertion/tool use. Subagent lifecycle completion and reported outcomes are not review acceptance. Previews and error snippets must be safe one-line text rather than raw terminal control sequences.
+
 ## Keyboard Input
 
 Use `matchesKey()` for key detection:

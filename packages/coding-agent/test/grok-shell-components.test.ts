@@ -1,10 +1,24 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type Component, ScrollView, stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	CURSOR_MARKER,
+	ScrollView,
+	stripTerminalSequences,
+	TuiAltScreen,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
+import {
+	CompactionStatusIndicator,
+	RetryStatusIndicator,
+	WorkingStatusIndicator,
+} from "../src/modes/interactive/components/status-indicator.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { type GrokChromeTheme, GrokComponentFactory } from "../src/modes/interactive-grok/grok-component-factory.ts";
 
 const identity = (text: string) => text;
@@ -208,6 +222,12 @@ describe("Grok shell components", () => {
 		}
 		frame.setSession(createStubSession({ modelId: "replacement", thinkingLevel: "off" }));
 		expect(stripTerminalSequences(frame.render(80).at(-1) ?? "")).toContain("replacement • off");
+	});
+
+	it("keeps input instead of borders at one and two columns", () => {
+		const frame = new GrokComponentFactory(identityTheme).createEditorFrame(new EditorHost());
+		expect(frame.render(1)).toEqual(["w"]);
+		expect(frame.render(2)).toEqual(["wr"]);
 	});
 
 	it("renders the Grok editor frame with the active thinking-level border color", () => {
@@ -416,6 +436,196 @@ describe("Grok shell components", () => {
 			view.dispose();
 		}
 	});
+
+	it("retains wrapped usage and extension states on narrow tall screens and after resizing", async () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const ui = new TuiAltScreen(terminal);
+		const view = new GrokComponentFactory(identityTheme).createInteractiveView({
+			document: new StubComponent(["transcript"]),
+			transcriptViewport: new ScrollView(new StubComponent(["transcript"]), { primary: true }),
+			editorHost: new EditorHost(),
+			location: { path: "/workspace" },
+			contextPercent: 42,
+			session: createStubSession({
+				usage: { input: 188_000, output: 8_900, cacheRead: 3_500_000, cacheWrite: 0, cost: { total: 5.877 } },
+			}),
+			footerData: {
+				...createStubFooterData(2),
+				getExtensionStatuses: () => new Map([["state", "perm:full-access 中文状态"]]),
+			},
+		});
+		ui.setLayoutRoot(view.fullscreenRoot);
+		ui.start();
+		try {
+			for (const width of [80, 20, 80]) {
+				terminal.resize(width, 24);
+				await terminal.waitForRender();
+				const screen = terminal.getViewport().join("").replaceAll(" ", "");
+				for (const text of [
+					"transcript",
+					"writeamessage",
+					"↑188k",
+					"↓8.9k",
+					"R3.5M",
+					"$5.877",
+					"perm:full-access",
+					"中文状态",
+					"•high",
+				])
+					expect(screen).toContain(text);
+			}
+		} finally {
+			ui.stop();
+			view.dispose();
+		}
+	});
+
+	it.each([4, 6, 8, 10])("prioritizes transcript, editor and errors at height %s", async (height) => {
+		const terminal = new VirtualTerminal(20, height);
+		const ui = new TuiAltScreen(terminal);
+		const view = new GrokComponentFactory(identityTheme).createInteractiveView({
+			document: new StubComponent(["transcript"]),
+			transcriptViewport: new ScrollView(new StubComponent(["transcript"]), { primary: true }),
+			editorHost: new EditorHost(),
+			location: { path: "/workspace" },
+			contextPercent: 42,
+			status: { kind: "error", label: "Failed" },
+			session: createStubSession({ modelId: "long-model-name" }),
+		});
+		ui.setLayoutRoot(view.fullscreenRoot);
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			const viewport = terminal.getViewport();
+			expect(viewport.join("\n")).toContain("transcript");
+			expect(viewport.join("\n")).toContain("write a message");
+			expect(viewport.join("\n")).toContain("Failed");
+			expect(viewport.every((line) => visibleWidth(line) <= 20)).toBe(true);
+			expect(viewport.join("\n")).toContain("• high");
+			if (height === 4)
+				expect(viewport.map((line) => line.trimEnd())).toEqual([
+					"transcript",
+					"● Failed",
+					"❯ write a message",
+					"long-model-n… • high",
+				]);
+		} finally {
+			ui.stop();
+			view.dispose();
+		}
+	});
+
+	it.each([3, 4, 6, 8, 10])(
+		"keeps authoritative retry, compaction and custom errors with input/transcript at height %s",
+		async (height) => {
+			initTheme("dark");
+			const terminal = new VirtualTerminal(40, height);
+			const ui = new TuiAltScreen(terminal);
+			const view = new GrokComponentFactory(identityTheme).createInteractiveView({
+				document: new StubComponent(["transcript"]),
+				transcriptViewport: new ScrollView(new StubComponent(["transcript"]), { primary: true }),
+				editorHost: new EditorHost(),
+				location: { path: "/workspace" },
+				contextPercent: 42,
+				session: createStubSession({ modelId: "long-model-name" }),
+			});
+			const retry = new RetryStatusIndicator(ui, 1, 3, 60_000, true);
+			const compaction = new CompactionStatusIndicator(ui, "overflow");
+			ui.setLayoutRoot(view.fullscreenRoot);
+			ui.start();
+			try {
+				for (const [component, label] of [
+					[retry, "Service unavailable"],
+					[compaction, "Context overflow"],
+					[new StubComponent(["", "Critical error", "retry or compact to recover", ""]), "Critical error"],
+				] as const) {
+					const slot = new Container();
+					slot.addChild(component);
+					view.setStatusComponent(slot);
+					view.setStatus({ kind: "error", label: "STALE_GROK_STATUS" });
+					ui.renderNow();
+					const viewport = await terminal.flushAndGetViewport();
+					const screen = viewport.join("\n");
+					expect(screen).toContain(label);
+					expect(screen).not.toContain("STALE_GROK_STATUS");
+					expect(screen).toContain("transcript");
+					expect(screen).toContain("write a message");
+					expect(viewport.every((line) => visibleWidth(line) <= 40)).toBe(true);
+				}
+			} finally {
+				retry.dispose();
+				compaction.dispose();
+				ui.stop();
+				view.dispose();
+			}
+		},
+	);
+
+	it.each([
+		{ width: 24, height: 12, fullStatus: false },
+		{ width: 80, height: 12, fullStatus: false },
+		{ width: 24, height: 80, fullStatus: true },
+		{ width: 120, height: 40, fullStatus: true },
+	])(
+		"keeps a long native working message behind the input budget at $width × $height",
+		async ({ width, height, fullStatus }) => {
+			initTheme("dark");
+			const terminal = new VirtualTerminal(width, height);
+			const ui = new TuiAltScreen(terminal);
+			const editorHost: Component = { render: () => [`EDITABLE_DRAFT${CURSOR_MARKER}`], invalidate: () => {} };
+			const view = new GrokComponentFactory(identityTheme).createInteractiveView({
+				document: new StubComponent(["transcript"]),
+				transcriptViewport: new ScrollView(new StubComponent(["transcript"]), { primary: true }),
+				editorHost,
+				location: { path: "/workspace" },
+				contextPercent: 42,
+			});
+			const working = new WorkingStatusIndicator(ui, "Working...", { frames: [] });
+			const message = `Inspecting ${"repository path and dependency graph ".repeat(10)}LAST_STATUS_WORD`;
+			// setWorkingMessage updates the same native WorkingStatusIndicator message.
+			working.setMessage(message);
+			const retry = new RetryStatusIndicator(ui, 1, 3, 60_000, true);
+			const compaction = new CompactionStatusIndicator(ui, "overflow");
+			ui.setLayoutRoot(view.fullscreenRoot);
+			ui.start();
+			try {
+				for (const [component, label] of [
+					[working, "Inspecting"],
+					[retry, "Service unavailable"],
+					[compaction, "Context overflow"],
+					[
+						new StubComponent([
+							"",
+							"Warning: recovery needed",
+							...Array.from({ length: 30 }, () => "custom warning detail"),
+						]),
+						"Warning:",
+					],
+				] as const) {
+					const slot = new Container();
+					slot.addChild(component);
+					view.setStatusComponent(slot);
+					ui.renderNow();
+					const viewport = await terminal.flushAndGetViewport();
+					const screen = viewport.join("\n");
+					expect(screen).toContain("transcript");
+					expect(screen).toContain(label);
+					expect(screen).toContain("EDITABLE_DRAFT");
+					const draftRow = viewport.findIndex((line) => line.includes("EDITABLE_DRAFT"));
+					expect(terminal.getCursorPosition()).toEqual({ x: 17, y: draftRow });
+					expect(viewport.every((line) => visibleWidth(line) <= width)).toBe(true);
+					if (component === working && fullStatus)
+						expect(screen.replace(/\s/g, "")).toContain(message.replace(/\s/g, ""));
+				}
+			} finally {
+				working.dispose();
+				retry.dispose();
+				compaction.dispose();
+				ui.stop();
+				view.dispose();
+			}
+		},
+	);
 
 	it("mounts a stats bar with native Pi session info when a session is provided", () => {
 		const factory = new GrokComponentFactory(identityTheme);

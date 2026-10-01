@@ -8,6 +8,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { formatDisplayPath } from "../../../utils/display-path.ts";
 import {
 	backgroundTaskStallHint,
 	oneLineBackgroundTaskText as oneLine,
@@ -36,7 +37,7 @@ function statusText(record: BackgroundTaskRecord): string {
 function outcome(record: BackgroundTaskRecord): string {
 	if (record.exitCode !== undefined && record.exitCode !== null) return `exit ${record.exitCode}`;
 	if (record.signal) return `signal ${record.signal}`;
-	return record.error ?? "no exit status";
+	return record.error ? `Error: ${oneLine(record.error)}` : "no exit status";
 }
 
 function pad(text: string, width: number): string {
@@ -59,10 +60,13 @@ export class GrokTasksPanel implements Component, Focusable {
 	private readonly requestRender: () => void;
 	private readonly done: () => void;
 	private readonly height: () => number;
-	private readonly onCopyPath: ((path: string) => void) | undefined;
+	private readonly onInsertPath: ((path: string) => void) | undefined;
 	private readonly unsubscribes: Array<() => void>;
 	private readonly tick: ReturnType<typeof setInterval>;
 	private selected = 0;
+	private selectedId: string | undefined;
+	private listTop = 0;
+	private listRoom = 1;
 	private watchingId: string | undefined;
 	private scroll = 0;
 	private follow = true;
@@ -82,7 +86,8 @@ export class GrokTasksPanel implements Component, Focusable {
 		requestRender: () => void;
 		done: () => void;
 		height: () => number;
-		onCopyPath?: (path: string) => void;
+		/** Closes the panel and inserts the full path into the main editor draft. */
+		onInsertPath?: (path: string) => void;
 	}) {
 		this.manager = options.manager;
 		this.theme = options.theme;
@@ -90,7 +95,7 @@ export class GrokTasksPanel implements Component, Focusable {
 		this.requestRender = options.requestRender;
 		this.done = options.done;
 		this.height = options.height;
-		this.onCopyPath = options.onCopyPath;
+		this.onInsertPath = options.onInsertPath;
 		const refresh = (): void => {
 			if (!this.closed) this.requestRender();
 		};
@@ -110,7 +115,11 @@ export class GrokTasksPanel implements Component, Focusable {
 
 	/** Active tasks first (oldest running at top), then finished tasks, newest first. */
 	private tasks(): BackgroundTaskRecord[] {
-		return sortBackgroundTasks(this.manager.list({ activeOnly: false }));
+		const rows = sortBackgroundTasks(this.manager.list({ activeOnly: false }));
+		const index = rows.findIndex((record) => record.id === this.selectedId);
+		this.selected = index >= 0 ? index : Math.max(0, Math.min(this.selected, rows.length - 1));
+		this.selectedId = rows[this.selected]?.id;
+		return rows;
 	}
 
 	handleInput(data: string): void {
@@ -126,30 +135,31 @@ export class GrokTasksPanel implements Component, Focusable {
 			else if (this.keys.matches(data, "tui.select.down"))
 				this.selected = Math.min(Math.max(0, rows.length - 1), this.selected + 1);
 			else if (this.keys.matches(data, "tui.select.pageUp"))
-				this.selected = Math.max(0, this.selected - Math.max(1, this.height() - 9));
+				this.selected = Math.max(0, this.selected - this.listRoom);
 			else if (this.keys.matches(data, "tui.select.pageDown"))
-				this.selected = Math.min(Math.max(0, rows.length - 1), this.selected + Math.max(1, this.height() - 9));
+				this.selected = Math.min(Math.max(0, rows.length - 1), this.selected + this.listRoom);
 			else if (this.keys.matches(data, "tui.select.confirm") && rows.length > 0) {
 				this.watchingId = rows[Math.min(this.selected, rows.length - 1)].id;
 				this.scroll = 0;
 				this.follow = true;
 			}
+			this.selectedId = rows[this.selected]?.id;
 		} else if (this.keys.matches(data, "tui.select.pageUp")) {
 			this.follow = false;
 			this.scroll += Math.max(1, this.height() - 9);
 		} else if (this.keys.matches(data, "tui.select.pageDown")) {
 			this.scroll = Math.max(0, this.scroll - Math.max(1, this.height() - 9));
 			if (this.scroll === 0) this.follow = true;
-		} else if (data === "\x1b[F" || data === "\x1b[4~") {
+		} else if (this.keys.matches(data, "app.tasks.latest")) {
 			// End: jump to the newest output and reattach follow mode.
 			this.follow = true;
 			this.scroll = 0;
-		} else if (data === "y" && this.onCopyPath) {
+		} else if (this.keys.matches(data, "app.tasks.insertPath") && this.onInsertPath) {
 			const record = this.manager.get(this.watchingId);
 			if (record) {
 				const path = record.outputPath;
 				this.close();
-				this.onCopyPath(path);
+				this.onInsertPath(path);
 			}
 		}
 		if (!this.closed) this.requestRender();
@@ -159,19 +169,20 @@ export class GrokTasksPanel implements Component, Focusable {
 		width: number,
 		now: number,
 		hint: (id: Parameters<KeybindingsManager["getKeys"]>[0]) => string,
+		height: number,
 	): string[] {
 		const th = this.theme;
 		const rows = this.tasks();
 		const activeCount = rows.filter((record) => !isTerminalTaskStatus(record.status)).length;
 		const lines: string[] = [];
-		lines.push(
-			th.fg(
-				"dim",
-				`${rows.length === 0 ? "No" : activeCount} active · ${rows.length - activeCount} finished — ${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} details · read-only`,
-			),
-		);
+		if (height > 1)
+			lines.push(
+				th.fg(
+					"dim",
+					`${rows.length === 0 ? "No" : activeCount} active · ${rows.length - activeCount} finished${rows.length > 0 ? ` · ${this.selected + 1}/${rows.length}` : ""} — ${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} details · read-only`,
+				),
+			);
 		if (rows.length === 0) {
-			lines.push("");
 			lines.push(
 				th.fg(
 					"muted",
@@ -180,7 +191,9 @@ export class GrokTasksPanel implements Component, Focusable {
 			);
 			return lines;
 		}
-		this.selected = Math.max(0, Math.min(this.selected, rows.length - 1));
+		this.listRoom = Math.max(1, height - lines.length);
+		const taskLines: string[] = [];
+		let selectedLine = 0;
 		const compact = width < COMPACT_WIDTH;
 		const idWidth = Math.min(12, Math.max(7, ...rows.map((record) => record.id.length)));
 		let dividerInserted = false;
@@ -188,19 +201,25 @@ export class GrokTasksPanel implements Component, Focusable {
 			const isActive = !isTerminalTaskStatus(record.status);
 			if (!isActive && !dividerInserted && activeCount > 0) {
 				dividerInserted = true;
-				lines.push(th.fg("dim", "─".repeat(Math.max(4, width))));
+				taskLines.push(th.fg("dim", "─".repeat(Math.max(4, width))));
 			}
 			const presentation = STATUS_PRESENTATION[record.status];
 			const selectedRow = index === this.selected;
 			const marker = selectedRow ? "›" : " ";
 			const command = oneLine(record.command);
 			const stall = backgroundTaskStallHint(record, now, this.manager.stallTimeoutMs);
-			const status = `${statusText(record)}${stall ? " ⏸" : ""}`;
+			const status = `${statusText(record)}${stall ? " · no output" : ""}`;
 			const text = compact
 				? `${marker} ${presentation.icon} ${record.id} ${status} ${timeText(record, now)} ${command}`
 				: `${marker} ${presentation.icon} ${pad(record.id, idWidth)} ${pad(status, 15)} ${pad(timeText(record, now), 10)}${record.promoted ? pad("↪ promoted", 12) : pad("", 12)}${command}`;
-			lines.push(th.fg(selectedRow ? "accent" : presentation.color, text));
+			if (selectedRow) selectedLine = taskLines.length;
+			taskLines.push(th.fg(selectedRow ? "accent" : presentation.color, text));
 		}
+		// Scroll rendered rows, not task indices: the active/finished divider takes a row too.
+		this.listTop = Math.min(this.listTop, Math.max(0, taskLines.length - this.listRoom));
+		if (selectedLine < this.listTop) this.listTop = selectedLine;
+		else if (selectedLine >= this.listTop + this.listRoom) this.listTop = selectedLine - this.listRoom + 1;
+		lines.push(...taskLines.slice(this.listTop, this.listTop + this.listRoom));
 		return lines;
 	}
 
@@ -210,7 +229,7 @@ export class GrokTasksPanel implements Component, Focusable {
 		const now = Date.now();
 		const hint = (id: Parameters<KeybindingsManager["getKeys"]>[0]) => this.keys.getKeys(id).join("/") || "unbound";
 		const height = Math.max(4, this.height());
-		const framed = width >= 4;
+		const framed = width >= 5;
 		const contentWidth = Math.max(1, width - (framed ? 4 : 0));
 		const maxHeight = height - (framed ? 2 : 0);
 		const cancelTarget = this.watchingId !== undefined ? "back to list" : "return to main session";
@@ -219,7 +238,9 @@ export class GrokTasksPanel implements Component, Focusable {
 			th.fg("warning", `${hint("tui.select.cancel")}: ${cancelTarget} · Read-only · Main editor inactive`),
 		];
 		if (this.watchingId === undefined) {
-			lines.push(...this.renderList(contentWidth, now, hint));
+			// At tiny heights reserve at least one row for the selection instead of clipping it.
+			lines.splice(Math.max(0, maxHeight - 1));
+			lines.push(...this.renderList(contentWidth, now, hint, maxHeight - lines.length));
 		} else {
 			const record = this.manager.get(this.watchingId);
 			if (!record) {
@@ -242,12 +263,12 @@ export class GrokTasksPanel implements Component, Focusable {
 					.filter(Boolean)
 					.join(" · ");
 				lines.push(th.fg("muted", oneLine(meta)));
-				lines.push(th.fg("dim", oneLine(`log ${record.outputPath}`)));
+				lines.push(th.fg("dim", `log ${formatDisplayPath(oneLine(record.outputPath), contentWidth - 4)}`));
 				if (isTerminalTaskStatus(record.status)) lines.push(th.fg("dim", outcome(record)));
 				lines.push(
 					th.fg(
 						"dim",
-						`${hint("tui.select.pageUp")}/${hint("tui.select.pageDown")} scroll · End latest${this.onCopyPath ? " · y copy log path" : ""} · ${hint("tui.select.cancel")} back`,
+						`${hint("tui.select.pageUp")}/${hint("tui.select.pageDown")} scroll · ${hint("app.tasks.latest")} latest${this.onInsertPath ? ` · ${hint("app.tasks.insertPath")} insert log path` : ""} · ${hint("tui.select.cancel")} back`,
 					),
 				);
 				const output = this.manager.readOutput(record.id, OUTPUT_PREVIEW_BYTES);
@@ -261,7 +282,7 @@ export class GrokTasksPanel implements Component, Focusable {
 							),
 							...wrapTextWithAnsi(safe(output.value.output || "No output yet…"), contentWidth),
 						]
-					: [th.fg("warning", `Output unavailable: ${output.error.message}`)];
+					: [th.fg("warning", `Output unavailable: ${oneLine(output.error.message)}`)];
 				const room = Math.max(1, maxHeight - lines.length - 1);
 				this.scroll = Math.min(this.scroll, Math.max(0, body.length - room));
 				if (this.follow) this.scroll = 0;
@@ -272,7 +293,7 @@ export class GrokTasksPanel implements Component, Focusable {
 						? ""
 						: this.follow
 							? "  [latest]"
-							: `  [${Math.round((top / Math.max(1, body.length - room)) * 100)}% — PgUp/PgDn, End for latest]`;
+							: `  [${Math.round((top / Math.max(1, body.length - room)) * 100)}% — ${hint("tui.select.pageUp")}/${hint("tui.select.pageDown")}, ${hint("app.tasks.latest")} for latest]`;
 				const divider = `── output ${"─".repeat(Math.max(2, contentWidth - 11 - visibleWidth(marker)))}${th.fg("warning", marker)}`;
 				lines.push(th.fg("dim", divider));
 				lines.push(...body.slice(top, end));

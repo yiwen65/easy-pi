@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import { Container, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, ScrollView, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -40,11 +40,13 @@ function mailboxMessage(content: string) {
 
 function fakeMode() {
 	const chatContainer = new Container();
+	const documentContainer = new Container();
+	documentContainer.addChild(chatContainer);
 	const mode: any = {
 		chatContainer,
-		documentContainer: { children: [chatContainer] },
+		documentContainer,
 		loadedResourcesContainer: { children: [] },
-		transcriptScrollView: {},
+		transcriptScrollView: new ScrollView(documentContainer, { follow: "end" }),
 		transcriptContentWidth: () => 100,
 		toolOutputExpanded: false,
 		grokComponentFactory: undefined,
@@ -70,6 +72,7 @@ function fakeMode() {
 		"addToolComponentToChat",
 		"addMessageToChat",
 		"handleTranscriptContentClick",
+		"toggleTranscriptBlock",
 		"computeChatChildOffsets",
 		"setToolsExpanded",
 		"handleEvent",
@@ -235,7 +238,7 @@ describe("subagent transcript routing", () => {
 		) as SubagentGroupComponent;
 		expect(group.resultCount).toBe(1);
 		const header = group.render(100).join("\n");
-		expect(header).toContain("Done");
+		expect(header).toContain("Completed");
 		expect(header).toContain("everything is fine");
 		expect(JSON.stringify(mode.chatContainer.children.map((child: any) => child.constructor.name))).not.toContain(
 			"CustomMessageComponent",

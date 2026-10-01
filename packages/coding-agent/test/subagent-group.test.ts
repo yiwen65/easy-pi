@@ -65,6 +65,33 @@ describe("subagent display parsing", () => {
 		expect(parseDeliverResult(undefined).raw).toBe("");
 	});
 
+	it("bounds deeply nested invalid array display while retaining raw text", () => {
+		const raw = `${"[".repeat(4000)}"DEEP_SENTINEL"${"]".repeat(4000)}`;
+		const result = parseDeliverResult(raw);
+		expect(result.raw).toBe(raw);
+		expect(result.warning).toContain("Format warning");
+		expect(result.displayText).toContain("(nested data; open Diagnostics)");
+	});
+
+	it("does not traverse ignored deep fields in a valid result", () => {
+		const deep = `${"[".repeat(4000)}0${"]".repeat(4000)}`;
+		const raw = `{"summary":"ok","outcome":"succeeded","ignored":${deep}}`;
+		const result = parseDeliverResult(raw);
+		expect(result.raw).toBe(raw);
+		expect(result.displayText).toBe("ok");
+		expect(result.contract?.summary).toBe("ok");
+		expect(result.warning).toBeUndefined();
+	});
+
+	it("safely falls back when wrongly typed result text cannot be JSON serialized", () => {
+		const raw = `${"[".repeat(8000)}0${"]".repeat(8000)}`;
+		const text: unknown = JSON.parse(raw);
+		const result = parseDeliverResult(text);
+		expect(result.warning).toContain("Format warning");
+		expect(result.displayText).toContain("(nested data; open Diagnostics)");
+		expect(result.raw).toContain("not serializable");
+	});
+
 	it("resolves tool targets and spawn objectives", () => {
 		expect(normalizeAgentPath("worker")).toBe("/root/worker");
 		expect(normalizeAgentPath("/root/worker")).toBe("/root/worker");
@@ -82,6 +109,100 @@ describe("subagent display parsing", () => {
 describe("SubagentGroupComponent", () => {
 	beforeEach(() => initTheme("dark"));
 
+	it.each(
+		[
+			{ summary: 42, outcome: "succeeded" },
+			{ summary: ["invalid"], outcome: "succeeded" },
+			["invalid result array"],
+			...["artifacts", "checks", "evidence", "risks"].map((field) => ({
+				summary: "Malformed list",
+				outcome: "succeeded",
+				[field]: { invalid: true },
+			})),
+			{ summary: "Invalid validation", outcome: "succeeded", resultValidation: 42 },
+		].map((payload) => ({ payload })),
+	)("retains malformed results without throwing: %j", ({ payload }) => {
+		const group = new SubagentGroupComponent("/root/worker");
+		const text = JSON.stringify(payload);
+		expect(() => group.addMailboxResult({ ...ENVELOPE, text })).not.toThrow();
+		expect(group.render(160).join("\n")).toContain("!format");
+		group.setExpanded(true);
+		const lines = group.render(160).map(stripVTControlCharacters);
+		expect(lines.join("\n")).toContain("Format warning");
+		expect(lines.join("\n")).not.toContain(text);
+		if (payload !== null && typeof payload === "object" && "outcome" in payload)
+			expect(lines.join("\n")).toContain("Outcome: succeeded");
+		group.handleOverviewClick(
+			lines.findIndex((line) => line.includes("Diagnostics")),
+			160,
+		);
+		expect(group.render(160).map(stripVTControlCharacters).join("\n")).toContain(JSON.stringify(text).slice(1, -1));
+	});
+
+	it.each(["succeeded", "partial", "blocked", "failed"])(
+		"separates completed lifecycle from %s outcome",
+		(outcome) => {
+			const group = new SubagentGroupComponent("/root/worker");
+			group.addMailboxResult({
+				...ENVELOPE,
+				text: JSON.stringify({ summary: "Latest result", outcome }),
+				resultValidation: { contract: "valid", outcome },
+			});
+			const header = group.render(160).map(stripVTControlCharacters).join("\n");
+			expect(header).toContain("Completed");
+			expect(header).toContain(`Outcome: ${outcome}`);
+			expect(header).not.toContain("Accepted");
+			group.setExpanded(true);
+			expect(group.render(160).map(stripVTControlCharacters).join("\n")).toContain(`Outcome: ${outcome}`);
+		},
+	);
+
+	it.each(["invalid", "not_completed"])("shows controller validation warning %s", (contract) => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({
+			...ENVELOPE,
+			resultValidation: { contract },
+			text: JSON.stringify({ summary: "Latest result", outcome: "blocked" }),
+		});
+		expect(group.render(160).join("\n")).toContain(contract === "invalid" ? "!invalid" : "!incomplete");
+		group.setExpanded(true);
+		expect(group.render(160).join("\n")).toContain(contract);
+	});
+
+	it.each([
+		{ name: "very-long-worker-name-".repeat(8), outcome: "blocked", malformed: false },
+		{ name: "中文子代理名称".repeat(12), outcome: "succeeded", malformed: false },
+		{ name: "中文子代理名称".repeat(12), outcome: "blocked", malformed: true },
+		{ name: "very-long-worker-name-".repeat(8), outcome: "succeeded", malformed: true },
+	])("reserves narrow header outcome/warning and latest preview: %j", ({ name, outcome, malformed }) => {
+		const group = new SubagentGroupComponent(`/root/${name}`);
+		group.addMailboxResult({ ...ENVELOPE, text: JSON.stringify({ summary: "OLD_PREVIEW", outcome: "failed" }) });
+		group.addMailboxResult({
+			...ENVELOPE,
+			text: JSON.stringify({
+				summary: "LATEST最新预览",
+				outcome,
+				...(malformed ? { artifacts: 42, checks: 42, evidence: 42, risks: 42 } : {}),
+			}),
+		});
+		for (const width of [40, 80]) {
+			const lines = group.render(width).map(stripVTControlCharacters);
+			expect(lines).toHaveLength(1);
+			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
+			expect(lines[0]).toContain("Completed");
+			expect(lines[0]).toContain(outcome);
+			expect(lines[0]).toMatch(/(?:out:|Outcome:)/);
+			if (malformed) expect(lines[0]).toContain("!format");
+			if (width === 80) expect(lines[0]).toContain("LATEST");
+			expect(lines[0]).not.toContain("OLD_PREVIEW");
+			expect(lines[0]).toContain("…");
+		}
+		group.setExpanded(true);
+		const text = group.render(80).map(stripVTControlCharacters).join("\n");
+		expect(text).toContain(`Outcome: ${outcome}`);
+		if (malformed) expect(text).toContain("Format warning: invalid artifacts, checks, evidence, risks");
+	});
+
 	it("collapses to a header line with state, time, and summary by default", () => {
 		const group = new SubagentGroupComponent("/root/term-bench");
 		group.addMailboxResult(ENVELOPE);
@@ -89,7 +210,7 @@ describe("SubagentGroupComponent", () => {
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("term-bench");
 		expect(lines[0]).not.toContain("/root/");
-		expect(lines[0]).toContain("Done");
+		expect(lines[0]).toContain("Completed");
 		expect(lines[0]).toContain("no proven cost");
 		expect(lines[0]).not.toContain('"artifacts"');
 	});
@@ -105,7 +226,7 @@ describe("SubagentGroupComponent", () => {
 		);
 		group.addMailboxResult(ENVELOPE, startedAt + 65_000);
 		const header = group.render(100).join("\n");
-		expect(header).toContain("1m5s");
+		expect(header).toContain("1m 5s");
 		expect(header).not.toContain("ago");
 	});
 
@@ -114,7 +235,7 @@ describe("SubagentGroupComponent", () => {
 		const delegated = Date.now() - 3_600_000; // an hour ago in real history
 		group.addTool("spawn_agent", makeTool("spawn_agent", {}), {}, delegated);
 		group.addMailboxResult(ENVELOPE, delegated + 125_000);
-		expect(group.render(100).join("\n")).toContain("2m5s");
+		expect(group.render(100).join("\n")).toContain("2m 5s");
 	});
 
 	it("expands into readable partitions with validation recoverable in diagnostics", () => {
@@ -188,12 +309,149 @@ describe("SubagentGroupComponent", () => {
 			if (resultFirst) group.addMailboxResult({ ...ENVELOPE, text: "Followup finished" });
 			followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
 			const lines = group.render(100).map(stripVTControlCharacters);
-			expect(lines[0]).toContain(resultFirst ? "Done" : "Running");
+			expect(lines[0]).toContain(resultFirst ? "Completed" : "Running");
 			expect(lines.join("\n")).toContain("Task: Followup objective\nFULL_FOLLOWUP_END");
 			expect(lines.join("\n")).not.toContain("Original task");
 			if (resultFirst) expect(lines.join("\n")).toContain("Followup finished");
 		},
 	);
+
+	it("keeps unknown JSON raw only in Diagnostics without inventing a contract", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		const text = JSON.stringify({ unknown: "UNKNOWN_JSON_SENTINEL" });
+		group.addMailboxResult({ ...ENVELOPE, text });
+		expect(group.render(160).join("\n")).not.toContain('"unknown"');
+		group.setExpanded(true);
+		const lines = group.render(160).map(stripVTControlCharacters);
+		expect(lines.join("\n")).toContain("unknown: UNKNOWN_JSON_SENTINEL");
+		expect(lines.join("\n")).not.toContain('"unknown"');
+		expect(parseDeliverResult(text).contract).toBeUndefined();
+		expect(parseDeliverResult(text).raw).toBe(text);
+		group.handleOverviewClick(
+			lines.findIndex((line) => line.includes("Diagnostics")),
+			160,
+		);
+		expect(group.render(160).join("\n")).toContain(JSON.stringify(text).slice(1, -1));
+	});
+
+	it.each([
+		{ text: "Result remains plain text", outcome: "blocked" },
+		{ text: '```json\n{"summary":"Wrapped result","outcome":"blocked"}\n```', outcome: "blocked" },
+		{ text: 'Result follows: {"summary":"Prose result","outcome":"failed"} End.', outcome: "failed" },
+	])("uses known envelope outcomes for result text wrappers: %j", ({ text, outcome }) => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({ ...ENVELOPE, text, resultValidation: { contract: "valid", outcome } });
+		expect(group.render(160).join("\n")).toContain(`Outcome: ${outcome}`);
+		group.setExpanded(true);
+		expect(group.render(160).join("\n")).toContain(`Outcome: ${outcome}`);
+		expect(group.render(160).join("\n")).not.toContain('"summary"');
+	});
+
+	it.each([
+		{ contract: "accepted", outcome: "blocked" },
+		{ contract: "valid", outcome: "accepted" },
+		{ contract: "valid", outcome: 42 },
+		{ contract: "valid", acceptance: "accepted" },
+	])("warns about unknown validation enums without displaying them as outcomes: %j", (resultValidation) => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({ ...ENVELOPE, text: "Plain result", resultValidation });
+		group.setExpanded(true);
+		const text = group.render(160).join("\n");
+		expect(text).toContain("Format warning");
+		expect(text).not.toContain("Outcome: accepted");
+		expect(text).not.toContain("Outcome: 42");
+	});
+
+	it("normalizes each result independently and keeps the newest outcome in the header", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({
+			...ENVELOPE,
+			text: "OLD_BLOCKED",
+			resultValidation: { contract: "valid", outcome: "blocked" },
+		});
+		group.addMailboxResult({
+			...ENVELOPE,
+			text: "LATEST_PARTIAL",
+			resultValidation: { contract: "valid", outcome: "partial" },
+		});
+		expect(group.render(160).join("\n")).toContain("Outcome: partial");
+		expect(group.render(160).join("\n")).not.toContain("Outcome: blocked");
+		group.setExpanded(true);
+		const text = group.render(160).join("\n");
+		expect(text).toContain("Outcome: blocked");
+		expect(text.indexOf("LATEST_PARTIAL")).toBeLessThan(text.indexOf("OLD_BLOCKED"));
+	});
+
+	it.each([42, null, ["not text"], { text: "not a string" }].map((text) => ({ text })))(
+		"safely retains non-string envelope text %j",
+		({ text }) => {
+			const group = new SubagentGroupComponent("/root/worker");
+			group.addMailboxResult({ ...ENVELOPE, text, resultValidation: { contract: "invalid" } });
+			group.setExpanded(true);
+			const lines = group.render(160).map(stripVTControlCharacters);
+			expect(lines.join("\n")).toContain("Format warning");
+			group.handleOverviewClick(
+				lines.findIndex((line) => line.includes("Diagnostics")),
+				160,
+			);
+			expect(group.render(160).join("\n")).toContain('"turnId": "t-1"');
+		},
+	);
+
+	it("bounds deeply nested artifact values without changing shallow object output or Diagnostics", () => {
+		const deep = `${"[".repeat(4000)}"ARTIFACT_DEEP_SENTINEL"${"]".repeat(4000)}`;
+		const raw = `{"summary":"ok","outcome":"succeeded","artifacts":[{"path":"/tmp/shallow","description":"verified"},{"nested":${deep}}]}`;
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({ ...ENVELOPE, text: raw });
+		group.setExpanded(true);
+		const lines = group.render(120).map(stripVTControlCharacters);
+		expect(lines.join("\n")).toContain("path: /tmp/shallow · description: verified");
+		expect(lines.join("\n")).toContain("(nested data; open Diagnostics)");
+		expect(lines.join("\n")).not.toContain("ARTIFACT_DEEP_SENTINEL");
+		expect(group.handleOverviewClick(lines.indexOf("▸ Diagnostics"), 120)).toBe(true);
+		expect(group.render(120).join("\n")).toContain("ARTIFACT_DEEP_SENTINEL");
+		expect(parseDeliverResult(raw).raw).toBe(raw);
+	});
+
+	it("recovers the original JSON envelope wire when deep text cannot be serialized in Diagnostics", () => {
+		const body = ` {"from":"/root/probe","status":"completed","text":${"[".repeat(8000)}"WIRE_SENTINEL"${"]".repeat(8000)},"opaque":"UNCHANGED_METADATA"} `;
+		const envelope = parseMailboxEnvelope(body);
+		expect(envelope).toBeDefined();
+		if (!envelope) throw new Error("Expected parsed envelope");
+		const group = new SubagentGroupComponent("/root/probe");
+		group.addMailboxResult(envelope);
+		group.setExpanded(true);
+		const lines = group.render(120).map(stripVTControlCharacters);
+		expect(group.handleOverviewClick(lines.indexOf("▸ Diagnostics"), 120)).toBe(true);
+		const diagnostics = group.render(120).map(stripVTControlCharacters);
+		const recoveredWire = diagnostics.slice(diagnostics.indexOf("Result envelopes") + 1).join("");
+		expect(recoveredWire.trim()).toBe(body.trim());
+		expect(recoveredWire).toContain("WIRE_SENTINEL");
+		expect(recoveredWire).toContain('"opaque":"UNCHANGED_METADATA"');
+		expect(recoveredWire).not.toContain("original JSON unavailable");
+	});
+
+	it("shows an explicit diagnostic warning for an unrepresentable direct JS envelope", () => {
+		const envelope: Record<string, unknown> = { from: "/root/probe", status: "completed", text: "Plain text" };
+		envelope.circular = envelope;
+		const group = new SubagentGroupComponent("/root/probe");
+		group.addMailboxResult(envelope);
+		group.setExpanded(true);
+		const lines = group.render(120).map(stripVTControlCharacters);
+		expect(group.handleOverviewClick(lines.indexOf("▸ Diagnostics"), 120)).toBe(true);
+		expect(group.render(120).join("\n")).toContain("original JSON unavailable");
+	});
+
+	it("retains deeply nested invalid raw strings when Diagnostics opens", () => {
+		const raw = `${"[".repeat(4000)}"RAW_DEEP_SENTINEL"${"]".repeat(4000)}`;
+		const group = new SubagentGroupComponent("/root/worker");
+		group.addMailboxResult({ ...ENVELOPE, text: raw, resultValidation: { contract: "invalid" } });
+		group.setExpanded(true);
+		const lines = group.render(120).map(stripVTControlCharacters);
+		expect(lines.join("\n")).toContain("(nested data; open Diagnostics)");
+		expect(group.handleOverviewClick(lines.indexOf("▸ Diagnostics"), 120)).toBe(true);
+		expect(group.render(120).join("\n")).toContain("RAW_DEEP_SENTINEL");
+	});
 
 	it("preserves multiline plain text for non-JSON results", () => {
 		const group = new SubagentGroupComponent("/root/x");
@@ -234,10 +492,10 @@ describe("SubagentGroupComponent", () => {
 			const tool = makeTool(toolName, { target: "/root/w" });
 			group.addTool(toolName, tool, { target: "/root/w" });
 			tool.updateResult({ content: [{ type: "text", text: "pending" }], isError: false }, true);
-			expect(group.render(100).join("\n")).toContain("Done");
+			expect(group.render(100).join("\n")).toContain("Completed");
 			tool.updateResult({ content: [{ type: "text", text: "Collaboration tool failed: busy" }], isError: true });
 			const header = group.render(100).join("\n");
-			expect(header).toContain("Done");
+			expect(header).toContain("Completed");
 			expect(header).not.toContain("Running");
 			expect(header).not.toContain("Interrupted");
 			expect(header).not.toContain("Closed");
@@ -249,7 +507,7 @@ describe("SubagentGroupComponent", () => {
 		group.addMailboxResult(ENVELOPE);
 		const followup = makeTool("followup_task", {});
 		group.addTool("followup_task", followup, {});
-		expect(group.render(100).join("\n")).toContain("Done");
+		expect(group.render(100).join("\n")).toContain("Completed");
 		followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
 		expect(group.render(100).join("\n")).toContain("Running");
 
@@ -267,7 +525,7 @@ describe("SubagentGroupComponent", () => {
 		group.addTool("followup_task", followup, {});
 		group.addMailboxResult({ ...ENVELOPE, text: "Followup finished" });
 		followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
-		expect(group.render(100).join("\n")).toContain("Done");
+		expect(group.render(100).join("\n")).toContain("Completed");
 	});
 
 	it("interrupt uses the returned previous status rather than assuming it stopped running work", () => {
@@ -290,7 +548,7 @@ describe("SubagentGroupComponent", () => {
 			isError: false,
 		});
 		const header = done.render(100).join("\n");
-		expect(header).toContain("Done");
+		expect(header).toContain("Completed");
 		expect(header).not.toContain("Interrupted");
 	});
 
@@ -335,11 +593,11 @@ describe("SubagentGroupComponent", () => {
 				isError: true,
 			});
 			const header = group.render(120).join("\n");
-			expect(header).toContain(status === "running" ? "Running" : status === "closed" ? "Closed" : "Done");
+			expect(header).toContain(status === "running" ? "Running" : status === "closed" ? "Closed" : "Completed");
 			expect(header).toContain(status === "running" ? "Original task" : "no proven cost");
 			expect(header).not.toContain("Unwanted task");
 			expect(header).not.toContain("Collaboration tool failed");
-			if (status !== "running") expect(header).toContain(status === "closed" ? "6s" : "5s");
+			if (status !== "running") expect(header).toContain(status === "closed" ? "6.0s" : "5.0s");
 		},
 	);
 
@@ -477,7 +735,7 @@ describe("SubagentGroupComponent", () => {
 		tool.updateResult({ content: [{ type: "text", text: "Collaboration tool failed: busy" }], isError: true });
 		group.setExpanded(true);
 		const lines = group.render(100).map(stripVTControlCharacters);
-		expect(lines[0]).toContain("Done");
+		expect(lines[0]).toContain("Completed");
 		expect(
 			group.handleOverviewClick(
 				lines.findIndex((line) => line.includes("Activity")),
@@ -535,6 +793,20 @@ describe("SubagentTranscriptRouter", () => {
 		router.handleTool("send_message", { target: "/root/a" }, makeTool("send_message", {}));
 		expect(container.children.at(-1)).toBe(router.groupFor("/root/a"));
 	});
+
+	it.each([42, [], {}, true, null].map((from) => ({ from })))(
+		"rejects invalid mailbox sender %j without throwing",
+		({ from }) => {
+			const router = new SubagentTranscriptRouter(new Container(), () => false);
+			expect(
+				router.handleMailboxMessage({
+					customType: "epi-collaboration-message",
+					content: envelopeText({ ...ENVELOPE, from }),
+				}),
+			).toBe(false);
+			expect(router.currentGroups()).toHaveLength(0);
+		},
+	);
 
 	it("mailbox routing only applies to displayable collaboration messages", () => {
 		const router = new SubagentTranscriptRouter(new Container(), () => false);

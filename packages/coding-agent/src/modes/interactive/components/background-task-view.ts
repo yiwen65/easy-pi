@@ -2,10 +2,11 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	type BackgroundTaskRecord,
 	type BackgroundTaskStatus,
-	formatTaskDuration,
 	isBackgroundTaskStalled,
 	isTerminalTaskStatus,
 } from "@earendil-works/pi-agent-core/node";
+
+import { formatWorkedDuration } from "../../../utils/duration.ts";
 
 /** Icon, word, and color for every task state, shared by the transcript block and the /tasks panel. */
 export const BACKGROUND_TASK_STATUS_PRESENTATION: Record<
@@ -34,7 +35,7 @@ export function oneLineBackgroundTaskText(text: string): string {
 
 /** Running tasks show live elapsed time; terminal tasks keep their runtime duration (start -> end). */
 export function backgroundTaskDuration(record: BackgroundTaskRecord, now: number): string {
-	return formatTaskDuration((record.endedAt ?? now) - record.startedAt);
+	return formatWorkedDuration((record.endedAt ?? now) - record.startedAt);
 }
 
 /**
@@ -47,7 +48,7 @@ export function backgroundTaskStallHint(
 	stallTimeoutMs: number,
 ): string | undefined {
 	if (!isBackgroundTaskStalled(record, now, stallTimeoutMs)) return undefined;
-	return `⏸ no output ${formatTaskDuration(now - (record.lastOutputAt ?? record.startedAt))}`;
+	return `⏸ no output ${formatWorkedDuration(now - (record.lastOutputAt ?? record.startedAt))}`;
 }
 
 /** Active tasks first (oldest started), then terminal tasks (newest finished). */

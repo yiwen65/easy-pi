@@ -1,4 +1,12 @@
-import { type Component, Container, ScrollView, VStack } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	ScrollView,
+	type StackEntryOptions,
+	stripTerminalSequences,
+	truncateToWidth,
+	VStack,
+} from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GrokEditorFrame } from "./components/grok-editor-frame.ts";
@@ -58,20 +66,87 @@ export class GrokInteractiveView {
 			options.transcriptViewport instanceof ScrollView
 				? [new GrokJumpToBottom(options.transcriptViewport, theme)]
 				: [];
+		// The regular frame retains complete metadata. Fullscreen switches to compact
+		// chrome before wrapped model/footer rows can displace the transcript or input.
+		const roomy: NonNullable<StackEntryOptions["visible"]> = ({ width, height }) => width >= 24 && height >= 12;
+		const short: NonNullable<StackEntryOptions["visible"]> = ({ height }) => height < 12;
+		const narrow: NonNullable<StackEntryOptions["visible"]> = ({ width, height }) => width < 24 && height >= 12;
+		const compactInput: Component = {
+			render: (width) => this.editorFrame.renderCompactInput(width),
+			invalidate: () => this.editorFrame.invalidate(),
+		};
+		const compactMetadata: Component = {
+			render: (width) => this.editorFrame.renderCompactMetadata(width),
+			invalidate: () => {},
+		};
+		const roomyStatus: Component = {
+			render: (width) => {
+				const lines = this.statusSlot.render(width);
+				// Native Loader status starts with decoration. If allocation shrinks to
+				// one row it must still show the authoritative label, not a blank.
+				const start = lines.findIndex((line) => stripTerminalSequences(line).trim());
+				return start < 0 ? [] : lines.slice(start);
+			},
+			invalidate: () => this.statusSlot.invalidate(),
+		};
+		const compactStatus: Component = {
+			render: (width) => {
+				const lines = this.statusSlot.children.flatMap((component) =>
+					component === this.status ? this.status.render(width, false) : component.render(width),
+				);
+				// Runtime retry/compaction indicators are authoritative, but include padding
+				// and may wrap. Keep their label in one row so they cannot displace input.
+				const label = lines.filter((line) => stripTerminalSequences(line).trim()).join(" · ");
+				return label ? [truncateToWidth(label, width, "…")] : [];
+			},
+			invalidate: () => this.statusSlot.invalidate(),
+		};
+		const oneRow = (component: Component): Component => ({
+			render: (width) => {
+				const lines = component.render(width);
+				return lines.length ? [truncateToWidth(lines.join(" "), width, "…")] : [];
+			},
+			invalidate: () => component.invalidate(),
+		});
+		const compactJump = jumpToBottom.map(
+			(component): Component => ({
+				render: (width) => component.render(width).filter((line) => line.trim().length > 0),
+				invalidate: () => component.invalidate(),
+				handleClick: (row, col) => component.handleClick(row, col),
+			}),
+		);
+		const compactDock = (compressMetadata: boolean) =>
+			new VStack([
+				...pending.map((component) => ({ component, shrink: 1, minSize: 0 })),
+				{ component: compactStatus, shrink: 0 },
+				...before.map((component) => ({ component, shrink: 1, minSize: 0 })),
+				...compactJump.map((component) => ({ component, shrink: 1, minSize: 0 })),
+				{ component: compactInput, shrink: 1, minSize: 1 },
+				{ component: compactMetadata, shrink: 1, minSize: 0 },
+				...stats.map((component) => ({
+					component: compressMetadata ? oneRow(component) : component,
+					shrink: 1,
+					minSize: 0,
+				})),
+				...after.map((component) => ({ component, shrink: 1, minSize: 0 })),
+				{ component: compressMetadata ? oneRow(this.footer) : this.footer, shrink: 1, minSize: 0 },
+			]);
 		const dock = new VStack([
 			...pending.map((component) => ({ component, shrink: 1, minSize: 0 })),
-			{ component: this.statusSlot, shrink: 1, minSize: 0 },
+			{ component: roomyStatus, shrink: 1, minSize: 1, visible: () => this.statusSlot.children.length > 0 },
 			...before.map((component) => ({ component, shrink: 1, minSize: 0 })),
 			...jumpToBottom.map((component) => ({ component, basis: 1, shrink: 0, minSize: 1 })),
 			{ component: this.editorFrame, shrink: 1, minSize: 3 },
-			...stats.map((component) => ({ component, shrink: 1, minSize: 1 })),
+			...stats.map((component) => ({ component, shrink: 1, minSize: 0 })),
 			...after.map((component) => ({ component, shrink: 1, minSize: 0 })),
 			{ component: this.footer, shrink: 1, minSize: 0 },
 		]);
 		this.fullscreenRoot = new VStack([
-			{ component: this.topBar, basis: 1, grow: 0, shrink: 0, minSize: 1 },
+			{ component: this.topBar, basis: 1, grow: 0, shrink: 0, minSize: 1, visible: ({ height }) => height >= 8 },
 			{ component: options.transcriptViewport, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
+			{ component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 3, visible: roomy },
+			{ component: compactDock(true), basis: "auto", grow: 0, shrink: 1, minSize: 2, visible: short },
+			{ component: compactDock(false), basis: "auto", grow: 0, shrink: 1, minSize: 2, visible: narrow },
 		]);
 		this.regularComponents = [
 			this.topBar,

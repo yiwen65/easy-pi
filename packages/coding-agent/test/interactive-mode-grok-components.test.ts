@@ -217,9 +217,9 @@ describe("InteractiveMode Grok component routing", () => {
 
 		groups[0]?.completeTurn();
 		const collapsed = stripAnsi(context.chatContainer.render(80).join("\n"));
-		expect(collapsed.match(/✦ Thinking\.\.\./g)).toHaveLength(1);
+		expect(collapsed.match(/▸ ✦ /g)).toHaveLength(1);
 		expect(collapsed).not.toContain("first");
-		expect(collapsed).not.toContain("second");
+		expect(collapsed).toContain("second");
 
 		expect(groups[0]?.handleOverviewClick(0)).toBe(true);
 		const expanded = stripAnsi(context.chatContainer.render(80).join("\n"));

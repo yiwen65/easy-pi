@@ -5,10 +5,9 @@
  * frames on a layout mirroring pi's fullscreen interactive mode:
  * VStack [ ScrollView(transcript), dock VStack [status, editor, footer] ].
  *
- * Two scenarios:
- * - static: nothing changes between frames (pure recomposite churn)
- * - editor: one character appended to the editor per frame (doc scenario
- *   "30 editor updates")
+ * Bounded long-session scenarios: collapsed tool-like history, expanded logs,
+ * editor updates, and resize. These are simulated NullTerminal frames, NOT
+ * end-to-end real terminal latency (no terminal parsing, transport, or paint).
  *
  * Allocation is estimated with the V8 sampling heap profiler including
  * objects collected by minor/major GC, i.e. it measures churn, not retention.
@@ -18,6 +17,7 @@
 
 import { Session } from "node:inspector/promises";
 import { performance } from "node:perf_hooks";
+import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
@@ -28,12 +28,14 @@ import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 const COLUMNS = 100;
 const ROWS = 30;
 const WARMUP_FRAMES = 20;
-const FRAMES = 300;
+const FRAMES = 100;
 const SAMPLING_INTERVAL = 4096;
 
 /** Terminal that discards output; keeps xterm parsing out of the measurement. */
 class NullTerminal implements Terminal {
 	bytesWritten = 0;
+	width = COLUMNS;
+	height = ROWS;
 	start(_onInput: (data: string) => void, _onResize: () => void): void {}
 	stop(): void {}
 	async drainInput(): Promise<void> {}
@@ -41,10 +43,10 @@ class NullTerminal implements Terminal {
 		this.bytesWritten += data.length;
 	}
 	get columns(): number {
-		return COLUMNS;
+		return this.width;
 	}
 	get rows(): number {
-		return ROWS;
+		return this.height;
 	}
 	get kittyProtocolActive(): boolean {
 		return false;
@@ -89,16 +91,76 @@ class EditorSim implements Component {
 	}
 }
 
-function buildTranscript(): Container {
-	const container = new Container();
-	for (let i = 0; i < 150; i++) {
-		const styled =
-			i % 3 === 0
-				? `\x1b[1m\x1b[36muser ${i}\x1b[39m\x1b[22m message with some \x1b[33mstyled\x1b[39m content padding padding`
-				: `assistant ${i} plain response line with enough text to be representative of a transcript row`;
-		container.addChild(new Text(styled, 1, 0));
+const plain = (text: string) => text;
+const markdownTheme: MarkdownTheme = {
+	heading: (text) => `\x1b[1m${text}\x1b[22m`,
+	link: plain,
+	linkUrl: plain,
+	code: plain,
+	codeBlock: plain,
+	codeBlockBorder: plain,
+	quote: plain,
+	quoteBorder: plain,
+	hr: plain,
+	listBullet: plain,
+	bold: plain,
+	italic: plain,
+	strikethrough: plain,
+	underline: plain,
+};
+
+class ToolLogSim implements Component {
+	expanded = false;
+	private collapsed: Text;
+	private log: Text;
+	constructor(index: number) {
+		this.collapsed = new Text(`▸ tool ${index}: completed (30 log rows)`, 1, 0);
+		this.log = new Text(
+			Array.from(
+				{ length: 30 },
+				(_, row) => `  \x1b[32mtool ${index} log ${row}\x1b[39m 编译输出 路径/src/module-${row}.ts`,
+			).join("\n"),
+			1,
+			0,
+		);
 	}
-	return container;
+	render(width: number): string[] {
+		return (this.expanded ? this.log : this.collapsed).render(width);
+	}
+	invalidate(): void {
+		this.collapsed.invalidate();
+		this.log.invalidate();
+	}
+}
+
+function buildTranscript(): { transcript: Container; tools: ToolLogSim[] } {
+	const transcript = new Container();
+	const tools: ToolLogSim[] = [];
+	for (let i = 0; i < 600; i++) {
+		if (i % 6 === 0) {
+			const tool = new ToolLogSim(i);
+			tools.push(tool);
+			transcript.addChild(tool);
+		} else if (i % 3 === 0) {
+			transcript.addChild(
+				new Markdown(
+					`## Response ${i}\n\n中文历史：检查 **布局** 与滚动。\n\n- preserve component identity\n- retain local reading offset\n\n\`\`\`ts\nconst frame = render(width);\n\`\`\``,
+					1,
+					0,
+					markdownTheme,
+				),
+			);
+		} else {
+			transcript.addChild(
+				new Text(
+					`\x1b[36mmessage ${i}\x1b[39m 中文对话与 emoji 🙂: representative history with wrapping and styled content padding padding`,
+					1,
+					0,
+				),
+			);
+		}
+	}
+	return { transcript, tools };
 }
 
 interface SamplingNode {
@@ -160,7 +222,7 @@ async function main(): Promise<void> {
 	const terminal = new NullTerminal();
 	const tui = new TuiAltScreen(terminal, false, "/tmp/pi-tui-bench");
 
-	const transcript = buildTranscript();
+	const { transcript, tools } = buildTranscript();
 	const editor = new EditorSim();
 	const scrollView = new ScrollView(transcript, {
 		follow: "end",
@@ -187,17 +249,35 @@ async function main(): Promise<void> {
 	const session = new Session();
 	session.connect();
 
+	const collapsedLines = transcript.render(COLUMNS).length;
 	const staticResult = await runScenario(session, terminal, tui, () => {});
+	for (const tool of tools) tool.expanded = true;
+	for (let i = 0; i < WARMUP_FRAMES; i++) tui.renderNow();
+	const expandedLines = transcript.render(COLUMNS).length;
+	const expandedResult = await runScenario(session, terminal, tui, () => {});
 	const editorResult = await runScenario(session, terminal, tui, (i) => {
 		editor.append(String.fromCharCode(97 + (i % 26)));
+	});
+
+	const resizeResult = await runScenario(session, terminal, tui, (i) => {
+		if (i % 10 !== 0) return;
+		terminal.width = i % 20 === 0 ? 80 : COLUMNS;
+		terminal.height = i % 20 === 0 ? 24 : ROWS;
 	});
 
 	session.disconnect();
 	tui.stop();
 
-	console.log(`frames=${FRAMES} viewport=${COLUMNS}x${ROWS} transcript=${transcript.render(COLUMNS).length} lines`);
-	report("static", staticResult);
+	console.log(
+		`SIMULATED NullTerminal frames=${FRAMES}/scenario viewport=${COLUMNS}x${ROWS}; not real terminal latency`,
+	);
+	console.log(
+		`history=600 components collapsed=${collapsedLines} lines expanded=${expandedLines} lines; resize=80x24↔100x30 every 10 frames`,
+	);
+	report("collapsed", staticResult);
+	report("expanded", expandedResult);
 	report("editor", editorResult);
+	report("resize", resizeResult);
 }
 
 await main();

@@ -176,6 +176,8 @@ These actions apply to user-prompt navigation in the Grok TUI. On macOS, the `su
 | `app.prompt.next` | `super+down`, `alt+down` | Jump to the next user prompt |
 | `app.prompt.list` | `super+g`, `alt+g` | Open the user prompt jump panel |
 
+Consecutive previous/next jumps cycle by prompt identity even when the last prompt cannot reach the viewport top. Manual scroll requests (including away-and-back), changed viewport geometry, removal, or session clearing reset that navigation sequence. Prompt jumps detach end-follow; the fullscreen bottom action restores follow mode.
+
 ### Native Agent Viewer
 
 Open `/agents` in Grok-TUI; Up/Down selects, Enter watches, Escape returns to the list/root. Within the child view:
@@ -194,10 +196,24 @@ Open `/agents` in Grok-TUI; Up/Down selects, Enter watches, Escape returns to th
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
+| `app.tools.expand` | `ctrl+o` | Globally collapse or expand tool output (does not open subagent Diagnostics) |
+| `app.transcript.toggle` | `alt+o` | Select and toggle one foldable transcript block without changing the global default |
 | `app.message.copy` | `ctrl+x` | Copy the editor's input text (paste markers expanded) when it is non-empty; otherwise the last assistant message, or the selected message in `/tree` |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `shift+alt+up` | Restore queued messages to editor |
+
+Regular mode provides keyboard-only local folding via `app.transcript.toggle`. Selecting a block opens fullscreen history so that block can be brought into view. Fullscreen supports both keyboard selection and clicks on foldable block headers. Cancelling restores editor focus and leaves the draft unchanged. Subagent Diagnostics is a separate explicit control, not a side effect of global expansion.
+
+### Background Task Panel
+
+These actions apply only inside `/tasks` details; `y` remains ordinary text in the main editor.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.tasks.insertPath` | `y` | Close the panel and append the original full log path to the draft, preserving existing whitespace; this is not clipboard copy |
+| `app.tasks.latest` | `end` | Reattach follow mode at the newest output |
+
+Use `tui.select.pageUp` / `tui.select.pageDown` to scroll task output. All panel hints reflect configured bindings.
 
 ### Tree Navigation
 
