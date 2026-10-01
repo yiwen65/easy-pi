@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
@@ -129,9 +130,18 @@ describe("subagent transcript routing", () => {
 		).toHaveLength(1);
 		expect(mode.pendingTools.has("c1")).toBe(false);
 		(groups[0] as SubagentGroupComponent).setExpanded(true);
-		const rendered = (groups[0] as SubagentGroupComponent).render(100).join("\n");
-		expect(rendered).toContain("/root/validate-extra-key");
-		expect(rendered).toContain("Accepted");
+		const group = groups[0] as SubagentGroupComponent;
+		const lines = group.render(100).map(stripVTControlCharacters);
+		expect(lines[0]).toContain("validate-extra-key");
+		expect(lines[0]).not.toContain("/root/");
+		expect(lines.join("\n")).not.toContain("Message sent");
+		expect(
+			group.handleOverviewClick(
+				lines.findIndex((line) => line.includes("Activity")),
+				100,
+			),
+		).toBe(true);
+		expect(group.render(100).join("\n")).toContain("Accepted");
 	});
 
 	it("still streams ordinary tools and routes collaboration calls at execution start", async () => {
@@ -264,15 +274,74 @@ describe("subagent transcript routing", () => {
 		expect(mode.handleTranscriptContentClick({ scrollView: {}, row: 0, col: 1 })).toBe(false);
 	});
 
+	it("routes Activity and diagnostic clicks after a wrapped task and result", () => {
+		const mode = fakeMode();
+		mode.transcriptContentWidth = () => 40;
+		const tool = spawnTool(mode, "spawn_agent", "c1", {
+			task_name: "worker",
+			task: { objective: `${"Inspect the long wrapped objective ".repeat(6)}\nTASK_END_SENTINEL` },
+		});
+		tool.updateResult({ content: [{ type: "text", text: '{"status":"accepted","raw":"DIAG"}' }], isError: false });
+		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
+		const group = mode.chatContainer.children.find(
+			(child: unknown) => child instanceof SubagentGroupComponent,
+		) as SubagentGroupComponent;
+		const render = () => group.render(40).map(stripVTControlCharacters);
+		const click = (row: number) =>
+			mode.handleTranscriptContentClick({ scrollView: mode.transcriptScrollView, row, col: 1 });
+		expect(click(0)).toBe(true);
+		const taskRow = render().findIndex((line) => line.includes("TASK_END_SENTINEL"));
+		const activityRow = render().findIndex((line) => line.includes("Activity"));
+		expect(taskRow).toBeGreaterThan(2);
+		expect(activityRow).toBeGreaterThan(taskRow);
+		expect(render().join("\n")).not.toContain("DIAG");
+		expect(click(activityRow)).toBe(true);
+		const activityOperationRow = render().findIndex((line) => line.includes("Task assigned"));
+		expect(activityOperationRow).toBeGreaterThan(activityRow);
+		expect(click(activityOperationRow)).toBe(false);
+		expect(render().join("\n")).not.toContain("DIAG");
+		const diagnosticsRow = render().findIndex((line) => line.includes("Diagnostics"));
+		expect(click(diagnosticsRow)).toBe(true);
+		expect(render().join("\n")).toContain("Tool receipts");
+		expect(render().join("\n")).toContain("Result envelopes");
+		const operationRow = render().findIndex((line) => line.includes("spawn_agent · Accepted"));
+		expect(operationRow).toBeGreaterThan(diagnosticsRow);
+		expect(click(operationRow)).toBe(true);
+		expect(render().join("\n")).toContain("DIAG");
+		expect(render().every((line) => visibleWidth(line) <= 40)).toBe(true);
+		expect(click(operationRow)).toBe(true);
+		expect(render().join("\n")).not.toContain("DIAG");
+		expect(click(diagnosticsRow)).toBe(true);
+		expect(render().join("\n")).not.toContain("Tool receipts");
+		expect(click(activityRow)).toBe(true);
+		expect(render().join("\n")).not.toContain("Task assigned");
+	});
+
 	it("ctrl+o toggles group expansion like other expandable transcript blocks", () => {
 		const mode = fakeMode();
-		spawnTool(mode, "spawn_agent", "c1", { task_name: "worker", delegation: { task: { objective: "probe" } } });
+		const tool = spawnTool(mode, "spawn_agent", "c1", {
+			task_name: "worker",
+			task: { objective: "probe\nReport the full result" },
+		});
+		tool.updateResult({
+			content: [{ type: "text", text: '{"status":"accepted","raw":"CTRL_O_DIAGNOSTIC"}' }],
+			isError: false,
+		});
+		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
 		const group = mode.chatContainer.children.find(
 			(child: unknown) => child instanceof SubagentGroupComponent,
 		) as SubagentGroupComponent;
 		const collapsed = group.render(100).length;
 		mode.setToolsExpanded(true);
+		const expandedText = group.render(100).map(stripVTControlCharacters).join("\n");
 		expect(group.render(100).length).toBeGreaterThan(collapsed);
+		expect(expandedText).toContain("Report the full result");
+		expect(expandedText).toContain("everything is fine");
+		expect(expandedText).toContain("Activity");
+		expect(expandedText).not.toContain("Task assigned");
+		expect(expandedText).not.toContain("CTRL_O_DIAGNOSTIC");
+		expect(expandedText).not.toContain('"task_name"');
+		expect(expandedText).not.toContain('"summary"');
 		mode.setToolsExpanded(false);
 		expect(group.render(100).length).toBe(collapsed);
 	});
