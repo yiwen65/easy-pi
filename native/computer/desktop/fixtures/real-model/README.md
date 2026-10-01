@@ -45,6 +45,15 @@ and awaited native/fixture/browser cleanup are retained in `result.json`.
 
 Limits: 24 model turns/task, 180 seconds for model/tool execution, 2048 output tokens/turn, no provider retry. Reported cumulative cost at/above USD 10 prevents starting another request/task; this is **not a prepaid hard spending cap**, because an in-flight response may cross the threshold and provider cost reporting can be incomplete. Setup and cleanup are separately timed. Cancellation waits for native drain, not a fabricated timeout success. Run processes serially; cost limits do not aggregate automatically across separate invocations.
 
+The harness explicitly passes `timeoutMs: 30_000` and
+`websocketConnectTimeoutMs: 15_000` to each model request. The former is the
+WebSocket stream idle budget (reset by incoming messages); it is not a universal
+30-second request deadline. The provider's existing pre-stream transport
+fallback is unchanged. Production timeout settings are unchanged. Each result
+includes `modelRequestMs` as well as their sum `modelMs`; idle failures retain
+the fixed category `provider_idle_timeout`. Results collected before this policy
+must not be pooled into a comparable speedup claim.
+
 The desktop fixture uses an empty profile, `--use-mock-keychain`, disabled sync/extensions/background networking, loopback-only task server and CDP. The model only receives `computer`, no shell/filesystem/network/evaluator tool. CDP is used by trusted harness setup, independent result checks and graceful close, never to perform task actions. Browser mode uses the native-owned isolated profile lifecycle. Profiles and failed evidence are retained for diagnosis, not force-deleted.
 
 ## Evidence and acceptance

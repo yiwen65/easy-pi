@@ -282,6 +282,11 @@
 - 已证实评估器配置分歧：configureHttpDispatcher(30_000) 只配置 HTTP，createAgentSession 仍按 SettingsManager 默认300_000传入模型 timeoutMs；WebSocket 等待不采用先前 HTTP dispatcher 设置。仅在评测 meteredStream 明确传入 idle30_000/connect15_000，仍 maxRetries=0，不改生产默认、不自动重放。增加逐请求耗时 ledger 和固定 provider_idle_timeout 分类，禁止保留原始敏感错误载荷。参考 [官方 WebSocket 指南](https://developers.openai.com/api/docs/guides/websocket-mode)，其中连接生命周期不是本地空闲预算；不将文档当作171秒错误根因证据。
 - 回归先3/6、后6/6；实际 Agent 调用断言请求确实收到两项预算，逐轮数组复制及失败分类通过；相关评估器19/19。完整根 npm run check exit0，四个无关 formatter 改动已撤回，明确路径 diff check 通过。
 - 新协议实测 `subrole-model-browser-dynamic-bounded-1` 1/1：43.145s/11轮，model39.360s/tool3.761s，cost0.0758136 USD。独立 oracle 核对 R-101/R-204/R-305 顺序、各自不同的中文 note 和 Pro，正常退出、clean0a1b。逐轮请求2.918–5.214s，未触发新空闲期限；因此这次成功不能归因于超时修复，也不能宣称网络故障已解决。新旧超时协议不同，不能混合计算提速倍率；历史失败继续计入各自分母。
+- 请求预算及逐轮 ledger 已提交 `7c2ed55d8`。现有 provider 的本地模拟连接超时、首事件前空闲、流开始后空闲三项定向测试 3/3；流开始后超时不回退重放。新的整组数值诊断 `subrole-dialog-diagnostic-2` 11/11、正常关闭，仍不能宣称先前间歇窗口拒绝已修复。
+- `subrole-model-desktop-motion-1` 三项 1/3、cost0.1777 USD，全部正常关闭、clean0a27/0a28/0a29。drag-box 40.662s/9轮失败：三次拖拽均 stale_image_observation/inputCommitted=false，随后 recovery_exhausted；scroll-text 39.809s/10轮通过（focus+Cmd-End、填入末词、target.ref提交），rawReward=1，此样本不是滚轮通道资格；click-tab-2 44.766s/5轮因 provider_idle_timeout 失败，最后单轮30.848s，零工具拒绝。所有失败保留在分母。
+- 只读 ImageIO 解码比较 drag-box 的 image5→6、image6→7：2048×1582、分别616和282个变化像素，变化包围盒分别[443,383,475,407]/[456,383,474,407]，仅在远处倒计时数字，拖动起终点未变。源码 segment 首动作仍调用整图 revalidate，说明原保护与该动态场景不兼容；尚未证明完整拖拽局部校验安全，已请求完整路径走廊候选授权，未放宽拖拽或坐标点击保护。比较器仅在证据目录读取既有截图，无截图编辑。
+- 传输单变量探索：冻结 seed42/model/subtype candidate/任务/独立 oracle，只在隔离脚本选择 sse；`subrole-model-desktop-tab-sse-1` 1/1，154.638s/9轮，model153.627s/tool0.976s，cost0.0624452 USD、rawReward=1、clean0a2a。不能将通过解释为 WebSocket 根因或 SSE 提速，模型决策与网络噪声尚未控制。独立默认传输回测 `subrole-model-desktop-tab-auto-2` 49.477s/12轮业务失败、cost0.092848 USD、clean0a2b：两次AX观察无网页行，模型转为截图点击，四次整图过期拒绝，零点击派发、无provider错误。SSE脚本和所有源码已冻结到该运行 sources，工作树临时脚本已删除；生产传输不改。
+- 只读就绪探针 `subrole-readiness-1`：静态自有页面DOM已加载后，第一原生观察45行/零web行；100ms间隔读回约2.019s后出现59行/8个web行，零输入、正常关闭、clean0a2c。nativeComplete只表示本次AXChildren读取完整，不表示渲染器网页树已就绪；不可改称不存在控件。此实验只证明延迟存在，尚不能区分启用属性、Chromium异步树或更早读取触发的因果；不加入无条件长等待或重试输入。
 
 ## Final validation result
 
