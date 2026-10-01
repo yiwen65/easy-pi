@@ -10,7 +10,7 @@
 ## Background and goal
 
 减少动态页面中的无效拒绝和模型重试，同时保留原生目标身份、窗口边界、取消排空及未知输入不重放。
-此文只管理原生目标点击这一实施批次，不替代完整 Computer Use Goal 或宣称主流 benchmark 全覆盖。
+此文管理原生目标点击及后续明确批准的同窗拖拽候选批次，不替代完整 Computer Use Goal 或宣称主流 benchmark 全覆盖。
 原有 target-region-candidate.md 保留历史实验与失败证据，不再作为此批次状态清单。
 
 <!-- task-doc-section:scope-non-goals -->
@@ -22,6 +22,7 @@
 不操作个人浏览器，不删除租约，不添加新服务、第二套缓存或自动输入重放。
 新动作必须先用观察引用明确用户/模型的目标意图；不能偷偷把旧 imageRef 重新绑定到另一个控件。
 用户随后单独批准原生目标引用点击候选；负例和真实模型通过后才安装，坐标/拖拽不变。
+后续 T-005 仅在隔离候选验证用户另行批准的同窗拖拽走廊；已安装坐标/拖拽及跨窗契约仍不变。
 
 <!-- task-doc-section:facts-evidence -->
 ## Confirmed facts and evidence
@@ -81,6 +82,7 @@
 ## Dependencies and parallel batches
 
 - Dependency graph: T-001 -> T-002 -> T-004 -> T-003；T-003 的首次真实模型诊断已完成，新增 T-004 修复已复现的直接文本子节点误拒绝后继续资格验证。
+- 后续用户批准的拖拽资格任务 T-005 依赖 T-002，与 T-004/T-003 共享原生工作源和 GUI owner，串行执行。
 - Parallel batches: 无；各任务共享动作枚举、生成绑定与同一桌面 owner，串行执行。
 - Serialization constraints: 所有 GUI 串行；不启动子 agent；仅 coordinator 更新本文件。
 
@@ -172,6 +174,30 @@
 - Verification method:
   - Rust/TS 定点测试、真实 owned Chrome oracle、关闭与租约读回、根检查。
 - Validation evidence: v23 补充同快照隐藏直接文字缓存及有界只读就绪；cache所有权7项此前通过，最新segment31/31、就绪4/4、native加载TS55/55、ABI及根检查通过。Chrome33/33（含21次按钮正例）、AppKit8/8，负例零输入且全部正常退出、clean lease。真实模型表单/导航仍失败，历史失败保留；不得安装。完整路径与哈希见执行日志。
+- Blocker: None.
+- Unblock condition: None.
+
+### [ ] T-005 — 验证获批同窗拖拽走廊、身份及通用场景
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 在不重放未知输入的前提下消除远处动画导致的拖拽误拒绝，验证完整路径、原生身份及取消释放。
+- Inputs and prerequisites: T-002；用户明确批准完整路径走廊候选，负例和真实模型通过前不安装。
+- Scope or files: 隔离 subrole-source 的 image_reference、AX cache、capture、segment/drag.rs；冻结候选、owned GUI/真实模型夹具与本记录。
+- Expected output: 可重建的无诊断候选、保留失败的正负例及通用业务 oracle；明确安装资格与未覆盖边界。
+- Dependencies: T-002
+- Execution steps:
+  1. 复用既有快照关联截图及原生身份，不增加第二缓存或模型动作。
+  2. 验证移动、同外观替换、可见/透明覆盖、路径障碍和原有透明控件命中切换负例。
+  3. 串行验证滑块、排序、画布、取消排空及真实模型 drag-box，修复误拒绝并保留所有失败。
+  4. ABI、定向测试、根检查及发布材料核对后才判断安装，不把单次成功当稳定提速。
+- Acceptance criteria:
+  - 无关远处像素变化不阻断正常拖拽；未提交负例零按下/释放，取消后已有按下可靠释放。
+  - 原生身份、窗口/几何、实时命中和完整路径遮挡不因候选放宽而丢失；通用业务结果由独立 oracle 判断。
+  - 缺少证据及尚未覆盖场景明确记录，不以重试或改变业务 oracle 换绿。
+- Verification method:
+  - 定向 Rust、canonical ABI check、完整 npm run check、owned CfT 正负例、真实 AgentSession 和独立页面 oracle、关闭及租约读回。
+- Validation evidence: candidate6 平台 segment32/32、cache8/8、观察8/8；8个 owned 正负例通过；真实模型 drag-box 23.293s/7轮、rawReward=1；排序和画布业务通过。candidate7取消后恰好释放一次且正常排空；candidate8平台33/33、ABI检查及偏心按钮回归通过，但重复矩阵非按钮 toggle-group 实际派发，资格失败。滑块一步拖拽仍受自身悬停像素变化阻断；下一步验证必要的非按钮路径证据，保留所有失败且不安装。详见后续日志。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -318,8 +344,24 @@
 - 更强反例`drag-guard-toggle-obstacle-1`：截图前已存在透明原生按钮，pointer-events:none；截图后只改为auto，外观、AX身份和几何未变。起终点检查及窗口遮挡均未发现页内中段变化，实际downs=1/ups=1，负例失败、clean0a47。原子化像素加端点身份仍不足以证明完整路径输入接收者不变；新插入透明元素的先前通过不能覆盖此例。候选3不得安装。下一轮在此保留反例上验证路径中段的原生命中证据，避免以矩形重叠盲猜原意图或简单拒绝所有正常多控件/列表拖拽来换绿；还须覆盖canvas、滑块、排序、取消释放和真实模型drag-box。
 - 本轮完整root npm run check exit0；四个原先干净文件的formatter副作用按实际diff撤回并读回为空，其他会话TUI修改保留。五个冻结候选均恢复包路径，当前无运行GUI。安装版bridge/native再次核对仍a28cd243/a1f1aea2，未安装。持续Goal active，本轮为实际实现、验证和新反例进展，不是完成或阻塞。
 
+### 2026-10-02 drag center evidence and general business qualification
+
+- T-005 coordinator 已开始，复用本权威文档记录获批拖拽候选；不建立第二任务清单。candidate4 保存观察时已付出成本的 leaf AXButton 中心命中，仍归属既有 CachedSnapshot，CF retain/drop 回归8/8；不发布模型 token、不新增观察命中次数。candidate3 的透明既有按钮 pointer-events 切换反例在 candidate4 零输入拒绝，但静态正例也 pointer_hit_changed，故不得安装。
+- 独立 native hit 诊断 `drag-hit-diagnostic-2` 无输入：切换透明控件 pointer-events 后，第一次同步 AX 命中仍等于旧值，随后29次均不同；独立 DOM elementFromPoint 已确认接收者变化。candidate4 的 discover 失败之一另证实实际 CG 标题被 Chrome 省略，DOM 完整标题不是窗口目录精确标题；夹具改用短随机标题，不更改产品绑定规则。其他历史失败保留，不一律归因于启动延迟。
+- 单独 diagnostic5 的静态误拒绝追踪显示源中心原观察 AXStaticText、当前 AXWebArea；中间末端查询污染同一 Chromium 命中缓存。candidate6 将每个中心的预查询、原树身份/几何校验、最终同点命中连续排列，不插入其他点查询；诊断输出从工作源撤除。diagnostic5 产物永不安装。candidate6 manifest `efd7cbb18fc92a3dc3157a0cd198331c2c0eeb5cef0e7920815c93cb5ec0c3ce`、native `f3c076aeed973b9cbb43c23b10cbb85c9f2db8cfd736f68cef16f0904a360b4e`、bridge `6d0eeccfec0a6bf74e7cbe6cead1403db8e95c05aa752b2e9c48848d8f1672df`，全材料冻结验证。
+- `drag-guard6-{stable,toggle-obstacle,distant,replace,move,cover,obstacle,transparent-obstacle}-1` 8/8：两个正例按下/释放各1，六负例均明确 not_dispatched/inputCommitted=false、页面零按下/释放。全部正常关闭 clean0a50–0a57。平台segment32/32、cache8/8、观察8/8；完整根check exit0，四个无关formatter副作用撤回、全部冻结包恢复。中心证据目前只覆盖 leaf AXButton 的中心，不能据此声称完整页内路径通用安全。
+- 真正 AgentSession `drag-model6-box-2` 使用 openai-codex/gpt-6-sol、seed42、原180s/24轮预算：23.293s/7轮通过，model21.726s/tool1.548s、reported cost0.0430064 USD，实际候选 drag 派发后 target.ref Submit，独立 rawReward=1；无工具拒绝，正常关闭 clean0a58。前次 `drag-model6-box-1` 错用离线 env-i 丢失已有模型配置，启动前失败，无模型请求，不计业务样本。两次材料保留，生产传输/超时不改；不同旧协议不能计算速度倍率。
+- 通用业务夹具 `drag-business6-slider-1` 无正文触发通用 launcher innerText 准备条件，零 Computer 调用，不能计产品失败。只为 owned 夹具增加远离路径的正文后：排序 `-sort-1` 成功 BCA、画布 `-canvas-1` 终点[91,111]距目标小于3，均各1次按下/释放、正常退出 clean0a5a/0a5b。直接滑块 `-slider-2/3` 均在指针移动后的走廊像素比较拒绝，outcome_unknown/inputCommitted=true但页面downs/ups/inputs均0、value0，clean0a59/0a5c；不重放未知输入。
+- 只读同尺寸截图 slider-3 的 image3→5 有1823个变化像素，全部位于控件[800,551,961,569]。单变量 `-slider-prehover-1` 先显式现有 pointer_move、再新capture、再drag：value100、inputs20、downs/ups各1，正常退出 clean0a5d。支持自身悬停外观导致误拒绝的解释，但两段协议的成功不能冒充一步拖拽修复；原失败留在分母，没有删除原生校验或改弱业务 oracle。
+- 更强路径夹具新增 toggle-group、toggle-offcenter、toggle-gap 均零输入 pointer_hit_changed，clean0a5e–0a60；其中长路径无变化正例 gap-stable 同样拒绝（clean0a61），故 toggle-gap 不作为有效保护因果证据。首次分歧疑似发生在 drag_hit 切换端点后立即解析近似命中；仅在隔离工作源加入同点预查询→完整树校验→同点最终读，平台segment32/32通过。不因新负例绿而安装 candidate6。
+- candidate7 manifest `8c3303033ad6b48104527b0ae3f2056902062f879c6e5232fea83a170d60e980`、native `5cd6004fcfb271d50eba626359f6afd7ab5df76bffce46f0a9db7c2f6177d6a1`、bridge `3efac9f0a83c08525c3b5e49e320dabaa86a8a3459b4e051c8bab5003da54ca5`，release/ABI --check通过。原先失败 gap-stable 正例在此版本各1次按下/释放，toggle-gap仍零输入，clean0a62/0a63。`drag-guard7-cancel-1` 在独立页面确实收到mousedown之后才发Abort，返回cancelled/inputCommitted=true/dispatch unknown，实际mouseup恰好1次且完整排空、clean0a64，没有重放。
+- `drag-guard7-matrix-1` 串行重复矩阵在第10项停止：前9项通过；toggle-offcenter实际按下/释放各1，明确负例失败，所有owner正常退出，clean0a65–0a6e。路径边缘与100px宽透明按钮相交，但其中心不在24点走廊内；源码只按中心选择检查，导致已缓存的该按钮证据没有被校验。先前该负例零输入的单次结果被后续失败证伪，不宣称安全。candidate7禁止安装。
+- 最小 candidate8 源修改只将中心点相交条件改成原控件矩形相交条件，仍复用已有中心命中证据；新增边缘相交/中心不相交几何回归，平台segment33/33、release及ABI --check通过。冻结manifest `91ca0acb07170316e3f8a7e1c9028b325cc92d798826403884047d901ba4bef7`、native `310aba4fd236e39d6f2f727ed5db0b3d59921b86d129e424e6accec9140a7bdf`、bridge `6142a230229d57b285f9d2eef35474377251535ad380d43aa4547ba1ab23a72d`。原 toggle-offcenter 独立回归零输入且明确not_dispatched/inputCommitted=false，正常退出clean0a6f；不把纯几何测试替代真实派发回归。
+- `drag-guard8-matrix-1` 在第9项停止：前8项通过，toggle-group实际派发且downs/ups各1，负例失败。页面DOM elementFromPoint独立确认原有透明div从none变auto后拦截路径，只有按钮中心证据无法覆盖它。所有owner正常退出，clean0a70–0a78；已停止新付费样本，candidate8禁止安装。下一步仅验证复用同快照的必要非按钮原生命中证据及其静态正例/采集成本，避免为通过负例直接禁止正常列表/画布拖拽。已安装bridge/native再核对仍a28cd243/a1f1aea2，完全未变。
+- 本次完整根 `npm run check` exit0：Biome1501、pins/imports/shrinkwrap/install-lock/tsgo/browser-smoke通过。10个冻结候选临时移出扫描后全部恢复原路径；四个检查前干净文件的formatter副作用逐块apply_patch撤回并读回空diff，用户其他dirty改动保持。当前无GUI作业，租约clean0a78；权威文档验证通过。T-005继续由coordinator在上述非按钮反例开展单变量验证，整体仍partial、Goal active，不是安装或终止迭代。
+
 ## Final validation result
 
 - Result: partial
 - Evidence: T-001 完成；v23 Rust segment31/31、就绪4/4、TS55/55、Chrome33/33及AppKit8/8、ABI与根检查通过。已定位并修复v20间歇漏缓存；新证据包括v23确定性47/47、真实模型8/10及只读subtype真实生成和独立验证。动态表单最新单次通过，旧失败全部保留；补丁可应用，未安装。
-- Limitations: 安全密码输入仍不支持；显式激活取得焦点却未置顶已复现，受限修复待确认；browser_window_unproved间歇导航拒绝仍未定位，provider错误底层原因未证实；历史导航白页尚未复现。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。
+- Limitations: T-005拖拽候选的偏心按钮漏检已修正并通过原负例，但非按钮透明路径仍有实际漏检，一步滑块拖拽仍受自身悬停变化阻断；当前候选禁止安装。安全密码输入仍不支持；显式激活取得焦点却未置顶已复现，受限修复待确认；browser_window_unproved间歇导航拒绝仍未定位，provider错误底层原因未证实；历史导航白页尚未复现。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。
