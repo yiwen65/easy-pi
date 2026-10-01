@@ -258,6 +258,8 @@
 - 2026-10-01: owned AppKit覆盖窗口的确定性对照covered-activation-1复现：首次点击正确拒绝；显式activate返回confirmed，页面焦点立即及3秒后均为true，但新观察点击仍target_occluded且零输入。全部正常退出、clean09ab。源码取得keyboard focus后跳过AXRaise，支持“焦点不等于置顶”的原因；受限显式置顶候选已单独询问，未修改自动填入/按键策略或安装产物。
 - 2026-10-01: 已安装版导航原生alert回归installed-alerts-1共7/7、cleanup全真：无弹窗及0/10/100ms延迟场景均在限时内结束，弹窗保持opened，未静默关闭。导航约25.5–49.4ms，普通观察55.3ms，弹窗后拒绝约0.27–0.41ms。这是安装版保护/排空回归，不是v23发布资格或主流benchmark全覆盖。
 
+- 2026-10-01: 评估器修复与上述证据提交`5445ad7cd`。尝试同脚本验证v23原生alert时，在创建host之前被固定安装版SDK pins拒绝（Native input integrity mismatch）；未启动GUI、不计候选回归通过，也未改写安装版pins。候选后续需使用经过完整候选manifest验证的独立测试加载入口，不能绕过完整性检查。显式置顶及网页值确认两项受限行为变更仍待用户确认。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
