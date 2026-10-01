@@ -274,9 +274,17 @@
 - `subrole-gui-1` 因等待不足未见网页树失败；`subrole-gui-2` 的过早 activate 产生 foreground_focus_unproved/inputCommitted=true，后续 fill 被 previous_intent_unresolved 阻断，不重放。移除夹具多余激活并按页面树就绪读回，`subrole-gui-3` 通过：模型观察包含 AXSecureTextField、无密码值，真实 fill 仍 target_not_editable/inputCommitted=false，独立页面值未变、input/change 零次，Chrome 正常退出、clean09f0。两次失败保留，不改 oracle；登录业务仍不支持。
 - `subrole-model-fields-1` 真实模型两项 1/2，cost0.0931476 USD，全部正常关闭、clean09f1/09f2。enter-text 22.934s/6轮、model22.302s/tool0.617s、rawReward=1；login 14.913s/4轮、model14.629s/tool0.274s，读取 secure subtype 后准确报告不支持并结束，零输入/拒绝/坐标回退。login 仍按独立业务 oracle 计失败，不伪造成功；较旧43.218s/13轮样本减少徒劳尝试，但仅一次对照，不宣称稳定速度倍率。
 - readonly subtype 补丁 SHA256 `6152027dc6875bf3669f504595c4bf0c1f3b4e914325ced19d67e0997d3773f6`，根检查完整通过；匹配 SDK 类型检查、TS20项再运行通过。安装版 bridge/native 哈希仍为 a28cd243/a1f1aea2，未安装新候选。全树 diff check 仅发现用户既有 LEARNS.md EOF 空行；本批次明确路径 diff check 通过，不动用户日志。
+- readonly subtype 候选邻域回归：`subrole-select-1` 15/15；`subrole-alerts-1` 7/7，导航约28–42ms，alert后观察拒绝约0.48–0.63ms，弹窗未静默关闭。`subrole-dialog-1` 10/11：second 项在 navigate 后的窗口证明阶段 browser_window_unproved（inputCommitted=true），尚未进入多弹窗断言，页面 writes=0；正常排空，未知导航不重放。独立新会话 second 只读数值诊断 `subrole-dialog-second-diagnostic-1` 5/5，不能将无法重现解释为已修复；该间歇拒绝仍开放，不改变身份/几何门槛。所有 owner 正常关闭，最后 clean0a18。
+
+### 2026-10-02 model wait budget
+
+- `subrole-model-browser-general-1` 两次真实模型尝试 1/2，cost0.0431932 USD：dynamic 在 171.629s/6轮发生 provider_websocket_error，model168.466s/tool3.150s，尚未通过业务 oracle；scroll 16.835s/4轮通过，model14.182s/tool2.646s。无工具拒绝，全部正常排空、clean0a19/0a1a。远端或网络错误的根因未证实。
+- 已证实评估器配置分歧：configureHttpDispatcher(30_000) 只配置 HTTP，createAgentSession 仍按 SettingsManager 默认300_000传入模型 timeoutMs；WebSocket 等待不采用先前 HTTP dispatcher 设置。仅在评测 meteredStream 明确传入 idle30_000/connect15_000，仍 maxRetries=0，不改生产默认、不自动重放。增加逐请求耗时 ledger 和固定 provider_idle_timeout 分类，禁止保留原始敏感错误载荷。参考 [官方 WebSocket 指南](https://developers.openai.com/api/docs/guides/websocket-mode)，其中连接生命周期不是本地空闲预算；不将文档当作171秒错误根因证据。
+- 回归先3/6、后6/6；实际 Agent 调用断言请求确实收到两项预算，逐轮数组复制及失败分类通过；相关评估器19/19。完整根 npm run check exit0，四个无关 formatter 改动已撤回，明确路径 diff check 通过。
+- 新协议实测 `subrole-model-browser-dynamic-bounded-1` 1/1：43.145s/11轮，model39.360s/tool3.761s，cost0.0758136 USD。独立 oracle 核对 R-101/R-204/R-305 顺序、各自不同的中文 note 和 Pro，正常退出、clean0a1b。逐轮请求2.918–5.214s，未触发新空闲期限；因此这次成功不能归因于超时修复，也不能宣称网络故障已解决。新旧超时协议不同，不能混合计算提速倍率；历史失败继续计入各自分母。
 
 ## Final validation result
 
 - Result: partial
-- Evidence: T-001 完成；v23 Rust segment31/31、就绪4/4、TS55/55、Chrome33/33及AppKit8/8、ABI与根检查通过。已用读时序实验定位并修复v20间歇漏缓存；最新真实模型表单/导航仍失败，均正常关闭。补丁可应用；未安装。
-- Limitations: v23表单遇遮挡、绕行后耗尽轮数；显式激活取得焦点却未置顶已复现，受限修复待确认；历史导航白页尚未复现。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。
+- Evidence: T-001 完成；v23 Rust segment31/31、就绪4/4、TS55/55、Chrome33/33及AppKit8/8、ABI与根检查通过。已定位并修复v20间歇漏缓存；新证据包括v23确定性47/47、真实模型8/10及只读subtype真实生成和独立验证。动态表单最新单次通过，旧失败全部保留；补丁可应用，未安装。
+- Limitations: 安全密码输入仍不支持；显式激活取得焦点却未置顶已复现，受限修复待确认；browser_window_unproved间歇导航拒绝仍未定位，provider错误底层原因未证实；历史导航白页尚未复现。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。

@@ -72,7 +72,14 @@ writeFileSync(
 			nativeSha256: sha(
 				join(dirname(bridgePath), "sdk/node_modules/@trycua/cua-driver-darwin-arm64/libcua_driver_sdk.dylib"),
 			),
-			limits: { turnsPerTask: 24, secondsPerTask: 180, outputTokensPerTurn: 2048, reportedCostStopUSD: 10 },
+			limits: {
+				turnsPerTask: 24,
+				secondsPerTask: 180,
+				outputTokensPerTurn: 2048,
+				reportedCostStopUSD: 10,
+				modelIdleTimeoutMs: 30_000,
+				modelConnectTimeoutMs: 15_000,
+			},
 			protocol: `Official MiniWoB HTML and raw reward, adapted 180s time limit and full Chrome viewport; not official aggregate score. Native ${mode} computer tool only; privileged fixture setup/read-only oracle/cleanup are not agent actions. No task API or evaluator exposed to agent.`,
 		},
 		null,
@@ -315,6 +322,7 @@ for (const id of selected) {
 			taskMs,
 			setupMs,
 			modelMs: meter.modelMs,
+			modelRequestMs: meter.requestMs,
 			toolMs: calls.reduce((sum, call) => sum + call.ms, 0),
 			calls,
 			turns: meter.turns,

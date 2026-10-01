@@ -25,6 +25,8 @@ test("real Agent invocation stops before request 25 and never counts the synthet
 		assert.ok(calls <= 24);
 		assert.equal(options.maxTokens, 2048);
 		assert.equal(options.maxRetries, 0);
+		assert.equal(options.timeoutMs, 30_000);
+		assert.equal(options.websocketConnectTimeoutMs, 15_000);
 		const stream = createAssistantMessageEventStream();
 		const message = {
 			role: "assistant",
@@ -100,6 +102,10 @@ test("request admission bounds real invocations and counts each interval once", 
 	meter.finish(); // synthetic failure with no admitted request
 	assert.equal(meter.turns, 24);
 	assert.equal(meter.modelMs, 240);
+	assert.deepEqual(meter.requestMs, Array(24).fill(10));
+	const copied = meter.requestMs;
+	copied.push(1000);
+	assert.equal(meter.requestMs.length, 24);
 	const expensive = createRequestMeter(() => now);
 	assert.throws(() => expensive.start(10), /budget exhausted/);
 	assert.equal(expensive.turns, 0);
@@ -109,6 +115,7 @@ test("provider failures retain categories, never arbitrary credential-bearing pa
 	assert.equal(providerFailure("403 https://user:secret@example.test?key=private"), "provider_access_denied");
 	assert.equal(providerFailure("WebSocket error token=private"), "provider_websocket_error");
 	assert.equal(providerFailure("UND_ERR_CONNECT_TIMEOUT"), "provider_connect_timeout");
+	assert.equal(providerFailure("WebSocket idle timeout after 30000ms token=private"), "provider_idle_timeout");
 	assert.equal(providerFailure("arbitrary secret"), "provider_error");
 	assert.equal(providerFailure(undefined), undefined);
 });

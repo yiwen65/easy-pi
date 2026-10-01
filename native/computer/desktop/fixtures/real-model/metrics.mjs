@@ -3,13 +3,20 @@ import assert from "node:assert/strict";
 export function meteredStream(stream, meter, reportedCost) {
 	return (model, context, options) => {
 		meter.start(reportedCost());
-		return stream(model, context, { ...options, maxTokens: 2048, maxRetries: 0 });
+		return stream(model, context, {
+			...options,
+			maxTokens: 2048,
+			maxRetries: 0,
+			timeoutMs: 30_000,
+			websocketConnectTimeoutMs: 15_000,
+		});
 	};
 }
 
 export function createRequestMeter(now = () => performance.now()) {
 	let turns = 0;
 	let modelMs = 0;
+	const requestMs = [];
 	let started;
 	return {
 		start(reportedCost) {
@@ -20,7 +27,9 @@ export function createRequestMeter(now = () => performance.now()) {
 		},
 		finish() {
 			if (started !== undefined) {
-				modelMs += now() - started;
+				const duration = now() - started;
+				modelMs += duration;
+				requestMs.push(duration);
 				started = undefined;
 			}
 		},
@@ -30,6 +39,9 @@ export function createRequestMeter(now = () => performance.now()) {
 		get modelMs() {
 			return modelMs;
 		},
+		get requestMs() {
+			return [...requestMs];
+		},
 	};
 }
 
@@ -37,6 +49,7 @@ export function providerFailure(message) {
 	if (!message) return undefined;
 	if (message === "Model budget exhausted") return "model_budget_exhausted";
 	if (/UND_ERR_CONNECT_TIMEOUT|connect.*timed? ?out/i.test(message)) return "provider_connect_timeout";
+	if (/WebSocket idle timeout|UND_ERR_BODY_TIMEOUT|body timeout/i.test(message)) return "provider_idle_timeout";
 	if (/websocket/i.test(message)) return "provider_websocket_error";
 	if (/\b(?:401|403)\b/.test(message)) return "provider_access_denied";
 	return "provider_error";
