@@ -287,6 +287,10 @@
 - 只读 ImageIO 解码比较 drag-box 的 image5→6、image6→7：2048×1582、分别616和282个变化像素，变化包围盒分别[443,383,475,407]/[456,383,474,407]，仅在远处倒计时数字，拖动起终点未变。源码 segment 首动作仍调用整图 revalidate，说明原保护与该动态场景不兼容；尚未证明完整拖拽局部校验安全，已请求完整路径走廊候选授权，未放宽拖拽或坐标点击保护。比较器仅在证据目录读取既有截图，无截图编辑。
 - 传输单变量探索：冻结 seed42/model/subtype candidate/任务/独立 oracle，只在隔离脚本选择 sse；`subrole-model-desktop-tab-sse-1` 1/1，154.638s/9轮，model153.627s/tool0.976s，cost0.0624452 USD、rawReward=1、clean0a2a。不能将通过解释为 WebSocket 根因或 SSE 提速，模型决策与网络噪声尚未控制。独立默认传输回测 `subrole-model-desktop-tab-auto-2` 49.477s/12轮业务失败、cost0.092848 USD、clean0a2b：两次AX观察无网页行，模型转为截图点击，四次整图过期拒绝，零点击派发、无provider错误。SSE脚本和所有源码已冻结到该运行 sources，工作树临时脚本已删除；生产传输不改。
 - 只读就绪探针 `subrole-readiness-1`：静态自有页面DOM已加载后，第一原生观察45行/零web行；100ms间隔读回约2.019s后出现59行/8个web行，零输入、正常关闭、clean0a2c。nativeComplete只表示本次AXChildren读取完整，不表示渲染器网页树已就绪；不可改称不存在控件。此实验只证明延迟存在，尚不能区分启用属性、Chromium异步树或更早读取触发的因果；不加入无条件长等待或重试输入。
+- 后续就绪对照：默认新进程 `subrole-readiness-2` 约2.085s出现网页；只在隔离启动添加 force-renderer-accessibility 的 `subrole-readiness-forced-1/2` 两次均首次观察59行/8个web行，正常关闭、clean0a2d/0a2e/0a2f。此 flag 是 [Chromium 原生支持的诊断开关](https://chromium.googlesource.com/chromium/src/+/HEAD/ui/accessibility/accessibility_switches.cc)，改变了冷启动条件，不将其作为默认产品修复或可比模型提速。
+- 非替代修复：`subrole-readiness-role-1` 在首次工具调用前只读同一新拥有PID的AXApplication角色，读取成功且权限未提示；仍约2.036s才出现网页，正常退出、clean0a30。仅补读AXRole不能消除网页树延迟。
+- 捕获启用返回码与真实副作用的首次分歧：`ax-enablement-role-1` 仅只读应用角色/角色树，30次读取4.092s无AXWebArea、零读取错误；独立新进程 `ax-enablement-enhanced-1` 仅额外设置现有 prepare 已使用的 AXEnhancedUserInterface=true，返回 -25208（NotImplemented），却在约2.035s出现AXWebArea，零读取错误。两者均只操作新创建测试Chrome、未读字段内容/生成输入、正常关闭，native lease维持clean0a30。因此 Native.prepare 的“unsupported setter没有变化”不能推广到这条Chrome路径；Cocoa已验证的无副作用优化也不能因此一律移除。
+- [Chromium 当前源码](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/chrome_browser_application_mac.mm) 的 Enhanced setter 先安排两秒 debounce，再调用 super返回；角色读取在新macOS仅请求NativeAPIs，不等于网页完整树。与本机对照吻合，但153.0.8010.52精确tag未能通过网页工具获取，不冒充逐行版本匹配证据。下一步只做可取消、有界、不会重设debounce的读取就绪候选及Cocoa不退化对照；尚未修改或安装Native.prepare。
 
 ## Final validation result
 
