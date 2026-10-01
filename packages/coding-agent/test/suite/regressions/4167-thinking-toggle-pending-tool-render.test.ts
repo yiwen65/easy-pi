@@ -54,7 +54,7 @@ type RenderSessionContextThis = {
 	createRoutedToolComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent;
 	addToolComponentToChat(component: ToolExecutionComponent, toolName: string, args: unknown): void;
 	flushPendingSkillMentions(): void;
-	completeCurrentTurnThinking(): void;
+	completeTurnGroups(): void;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	renderSessionItems: RenderSessionItems;
 };
@@ -100,7 +100,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			chatContainer.addChild(component);
 		},
 		flushPendingSkillMentions() {},
-		completeCurrentTurnThinking() {},
+		completeTurnGroups() {},
 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
 			.renderSessionItems,
 		addMessageToChat(message: AgentMessage) {

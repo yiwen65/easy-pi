@@ -13,7 +13,7 @@ type SkillMentionHarness = {
 	pendingSkillMentionsPopulateHistory: boolean;
 	currentTurnThinkingGroup: undefined;
 	currentTurnToolGroup: undefined;
-	completeCurrentTurnThinking(): void;
+	completeTurnGroups(): void;
 	createUserMessageComponent(text: string, timestamp?: number, skillNames?: readonly string[]): UserMessageComponent;
 	getUserMessageText: (message: AgentMessage) => string;
 	renderUserMessage: (text: string, timestamp: number | undefined, options?: { populateHistory?: boolean }) => void;
@@ -42,7 +42,7 @@ function createHarness() {
 		pendingSkillMentionsPopulateHistory: false,
 		currentTurnThinkingGroup: undefined,
 		currentTurnToolGroup: undefined,
-		completeCurrentTurnThinking: vi.fn(),
+		completeTurnGroups: vi.fn(),
 		createUserMessageComponent: (text, _timestamp, skillNames) =>
 			new UserMessageComponent(text, undefined, 1, [], skillNames),
 		getUserMessageText,

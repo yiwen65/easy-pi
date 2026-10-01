@@ -134,6 +134,48 @@ describe("LiveLineScroller", () => {
 		}
 	});
 
+	test.each(["head", "tail"] as const)("completed %s rows never restart scrolling", (anchor) => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const scroller = new LiveLineScroller({ requestRender }, anchor);
+		try {
+			scroller.setText(COMMAND);
+			scroller.window(WIDTH);
+			vi.advanceTimersByTime(2_000);
+			expect(requestRender).toHaveBeenCalled();
+			scroller.completeTurn();
+			requestRender.mockClear();
+			const settled = scroller.window(WIDTH);
+			vi.advanceTimersByTime(10_000);
+			expect(scroller.window(WIDTH)).toBe(settled);
+			expect(requestRender).not.toHaveBeenCalled();
+			// Later text changes and resize must not rearm a completed turn.
+			scroller.setText(`${COMMAND} && echo updated`);
+			const updated = scroller.window(WIDTH - 5);
+			vi.advanceTimersByTime(10_000);
+			expect(scroller.window(WIDTH - 5)).toBe(updated);
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			scroller.dispose();
+		}
+	});
+
+	test("completion cancels a pending idle delay", () => {
+		vi.useFakeTimers();
+		const { scroller, requestRender } = createScroller();
+		try {
+			scroller.setText(COMMAND);
+			scroller.window(WIDTH);
+			scroller.completeTurn();
+			vi.advanceTimersByTime(10_000);
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			scroller.dispose();
+		}
+	});
+
 	test("stops repainting after dispose", () => {
 		vi.useFakeTimers();
 		const { scroller, requestRender } = createScroller();

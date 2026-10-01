@@ -20,7 +20,7 @@ const SCROLL_GAP = "   ";
  * head for commands ("head"), or the tail for streamed prose where the newest
  * text matters ("tail"). Once the text stopped changing for IDLE_DELAY_MS the
  * row scrolls the hidden part into view and keeps cycling; new text resets it to
- * the anchored end.
+ * the anchored end. Completing the turn permanently stops automatic scrolling.
  */
 export class LiveLineScroller {
 	private readonly ui?: LiveLineRenderer;
@@ -28,6 +28,7 @@ export class LiveLineScroller {
 	private text = "";
 	private width = 0;
 	private offset = 0;
+	private turnComplete = false;
 	private idleTimer: ReturnType<typeof setTimeout> | undefined;
 	private ticker: ReturnType<typeof setInterval> | undefined;
 
@@ -54,6 +55,12 @@ export class LiveLineScroller {
 		return this.anchor === "tail" ? tailWindow(this.text, width) : headWindow(this.text, width);
 	}
 
+	/** Completed turns stay anchored, even if their text or the terminal width changes later. */
+	completeTurn(): void {
+		this.turnComplete = true;
+		this.dispose();
+	}
+
 	/** Stop both timers. Called when the row leaves the transcript. */
 	dispose(): void {
 		if (this.idleTimer) {
@@ -68,7 +75,7 @@ export class LiveLineScroller {
 			clearTimeout(this.idleTimer);
 			this.idleTimer = undefined;
 		}
-		if (!this.ui || this.text.length === 0) return;
+		if (this.turnComplete || !this.ui || this.text.length === 0) return;
 		this.idleTimer = setTimeout(() => {
 			this.idleTimer = undefined;
 			this.startTicker();

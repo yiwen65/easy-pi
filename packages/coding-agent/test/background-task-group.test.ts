@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { ok } from "@earendil-works/pi-agent-core";
-import { BackgroundTaskManager } from "@earendil-works/pi-agent-core/node";
+import { BackgroundTaskManager, type BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskGroupComponent } from "../src/modes/interactive/components/background-task-group.ts";
@@ -27,7 +27,7 @@ function fakeMode() {
 		outputPad: 1,
 		getMarkdownThemeWithSettings: () => ({}),
 	};
-	mode.completeCurrentTurnThinking = () => {};
+	mode.completeTurnGroups = proto.completeTurnGroups;
 	mode.createUserMessageComponent = () => new Container();
 	for (const name of [
 		"addMessageToChat",
@@ -136,6 +136,74 @@ describe("BackgroundTaskGroupComponent", () => {
 			}
 			expect(sawTail).toBe(true);
 			expect(requestRender).toHaveBeenCalled();
+		} finally {
+			group.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("stops a completed turn's header scroll without freezing background task status", () => {
+		vi.useFakeTimers();
+		const record: BackgroundTaskRecord = {
+			id: "bg-completed-turn",
+			command: `npm run build --workspace packages/coding-agent -- --filter ${"long".repeat(20)}`,
+			cwd: dir,
+			status: "running",
+			startedAt: Date.now(),
+			outputPath: join(dir, "bg-completed-turn.log"),
+			promoted: false,
+			lastOutputAt: Date.now(),
+		};
+		let terminalListener: ((task: BackgroundTaskRecord) => void) | undefined;
+		const fixtureManager = {
+			list: () => [record],
+			onStart: () => () => {},
+			onTerminal: (listener: (task: BackgroundTaskRecord) => void) => {
+				terminalListener = listener;
+				return () => {};
+			},
+			stallTimeoutMs: 0,
+		} as unknown as BackgroundTaskManager;
+		const requestRender = vi.fn();
+		const group = new BackgroundTaskGroupComponent(fixtureManager, requestRender);
+		const header = () => stripVTControlCharacters(group.render(60)[0] ?? "");
+		try {
+			const liveHead = header();
+			expect(liveHead).toContain("npm run build");
+			vi.advanceTimersByTime(1_000);
+			let sawTail = false;
+			for (let tick = 0; tick < 120 && !sawTail; tick++) {
+				vi.advanceTimersByTime(120);
+				sawTail = header().includes("longlonglong");
+			}
+			expect(sawTail).toBe(true);
+			group.completeTurn();
+			const completedHead = header();
+			expect(completedHead).toBe(liveHead);
+			vi.advanceTimersByTime(10_000);
+			expect(header()).toBe(completedHead);
+
+			group.setExpanded(true);
+			expect(group.render(200).join("\n")).toContain(record.id);
+			group.setExpanded(false);
+			record.command = `changed-command ${"updated".repeat(20)}`;
+			const updatedHead = header();
+			expect(updatedHead).toContain("changed-command");
+			vi.advanceTimersByTime(10_000);
+			expect(header()).toBe(updatedHead);
+
+			// Completion still refreshes the old turn's task counters and expanded rows.
+			record.status = "succeeded";
+			record.endedAt = Date.now();
+			requestRender.mockClear();
+			terminalListener?.(record);
+			expect(requestRender).toHaveBeenCalled();
+			expect(header()).toContain("0 running · 1 finished");
+			const finishedHead = header();
+			vi.advanceTimersByTime(10_000);
+			expect(header()).toBe(finishedHead);
+			group.setExpanded(true);
+			expect(group.render(200).join("\n")).toContain("Done");
 		} finally {
 			group.dispose();
 			vi.useRealTimers();
