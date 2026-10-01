@@ -2,6 +2,7 @@ import {
 	type Component,
 	sliceByColumn,
 	stripTerminalSequences,
+	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -53,10 +54,28 @@ export class GrokEditorFrame implements Component {
 		this.editorHost.invalidate();
 	}
 
+	/** Border-free input for constrained fullscreen layouts; never replace it with decoration. */
+	renderCompactInput(width: number): string[] {
+		if (width <= 0) return [];
+		const prompt = width >= 4 ? this.theme.accent("❯ ") : "";
+		const hostWidth = Math.max(1, width - visibleWidth(prompt));
+		const lines = this.editorHost.render(hostWidth).filter((line) => !isEditorBorder(line));
+		return (lines.length ? lines : [""]).map(
+			(line, index) =>
+				(index === 0 ? prompt : " ".repeat(visibleWidth(prompt))) + sliceByColumn(line, 0, hostWidth, true),
+		);
+	}
+
+	/** Compact model/effort hint; the full label remains available in the regular frame. */
+	renderCompactMetadata(width: number): string[] {
+		const label = this.renderModelLabel(Math.max(0, width));
+		return label ? [truncateToWidth(label, Math.max(0, width), "…")] : [];
+	}
+
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, Math.floor(width));
 		const borderColor = this.borderColor ?? this.theme.border;
-		if (safeWidth < 4) return [borderColor("─".repeat(safeWidth))];
+		if (safeWidth < 4) return this.renderCompactInput(width);
 
 		const interiorWidth = safeWidth - 2;
 		const prompt = "❯ ";
@@ -94,13 +113,17 @@ export class GrokEditorFrame implements Component {
 		return [top, ...body, ...metadata, bottom];
 	}
 
-	private renderModelLabel(): string {
+	private renderModelLabel(width?: number): string {
 		if (!this.session) return "";
 		const state = this.session.state;
-		const modelName = state.model?.id || "no-model";
 		const level = state.model?.reasoning ? state.thinkingLevel || "off" : "";
-		if (!level) return this.theme.accent(modelName);
+		const modelName = state.model?.id || "no-model";
+		const fittedModel =
+			width === undefined
+				? modelName
+				: truncateToWidth(modelName, Math.max(0, width - (level ? visibleWidth(` • ${level}`) : 0)), "…");
+		if (!level) return this.theme.accent(fittedModel);
 		const styledLevel = level === "off" ? this.theme.dim(level) : this.theme.thinkingLevel(level, level);
-		return this.theme.accent(modelName) + this.theme.muted(" • ") + styledLevel;
+		return this.theme.accent(fittedModel) + this.theme.muted(" • ") + styledLevel;
 	}
 }

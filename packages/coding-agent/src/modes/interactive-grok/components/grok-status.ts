@@ -36,8 +36,8 @@ export class GrokStatus implements Component {
 		// The component has no render cache.
 	}
 
-	render(width: number): string[] {
-		if (this.state.kind === "idle") return this.reserveLine ? [""] : [];
+	render(width: number, reserveLine = this.reserveLine): string[] {
+		if (this.state.kind === "idle") return reserveLine ? [""] : [];
 
 		const safeWidth = Math.max(1, Math.floor(width));
 		const marker = "●";

@@ -1,6 +1,13 @@
 import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { isTerminalTaskStatus } from "@earendil-works/pi-agent-core/node";
-import { Container, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+	Container,
+	recordRenderedContentClickHandler,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
+import { formatDisplayPath } from "../../../utils/display-path.ts";
 import { theme } from "../theme/theme.ts";
 import {
 	backgroundTaskStallHint,
@@ -32,6 +39,7 @@ export class BackgroundTaskGroupComponent extends Container {
 	private readonly unsubscribes: Array<() => void> = [];
 	private readonly taskIds: Set<string>;
 	private acceptingTasks = true;
+	private disposed = false;
 
 	/** The manager this block renders; the TUI remounts when a session swap changes it. */
 	readonly manager: BackgroundTaskManager;
@@ -99,11 +107,19 @@ export class BackgroundTaskGroupComponent extends Container {
 		const count = `${active.length} running${terminalCount > 0 ? ` · ${terminalCount} finished` : ""}`;
 		const command = latest ? oneLine(latest.command) : "";
 		this.scroller.setText(command);
-		const prefix = `⚙ background tasks · ${count}`;
+		const failures = tasks.filter((task) => task.status === "failed" || task.status === "timed_out").length;
+		const disclosure = this.expanded ? "▾" : "▸";
+		const failureLabel = failures ? `! ⚙ ${failures} failed ·` : " ⚙";
+		// Put failures ahead of the long title so narrow headers still signal older errors.
+		const prefix = `${disclosure}${failureLabel} background tasks · ${count}`;
 		const gap = command ? " · " : "";
 		const commandWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(gap));
 		const suffix = this.scroller.window(commandWidth);
-		return truncateToWidth(theme.fg("accent", prefix) + theme.fg("muted", gap + suffix), width);
+		return truncateToWidth(
+			(failures ? theme.fg("warning", prefix) : theme.fg("accent", prefix)) + theme.fg("muted", gap + suffix),
+			width,
+			"",
+		);
 	}
 
 	private taskLine(record: BackgroundTaskRecord, width: number, now: number): string {
@@ -136,11 +152,21 @@ export class BackgroundTaskGroupComponent extends Container {
 		if (stall) {
 			lines.push(truncateToWidth(theme.fg("warning", `  ${stall} — still running; task_stop terminates it`), width));
 		}
-		lines.push(truncateToWidth(theme.fg("muted", `  log ${record.outputPath}`), width));
+		const pathLabel = truncateToWidth("  log ", width, "");
+		lines.push(
+			theme.fg("muted", pathLabel + formatDisplayPath(oneLine(record.outputPath), width - visibleWidth(pathLabel))),
+		);
 		const output = this.manager.readOutput(record.id, OUTPUT_PREVIEW_BYTES);
 		if (output.ok && output.value.output.trim()) {
-			const wrapped = wrapTextWithAnsi(safe(output.value.output.trim()), Math.max(1, width)).slice(-8);
-			lines.push(...wrapped.map((line) => `  ${theme.fg("dim", line)}`));
+			const text = safe(output.value.output.trim());
+			// Reserve indentation before wrapping. Extremely narrow screens omit indentation;
+			// a two-cell grapheme cannot fit width1, so mark it rather than overflowing.
+			// Its original text remains in the log and in the preview at feasible widths.
+			const indent = width >= 4 ? "  " : "";
+			const wrapped = wrapTextWithAnsi(text, Math.max(1, width - indent.length)).slice(-8);
+			lines.push(
+				...wrapped.map((line) => indent + theme.fg("dim", width === 1 ? truncateToWidth(line, 1, "…") : line)),
+			);
 		}
 		return lines;
 	}
@@ -177,20 +203,41 @@ export class BackgroundTaskGroupComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		if (width <= 0) return [];
 		const now = Date.now();
 		const tasks = this.tasks();
 		const lines = [this.collapsedLine(width, tasks)];
-		if (!this.expanded) return lines;
-		for (const record of tasks) {
-			lines.push(this.taskLine(record, width, now));
-			if (record.id === this.expandedTaskId) lines.push(...this.taskDetail(record, width, now));
+		const expanded = this.expanded;
+		const expandedTaskId = this.expandedTaskId;
+		const ranges: Array<{ id: string; start: number; end: number }> = [];
+		if (expanded) {
+			for (const record of tasks) {
+				const start = lines.length;
+				lines.push(this.taskLine(record, width, now));
+				if (record.id === expandedTaskId) lines.push(...this.taskDetail(record, width, now));
+				ranges.push({ id: record.id, start, end: lines.length });
+			}
+			if (tasks.length === 0) lines.push(truncateToWidth(theme.fg("muted", "No background tasks yet."), width, ""));
 		}
-		if (tasks.length === 0) lines.push(theme.fg("muted", "no tasks"));
+		recordRenderedContentClickHandler(this, lines, (localRow) => {
+			if (this.disposed || this.expanded !== expanded) return false;
+			if (localRow === 0) {
+				this.setExpanded(!expanded);
+				return true;
+			}
+			const target = ranges.find((range) => localRow >= range.start && localRow < range.end);
+			if (!target || !this.taskIds.has(target.id) || !this.tasks().some((task) => task.id === target.id))
+				return false;
+			this.expandedTaskId = target.id === expandedTaskId ? undefined : target.id;
+			this.requestRender();
+			return true;
+		});
 		return lines;
 	}
 
 	/** Stop the ticker and the idle scroll when the block leaves the transcript. */
 	dispose(): void {
+		this.disposed = true;
 		if (this.ticker) clearInterval(this.ticker);
 		this.ticker = undefined;
 		this.scroller.dispose();

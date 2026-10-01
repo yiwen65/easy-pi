@@ -126,6 +126,8 @@ export {
 	type OverlayMargin,
 	type OverlayOptions,
 	type OverlayUnfocusOptions,
+	type RenderedContentClickHandler,
+	recordRenderedContentClickHandler,
 	type SizeValue,
 	type TUI,
 	type TuiInputListener,

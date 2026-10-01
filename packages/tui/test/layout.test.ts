@@ -6,6 +6,7 @@ import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
 import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
+import { Container } from "../src/tui.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
@@ -13,6 +14,162 @@ function visibleLines(lines: string[]): string[] {
 }
 
 describe("viewport layout", () => {
+	it("counts explicit scroll requests without counting layout maintenance", () => {
+		const document = new Container();
+		const before = new Text("before", 0, 0);
+		const reading = new Text("read0\nread1\nread2\nread3\nread4\nread5", 0, 0);
+		document.children = [before, reading];
+		const scroll = new ScrollView(document, { follow: "end" });
+		const render = () => renderLayoutFrame(scroll, 20, 2, () => {});
+		assert.equal(scroll.scrollRevision, 0);
+		render();
+		assert.equal(scroll.scrollRevision, 0);
+		scroll.scrollToEnd();
+		scroll.scrollToEnd();
+		assert.equal(scroll.scrollRevision, 2, "same-clamped end requests count");
+		scroll.scrollTo(99);
+		assert.equal(scroll.scrollRevision, 3, "clamped scrollTo counts");
+		assert.equal(scroll.scrollBy(10), 10);
+		assert.equal(scroll.scrollRevision, 4, "nonzero blocked scrollBy counts");
+		scroll.scrollBy(0);
+		scroll.scrollBy(Number.NaN);
+		assert.equal(scroll.scrollRevision, 4, "zero normalized deltas do not count");
+		scroll.scrollToStart();
+		scroll.scrollToStart();
+		assert.equal(scroll.scrollRevision, 6, "same start requests count");
+		scroll.scrollTo(3);
+		const savedTop = scroll.scrollTop;
+		const savedRevision = scroll.scrollRevision;
+		scroll.scrollBy(-1);
+		scroll.scrollBy(1);
+		assert.equal(scroll.scrollTop, savedTop);
+		assert.equal(scroll.scrollRevision, savedRevision + 2, "away-and-back is distinguishable");
+		render();
+		before.setText("before0\nbefore1\nbefore2");
+		render();
+		assert.equal(scroll.scrollTop, savedTop + 2, "reading anchor still restores geometry");
+		assert.equal(scroll.scrollRevision, savedRevision + 2, "anchor updates do not count");
+		scroll.scrollToEnd();
+		const endRevision = scroll.scrollRevision;
+		reading.setText("read0\nread1\nread2\nread3\nread4\nread5\nnew end");
+		render();
+		assert.equal(scroll.isFollowingEnd, true);
+		assert.equal(scroll.scrollRevision, endRevision, "follow-end maintenance does not count");
+	});
+	it("prefers the leaf over identical root and single-child container bounds", () => {
+		for (const nested of [false, true]) {
+			const document = new Container();
+			const reading = new Text("read0\nread1\nread2\nread3\nread4\nread5", 0, 0);
+			const parent = nested ? new Container() : document;
+			parent.addChild(reading);
+			if (nested) document.addChild(parent);
+			const scroll = new ScrollView(document, { follow: "end" });
+			const render = () => visibleLines(renderLayoutFrame(scroll, 20, 2, () => {}).lines);
+			render();
+			scroll.scrollTo(0, { disableFollow: true });
+			assert.equal(render()[0], "read0");
+			parent.children.unshift(new Text("prepended", 0, 0));
+			assert.equal(render()[0], "read0");
+			assert.equal(scroll.scrollTop, 1);
+		}
+	});
+	it("falls back to a surviving parent local row when all old neighbours disappear", () => {
+		const document = new Container();
+		const parent = new Container();
+		parent.addChild(new Text("read0\nread1\nread2\nread3\nread4\nread5", 0, 0));
+		document.children = [new Text("old0\nold1", 0, 0), parent];
+		const scroll = new ScrollView(document);
+		const render = () => visibleLines(renderLayoutFrame(scroll, 20, 2, () => {}).lines);
+		render();
+		scroll.scrollTo(5);
+		assert.equal(render()[0], "read3");
+		parent.children = [new Text("replacement0\nreplacement1", 0, 0)];
+		document.children = [
+			new Text("new0\nnew1\nnew2\nnew3\nnew4\nnew5", 0, 0),
+			parent,
+			new Text("tail0\ntail1\ntail2\ntail3", 0, 0),
+		];
+		assert.equal(render()[0], "replacement1");
+		assert.equal(scroll.scrollTop, 7, "clamp local parent row rather than old absolute row");
+	});
+
+	it("uses boundary neighbours and clamps the fallback to the viewport", () => {
+		const document = new Container();
+		const before = new Text("before0\nbefore1\nbefore2\nbefore3\nbefore4\nbefore5", 0, 0);
+		const target = new Text("read0\nread1\nread2\nread3\nread4\nread5", 0, 0);
+		const after = new Text("after", 0, 0);
+		document.children = [before, target, after];
+		const scroll = new ScrollView(document);
+		const render = () => visibleLines(renderLayoutFrame(scroll, 20, 3, () => {}).lines);
+		render();
+		scroll.scrollTo(6);
+		assert.equal(render()[0], "read0");
+		document.removeChild(target);
+		assert.deepEqual(render(), ["before4", "before5", "after"]);
+		assert.equal(scroll.scrollTop, 4, "next neighbour at old end boundary is viewport-clamped");
+		document.children = [before, target];
+		render();
+		scroll.scrollTo(6);
+		assert.equal(render()[0], "read0");
+		document.children = [before, new Text("new0\nnew1\nnew2\nnew3", 0, 0)];
+		assert.equal(render()[0], "before0", "previous neighbour at old start boundary is fallback");
+	});
+
+	it("keeps the reading component and local row when earlier content grows", () => {
+		const document = new Container();
+		const earlier = new Text("earlier", 0, 0);
+		const target = new Text("target0\ntarget1\ntarget2\ntarget3\ntarget4\ntarget5", 0, 0);
+		document.addChild(earlier);
+		document.addChild(target);
+		document.addChild(new Text("tail0\ntail1\ntail2\ntail3", 0, 0));
+		const scroll = new ScrollView(document, { follow: "end" });
+		renderLayoutFrame(scroll, 20, 3, () => {});
+		scroll.scrollTo(4);
+		assert.strictEqual(visibleLines(renderLayoutFrame(scroll, 20, 3, () => {}).lines)[0], "target3");
+		earlier.setText("earlier0\nearlier1\nearlier2\nearlier3\nearlier4");
+		assert.strictEqual(visibleLines(renderLayoutFrame(scroll, 20, 3, () => {}).lines)[0], "target3");
+	});
+	it("preserves nested identity through collapse, reorder and resize and falls back on removal", () => {
+		const document = new Container();
+		const chat = new Container();
+		const before = new Text("before0\nbefore1\nbefore2", 0, 0);
+		const target = new Text("target0\ntarget1\ntarget2\ntarget3\ntarget4\ntarget5", 0, 0);
+		const tail = new Text("tail0\ntail1\ntail2\ntail3\ntail4\ntail5", 0, 0);
+		chat.children = [before, target, tail];
+		document.addChild(chat);
+		const scroll = new ScrollView(document, { follow: "end" });
+		const render = (width = 20) => visibleLines(renderLayoutFrame(scroll, width, 3, () => {}).lines);
+		render();
+		scroll.scrollTo(6);
+		assert.equal(render()[0], "target3");
+		before.setText("collapsed");
+		assert.equal(render()[0], "target3");
+		chat.children = [target, before, tail];
+		assert.equal(render()[0], "target3");
+		assert.equal(render(10)[0], "target3");
+		target.setText("target0\ntarget1");
+		assert.equal(render()[0], "target1", "clamp offset inside collapsed reading component");
+		chat.removeChild(target);
+		assert.equal(render()[0], "collapsed", "next surviving neighbour starts at top");
+		scroll.scrollToEnd();
+		tail.setText("tail0\ntail1\ntail2\ntail3\ntail4\ntail5\nnew end");
+		assert.equal(render().at(-1), "new end");
+		assert.equal(scroll.isFollowingEnd, true);
+	});
+
+	it("keeps a local reading row when resizing wraps content above it", () => {
+		const document = new Container();
+		const before = new Text("abcdefghijklmnopqrstuvwxyz", 0, 0);
+		const target = new Text("t0\nt1\nt2\nt3\nt4\nt5", 0, 0);
+		document.children = [before, target, new Text("end0\nend1\nend2", 0, 0)];
+		const scroll = new ScrollView(document);
+		renderLayoutFrame(scroll, 40, 3, () => {});
+		scroll.scrollTo(4);
+		assert.equal(visibleLines(renderLayoutFrame(scroll, 40, 3, () => {}).lines)[0], "t3");
+		assert.equal(visibleLines(renderLayoutFrame(scroll, 10, 3, () => {}).lines)[0], "t3");
+		assert.equal(scroll.scrollTop, 6);
+	});
+
 	it("allocates vertical grow space deterministically", () => {
 		const frame = renderLayoutFrame(
 			new VStack([

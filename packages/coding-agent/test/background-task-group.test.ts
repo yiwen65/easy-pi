@@ -7,8 +7,13 @@ import { BackgroundTaskManager, type BackgroundTaskRecord } from "@earendil-work
 import { Container, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskGroupComponent } from "../src/modes/interactive/components/background-task-group.ts";
+import {
+	backgroundTaskDuration,
+	backgroundTaskStallHint,
+} from "../src/modes/interactive/components/background-task-view.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { formatDisplayPath } from "../src/utils/display-path.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const proto = InteractiveMode.prototype as any;
@@ -323,6 +328,117 @@ describe("BackgroundTaskGroupComponent", () => {
 
 		await stallManager.cleanup();
 		group.dispose();
+	});
+
+	it.each([
+		{ width: 1, content: "abcdef", expected: "abcdef" },
+		{ width: 1, content: "中🙂a", expected: "……a" },
+		...[2, 3, 4, 40].map((width) => ({
+			width,
+			content: "中文abcdef中文".repeat(width === 40 ? 3 : 1),
+			expected: "中文abcdef中文".repeat(width === 40 ? 3 : 1),
+		})),
+	])(
+		"reserves log indentation before wrapping styled wide output at $width columns ($content)",
+		({ width, content, expected }) => {
+			const record: BackgroundTaskRecord = {
+				id: "output",
+				command: "latest",
+				cwd: dir,
+				status: "succeeded",
+				startedAt: 0,
+				endedAt: 65_000,
+				lastOutputAt: 65_000,
+				outputPath: "/tmp/output.log",
+				promoted: false,
+			};
+			const output = `\x1b[31m${content}\x1b[0m`;
+			const fixtureManager = {
+				list: () => [record],
+				onStart: () => () => {},
+				onTerminal: () => () => {},
+				stallTimeoutMs: 0,
+				readOutput: () => ({ ok: true, value: { output } }),
+			} as unknown as BackgroundTaskManager;
+			const group = new BackgroundTaskGroupComponent(fixtureManager, () => {});
+			try {
+				group.setExpanded(true);
+				group.handleOverviewClick(1, width);
+				const lines = group.render(width);
+				expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+				expect(lines.slice(4).map(stripVTControlCharacters).join("").replaceAll(" ", "")).toBe(expected);
+				expect(group.render(0)).toEqual([]);
+				if (width === 1) {
+					expect(group.render(40).slice(4).map(stripVTControlCharacters).join("").trim()).toBe(content);
+					expect(output).toBe(`\x1b[31m${content}\x1b[0m`);
+				}
+				if (width === 40)
+					expect(lines.slice(4).map(stripVTControlCharacters)).toEqual([
+						"  中文abcdef中文中文abcdef中文中文abcdef",
+						"  中文",
+					]);
+			} finally {
+				group.dispose();
+			}
+		},
+	);
+
+	it("uses shared readable durations and filename-preserving display-only paths", () => {
+		const record: BackgroundTaskRecord = {
+			id: "time",
+			command: "x",
+			cwd: dir,
+			status: "running",
+			startedAt: 0,
+			lastOutputAt: 0,
+			outputPath: "/long/folder/中文/output.log",
+			promoted: false,
+		};
+		expect(backgroundTaskDuration(record, 800)).toBe("0.8s");
+		expect(backgroundTaskDuration(record, 65_000)).toBe("1m 5s");
+		expect(backgroundTaskStallHint(record, 65_000, 100)).toBe("⏸ no output 1m 5s");
+		expect(formatDisplayPath(record.outputPath, 16)).toBe("…中文/output.log");
+		for (const width of [0, 1, 2, 4, 20])
+			expect(visibleWidth(formatDisplayPath(record.outputPath, width))).toBeLessThanOrEqual(width);
+		expect(record.outputPath).toBe("/long/folder/中文/output.log");
+		expect(formatDisplayPath("中文", 1)).toBe("…");
+		expect(formatDisplayPath("中文", 2)).toBe("…");
+		expect(formatDisplayPath("中文", 4)).toBe("中文");
+		expect(formatDisplayPath("", 0)).toBe("");
+		expect(formatDisplayPath("中文", 0)).toBe("");
+		expect(formatDisplayPath("\x1b[31m\x1b[0m", 0)).toBe("");
+		expect(visibleWidth(formatDisplayPath("\x1b[31m中文\x1b[0m", 1))).toBe(1);
+	});
+
+	it("summarizes failures without replacing the latest command or counting stopped tasks", () => {
+		const records = (["failed", "timed_out", "stopped", "succeeded"] as const).map((status, index) => ({
+			id: `task-${index}`,
+			command: index === 3 ? "latest-command" : `older-${index}`,
+			cwd: dir,
+			status,
+			startedAt: index,
+			endedAt: 100,
+			outputPath: "/tmp/log",
+			promoted: false,
+		}));
+		const fixtureManager = {
+			list: () => records,
+			onStart: () => () => {},
+			onTerminal: () => () => {},
+			stallTimeoutMs: 0,
+		} as unknown as BackgroundTaskManager;
+		const group = new BackgroundTaskGroupComponent(fixtureManager, () => {});
+		try {
+			group.completeTurn();
+			expect(stripVTControlCharacters(group.render(120)[0])).toContain("2 failed");
+			expect(stripVTControlCharacters(group.render(2)[0])).toBe("▸!");
+			expect(stripVTControlCharacters(group.render(120)[0])).toContain("latest-command");
+			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^▸/);
+			group.setExpanded(true);
+			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^▾/);
+		} finally {
+			group.dispose();
+		}
 	});
 
 	it("supports ctrl+o global expansion and stays within width", async () => {

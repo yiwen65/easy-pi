@@ -208,6 +208,47 @@ type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | Blocked
 type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusRestoreState;
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
+export interface RenderedChildOffset {
+	component: Component;
+	start: number;
+	height: number;
+}
+
+// Metadata belongs to the returned render result, not mutable component state.
+export type RenderedContentClickHandler = (localRow: number, col: number) => boolean;
+
+const renderedMetadata = new WeakMap<
+	string[],
+	{
+		containerOffsets?: Map<Container, RenderedChildOffset[]>;
+		contentClickHandlers?: Map<Component, RenderedContentClickHandler>;
+	}
+>();
+
+/** Bind trusted display-only controls to this render result, never to mutable component state. */
+export function recordRenderedContentClickHandler(
+	component: Component,
+	lines: string[],
+	handler: RenderedContentClickHandler,
+): void {
+	const metadata = renderedMetadata.get(lines) ?? {};
+	metadata.contentClickHandlers ??= new Map();
+	metadata.contentClickHandlers.set(component, handler);
+	renderedMetadata.set(lines, metadata);
+}
+
+export function getRenderedContentClickHandlers(
+	lines: string[],
+): ReadonlyMap<Component, RenderedContentClickHandler> | undefined {
+	return renderedMetadata.get(lines)?.contentClickHandlers;
+}
+
+export function getRenderedContainerOffsets(
+	lines: string[],
+): ReadonlyMap<Container, RenderedChildOffset[]> | undefined {
+	return renderedMetadata.get(lines)?.containerOffsets;
+}
+
 /**
  * Container - a component that contains other components
  */
@@ -237,11 +278,31 @@ export class Container implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		const offsets: RenderedChildOffset[] = [];
+		const containers = new Map<Container, RenderedChildOffset[]>();
+		const handlers = new Map<Component, RenderedContentClickHandler>();
 		for (const child of this.children) {
 			const childLines = child.render(width);
+			const start = lines.length;
+			offsets.push({ component: child, start, height: childLines.length });
+			for (const [container, ranges] of getRenderedContainerOffsets(childLines) ?? []) {
+				containers.set(
+					container,
+					ranges.map((range) => ({ ...range, start: start + range.start })),
+				);
+			}
+			for (const [component, handler] of getRenderedContentClickHandlers(childLines) ?? []) {
+				handlers.set(component, handler);
+			}
 			for (const line of childLines) {
 				lines.push(line);
 			}
+		}
+		// An override can prepend headers, padding, or reorder rows after super.render.
+		// Such components are opaque unless they provide their own layout node.
+		if (this.render === Container.prototype.render) {
+			containers.set(this, offsets);
+			renderedMetadata.set(lines, { containerOffsets: containers, contentClickHandlers: handlers });
 		}
 		return lines;
 	}

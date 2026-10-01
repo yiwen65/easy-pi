@@ -35,7 +35,9 @@ test("subagent mouse controls keep activity human-readable and diagnostics opt-i
 	const scrollView = new ScrollView(group, { primary: true });
 	const copySelection = vi.fn(async () => true);
 	const tui = new TuiAltScreen(terminal, undefined, undefined, {
-		onContentClick: (click) => click.scrollView === scrollView && group.handleOverviewClick(click.row, width),
+		onContentClick: (click) =>
+			click.scrollView === scrollView &&
+			(tui.getRenderedContentClickHandler(scrollView, group)?.(click.row, click.col) ?? false),
 		copySelection,
 	});
 	const text = () => terminal.getViewport().join("\n");

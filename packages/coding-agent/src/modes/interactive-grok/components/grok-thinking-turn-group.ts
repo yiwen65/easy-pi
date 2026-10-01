@@ -2,6 +2,7 @@ import {
 	Container,
 	Markdown,
 	type MarkdownTheme,
+	recordRenderedContentClickHandler,
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
@@ -9,8 +10,6 @@ import {
 import { LiveLineScroller } from "../../interactive/components/live-line-scroller.ts";
 import { theme } from "../../interactive/theme/theme.ts";
 import { flattenInline } from "./grok-inline-text.ts";
-
-const PREFIX = "✦ ";
 
 /**
  * One collapsed/expandable Thinking block shared by every assistant message in a turn.
@@ -33,6 +32,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	private expanded = false;
 	private markdown: Markdown | undefined;
 	private renderedRowCount = 0;
+	private disposed = false;
 
 	constructor(markdownTheme: MarkdownTheme, hiddenLabel: string, outputPad: number, userHidden: boolean, ui?: TUI) {
 		super();
@@ -75,6 +75,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 
 	/** Stop the idle scroll timer. Called when the group leaves the transcript. */
 	dispose(): void {
+		this.disposed = true;
 		this.scroller.dispose();
 	}
 
@@ -101,13 +102,15 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	}
 
 	private overviewLine(width: number): string {
-		const padLeft = " ".repeat(this.outputPad);
-		const contentWidth = Math.max(1, width - this.outputPad);
+		const pad = Math.min(this.outputPad, Math.max(0, width - 1));
+		const padLeft = " ".repeat(pad);
+		const contentWidth = width - pad;
+		const prefix = `${this.expanded ? "▾" : "▸"} ✦ `;
 		const liveThinking = this.userHidden || this.expanded ? undefined : this.latestThinking();
 		const body = liveThinking
-			? this.scroller.window(Math.max(1, contentWidth - visibleWidth(PREFIX)))
+			? this.scroller.window(Math.max(0, contentWidth - visibleWidth(prefix)))
 			: this.hiddenLabel;
-		const line = theme.italic(theme.fg("accent", `${PREFIX}${body}`));
+		const line = theme.italic(theme.fg("accent", `${prefix}${body}`));
 		return padLeft + truncateToWidth(line, contentWidth, "");
 	}
 
@@ -118,6 +121,14 @@ export class GrokThinkingTurnGroupComponent extends Container {
 		const lines =
 			!this.expanded || this.userHidden || !this.markdown ? [overview] : [overview, ...this.markdown.render(width)];
 		this.renderedRowCount = lines.length;
+		const rowCount = lines.length;
+		const expanded = this.expanded;
+		recordRenderedContentClickHandler(this, lines, (localRow) => {
+			if (this.disposed || this.userHidden || localRow < 0 || localRow >= rowCount || this.expanded !== expanded)
+				return false;
+			this.setExpanded(!expanded);
+			return true;
+		});
 		return lines;
 	}
 }

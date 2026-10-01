@@ -1,6 +1,7 @@
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { type Component, type OverlayHandle, Text, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, expect, test, vi } from "vitest";
@@ -15,6 +16,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBuiltInExtensions } from "../src/extensions/index.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { GrokTasksPanel } from "../src/modes/interactive-grok/components/grok-tasks-panel.ts";
 import { type GrokChromeTheme, GrokComponentFactory } from "../src/modes/interactive-grok/grok-component-factory.ts";
 
 const identity = (text: string) => text;
@@ -131,6 +133,9 @@ async function fixture(mode: "tui" | "rpc" = "tui") {
 			return panel!;
 		},
 		editorText: () => editorText,
+		setEditorText: (text: string) => {
+			editorText = text;
+		},
 		text: () => panel!.render(100).join("\n"),
 		key: (key: string) => panel!.handleInput!(key),
 		capture: async () => {
@@ -144,6 +149,170 @@ async function fixture(mode: "tui" | "rpc" = "tui") {
 		},
 	};
 }
+
+function panelFixture(
+	count = 8,
+	initialHeight = 8,
+	onInsertPath?: (path: string) => void,
+	keys = new KeybindingsManager(),
+) {
+	let records: BackgroundTaskRecord[] = Array.from({ length: count }, (_, index) => ({
+		id: `task-${index + 1}`,
+		command: `echo command-${index + 1}`,
+		cwd: "/tmp",
+		status: "running",
+		startedAt: Date.now() - 65_000 + index,
+		lastOutputAt: Date.now(),
+		outputPath: `/tmp/task-${index + 1}.log`,
+		promoted: false,
+	}));
+	let height = initialHeight;
+	const manager = {
+		list: () => records,
+		get: (id: string) => records.find((record) => record.id === id),
+		onStart: () => () => {},
+		onTerminal: () => () => {},
+		stallTimeoutMs: 0,
+		readOutput: () => ({ ok: true, value: { output: "test output", totalBytes: 11, truncated: false } }),
+	} as unknown as BackgroundTaskManager;
+	initTheme("dark");
+	const panel = new GrokTasksPanel({
+		manager,
+		theme,
+		keybindings: keys,
+		requestRender: () => {},
+		done: () => {},
+		height: () => height,
+		onInsertPath,
+	});
+	cleanups.push(async () => panel.dispose());
+	return {
+		panel,
+		records: () => records,
+		remove: (id: string) => {
+			records = records.filter((record) => record.id !== id);
+		},
+		resize: (value: number) => {
+			height = value;
+		},
+		text: (width = 80) => panel.render(width).join("\n"),
+	};
+}
+
+test("small task list keeps the selected row visible and Enter opens that row", () => {
+	const f = panelFixture();
+	for (let index = 0; index < 7; index++) {
+		f.panel.handleInput("\x1b[B");
+		expect(f.text()).toMatch(new RegExp(`›[^\\n]*task-${index + 2}`));
+	}
+	f.panel.handleInput("\r");
+	expect(f.text()).toContain("task-8");
+	expect(f.text()).toContain("$ echo command-8");
+});
+
+test("task selection follows identity across active/terminal sorting and removal", () => {
+	const f = panelFixture(4, 12);
+	f.text();
+	f.panel.handleInput("\x1b[B");
+	const selected = f.records()[1];
+	selected.status = "succeeded";
+	selected.endedAt = Date.now();
+	expect(f.text()).toMatch(/›[^\n]*task-2/);
+	f.panel.handleInput("\r");
+	expect(f.text()).toContain("$ echo command-2");
+	f.panel.handleInput("\x1b");
+	f.remove("task-2");
+	expect(f.text()).toMatch(/›[^\n]*task-4/);
+	f.panel.handleInput("\r");
+	expect(f.text()).toContain("$ echo command-4");
+});
+
+test("Enter reconciles sorting even before a repaint and removed watched tasks can return to list", () => {
+	const f = panelFixture(3, 12);
+	f.text();
+	f.panel.handleInput("\x1b[B");
+	f.records()[1].status = "failed";
+	f.records()[1].endedAt = Date.now();
+	f.records()[1].error = "process launch failed";
+	f.panel.handleInput("\r");
+	expect(f.text()).toContain("$ echo command-2");
+	expect(f.text()).toContain("Failed");
+	expect(f.text()).toContain("Error: process launch failed");
+	f.remove("task-2");
+	expect(f.text()).toContain("no longer exists");
+	f.panel.handleInput("\x1b");
+	expect(f.text()).toMatch(/›[^\n]*task-3/);
+	f.panel.handleInput("\x1b[A");
+	expect(f.text()).toMatch(/›[^\n]*task-1/);
+	f.remove("task-1");
+	f.remove("task-3");
+	expect(f.text()).toContain("No background tasks yet");
+	f.panel.handleInput("\r");
+	expect(f.text()).toContain("No background tasks yet");
+});
+
+test("paging, divider crossing, resizing and narrow widths keep selection bounded", () => {
+	const f = panelFixture(8, 8);
+	for (const record of f.records().slice(4)) {
+		record.status = "failed";
+		record.endedAt = record.startedAt;
+		record.exitCode = 3;
+	}
+	f.text();
+	for (let index = 0; index < 8; index++) {
+		f.panel.handleInput("\x1b[6~");
+		expect(f.text()).toMatch(/›[^\n]*task-/);
+	}
+	for (const height of [4, 5, 8, 12]) {
+		f.resize(height);
+		for (const width of [1, 4, 12, 40, 80]) {
+			const lines = f.panel.render(width);
+			expect(lines).toHaveLength(height);
+			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+			if (width >= 40) expect(lines.join("\n")).toMatch(/›[^\n]*task-/);
+		}
+	}
+	f.resize(8);
+	for (let index = 0; index < 8; index++) {
+		f.panel.handleInput("\x1b[5~");
+		expect(f.text()).toMatch(/›[^\n]*task-/);
+	}
+	expect(f.text()).toMatch(/›[^\n]*task-1/);
+});
+
+test("onInsertPath receives the full log path after the panel closes", () => {
+	const paths: string[] = [];
+	const f = panelFixture(1, 24, (path) => {
+		expect(f.panel.render(40)).toEqual([]);
+		paths.push(path);
+	});
+	const path = `/tmp/${"long-directory/".repeat(8)}task-1.log`;
+	f.records()[0].outputPath = path;
+	f.panel.handleInput("\r");
+	expect(f.text(40)).toContain("log …");
+	expect(f.text(40)).toContain("task-1.log");
+	expect(f.panel.render(40).every((line) => visibleWidth(line) <= 40)).toBe(true);
+	f.panel.handleInput("y");
+	expect(paths).toEqual([path]);
+});
+
+test("task panel remaps insert/latest and disables the original keys", () => {
+	const paths: string[] = [];
+	const keys = new KeybindingsManager({ "app.tasks.insertPath": "ctrl+i", "app.tasks.latest": "ctrl+e" });
+	const f = panelFixture(1, 24, (path) => paths.push(path), keys);
+	f.panel.handleInput("\r");
+	expect(f.text()).toContain("ctrl+i insert log path");
+	expect(f.text()).toContain("ctrl+e latest");
+	f.panel.handleInput("y");
+	expect(paths).toEqual([]);
+	f.panel.handleInput("\x1b[5~");
+	f.panel.handleInput("\x1b[F");
+	expect(Reflect.get(f.panel, "follow")).toBe(false);
+	f.panel.handleInput("\x05");
+	expect(Reflect.get(f.panel, "follow")).toBe(true);
+	f.panel.handleInput("\x09");
+	expect(paths).toEqual(["/tmp/task-1.log"]);
+});
 
 test("background tasks never write a footer status line", async () => {
 	const f = await fixture();
@@ -196,7 +365,7 @@ test("/tasks opens a read-only panel with live list, detail watch and clean clos
 	expect(list.indexOf(runningId)).toBeLessThan(list.indexOf(quickId));
 	// Finished rows show the task's runtime (start -> end), not how long ago it ended.
 	expect(list).not.toContain("ago");
-	expect(list).toMatch(new RegExp(`${quickId}\\s+Done\\s+\\d+s`));
+	expect(list).toMatch(new RegExp(`${quickId}\\s+Done\\s+\\d+(?:\\.\\d+)?s`));
 
 	// Detail view: watch the running task; panel keys never change manager state.
 	f.key("\r");
@@ -267,7 +436,7 @@ test("terminal results consumed via wait_for stay silent", async () => {
 	expect(f.statusCalls.at(-1)?.[1] ?? "").not.toContain("✗");
 });
 
-test("detail view follows newest output, detaches on page up, and y copies the log path", async () => {
+test("detail view follows newest output, detaches on page up, and y inserts the log path", async () => {
 	const f = await fixture();
 	const manager = f.session.backgroundTasks!;
 	const started = await manager.start("i=1; while [ $i -le 200 ]; do echo line-$i; i=$((i+1)); done", { cwd: f.cwd });
@@ -284,9 +453,13 @@ test("detail view follows newest output, detaches on page up, and y copies the l
 	f.key("\x1b[F"); // End: back to the newest output
 	await vi.waitFor(() => expect(f.text()).toContain("[latest]"));
 
-	f.key("y"); // copy path: panel closes and the log path lands in the editor
+	expect(f.text()).toContain("y insert log path");
+	expect(f.text()).not.toContain("copy log path");
+	f.setEditorText("  existing draft\n\n");
+	f.key("y"); // Insert path: panel closes and appends to the existing editor draft.
 	await open.command;
-	expect(f.editorText()).toContain(manager.get(id)!.outputPath);
+	expect(f.editorText()).toBe(`  existing draft\n\n${manager.get(id)!.outputPath}`);
+	expect(f.panel).toBeUndefined();
 });
 
 test("/tasks outside interactive mode reports JSON without opening UI", async () => {

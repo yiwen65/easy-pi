@@ -14,6 +14,7 @@ import type {
 	AgentRowState,
 	PiCollaborationMonitor,
 } from "../../../extensions/pi-collaboration-monitor.ts";
+import { formatWorkedDuration } from "../../../utils/duration.ts";
 import type { Theme } from "../../interactive/theme/theme.ts";
 
 const safe = (text: string) =>
@@ -34,25 +35,19 @@ const STATE_PRESENTATION: Record<
 	pending: { icon: "◌", word: "Pending", color: "dim" },
 	running: { icon: "●", word: "Running", color: "success" },
 	idle: { icon: "○", word: "Idle", color: "dim" },
-	completed: { icon: "✓", word: "Done", color: "dim" },
+	completed: { icon: "✓", word: "Completed", color: "dim" },
 	failed: { icon: "✗", word: "Failed", color: "error" },
 	interrupted: { icon: "⏸", word: "Interrupted", color: "warning" },
 	closed: { icon: "■", word: "Closed", color: "muted" },
 };
 
-function durationText(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
-	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
-}
-
 /** Running agents show active duration; settled agents show how long ago their last activity was. */
 function rowTime(row: AgentListRow, now: number): string {
 	const active = row.state === "running" || row.state === "pending" || row.state === "idle";
 	if (row.lastActivityAt === undefined) return "";
-	return active ? `${durationText(now - row.lastActivityAt)} active` : `${durationText(now - row.lastActivityAt)} ago`;
+	return active
+		? `${formatWorkedDuration(now - row.lastActivityAt)} active`
+		: `${formatWorkedDuration(now - row.lastActivityAt)} ago`;
 }
 
 function pad(text: string, width: number): string {

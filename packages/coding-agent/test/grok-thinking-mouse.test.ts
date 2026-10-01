@@ -15,7 +15,9 @@ test.each([false, true])("thinking mouse clicks toggle without copying (stationa
 	const scrollView = new ScrollView(group, { primary: true });
 	const copySelection = vi.fn(async () => true);
 	const tui = new TuiAltScreen(terminal, undefined, undefined, {
-		onContentClick: (click) => click.scrollView === scrollView && group.handleOverviewClick(click.row),
+		onContentClick: (click) =>
+			click.scrollView === scrollView &&
+			(tui.getRenderedContentClickHandler(scrollView, group)?.(click.row, click.col) ?? false),
 		copySelection,
 	});
 	tui.setLayoutRoot(scrollView);

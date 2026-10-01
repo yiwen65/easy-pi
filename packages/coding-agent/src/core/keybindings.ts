@@ -20,6 +20,9 @@ export interface AppKeybindings {
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
 	"app.tools.expand": true;
+	"app.transcript.toggle": true;
+	"app.tasks.insertPath": true;
+	"app.tasks.latest": true;
 	"app.thinking.toggle": true;
 	"app.prompt.prev": true;
 	"app.prompt.next": true;
@@ -92,6 +95,9 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
+	"app.transcript.toggle": { defaultKeys: "alt+o", description: "Select and toggle one transcript block" },
+	"app.tasks.insertPath": { defaultKeys: "y", description: "Task panel: insert full log path into draft" },
+	"app.tasks.latest": { defaultKeys: "end", description: "Task panel: follow newest output" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",

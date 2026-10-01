@@ -48,9 +48,11 @@ export function registerPiBackgroundTasks(pi: ExtensionAPI): void {
 							requestRender: () => tui.requestRender(),
 							done: () => done(),
 							height: () => Math.max(4, tui.terminal.rows),
-							onCopyPath: (path) => {
-								const existing = ctx.ui.getEditorText().trim();
-								ctx.ui.setEditorText(existing ? `${existing}\n${path}` : path);
+							// Insert into the main draft after closing the panel; this is not a clipboard action.
+							onInsertPath: (path) => {
+								const existing = ctx.ui.getEditorText();
+								const separator = existing && !existing.endsWith("\n") ? "\n" : "";
+								ctx.ui.setEditorText(`${existing}${separator}${path}`);
 							},
 						}),
 					{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center" } },

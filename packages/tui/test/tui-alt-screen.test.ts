@@ -14,6 +14,7 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 } from "../src/terminal-image.ts";
+import { Container } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -386,6 +387,49 @@ describe("TuiAltScreen", () => {
 		assert.ok(!terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b]52;")));
 		tui.stop();
 	});
+
+	for (const changedUrl of [false, true]) {
+		it(`validates the displayed release URL after reading-anchor movement (changed URL: ${changedUrl})`, async () => {
+			const terminal = new VirtualTerminal(30, 5);
+			const earlier = new Text("before0\nbefore1\nbefore2", 0, 0);
+			const oldUrl = "https://example.com/old";
+			const newUrl = "https://example.com/new";
+			const targetText = (url: string) =>
+				[hyperlink("click link", url), ...Array.from({ length: 29 }, (_, i) => `target${i}`)].join("\n");
+			const target = new Text(targetText(oldUrl), 0, 0);
+			const document = new Container();
+			document.addChild(earlier);
+			document.addChild(target);
+			const scroll = new ScrollView(document, { follow: "end" });
+			const urls: string[] = [];
+			const copied: string[] = [];
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				openUrl: (url) => urls.push(url),
+				copySelection: async (text) => {
+					copied.push(text);
+					return true;
+				},
+			});
+			tui.setLayoutRoot(scroll);
+			tui.start();
+			try {
+				tui.renderNow();
+				scroll.scrollTo(3);
+				tui.renderNow();
+				terminal.sendInput("\x1b[<0;6;1M");
+				earlier.setText(Array.from({ length: 10 }, (_, i) => `before${i}`).join("\n"));
+				if (changedUrl) target.setText(targetText(newUrl));
+				tui.renderNow();
+				assert.strictEqual(scroll.scrollTop, 10);
+				terminal.sendInput("\x1b[<0;6;1m");
+				await terminal.waitForRender();
+				assert.deepStrictEqual(urls, changedUrl ? [] : [oldUrl]);
+				assert.deepStrictEqual(copied, []);
+			} finally {
+				tui.stop({ preserveScreen: true });
+			}
+		});
+	}
 
 	it("keeps drag selection and falls through when the content click is not consumed", async () => {
 		const terminal = new RecordingTerminal(10, 2);

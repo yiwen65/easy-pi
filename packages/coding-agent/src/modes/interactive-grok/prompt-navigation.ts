@@ -11,6 +11,8 @@ export type PromptJumpDirection = -1 | 1;
 /**
  * Return the index into `promptStarts` to jump to, or undefined when there
  * are no prompts. `scrollTop` is the transcript's current top content row.
+ * `selectedIndex` advances an uninterrupted component-identity navigation
+ * sequence; the caller must invalidate it after manual scroll or geometry changes.
  *
  * - direction -1: nearest prompt strictly above the current top; wraps to
  *   the last prompt when already above the first one.
@@ -21,8 +23,13 @@ export function findPromptJumpTarget(
 	promptStarts: readonly number[],
 	scrollTop: number,
 	direction: PromptJumpDirection,
+	selectedIndex?: number,
 ): number | undefined {
 	if (promptStarts.length === 0) return undefined;
+	// A requested prompt may lie beyond the viewport's clamped scrollTop.
+	if (selectedIndex !== undefined && selectedIndex >= 0 && selectedIndex < promptStarts.length) {
+		return (selectedIndex + direction + promptStarts.length) % promptStarts.length;
+	}
 	if (promptStarts.length === 1) return 0;
 	if (direction < 0) {
 		for (let i = promptStarts.length - 1; i >= 0; i--) {

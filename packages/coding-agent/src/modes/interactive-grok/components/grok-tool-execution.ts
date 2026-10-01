@@ -94,6 +94,11 @@ export class GrokToolExecutionComponent extends ToolExecutionComponent {
 		super.setExpanded(expanded);
 	}
 
+	/** Disclosure state captured by the turn group when painting its controls. */
+	isExpanded(): boolean {
+		return this.grokExpanded;
+	}
+
 	/** Toggle the collapsed overview. Used by click-to-expand in the transcript. */
 	toggleExpanded(): void {
 		this.setExpanded(!this.grokExpanded);

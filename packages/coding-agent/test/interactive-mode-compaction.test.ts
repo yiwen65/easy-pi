@@ -1,5 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import { Container, ScrollView } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.ts";
@@ -326,8 +326,12 @@ describe("InteractiveMode compaction events", () => {
 			timestamp: 1,
 		});
 		const width = 100;
-		const scrollView = {};
+		const chatContainer = new Container();
+		chatContainer.addChild(component);
+		const scrollView = new ScrollView(chatContainer, { follow: "end" });
 		const fakeThis = {
+			chatContainer,
+			toggleTranscriptBlock: Reflect.get(InteractiveMode.prototype, "toggleTranscriptBlock"),
 			transcriptScrollView: scrollView,
 			transcriptContentWidth: () => width,
 			computeChatChildOffsets: () => [{ component, start: 0, height: component.render(width).length }],

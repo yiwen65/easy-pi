@@ -40,6 +40,7 @@ import {
 	Markdown,
 	matchesKey,
 	ProcessTerminal,
+	SelectList,
 	Spacer,
 	setKeybindings,
 	Text,
@@ -187,6 +188,7 @@ import {
 	getAvailableThemesWithPaths,
 	getEditorTheme,
 	getMarkdownTheme,
+	getSelectListTheme,
 	getThemeByName,
 	onThemeChange,
 	setRegisteredThemes,
@@ -908,6 +910,7 @@ export class InteractiveMode {
 			}
 		}
 		this.chatContainer.clear();
+		this.promptNavigation = undefined;
 		this.subagentRouter?.clear();
 		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
@@ -1325,6 +1328,8 @@ export class InteractiveMode {
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 			this.builtInHeader = new EasyPiStartupHeader({
 				expanded: this.getStartupExpansionState(),
+				getInteractionHint: () =>
+					`${this.getAppKeyDisplay("app.transcript.toggle")} local block · ${this.renderer.mode === "fullscreen" ? "click or keyboard" : "keyboard only; opens fullscreen"}`,
 				getTelemetry: () => {
 					return {
 						skills: this.session.resourceLoader.getSkills().skills.length,
@@ -1347,7 +1352,13 @@ export class InteractiveMode {
 						"to cycle models",
 					),
 					hint("app.model.select", "to select model"),
-					hint("app.tools.expand", "to expand tools"),
+					hint("app.tools.expand", "to expand all tools"),
+					hint(
+						"app.transcript.toggle",
+						this.renderer.mode === "fullscreen"
+							? "local block (click or keyboard)"
+							: "local block (keyboard only; opens fullscreen)",
+					),
 					hint("app.thinking.toggle", "to expand thinking"),
 					hint("app.editor.external", "for external editor"),
 					rawKeyHint("/", "for commands"),
@@ -3102,6 +3113,7 @@ export class InteractiveMode {
 		this.ui.onDebug = () => this.handleDebugCommand();
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
+		this.defaultEditor.onAction("app.transcript.toggle", () => this.showTranscriptToggleSelector());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => void this.handleOpenExternalEditor());
 		this.defaultEditor.onAction("app.message.copy", () => void this.handleCopyShortcut({ flashConfirmation: true }));
@@ -4513,6 +4525,11 @@ export class InteractiveMode {
 	 * Shared by transcript click hit-testing and user-prompt navigation.
 	 */
 	private computeChatChildOffsets(width: number): Array<{ component: Component; start: number; height: number }> {
+		if (this.renderer instanceof TuiAltScreen) {
+			if (!this.transcriptScrollView) return [];
+			// Hit-test only the displayed frame; changed children must not shift click targets.
+			return this.renderer.getRenderedChildOffsets(this.transcriptScrollView, this.chatContainer) ?? [];
+		}
 		let cursor = 0;
 		for (const child of this.documentContainer.children) {
 			if (child === this.chatContainer) break;
@@ -4538,8 +4555,26 @@ export class InteractiveMode {
 		const target = this.computeChatChildOffsets(width).find(
 			(entry) => click.row >= entry.start && click.row < entry.start + entry.height,
 		);
-		if (!target) return false;
+		if (!target || !this.chatContainer.children.includes(target.component)) return false;
 		const localRow = click.row - target.start;
+		const capturedHandler =
+			this.renderer instanceof TuiAltScreen
+				? this.renderer.getRenderedContentClickHandler(click.scrollView, target.component)
+				: undefined;
+		// A captured control map is authoritative, even when it rejects this row.
+		const toggled = capturedHandler
+			? capturedHandler(localRow, click.col)
+			: this.toggleTranscriptBlock(target.component, localRow, width);
+		if (toggled) {
+			// Detach before expansion changes layout; retain the reader's current anchor.
+			this.transcriptScrollView.scrollTo(this.transcriptScrollView.scrollTop, { disableFollow: true });
+			this.ui.requestRender();
+		}
+		return toggled;
+	}
+
+	private toggleTranscriptBlock(component: Component, localRow: number, width: number): boolean {
+		const target = { component };
 		let toggled = false;
 		if (target.component instanceof CompactionSummaryMessageComponent) {
 			toggled = target.component.handleContentClick(localRow, width);
@@ -4556,18 +4591,120 @@ export class InteractiveMode {
 		} else if (target.component instanceof GrokAssistantMessageComponent) {
 			toggled = target.component.handleThinkingLabelClick(localRow, width);
 		}
-		if (toggled) {
-			this.ui.requestRender();
-		}
 		return toggled;
 	}
 
+	private showTranscriptToggleSelector(): void {
+		const width = this.transcriptContentWidth();
+		const blocks = this.chatContainer.children.flatMap((component) => {
+			const kind =
+				component instanceof GrokThinkingTurnGroupComponent
+					? "Thinking"
+					: component instanceof GrokToolTurnGroupComponent
+						? "Tools"
+						: component instanceof BackgroundTaskGroupComponent
+							? "Background tasks"
+							: component instanceof SubagentGroupComponent
+								? "Subagent"
+								: component instanceof CompactionSummaryMessageComponent
+									? "Compaction"
+									: component instanceof GrokToolExecutionComponent
+										? "Tool"
+										: undefined;
+			if (!kind) return [];
+			const lines = component
+				.render(width)
+				.map((line) => sanitizeBinaryOutput(stripAnsi(line)).replace(/[\r\n\t]/g, " "));
+			const row =
+				component instanceof CompactionSummaryMessageComponent
+					? lines.findIndex((line) => line.includes("[compaction]"))
+					: 0;
+			if (row < 0 || !lines[row]) return [];
+			const state =
+				component instanceof GrokToolExecutionComponent
+					? component.isExpanded()
+						? "expanded"
+						: "collapsed"
+					: lines[row].trimStart().startsWith("▾")
+						? "expanded"
+						: lines[row].trimStart().startsWith("▸")
+							? "collapsed"
+							: "toggle details";
+			return [{ component, row, label: `${kind} · ${state} · ${lines[row].trim()}` }];
+		});
+		if (blocks.length === 0) {
+			this.showStatus("No foldable transcript blocks available");
+			return;
+		}
+		this.showSelector((done) => {
+			const container = new Container();
+			container.addChild(new Text(theme.bold("Toggle Transcript Block"), 0, 0));
+			container.addChild(
+				new Text(
+					theme.fg(
+						"muted",
+						this.renderer.mode === "fullscreen"
+							? "Fullscreen: click or keyboard · toggles only the selected block"
+							: "Regular: keyboard only · selecting opens fullscreen history",
+					),
+					0,
+					0,
+				),
+			);
+			const selector = new SelectList(
+				blocks.map((block, index) => ({ value: String(index), label: block.label })),
+				Math.max(1, Math.min(blocks.length, this.ui.terminal.rows - 6)),
+				getSelectListTheme(),
+			);
+			selector.onSelect = (item) => {
+				done();
+				const block = blocks[Number.parseInt(item.value, 10)];
+				if (!block || !this.chatContainer.children.includes(block.component)) {
+					this.ui.requestRender();
+					return;
+				}
+				// Regular mode has no interactive history viewport; selecting opts into fullscreen.
+				if (this.renderer.mode !== "fullscreen" && !this.switchTuiMode("fullscreen")) {
+					this.showStatus("Close active overlays before opening fullscreen history");
+					return;
+				}
+				if (block.component instanceof GrokToolExecutionComponent) {
+					block.component.toggleExpanded();
+				} else {
+					this.toggleTranscriptBlock(block.component, block.row, this.transcriptContentWidth());
+				}
+				if (this.renderer instanceof TuiAltScreen) this.renderer.renderNow();
+				const entry = this.computeChatChildOffsets(this.transcriptContentWidth()).find(
+					(entry) => entry.component === block.component,
+				);
+				if (entry) this.transcriptScrollView?.scrollTo(entry.start, { disableFollow: true });
+				this.ui.requestRender();
+			};
+			selector.onCancel = () => {
+				done();
+				this.ui.requestRender();
+			};
+			container.addChild(selector);
+			container.addChild(
+				new Text(
+					`${this.getAppKeyDisplay("app.transcript.toggle")}: local only · ${keyDisplayText("tui.select.confirm")} toggle · ${keyDisplayText("tui.select.cancel")} cancel`,
+					0,
+					0,
+				),
+			);
+			return { component: container, focus: selector };
+		});
+	}
+
 	private promptHighlight: { component: GrokUserMessageComponent; timer: ReturnType<typeof setTimeout> } | undefined;
+	private promptNavigation: { component: Component; revision: number; width: number; height: number } | undefined;
 
 	private ensurePromptNavigationViewport(): boolean {
 		if (!this.grokComponentFactory || !this.transcriptScrollView) return false;
-		if (this.renderer.mode === "fullscreen") return true;
-		return this.switchTuiMode("fullscreen");
+		if (this.renderer.mode !== "fullscreen" && !this.switchTuiMode("fullscreen")) return false;
+		// Keyboard commands may deliberately establish a first/current frame. Mouse never does.
+		if (this.renderer instanceof TuiAltScreen) this.renderer.renderNow();
+		return true;
 	}
 
 	private jumpToUserPrompt(direction: -1 | 1): void {
@@ -4582,10 +4719,19 @@ export class InteractiveMode {
 			this.showStatus("No user prompts to jump to");
 			return;
 		}
+		const navigation = this.promptNavigation;
+		const selectedIndex =
+			navigation &&
+			navigation.revision === transcriptScrollView.scrollRevision &&
+			navigation.width === width &&
+			navigation.height === transcriptScrollView.viewportHeight
+				? prompts.findIndex((prompt) => prompt.component === navigation.component)
+				: -1;
 		const targetIndex = findPromptJumpTarget(
 			prompts.map((prompt) => prompt.start),
 			transcriptScrollView.scrollTop,
 			direction,
+			selectedIndex >= 0 ? selectedIndex : undefined,
 		);
 		if (targetIndex === undefined) return;
 		const target = prompts[targetIndex];
@@ -4594,13 +4740,22 @@ export class InteractiveMode {
 	}
 
 	private scrollToTranscriptRow(start: number, component: Component): void {
-		this.transcriptScrollView?.scrollTo(start);
+		const scroll = this.transcriptScrollView;
+		if (!scroll) return;
+		scroll.scrollTo(start, { disableFollow: true });
+		this.promptNavigation = {
+			component,
+			revision: scroll.scrollRevision,
+			width: this.transcriptContentWidth(),
+			height: scroll.viewportHeight,
+		};
 		this.highlightUserPrompt(component);
 		this.ui.requestRender();
 	}
 
 	private scrollToUserPrompt(component: UserMessageComponent): void {
 		if (!this.transcriptScrollView) return;
+		if (this.renderer instanceof TuiAltScreen) this.renderer.renderNow();
 		const width = this.transcriptContentWidth();
 		const entry = this.computeChatChildOffsets(width).find((candidate) => candidate.component === component);
 		if (!entry) return;
@@ -6888,7 +7043,8 @@ export class InteractiveMode {
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
-| \`${expandTools}\` | Toggle tool output expansion |
+| \`${expandTools}\` | Toggle all tool output expansion (Diagnostics stays explicit) |
+| \`${this.getAppKeyDisplay("app.transcript.toggle")}\` | Toggle one transcript block; ${this.renderer.mode === "fullscreen" ? "click or keyboard" : "keyboard only; selection opens fullscreen history"} |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${promptPrev}\` / \`${promptNext}\` | Jump to previous/next user prompt (grok TUI) |
 | \`${promptList}\` | Open user prompt list to jump (grok TUI) |

@@ -1,5 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
-import { Container, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+	Container,
+	recordRenderedContentClickHandler,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
+import { formatWorkedDuration } from "../../../utils/duration.ts";
 import { theme } from "../theme/theme.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
@@ -37,14 +44,21 @@ const ACTIVITY_LABELS: Record<string, string> = {
 	close_agent: "Agent closed",
 };
 
-export interface MailboxEnvelope {
-	id?: string;
-	from?: string;
-	to?: string;
-	kind?: string;
-	status?: string;
-	text?: string;
-	resultValidation?: { contract?: string; outcome?: string; acceptance?: string };
+export interface MailboxEnvelope extends Record<string, unknown> {
+	id?: unknown;
+	from?: unknown;
+	to?: unknown;
+	kind?: unknown;
+	status?: unknown;
+	text?: unknown;
+	resultValidation?: unknown;
+}
+
+// Retain wire JSON without adding display metadata to the untrusted envelope itself.
+const mailboxEnvelopeWire = new WeakMap<MailboxEnvelope, string>();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export interface DeliverResultContract {
@@ -58,24 +72,23 @@ export interface DeliverResultContract {
 }
 
 /** Normalize a spawn/followup target to an absolute agent path. */
-export function normalizeAgentPath(name: string | undefined): string | undefined {
-	if (!name) return undefined;
+export function normalizeAgentPath(name: unknown): string | undefined {
+	if (typeof name !== "string" || !name) return undefined;
 	return name.startsWith("/") ? name : `/root/${name}`;
 }
 
 /** Extract the child a collaboration tool call belongs to, if any. */
 export function collaborationToolTarget(toolName: string, args: unknown): string | undefined {
 	if (!CHILD_BOUND_TOOL_NAMES.has(toolName)) return undefined;
-	const record = (args ?? {}) as Record<string, unknown>;
-	const raw =
-		toolName === "spawn_agent" ? (record.task_name as string | undefined) : (record.target as string | undefined);
+	if (!isRecord(args)) return undefined;
+	const raw = toolName === "spawn_agent" ? args.task_name : args.target;
 	return normalizeAgentPath(raw);
 }
 
 /** Full objective from delegation args; previews are truncated only at render time. */
 export function spawnObjective(args: unknown): string | undefined {
-	const task = (args as { task?: { objective?: unknown } } | undefined)?.task;
-	const objective = task?.objective;
+	const task = isRecord(args) ? args.task : undefined;
+	const objective = isRecord(task) ? task.objective : undefined;
 	if (typeof objective !== "string") return undefined;
 	return objective.trim() || undefined;
 }
@@ -86,39 +99,109 @@ export function parseMailboxEnvelope(content: unknown): MailboxEnvelope | undefi
 	if (typeof content === "string") text = content;
 	else if (Array.isArray(content)) {
 		text = content
-			.map((part) => part as { type?: string; text?: string })
-			.filter((part) => part.type === "text")
-			.map((part) => part.text ?? "")
+			.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "text")
+			.map((part) => (typeof part.text === "string" ? part.text : ""))
 			.join("\n");
 	}
-	const body = text.startsWith(MAILBOX_PREFIX) ? text.slice(MAILBOX_PREFIX.length).trim() : text.trim();
-	if (!body.startsWith("{")) return undefined;
+	const body = text.startsWith(MAILBOX_PREFIX) ? text.slice(MAILBOX_PREFIX.length) : text;
+	if (!body.trim().startsWith("{")) return undefined;
 	try {
-		const value = JSON.parse(body) as MailboxEnvelope;
-		return value && typeof value === "object" ? value : undefined;
+		const value: unknown = JSON.parse(body);
+		if (!isRecord(value)) return undefined;
+		mailboxEnvelopeWire.set(value, body);
+		return value;
 	} catch {
 		return undefined;
 	}
 }
 
-/** Parse the deliver_result payload inside an envelope; falls back to raw text. */
-export function parseDeliverResult(text: string | undefined): { contract?: DeliverResultContract; raw: string } {
-	if (!text) return { raw: "" };
-	try {
-		const value = JSON.parse(text) as DeliverResultContract;
-		if (value && typeof value === "object" && !Array.isArray(value)) return { contract: value, raw: text };
-	} catch {
-		// plain-text result
-	}
-	return { raw: text };
+type ResultOutcome = "succeeded" | "partial" | "blocked" | "failed";
+
+function knownOutcome(value: unknown): ResultOutcome | undefined {
+	return value === "succeeded" || value === "partial" || value === "blocked" || value === "failed" ? value : undefined;
 }
 
-function durationText(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
-	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+function normalizeResultValidation(value: unknown): { outcome?: ResultOutcome; warning?: string } {
+	if (value === undefined) return {};
+	if (!isRecord(value)) return { warning: "Format warning: invalid resultValidation" };
+	const outcome = knownOutcome(value.outcome);
+	if (
+		!["valid", "invalid", "not_completed"].includes(typeof value.contract === "string" ? value.contract : "") ||
+		("outcome" in value && outcome === undefined) ||
+		("acceptance" in value && value.acceptance !== "not_reviewed")
+	)
+		return { outcome, warning: "Format warning: invalid resultValidation" };
+	if (value.contract === "invalid" || value.contract === "not_completed")
+		return { outcome, warning: `Validation warning: ${value.contract}` };
+	return { outcome };
+}
+
+/** Narrow external fields before rendering; keep the original payload for diagnostics. */
+export function parseDeliverResult(text: unknown): {
+	contract?: DeliverResultContract;
+	raw: string;
+	displayText: string;
+	outcome?: ResultOutcome;
+	warning?: string;
+} {
+	if (text === undefined) return { raw: "", displayText: "" };
+	if (typeof text !== "string") {
+		let raw: string;
+		try {
+			raw = JSON.stringify(text) ?? String(text);
+		} catch {
+			raw = "(invalid result text; not serializable)";
+		}
+		return { raw, displayText: readableValue(text), warning: "Format warning: invalid result text" };
+	}
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		// Match the controller's tolerated fence/prose wrappers without changing the original text.
+		const start = text.indexOf("{");
+		const end = text.lastIndexOf("}");
+		if (start < 0 || end <= start) return { raw: text, displayText: text };
+		try {
+			value = JSON.parse(text.slice(start, end + 1));
+		} catch {
+			return { raw: text, displayText: text }; // plain-text result
+		}
+	}
+	if (!isRecord(value))
+		return { raw: text, displayText: readableValue(value), warning: "Format warning: invalid result object" };
+	const knownFields = ["summary", "outcome", "artifacts", "checks", "evidence", "risks", "resultValidation"];
+	if (!knownFields.some((field) => field in value)) return { raw: text, displayText: readableValue(value) };
+	const invalid = ["summary", "outcome"].filter((field) => field in value && typeof value[field] !== "string");
+	for (const field of ["artifacts", "checks", "evidence", "risks"]) {
+		if (field in value && !Array.isArray(value[field])) invalid.push(field);
+	}
+	const payloadOutcome = knownOutcome(value.outcome);
+	if ("outcome" in value && payloadOutcome === undefined && !invalid.includes("outcome")) invalid.push("outcome");
+	const validation = normalizeResultValidation(value.resultValidation);
+	const outcome = payloadOutcome ?? validation.outcome;
+	if (invalid.length > 0 || validation.warning?.startsWith("Format warning"))
+		return {
+			raw: text,
+			displayText: readableValue(value),
+			outcome,
+			warning: `Format warning: invalid ${invalid.join(", ") || "resultValidation"}`,
+		};
+	// All display-bearing fields have been checked; extra fields remain in raw diagnostics only.
+	const contract: DeliverResultContract = {};
+	if (typeof value.summary === "string") contract.summary = value.summary;
+	if (typeof value.outcome === "string") contract.outcome = value.outcome;
+	if (Array.isArray(value.artifacts)) contract.artifacts = value.artifacts;
+	if (Array.isArray(value.checks)) contract.checks = value.checks;
+	if (Array.isArray(value.evidence)) contract.evidence = value.evidence;
+	if (Array.isArray(value.risks)) contract.risks = value.risks;
+	return {
+		contract,
+		raw: text,
+		displayText: contract.summary ?? "(no summary supplied)",
+		outcome,
+		warning: validation.warning,
+	};
 }
 
 type SubagentState = "running" | "completed" | "failed" | "interrupted" | "closed";
@@ -127,7 +210,7 @@ const STATE_PRESENTATION: Record<
 	{ icon: string; word: string; color: "success" | "warning" | "error" | "muted" | "dim" }
 > = {
 	running: { icon: "●", word: "Running", color: "success" },
-	completed: { icon: "✓", word: "Done", color: "dim" },
+	completed: { icon: "✓", word: "Completed", color: "dim" },
 	failed: { icon: "✗", word: "Failed", color: "error" },
 	interrupted: { icon: "⏸", word: "Interrupted", color: "warning" },
 	closed: { icon: "■", word: "Closed", color: "muted" },
@@ -137,6 +220,9 @@ interface ResultMember {
 	envelope: MailboxEnvelope;
 	contract?: DeliverResultContract;
 	raw: string;
+	displayText: string;
+	outcome?: ResultOutcome;
+	warning?: string;
 	at: number;
 }
 
@@ -147,12 +233,15 @@ interface ActivityMember {
 	error?: string;
 }
 
-function readableValue(value: unknown): string {
+function readableValue(value: unknown, depth = 0): string {
 	if (typeof value === "string") return value;
-	if (Array.isArray(value)) return value.map(readableValue).join(", ");
 	if (value !== null && typeof value === "object") {
+		// Display normalization must not recurse through arbitrary external JSON depth.
+		// Original payloads stay intact in Diagnostics; shallow structured fields remain readable.
+		if (depth >= 8) return "(nested data; open Diagnostics)";
+		if (Array.isArray(value)) return value.map((item) => readableValue(item, depth + 1)).join(", ");
 		return Object.entries(value)
-			.map(([key, item]) => `${key}: ${readableValue(item)}`)
+			.map(([key, item]) => `${key}: ${readableValue(item, depth + 1)}`)
 			.join(" · ");
 	}
 	return String(value);
@@ -275,13 +364,23 @@ export class SubagentGroupComponent extends Container {
 	/** Register a delivered mailbox result belonging to this child. */
 	addMailboxResult(envelope: MailboxEnvelope, at?: number): void {
 		this.established = true;
-		const { contract, raw } = parseDeliverResult(envelope.text);
+		const { contract, raw, displayText, outcome, warning } = parseDeliverResult(envelope.text);
+		const validation = normalizeResultValidation(envelope.resultValidation);
 		if (envelope.status === "completed") this.state = "completed";
 		else if (envelope.status === "failed") this.state = "failed";
 		else if (envelope.status === "interrupted") this.state = "interrupted";
 		this.endedAt = at ?? Date.now();
-		this.resultSummary = contract ? oneLine(contract.summary ?? "(no summary supplied)") : oneLine(raw);
-		this.results.push({ envelope, contract, raw, at: Date.now() });
+		this.resultSummary = oneLine(displayText);
+		this.results.push({
+			envelope,
+			contract,
+			raw,
+			displayText,
+			outcome: outcome ?? validation.outcome,
+			warning:
+				[...new Set([warning, validation.warning].filter((item) => item !== undefined))].join(" · ") || undefined,
+			at: Date.now(),
+		});
 	}
 
 	get resultCount(): number {
@@ -291,20 +390,59 @@ export class SubagentGroupComponent extends Container {
 	/** Work duration: delegation → completion (or now while still running). */
 	private elapsed(now: number): string {
 		const start = this.startedAt ?? now;
-		return durationText((this.endedAt ?? now) - start);
+		return formatWorkedDuration((this.endedAt ?? now) - start);
 	}
 
 	private headerLine(width: number, now: number): string {
 		const presentation = STATE_PRESENTATION[this.state];
 		const summary = this.state === "running" ? this.objective : (this.resultSummary ?? this.objective);
 		const name = oneLine(this.agentPath.replace(/^\/root\//, ""));
-		return truncateToWidth(
+		const latest = this.results.at(-1);
+		const outcome = this.state !== "running" ? latest?.outcome : undefined;
+		const compact = width < 60;
+		const separator = compact ? " " : " · ";
+		const badge = latest?.warning
+			? latest.warning.includes("Format warning")
+				? "!format"
+				: latest.warning.includes("not_completed")
+					? "!incomplete"
+					: "!invalid"
+			: undefined;
+		const prefix =
 			theme.fg("muted", this.expanded ? "▾ " : "▸ ") +
-				theme.fg(presentation.color, `${presentation.icon} `) +
-				theme.fg("accent", name) +
-				theme.fg(presentation.color, ` · ${presentation.word}`) +
-				theme.fg("muted", ` · ${this.elapsed(now)}`) +
-				(!this.expanded && summary ? theme.fg("dim", ` · ${oneLine(summary)}`) : ""),
+			(!compact ? theme.fg(presentation.color, `${presentation.icon} `) : "");
+		const metadata =
+			theme.fg(presentation.color, `${separator}${presentation.word}`) +
+			(outcome
+				? theme.fg(
+						outcome === "succeeded" ? "dim" : "warning",
+						`${separator}${compact ? "out:" : "Outcome: "}${outcome}`,
+					)
+				: "") +
+			(badge ? theme.fg("warning", `${separator}${badge}`) : "");
+		const preview = !this.expanded && summary ? oneLine(summary) : "";
+		const minimumPreview = Math.min(8, visibleWidth(preview));
+		const duration = theme.fg("muted", `${separator}${this.elapsed(now)}`);
+		// Critical state/outcome/warning wins over time and identity. Reserve a readable newest preview
+		// when possible rather than letting a long name or warning consume the entire collapsed row.
+		const showDuration =
+			visibleWidth(prefix + metadata + duration) + 1 + (preview ? separator.length + minimumPreview : 0) <= width;
+		const available = Math.max(0, width - visibleWidth(prefix + metadata + (showDuration ? duration : "")));
+		const previewReserve =
+			preview && available >= 1 + separator.length + minimumPreview
+				? Math.min(20, visibleWidth(preview), available - 1 - separator.length)
+				: 0;
+		const nameWidth = Math.min(
+			visibleWidth(name),
+			Math.max(0, available - (previewReserve ? separator.length + previewReserve : 0)),
+		);
+		const previewWidth = Math.max(0, available - nameWidth - separator.length);
+		return truncateToWidth(
+			prefix +
+				theme.fg("accent", truncateToWidth(name, nameWidth, "…")) +
+				metadata +
+				(showDuration ? duration : "") +
+				(previewReserve ? theme.fg("dim", `${separator}${truncateToWidth(preview, previewWidth, "…")}`) : ""),
 			width,
 		);
 	}
@@ -315,7 +453,11 @@ export class SubagentGroupComponent extends Container {
 			const result = this.results[index];
 			const title = this.results.length > 1 ? `Result ${index + 1}` : "Result";
 			lines.push("", truncateToWidth(theme.fg("accent", title), width));
-			const text = result.contract ? (result.contract.summary ?? "(no summary supplied)") : result.raw;
+			if (result.outcome)
+				lines.push(...wrapTextWithAnsi(`Outcome: ${result.outcome}`, width).map((line) => theme.fg("muted", line)));
+			if (result.warning)
+				lines.push(...wrapTextWithAnsi(result.warning, width).map((line) => theme.fg("warning", line)));
+			const text = result.displayText;
 			lines.push(...wrapTextWithAnsi(safe(text || "(empty result)"), width).map((line) => theme.fg("text", line)));
 			if (result.contract) {
 				lines.push(...sectionLines("Artifacts", result.contract.artifacts ?? [], width));
@@ -398,7 +540,16 @@ export class SubagentGroupComponent extends Container {
 			}
 			if (this.results.length > 0) lines.push(truncateToWidth(theme.fg("muted", "Result envelopes"), width));
 			for (const result of this.results) {
-				lines.push(...wrapTextWithAnsi(safe(JSON.stringify(result.envelope, null, 2)), width));
+				let diagnostic: string;
+				try {
+					diagnostic = JSON.stringify(result.envelope, null, 2);
+				} catch {
+					// Deep JSON can exceed stringify's stack even though the original wire was valid.
+					diagnostic =
+						mailboxEnvelopeWire.get(result.envelope) ??
+						"(Format warning: result envelope not serializable; original JSON unavailable)";
+				}
+				lines.push(...wrapTextWithAnsi(safe(diagnostic), width));
 			}
 		}
 		return { lines, controls };
@@ -435,7 +586,37 @@ export class SubagentGroupComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		return this.layout(width).lines;
+		const { lines, controls } = this.layout(width);
+		const expanded = this.expanded;
+		const activityExpanded = this.activityExpanded;
+		const diagnosticsExpanded = this.diagnosticsExpanded;
+		const diagnosticTool = this.diagnosticTool;
+		const rowCount = lines.length;
+		recordRenderedContentClickHandler(this, lines, (localRow) => {
+			if (localRow < 0 || localRow >= rowCount || this.expanded !== expanded) return false;
+			if (localRow === 0) {
+				this.setExpanded(!expanded);
+				return true;
+			}
+			const target = controls.get(localRow);
+			if (!target) return false;
+			if (target === "activity") this.activityExpanded = !activityExpanded;
+			else if (target === "diagnostics") this.diagnosticsExpanded = !diagnosticsExpanded;
+			else {
+				if (
+					this.diagnosticsExpanded !== diagnosticsExpanded ||
+					!this.activities.some((activity) => activity.component === target) ||
+					!this.children.includes(target)
+				)
+					return false;
+				const open = diagnosticTool !== target;
+				this.diagnosticTool?.setExpanded(false);
+				this.diagnosticTool = open ? target : undefined;
+				target.setExpanded(open);
+			}
+			return true;
+		});
+		return lines;
 	}
 }
 

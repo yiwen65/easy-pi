@@ -270,6 +270,88 @@ test("long agents list keeps the selection, draft and action notice visible thro
 	}
 });
 
+test("agent durations share readable units for activity and age", () => {
+	initTheme("dark");
+	const clock = vi.spyOn(Date, "now").mockReturnValue(65_000);
+	const row: AgentListRow = {
+		task_name: "/root/worker",
+		status: "running",
+		state: "running",
+		loaded: true,
+		model: "faux",
+		lastActivityAt: 0,
+	};
+	const monitor = { list: () => [row], subscribe: () => () => {} } as unknown as PiCollaborationMonitor;
+	const panel = new GrokAgentsPanel({
+		monitor,
+		theme,
+		keybindings: new KeybindingsManager(),
+		height: () => 10,
+		requestRender: () => {},
+		done: () => {},
+	});
+	try {
+		expect(stripVTControlCharacters(panel.render(100).join("\n"))).toContain("1m 5s active");
+		row.state = "failed";
+		expect(stripVTControlCharacters(panel.render(100).join("\n"))).toContain("1m 5s ago");
+		clock.mockReturnValue(800);
+		expect(stripVTControlCharacters(panel.render(100).join("\n"))).toContain("0.8s ago");
+	} finally {
+		panel.dispose();
+		clock.mockRestore();
+	}
+});
+
+test("completed agent lifecycle does not imply a successful task outcome", () => {
+	initTheme("dark");
+	const rows: AgentListRow[] = [
+		{ task_name: "/root", status: "idle", state: "idle", loaded: true, model: "root" },
+		{
+			task_name: "/root/worker",
+			status: "completed",
+			state: "completed",
+			loaded: false,
+			model: "faux",
+			resultSummary: "outcome: failed",
+		},
+	];
+	const monitor = {
+		list: () => rows,
+		subscribe: () => () => {},
+		readHistory: async () => {},
+		view: () => ({
+			path: "/root/worker",
+			status: "completed",
+			state: "completed",
+			loaded: false,
+			model: "faux",
+			text: "outcome: failed",
+		}),
+	} as unknown as PiCollaborationMonitor;
+	const panel = new GrokAgentsPanel({
+		monitor,
+		theme,
+		keybindings: new KeybindingsManager(),
+		height: () => 24,
+		requestRender: () => {},
+		done: () => {},
+	});
+	try {
+		for (const inspect of [false, true]) {
+			if (inspect) {
+				panel.handleInput("\x1b[B");
+				panel.handleInput("\r");
+			}
+			const text = stripVTControlCharacters(panel.render(100).join("\n"));
+			expect(text).toContain("Completed");
+			expect(text).toContain("outcome: failed");
+			expect(text).not.toMatch(/\bDone\b|\bSucceeded\b/);
+		}
+	} finally {
+		panel.dispose();
+	}
+});
+
 test("default Grok command observes live native child; message/busy/interrupt target only the selection", async () => {
 	const f = await fixture();
 	const child = holdChild(f);
@@ -330,7 +412,7 @@ test.each(["git", "non-git"])(
 		await vi.waitFor(() => expect(child.childTurns).toBe(2));
 		expect(await readFile(join(f.cwd, "shared.txt"), "utf8")).toBe("shared edit");
 		child.release(fauxAssistantMessage("live 中文 output\u001b[?1049l safe"));
-		await vi.waitFor(() => expect(f.text()).toContain("Done"));
+		await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 		expect(f.renders.some((text) => text.includes("live 中文 output"))).toBe(true);
 		expect(f.text()).not.toContain("\x1b[?1049l");
 		f.key("\x1b");
@@ -385,7 +467,7 @@ test.each(["version", "oversized", "symlink"])(
 		await child.ready;
 		child.release(fauxAssistantMessage("retained answer"));
 		const showing = await f.show();
-		await vi.waitFor(() => expect(f.text()).toContain("Done"));
+		await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 		f.key("\x1b");
 		await showing.command;
 		const team = join(f.cwd, "agent", "teams", f.session.sessionId);
@@ -474,7 +556,7 @@ test("settled rows show the result summary and detail follows the newest activit
 	await child.ready;
 	child.release(fauxAssistantMessage(Array.from({ length: 120 }, (_, i) => `worker line ${i}`).join("\n")));
 	const { command } = await f.show();
-	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 	// settled row carries the result first line
 	expect(f.text()).toContain("worker line 0");
 
@@ -508,7 +590,7 @@ test("child terminal toast fires when the panel is closed and stays silent while
 
 	// panel open: the next settle stays silent
 	const opened = await f.show();
-	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 	f.key("\x1b[B");
 	f.key("\x06");
 	f.key(JSON.stringify(followupArgs("/root/worker", "second task")));
@@ -516,7 +598,7 @@ test("child terminal toast fires when the panel is closed and stays silent while
 	await vi.waitFor(() => expect(f.text()).toContain("Task accepted"));
 	await vi.waitFor(() => expect(child.childTurns).toBe(2));
 	child.release(fauxAssistantMessage("second done"));
-	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 	await new Promise((resolve) => setTimeout(resolve, 700));
 	expect(f.notices.filter((notice) => notice.includes("/root/worker"))).toHaveLength(1);
 
@@ -591,7 +673,7 @@ test("operator followup diagnostics retain the draft and show a corrective hint 
 	await child.ready;
 	child.release(fauxAssistantMessage("done"));
 	const { command } = await f.show();
-	await vi.waitFor(() => expect(f.text()).toContain("Done"));
+	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 	f.key("\x1b[B");
 	f.key("\r");
 	const calls = f.faux.state.callCount;

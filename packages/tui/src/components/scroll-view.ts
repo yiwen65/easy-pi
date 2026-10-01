@@ -1,7 +1,12 @@
 import { LAYOUT_NODE, type ScrollLayoutNode } from "../layout-node.ts";
-import { type Component, Container } from "../tui.ts";
+import { type Component, Container, type RenderedChildOffset } from "../tui.ts";
 
 export type ScrollViewScrollbar = "hidden" | "auto" | "always";
+
+/** Internal captured layout geometry for reading anchors, not the child-offset API. */
+export interface ScrollViewContentRange extends RenderedChildOffset {
+	depth: number;
+}
 
 export interface ScrollViewOptions {
 	axis?: "vertical";
@@ -27,6 +32,8 @@ export class ScrollView extends Container {
 	private currentScrollbar: ScrollViewScrollbar;
 	private readonly scrollbarHideDelayMs: number;
 	private currentScrollTop = 0;
+	private currentScrollRevision = 0;
+	private contentRanges: ScrollViewContentRange[] = [];
 	private contentHeight = 0;
 	private currentViewportHeight = 0;
 	private followingEnd: boolean;
@@ -54,6 +61,11 @@ export class ScrollView extends Container {
 
 	get scrollTop(): number {
 		return this.currentScrollTop;
+	}
+
+	/** Explicit scroll requests, including clamped requests; excludes layout anchor maintenance. */
+	get scrollRevision(): number {
+		return this.currentScrollRevision;
 	}
 
 	get isAtEnd(): boolean {
@@ -121,6 +133,7 @@ export class ScrollView extends Container {
 	}
 
 	scrollTo(scrollTop: number, options: ScrollViewScrollToOptions = {}): void {
+		this.currentScrollRevision += 1;
 		const requested = Number.isFinite(scrollTop) ? Math.trunc(scrollTop) : this.currentScrollTop;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const next = Math.max(0, Math.min(maxScrollTop, requested));
@@ -144,6 +157,7 @@ export class ScrollView extends Container {
 	scrollBy(lines: number): number {
 		const requested = Number.isFinite(lines) ? Math.trunc(lines) : 0;
 		if (requested === 0) return 0;
+		this.currentScrollRevision += 1;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
 		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
@@ -158,6 +172,7 @@ export class ScrollView extends Container {
 	}
 
 	scrollToStart(): void {
+		this.currentScrollRevision += 1;
 		const changed =
 			this.currentScrollTop !== 0 ||
 			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
@@ -171,6 +186,7 @@ export class ScrollView extends Container {
 	}
 
 	scrollToEnd(): void {
+		this.currentScrollRevision += 1;
 		const next = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const changed = this.currentScrollTop !== next || this.followingEnd !== this.followEnd;
 		this.currentScrollTop = next;
@@ -180,6 +196,61 @@ export class ScrollView extends Container {
 			this.markScrollbarActivity();
 			this.requestRenderCallback?.();
 		}
+	}
+
+	/** Restore reading position by identity before clamping to this frame's viewport. */
+	updateContentRanges(ranges: ScrollViewContentRange[]): void {
+		if (!this.followingEnd) {
+			const anchor = this.contentRanges
+				.filter(
+					(range) => range.start <= this.currentScrollTop && this.currentScrollTop < range.start + range.height,
+				)
+				.sort((a, b) => a.height - b.height || b.depth - a.depth)[0];
+			if (anchor) {
+				const replacement = ranges.find((range) => range.component === anchor.component && range.height > 0);
+				if (replacement) {
+					this.currentScrollTop =
+						replacement.start + Math.min(this.currentScrollTop - anchor.start, replacement.height - 1);
+				} else {
+					// Prefer the next surviving neighbour, then the previous one.
+					// If neither survives, retain a local row in the nearest parent.
+					const neighbours = [
+						...this.contentRanges
+							.filter((range) => range.start >= anchor.start + anchor.height)
+							.sort((a, b) => a.start - b.start),
+						...this.contentRanges
+							.filter((range) => range.start + range.height <= anchor.start)
+							.sort((a, b) => b.start - a.start),
+					];
+					let restored = false;
+					for (const neighbour of neighbours) {
+						const survivor = ranges.find((range) => range.component === neighbour.component && range.height > 0);
+						if (!survivor) continue;
+						this.currentScrollTop = survivor.start;
+						restored = true;
+						break;
+					}
+					if (!restored) {
+						const parents = this.contentRanges
+							.filter(
+								(range) =>
+									range.depth < anchor.depth &&
+									range.start <= anchor.start &&
+									range.start + range.height >= anchor.start + anchor.height,
+							)
+							.sort((a, b) => b.depth - a.depth);
+						for (const parent of parents) {
+							const survivor = ranges.find((range) => range.component === parent.component && range.height > 0);
+							if (!survivor) continue;
+							this.currentScrollTop =
+								survivor.start + Math.min(this.currentScrollTop - parent.start, survivor.height - 1);
+							break;
+						}
+					}
+				}
+			}
+		}
+		this.contentRanges = ranges;
 	}
 
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {

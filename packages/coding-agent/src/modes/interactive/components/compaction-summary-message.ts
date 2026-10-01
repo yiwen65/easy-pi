@@ -1,4 +1,11 @@
-import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	Box,
+	Markdown,
+	type MarkdownTheme,
+	recordRenderedContentClickHandler,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 
@@ -30,6 +37,25 @@ export class CompactionSummaryMessageComponent extends Box {
 		if (!this.expanded && !line.includes("[compaction]") && !line.includes("Compacted")) return false;
 		this.setExpanded(!this.expanded);
 		return true;
+	}
+
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		const expanded = this.expanded;
+		const rowCount = lines.length;
+		const headers = new Set<number>();
+		if (!expanded) {
+			for (let row = 0; row < lines.length; row++) {
+				if (lines[row]!.includes("[compaction]") || lines[row]!.includes("Compacted")) headers.add(row);
+			}
+		}
+		recordRenderedContentClickHandler(this, lines, (localRow) => {
+			if (this.expanded !== expanded || localRow < 0 || localRow >= rowCount) return false;
+			if (!expanded && !headers.has(localRow)) return false;
+			this.setExpanded(!expanded);
+			return true;
+		});
+		return lines;
 	}
 
 	override invalidate(): void {

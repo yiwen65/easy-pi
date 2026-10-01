@@ -1,8 +1,17 @@
-import type { ScrollView } from "./components/scroll-view.ts";
+import type { ScrollView, ScrollViewContentRange } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import {
+	type Component,
+	Container,
+	CURSOR_MARKER,
+	compositeTuiLine,
+	getRenderedContainerOffsets,
+	getRenderedContentClickHandlers,
+	type RenderedChildOffset,
+	type RenderedContentClickHandler,
+} from "./tui.ts";
 import { extractAnsiCode, getGraphemeCellRange, sliceByColumn, visibleWidth } from "./utils.ts";
 
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
@@ -24,6 +33,8 @@ export interface LayoutBox {
 	lineOffset?: number;
 	scrollView?: ScrollView;
 	scrollContentLines?: readonly string[];
+	containerOffsets?: ReadonlyMap<Container, RenderedChildOffset[]>;
+	contentClickHandlers?: ReadonlyMap<Component, RenderedContentClickHandler>;
 	layer: number;
 }
 
@@ -122,6 +133,13 @@ function layoutComponent(
 			clip: intersect(clip, { x, y, width: safeWidth, height: allocatedHeight }),
 			children: [],
 			lines,
+			containerOffsets: new Map(
+				[...(getRenderedContainerOffsets(lines) ?? [])].map(([container, ranges]) => [
+					container,
+					ranges.map((range) => ({ ...range })),
+				]),
+			),
+			contentClickHandlers: new Map(getRenderedContentClickHandlers(lines)),
 			lineOffset,
 			layer: 0,
 		};
@@ -141,9 +159,27 @@ function layoutComponent(
 		);
 		const contentHeight = childBox.rect.height;
 		const viewportHeight = height === undefined ? contentHeight : Math.max(0, Math.floor(height));
+		const scrollView = node.state as ScrollView;
+		const ranges: ScrollViewContentRange[] = [];
+		const collect = (box: LayoutBox, depth: number): void => {
+			const start = box.rect.y - childBox.rect.y;
+			ranges.push({ component: box.component, start, height: box.rect.height, depth });
+			// Walk captured parent/child relationships, not live Container.children.
+			// Equal bounds are common for single-child containers; depth identifies
+			// the reading leaf without relying on incidental metadata map order.
+			const collectContainer = (container: Container, parentDepth: number): void => {
+				for (const range of box.containerOffsets?.get(container) ?? []) {
+					ranges.push({ ...range, start: start + range.start, depth: parentDepth + 1 });
+					if (range.component instanceof Container) collectContainer(range.component, parentDepth + 1);
+				}
+			};
+			if (box.component instanceof Container) collectContainer(box.component, depth);
+			if (!box.scrollView) for (const child of box.children) collect(child, depth + 1);
+		};
+		collect(childBox, 0);
+		scrollView.updateContentRanges(ranges);
 		node.state.updateLayout(contentHeight, viewportHeight, context.requestRender);
 		translateBox(childBox, previousScrollTop - node.state.scrollTop);
-		const scrollView = node.state as ScrollView;
 		if (node.state.primary || !context.primaryScrollView) context.primaryScrollView = scrollView;
 		const rect = { x, y, width: safeWidth, height: viewportHeight };
 		const childClip = intersect(clip, rect);
