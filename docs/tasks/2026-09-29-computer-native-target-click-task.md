@@ -309,6 +309,15 @@
 - 第二冻结包`computer-native-drag-candidate2` manifest `f7204c54a1f30159d768969bffca0747ac48aedadcf9906f39ec206c9bf307fe`、native `1e366c595018d531e4aa3854fda220e78aa605133addfb58b51c135cc19485ce`、bridge `995375d60e0b5056664db53c3d70796a690ab73f2a10a9f3351d816dc9d7a8d1`。`drag-capture-association-2`已成功取得关联图像，但夹具误将公开工具抛出的预期stale_observation当失败，clean0a3c；仅修正独立夹具的预期错误捕获后`-3`通过：新图像关联可读，observe后旧图像仍拒绝，页面downs/ups均0，正常关闭clean0a3d。旧失败包和脚本保留；这不是拖拽替换缺陷已修复或安装资格。
 - 最新完整root check未通过：共享worktree的interactive-mode.ts/transcript-interaction.test.ts缺少app.transcript.toggle类型和showTranscriptToggleSelector方法（3项错误），属于其他会话TUI改动，未替其修改；四处检查前干净文件的formatter副作用已逐块撤回，其他dirty工作保留。两个冻结旧候选已恢复原路径；安装版bridge/native再次核对仍a28cd243/a1f1aea2。当前无运行GUI，持续Goal仍active；下一步接入原生拖拽身份/实时命中/路径遮挡guard，再完成全部负例及真实模型，未安装任何候选。
 
+### 2026-10-02 drag dispatch guard and stronger path counterexample
+
+- 在隔离工作源接入同窗拖拽候选：复用图像关联的原缓存，按实时CFEqual命中选取原有起终点元素，沿用原生目标点击的原始身份/几何/父链检查；完整24逻辑点走廊像素在移动前及按下前检查。窗口身份、Space、实时可见遮挡在完整路径及每次拖动派发前检查；按下后的源元素仍须属于原窗口，取消或失败由既有Events排空释放。其他坐标动作和跨窗拖拽不改。没有新模型动作、第二缓存或输入重放。缺少关联AX证据拒绝，复合拖拽段受已派发边界限制；这些限制尚须通用场景验证，不算已安装功能变更。
+- 冻结独立`computer-native-drag-candidate3`，manifest `81c3b39acf439bf9a0c4d6457b30d79f9ec01c015995a33f0d86e894008cc666`、native `291b6a4945e3b513a60ff2572d98fe0eb6cae1e11f391be8446b625921c06575`、bridge `49e0c20dbb0fc811a1e97574a71d23ec248d5975bb8a5b6777f6aecd7a68ee0a`。builder和全部源材料随manifest逐文件核对；新drag.rs明确加入源库存，父候选2保持不变。release构建及canonical UniFFI --check通过、未新增ABI。当前定向像素8/8、target_click4/4、路径窗矩形1/1；既有native警告未扩散修改。
+- `navigation-paint.eCQmJA/drag-guard-*`共11个独立owned CfT尝试：7项达到各自oracle（stable-1、replace-1、distant-2、move-1、cover-1、transparent-obstacle-3、obstacle-1）；3项未触达拖拽（distant-1、transparent-obstacle-1/2的discover缺少新建窗口，包含2秒有界只读发现后仍失败一次）；1项真正路径保护失败（toggle-obstacle-1）。不合并成benchmark成功率，原失败全部保留。所有feature/CfT正常关闭并全进程组排空，clean0a3e–0a48。
+- 原先同外观替换误派发回归在候选3返回stale_session_observation、not_dispatched/inputCommitted=false，页面downs=0/ups=0/replaced=true；稳定及远处文字变化均downs=1/ups=1。它们只证明该按钮的派发/释放与替换边界，不证明drag-box完成或性能提升。初版负例断言随后加强为必须明确not_dispatched/inputCommitted=false；之后三个负例通过，早期通过不倒推新的断言覆盖。
+- 更强反例`drag-guard-toggle-obstacle-1`：截图前已存在透明原生按钮，pointer-events:none；截图后只改为auto，外观、AX身份和几何未变。起终点检查及窗口遮挡均未发现页内中段变化，实际downs=1/ups=1，负例失败、clean0a47。原子化像素加端点身份仍不足以证明完整路径输入接收者不变；新插入透明元素的先前通过不能覆盖此例。候选3不得安装。下一轮在此保留反例上验证路径中段的原生命中证据，避免以矩形重叠盲猜原意图或简单拒绝所有正常多控件/列表拖拽来换绿；还须覆盖canvas、滑块、排序、取消释放和真实模型drag-box。
+- 本轮完整root npm run check exit0；四个原先干净文件的formatter副作用按实际diff撤回并读回为空，其他会话TUI修改保留。五个冻结候选均恢复包路径，当前无运行GUI。安装版bridge/native再次核对仍a28cd243/a1f1aea2，未安装。持续Goal active，本轮为实际实现、验证和新反例进展，不是完成或阻塞。
+
 ## Final validation result
 
 - Result: partial
