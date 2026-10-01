@@ -888,13 +888,16 @@ export class InteractiveMode {
 	/** Clear transcript content and stop the Grok live-row scroll timers first. */
 	private clearChatContainer(): void {
 		for (const child of this.chatContainer.children) {
-			if (child instanceof GrokThinkingTurnGroupComponent || child instanceof GrokToolTurnGroupComponent) {
+			if (
+				child instanceof GrokThinkingTurnGroupComponent ||
+				child instanceof GrokToolTurnGroupComponent ||
+				child instanceof BackgroundTaskGroupComponent
+			) {
 				child.dispose();
 			}
 		}
 		this.chatContainer.clear();
 		this.subagentRouter?.clear();
-		this.backgroundTaskGroup?.dispose();
 		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
@@ -3362,20 +3365,26 @@ export class InteractiveMode {
 	 */
 	private subscribeToBackgroundTasks(): void {
 		this.backgroundTaskUnsubscribe?.();
-		this.backgroundTaskUnsubscribe = this.session.backgroundTasks?.onStart(() => this.ensureBackgroundTaskGroup());
+		this.backgroundTaskUnsubscribe = this.session.backgroundTasks?.onStart((task) =>
+			this.ensureBackgroundTaskGroup(task.id),
+		);
 	}
 
-	private ensureBackgroundTaskGroup(): void {
+	private ensureBackgroundTaskGroup(taskId: string): void {
 		const manager = this.session.backgroundTasks;
 		if (!manager) return;
-		if (this.backgroundTaskGroup && this.backgroundTaskGroup.manager !== manager) {
-			this.chatContainer.removeChild(this.backgroundTaskGroup);
-			this.backgroundTaskGroup.dispose();
-			this.backgroundTaskGroup = undefined;
+		for (const child of [...this.chatContainer.children]) {
+			if (child instanceof BackgroundTaskGroupComponent && child.manager !== manager) {
+				this.chatContainer.removeChild(child);
+				child.dispose();
+				if (child === this.backgroundTaskGroup) this.backgroundTaskGroup = undefined;
+			}
 		}
 		if (!this.backgroundTaskGroup) {
-			this.backgroundTaskGroup = new BackgroundTaskGroupComponent(manager, () => this.ui.requestRender());
+			this.backgroundTaskGroup = new BackgroundTaskGroupComponent(manager, () => this.ui.requestRender(), [taskId]);
 			this.backgroundTaskGroup.setExpanded(this.toolOutputExpanded);
+		} else {
+			this.backgroundTaskGroup.addTask(taskId);
 		}
 		this.chatContainer.removeChild(this.backgroundTaskGroup);
 		this.chatContainer.addChild(this.backgroundTaskGroup);
@@ -3601,7 +3610,7 @@ export class InteractiveMode {
 				const taskId = (event.result as { details?: { backgroundTaskId?: string } } | undefined)?.details
 					?.backgroundTaskId;
 				if (taskId && this.session.backgroundTasks) {
-					this.ensureBackgroundTaskGroup();
+					this.ensureBackgroundTaskGroup(taskId);
 				}
 				break;
 			}
@@ -3843,6 +3852,8 @@ export class InteractiveMode {
 
 		// A user prompt closes the previous history turn and starts new groups.
 		this.completeCurrentTurnThinking();
+		this.backgroundTaskGroup?.completeTurn();
+		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
 		if (this.chatContainer.children.length > 0) {

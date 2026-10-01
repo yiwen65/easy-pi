@@ -27,7 +27,15 @@ function fakeMode() {
 		outputPad: 1,
 		getMarkdownThemeWithSettings: () => ({}),
 	};
-	for (const name of ["addMessageToChat", "subscribeToBackgroundTasks", "ensureBackgroundTaskGroup"])
+	mode.completeCurrentTurnThinking = () => {};
+	mode.createUserMessageComponent = () => new Container();
+	for (const name of [
+		"addMessageToChat",
+		"renderUserMessage",
+		"subscribeToBackgroundTasks",
+		"ensureBackgroundTaskGroup",
+		"clearChatContainer",
+	])
 		mode[name] = proto[name];
 	return mode;
 }
@@ -244,6 +252,45 @@ describe("background task transcript mounting", () => {
 	afterEach(async () => {
 		await manager.cleanup();
 		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("keeps background tasks in their originating user turn while their status stays live", async () => {
+		const mode = fakeMode();
+		mode.session.backgroundTasks = manager;
+		mode.subscribeToBackgroundTasks();
+		mode.renderUserMessage("first", Date.now());
+		const first = await manager.start("setTimeout(() => {}, 30_000)", { cwd: dir, env: { ...process.env } });
+		if (!first.ok) throw new Error("start failed");
+		const firstGroup = mode.backgroundTaskGroup as BackgroundTaskGroupComponent;
+		mode.renderUserMessage("second", Date.now());
+		const second = await manager.start("setTimeout(() => {}, 30_000)", { cwd: dir, env: { ...process.env } });
+		if (!second.ok) throw new Error("start failed");
+		const secondGroup = mode.backgroundTaskGroup as BackgroundTaskGroupComponent;
+		try {
+			expect(secondGroup).not.toBe(firstGroup);
+			firstGroup.setExpanded(true);
+			secondGroup.setExpanded(true);
+			expect(firstGroup.render(200).join("\n")).toContain(first.value.id);
+			expect(firstGroup.render(200).join("\n")).not.toContain(second.value.id);
+			expect(secondGroup.render(200).join("\n")).not.toContain(first.value.id);
+			expect(secondGroup.render(200).join("\n")).toContain(second.value.id);
+			expect(mode.chatContainer.children.indexOf(firstGroup)).toBeLessThan(
+				mode.chatContainer.children.indexOf(secondGroup),
+			);
+			await manager.stop(first.value.id);
+			await manager.wait(first.value.id, 10_000);
+			expect(firstGroup.render(200).join("\n")).toContain("0 running · 1 finished");
+			expect(secondGroup.render(200).join("\n")).toContain("1 running");
+			const disposeFirst = vi.spyOn(firstGroup, "dispose");
+			const disposeSecond = vi.spyOn(secondGroup, "dispose");
+			mode.clearChatContainer();
+			expect(disposeFirst).toHaveBeenCalledOnce();
+			expect(disposeSecond).toHaveBeenCalledOnce();
+		} finally {
+			mode.backgroundTaskUnsubscribe?.();
+			firstGroup.dispose();
+			secondGroup.dispose();
+		}
 	});
 
 	it("mounts the folding block for task starts outside the bash tool path", async () => {
