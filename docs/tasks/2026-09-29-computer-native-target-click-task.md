@@ -295,6 +295,16 @@
 - 新夹具协议真实模型 `subrole-model-desktop-tab-preenabled-1` seed42 1/1：首次select已有47个网页行，三次target.ref点击真实派发，rawReward=1，26.254s/8轮，model25.341s/tool0.888s，cost0.0496556 USD，正常关闭、clean0a31。相邻 `subrole-model-desktop-preenabled-neighbors-1` seed43 2/2：choose-list 30.650s/9轮、rawReward=1（保留一次target_geometry_unknown拒绝，不记无拒绝资格）；click-tab-2 18.611s/6轮、rawReward=1、零拒绝。cost合计0.0866656 USD，正常关闭、clean0a32/0a33。共3/3不是长期稳定率，不跨种子/协议/传输计算倍率。
 - 最新安装版bridge/native哈希仍a28cd243/a1f1aea2，未安装候选。通用既有Chrome冷启动AX就绪与拖拽整图校验仍开放；夹具预启用只解决可控评测启动条件，不冒充所有应用已修复。下一轮优先验证移动后窗口命中竞态和更精简观察是否保留通用能力；受限拖拽候选仍等授权，不默默放宽。
 
+### 2026-10-02 approved drag corridor candidate
+
+- 用户明确批准同窗拖拽完整路径走廊候选；仍须先过移动、替换、覆盖、路径障碍负例，再真实模型，通过前不安装。此授权不包含跨窗拖拽或其他尚待确认行为。
+- 仅在证据目录 `subrole-source/rust/crates/cua-driver-core/src/controlled/image_reference.rs` 实现未接入派发的像素比较原型，冻结 subtype/v23 产物不改。保留单张有界 PNG，用24逻辑点半径的完整线段胶囊比较，不只是两个端点或整个对角包围盒；PID、window、原始几何仍精确匹配，坏图/越界拒绝，Debug不输出图片字节。半径为候选设计参数，尚未经通用场景资格验证。
+- 默认整图比较的适配基线先出现预期业务断言失败：远处变化仍拒绝（1失败/3通过）；实现走廊后6/6像素单元通过，含路径内单像素、缩放/crop、逆向、零长度及边缘。这不是GUI移动/替换/遮挡负例通过。更早缺失方法的编译失败不计回归证据；无默认features运行的既有警告不混作默认配置通过。
+- 只读 `drag-corridor-replay` 对原失败截图 image5→6、image6→7回放：整图均false、走廊均true；未编辑截图、未生成任何输入。debug前一对10次均值156.287ms，release后一对10次均值11.644ms；不同截图对/构建配置不能计算生产提速倍率，回放几何来自记录的1100×850窗口，不冒充当前原生证明。首次release输出profile标签误写debug，已修正探针；终端构建输出明确为release。
+- 新安全事实：现有segment坐标point_with_route只核对窗口身份/几何；capture主动退休AX快照且仅返回图片，没有保存观察时每个坐标的原生命中身份。因此单独放宽像素校验不能声称已保留“同外观替换”的目标身份保护；实时hit只能证明当前命中，不能倒推观察时目标。下一步先验证能否复用既有快照/引用来证明起终点及路径边界，避免第二缓存、任意新对象或弱化负例。当前原型未接入native执行、不具备安装资格。
+- 后续算术边界回归累计7/7；修正探针标签后release image6→7十次均值12.642ms。owned GUI基线`drag-identity-stable-1/2`均整图变化拒绝、零输入，`-3`完成原目标一次按下/一次释放；全部正常关闭clean0a34–0a36。`drag-identity-replace-1`虽然零输入，但仍是整图stale拒绝；只读截图比较仅5个像素变化，均在窗顶[0,24,2046,34]，与目标替换区无关。因此这次不得计原生身份负例通过。所有夹具失败保留；没有将偶然图片变化当作身份保护。
+- 新反例已实际复现：只将隔离探针截图上限改为1100，`drag-identity-stable-1100-1`正例按下/释放各一次；`drag-identity-replace-1100-1/2`两个独立新窗口均将拖拽派发给外观及outerHTML相同但DOM身份不同的新按钮，页面downs=1/ups=1/replaced=true，负例均失败。原型走廊没有接入，这揭示现有坐标拖拽本身缺少目标身份保护，并非新算法导致。全部正常关闭clean0a38–0a3a；不重放未知输入，不改变个人浏览器/已安装版本。后一次图片比较工具因把1100原图与动作后2048证据图混比而尺寸不同拒绝，不能用于像素相等结论。
+
 ## Final validation result
 
 - Result: partial
