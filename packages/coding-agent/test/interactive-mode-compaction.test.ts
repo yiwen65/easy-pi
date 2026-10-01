@@ -1,7 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
-import type { SessionEntry } from "../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -55,7 +55,7 @@ describe("InteractiveMode compaction events", () => {
 			autoCompactionEscapeHandler: undefined as (() => void) | undefined,
 			defaultEditor: { onEscape: vi.fn() },
 			session,
-			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([]) },
+			sessionManager: SessionManager.inMemory(),
 			chatContainer,
 			streamingComponent: undefined,
 			streamingMessage: undefined,
@@ -122,6 +122,47 @@ describe("InteractiveMode compaction events", () => {
 		expect(chatContainer.children.filter((child) => child instanceof GrokTurnDurationComponent)).toHaveLength(1);
 		expect(stripAnsi(chatContainer.render(80).join("\n"))).toContain("worked ");
 		expect(fakeThis.ui.terminal.setProgress).toHaveBeenLastCalledWith(false);
+
+		// Rebuilding a compacted transcript must retain the completed turn's duration.
+		expect(fakeThis.sessionManager.getEntries()).toEqual([
+			expect.objectContaining({
+				type: "custom",
+				customType: "pi-turn-duration",
+				data: { durationMs: expect.any(Number) },
+			}),
+		]);
+		expect(fakeThis.sessionManager.buildSessionContext().messages).toEqual([]);
+		for (let index = 0; index < 7; index++) {
+			fakeThis.sessionManager.appendCompactionCheckpoint([], 1_000);
+		}
+		chatContainer.clear();
+		const replay = {
+			chatContainer,
+			grokComponentFactory: fakeThis.grokComponentFactory,
+			outputPad: 1,
+			session: { extensionRunner: { getEntryRenderer: () => undefined } },
+			sessionManager: fakeThis.sessionManager,
+			renderSessionEntries(entries: SessionEntry[]) {
+				for (const entry of entries) {
+					if (entry.type === "custom") addCustomEntryToChat.call(this, entry);
+				}
+			},
+			renderProjectTrustWarningIfNeeded: vi.fn(),
+			showStatus: Reflect.get(InteractiveMode.prototype, "showStatus"),
+			ui: fakeThis.ui,
+		};
+		const addCustomEntryToChat = Reflect.get(InteractiveMode.prototype, "addCustomEntryToChat") as (
+			this: typeof replay,
+			entry: Extract<SessionEntry, { type: "custom" }>,
+		) => void;
+		const renderInitialMessages = Reflect.get(InteractiveMode.prototype, "renderInitialMessages") as (
+			this: typeof replay,
+		) => void;
+		renderInitialMessages.call(replay);
+		const replayedText = stripAnsi(chatContainer.render(100).join("\n"));
+		expect(replayedText).toContain("Session compacted 7 times");
+		expect(replayedText).toContain("worked ");
+		expect(chatContainer.children.filter((child) => child instanceof GrokTurnDurationComponent)).toHaveLength(1);
 	});
 
 	test("uses the cache miss notice setting for compaction and branch summary costs", () => {

@@ -197,6 +197,8 @@ import {
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
 
+const TURN_DURATION_ENTRY_TYPE = "pi-turn-duration";
+
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -3630,6 +3632,9 @@ export class InteractiveMode {
 					this.completeCurrentTurnThinking();
 					const duration = this.finishGrokTurnTiming();
 					if (duration !== undefined) {
+						// Keep the marker when the transcript is rebuilt or the session is resumed.
+						// Custom entries are UI metadata and do not enter the provider context.
+						this.sessionManager.appendCustomEntry(TURN_DURATION_ENTRY_TYPE, { durationMs: duration });
 						this.chatContainer.addChild(new GrokTurnDurationComponent(duration, this.outputPad));
 					}
 				}
@@ -3817,6 +3822,21 @@ export class InteractiveMode {
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
+		if (entry.customType === TURN_DURATION_ENTRY_TYPE) {
+			const data = entry.data;
+			if (
+				this.grokComponentFactory &&
+				typeof data === "object" &&
+				data !== null &&
+				"durationMs" in data &&
+				typeof data.durationMs === "number" &&
+				Number.isFinite(data.durationMs) &&
+				data.durationMs >= 0
+			) {
+				this.chatContainer.addChild(new GrokTurnDurationComponent(data.durationMs, this.outputPad));
+			}
+			return;
+		}
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
