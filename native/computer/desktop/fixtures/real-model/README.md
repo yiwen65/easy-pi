@@ -57,6 +57,15 @@ fresh observations, not long-duration stability or an official benchmark score.
 
 `contract.json` records model, strategy, tool profile, seed, native/bridge/probe/fixture hashes, MiniWoB commit and limits; `sources/` freezes the harness version. Each attempt retains tool calls, assistant actions (not hidden reasoning), usage, screenshots, independent oracle, timing, cleanup proof and failure. `summary.json` retains **all** attempts and reported costs. `node native/computer/desktop/fixtures/real-model/report.mjs /absolute/output` summarizes durations and refusal codes without dropping failures.
 
+Failed desktop attempts also record a read-only `pageState` after native input
+has drained and before Chrome closes: document readiness, visibility/focus,
+body bounds and at most 4096 characters of visible text. The exact loopback
+fixture origin is checked before reading content. Foreign origins or failed
+inspection remain explicit unknowns. This diagnostic is never sent to the model,
+used to pass the task, or used to replay input. `diagnosticMs` is included in
+cleanup time, not task/model/tool time. Local request-budget exhaustion is
+classified as `model_budget_exhausted`, not a provider outage; limits are unchanged.
+
 Business success requires the exact independent result, real model and tool calls, and clean native/Chrome closure. A correctly refused stale reference is protection success, **not task success**. Model narration or `inputCommitted` is never the task oracle. Report setup/failed/interrupted attempts separately but keep them in the denominator. P50/P95 of successful tasks exclude failed durations explicitly; small-N P95 is not a reliability claim.
 
 For an optimization: freeze dataset/seed/model/native version, preserve the same oracle, alternate A/B order for repeated pairs, retain every failure and count calls/bytes/model time/tool time. Do not promote prompt changes based on one faster failed run, or pool distinct task families into a claimed speedup. A changed stale-image policy also needs negative controls for moved/replaced targets, overlays and unrelated windows; any weaker semantic guarantee must be explicitly accepted.

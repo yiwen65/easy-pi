@@ -275,6 +275,18 @@ for (const id of selected) {
 		const closeStart = performance.now();
 		const { nativeClosed, cleanupErrors } = await closeNative(session, feature);
 		if (!nativeClosed) failure ??= { message: "native close unproved" };
+		let pageState, diagnosticMs;
+		if (failure && nativeClosed && chrome) {
+			// Trusted read-only diagnosis after input has drained, never model
+			// evidence, task success, a retry, or a reason to skip Chrome close.
+			const diagnosticStart = performance.now();
+			try {
+				pageState = await chrome.inspectFixture();
+			} catch {
+				pageState = { status: "unavailable" };
+			}
+			diagnosticMs = performance.now() - diagnosticStart;
+		}
 		let chromeExit;
 		if (nativeClosed && chrome) {
 			try {
@@ -309,6 +321,8 @@ for (const id of selected) {
 			cost,
 			tokenUsage,
 			oracle,
+			pageState,
+			diagnosticMs,
 			chrome: chrome?.version,
 			requests,
 			cleanup,

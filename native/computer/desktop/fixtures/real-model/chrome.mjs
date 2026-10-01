@@ -3,6 +3,24 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+export function fixtureStateExpression(url) {
+	const fixture = new URL(url);
+	assert.ok(
+		fixture.protocol === "http:" && fixture.hostname === "127.0.0.1",
+		"Diagnostics require a loopback fixture",
+	);
+	return `(() => {
+if (location.origin !== ${JSON.stringify(fixture.origin)}) return {status:'outside_fixture'};
+const text = document.body?.innerText ?? '';
+const rect = document.body?.getBoundingClientRect();
+return {status:'observed',path:location.pathname,ready:document.readyState,
+visibility:document.visibilityState,focused:document.hasFocus(),
+bodyText:text.slice(0,4096),bodyTextTruncated:text.length>4096,
+bodyRect:rect?[rect.x,rect.y,rect.width,rect.height]:null,
+viewport:[innerWidth,innerHeight]};
+})()`;
+}
+
 export async function until(check, timeout = 10_000) {
 	const end = performance.now() + timeout;
 	while (performance.now() < end) {
@@ -156,6 +174,7 @@ export async function launchChrome(bundle, profile, url) {
 		);
 		return {
 			evaluate,
+			inspectFixture: () => evaluate(fixtureStateExpression(url)),
 			targets,
 			version: await browser.call("Browser.getVersion"),
 			async close() {

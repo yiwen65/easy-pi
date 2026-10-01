@@ -252,9 +252,15 @@
 
 - 2026-09-29: v23根`npm run check`完整通过，四个无关formatter修改已撤回；真实模型`native-target-model23-chrome`两项0/2、cleanup全真、clean09a0/09a1。form114.04s/24轮，model110.84s/tool3.068s，已得到精确正确oracle但未在轮数内正常结束，故仍失败；Submit两次target_occluded，显式activate后仍遮挡，最后focus+Space提交。此前City读回一度为`Hangzhou..`，来源未证实，模型修正后oracle正确。navigation39.56s/9轮，model38.52s/tool1.016s，发出GET /records，最终截图仍白页，无业务oracle；不是pointer_hit_changed。两项reported cost合计0.3143588 USD，不归因于已修复的缓存漏读，不删除失败、不增加轮数换绿。下一步区分可见遮挡、Chrome绘制/页面状态和模型预算；不关闭个人应用、不放宽点击保护。安装版未动。
 
+- 2026-10-01: 原临时目录 `/tmp/epi-pointer-boundary.PFHOUz` 已不存在，以上结果保留为历史记录，不声称原始运行文件仍可访问。v23冻结候选仍在，后续实验改存 `.artifacts/computer/navigation-paint.eCQmJA/`；安装版未替换。独立前台、后台不遮挡和关闭后只读诊断三项通过（foreground-1、background-1、diagnostic-close-1，clean09a7–09a9），实际截图及页面内容正常；后台状态本身未复现白页。
+- 2026-10-01: 评估器补充失败后只读页面状态：仅native正常排空后读取精确loopback origin，文本最多4096字符，不交给模型、不改变oracle、不重放输入；耗时计入cleanup。修正本地轮数耗尽被误分类为provider_error，实际Agent预算回归先失败后通过，限额不变。chrome/metrics/lifecycle/tasks共19/19，完整根检查exit0，已撤回无关formatter差异。
+- 2026-10-01: v23真实模型导航再次失败（model-navigation-1）：31.547s/9轮，model30.872s/tool0.648s，reported cost0.0719588 USD，cleanup=true、clean09aa。两次target点击均因遮挡零输入拒绝，中间显式activate确认焦点后仍拒绝；新增诊断证明页面仍在根路径、正文正常、未请求records，此次不是白页问题。
+- 2026-10-01: owned AppKit覆盖窗口的确定性对照covered-activation-1复现：首次点击正确拒绝；显式activate返回confirmed，页面焦点立即及3秒后均为true，但新观察点击仍target_occluded且零输入。全部正常退出、clean09ab。源码取得keyboard focus后跳过AXRaise，支持“焦点不等于置顶”的原因；受限显式置顶候选已单独询问，未修改自动填入/按键策略或安装产物。
+- 2026-10-01: 已安装版导航原生alert回归installed-alerts-1共7/7、cleanup全真：无弹窗及0/10/100ms延迟场景均在限时内结束，弹窗保持opened，未静默关闭。导航约25.5–49.4ms，普通观察55.3ms，弹窗后拒绝约0.27–0.41ms。这是安装版保护/排空回归，不是v23发布资格或主流benchmark全覆盖。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
 - Evidence: T-001 完成；v23 Rust segment31/31、就绪4/4、TS55/55、Chrome33/33及AppKit8/8、ABI与根检查通过。已用读时序实验定位并修复v20间歇漏缓存；最新真实模型表单/导航仍失败，均正常关闭。补丁可应用；未安装。
-- Limitations: v23表单遇遮挡、绕行后耗尽轮数；导航白页原因待分辨。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。
+- Limitations: v23表单遇遮挡、绕行后耗尽轮数；显式激活取得焦点却未置顶已复现，受限修复待确认；历史导航白页尚未复现。三项旧native生命周期夹具仍失败，不冒充通过。指针移动后竞态和可比速度仍未完成，持续 Goal 保持 active。安装门槛未满足。

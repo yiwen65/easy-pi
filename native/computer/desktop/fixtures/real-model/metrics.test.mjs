@@ -82,6 +82,7 @@ test("real Agent invocation stops before request 25 and never counts the synthet
 	assert.equal(meter.turns, 24);
 	assert.equal(errors.length, 1);
 	assert.match(errors[0], /Model budget exhausted/);
+	assert.equal(providerFailure(errors[0]), "model_budget_exhausted");
 	assert.ok(meter.modelMs >= 0);
 });
 

@@ -35,6 +35,7 @@ export function createRequestMeter(now = () => performance.now()) {
 
 export function providerFailure(message) {
 	if (!message) return undefined;
+	if (message === "Model budget exhausted") return "model_budget_exhausted";
 	if (/UND_ERR_CONNECT_TIMEOUT|connect.*timed? ?out/i.test(message)) return "provider_connect_timeout";
 	if (/websocket/i.test(message)) return "provider_websocket_error";
 	if (/\b(?:401|403)\b/.test(message)) return "provider_access_denied";
