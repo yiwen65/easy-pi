@@ -1,8 +1,38 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
-import type { ComputerDiscoveredWindow, ComputerImage } from "@trycua/cua-driver";
-import { projectImage, projectWindows } from "../projection.ts";
+import type { ComputerDiscoveredWindow, ComputerImage, WindowStateOutput } from "@trycua/cua-driver";
+import { projectImage, projectObservation, projectWindows } from "../projection.ts";
+
+test("native secure subrole reaches the model without inventing a value or changing grants", () => {
+	const observation: WindowStateOutput = {
+		pid: 1,
+		windowId: 1n,
+		snapshotId: "native-subrole",
+		images: [],
+		elementsComplete: true,
+		truncated: false,
+		elements: [
+			{
+				elementIndex: 0n,
+				depth: 0,
+				role: "AXTextField",
+				subrole: "AXSecureTextField",
+				elementToken: "native-subrole:0",
+				inWebContent: true,
+			},
+		],
+	};
+	const output = projectObservation(observation);
+	const row = JSON.parse(output.content[0].text.split("\n")[1]!);
+	assert.equal(row.subrole, "AXSecureTextField");
+	assert.equal(row.value, undefined);
+	assert.deepEqual([...output.grant.refs], ["native-subrole:0"]);
+	assert.equal(output.grant.legacyRefs.size, 0);
+	delete observation.elements![0]!.subrole;
+	const ordinary = JSON.parse(projectObservation(observation).content[0].text.split("\n")[1]!);
+	assert.equal(ordinary.subrole, undefined);
+});
 
 function image(): ComputerImage {
 	const bytes = new ArrayBuffer(33);

@@ -261,6 +261,20 @@
 - 2026-10-01: 评估器修复与上述证据提交`5445ad7cd`。尝试同脚本验证v23原生alert时，在创建host之前被固定安装版SDK pins拒绝（Native input integrity mismatch）；未启动GUI、不计候选回归通过，也未改写安装版pins。候选后续需使用经过完整候选manifest验证的独立测试加载入口，不能绕过完整性检查。显式置顶及网页值确认两项受限行为变更仍待用户确认。
 
 <!-- task-doc-section:final-validation -->
+### 2026-10-01 continued qualification
+
+- 新证据根目录为 `.artifacts/computer/navigation-paint.eCQmJA/`，下列路径均相对于它。v23 独立加载器校验冻结 manifest、SDK/runtime/NAPI/native/renderer pins；安装版 loader 和 pins 未修改。后补所有 SDK/CJS 文件逐文件验证，旧运行仍保留原加载器副本，不倒推验证范围。
+- v23 确定性回归共 47/47：`candidate23-alerts-2` 7/7、`candidate23-select-1` 15/15、`candidate23-general-1` 14/14、`candidate23-dialog-1` 11/11。包含原生 alert 保持打开、select 精确 index/事件计数、通用输入及 stale/cancel、dialog 外部/替换/移动等负例；全部正常排空并 clean lease。不是完整主流 benchmark 总分。
+- v23 真实模型共 10 次尝试、8 次业务通过、2 次失败，reported cost 合计 0.3729272 USD。browser form/navigation/dialog 3/3（70.411/25.417/19.934s），seed43 browser choose-list/click-tab-2 2/2；desktop seed43 和 seed42 click-test-2 均通过，seed42 enter-text/checkboxes/login 1/3。原始轨迹和全部失败分别保存在 `candidate23-model-browser-1`、`candidate23-miniwob43-browser-1`、`candidate23-miniwob43-desktop-1`、`candidate23-miniwob42-desktop-1`、`candidate23-miniwob42-desktop-fields-1`。
+- seed43 desktop click-test-2 的两次 pointer_hit_changed 不是隐藏文字缓存修复失败：`miniwob43-layout-1/result.json` 只读对照证明 TWO 覆盖 ONE 中心，真实命中为 TWO，拒绝正确；最后已有 focus+Space 完成。seed42 desktop 16.421s/5轮、一次 AXButton ONE target.ref 真正派发、rawReward=1、无坐标或键盘回退，clean09ea，提供该按钮路径的真实模型正例；不同布局不能作为可比提速证据。
+- enter-text 在输入前 provider_websocket_error，137.100s/4轮，保留失败；checkboxes 25.729s/7轮通过；login 43.218s/13轮失败，先触及独立 web fill 边界，随后密码字段 target_not_editable，模型再试旧像素输入。密码写入限制是有意保护，不删除它来使 benchmark 变绿。
+- login 首次因果分歧：原生 Data 已读 AXSubrole 且跳过 secure AXValue，但 WindowElement ABI 和模型投影丢失 subrole，使模型只看到普通 AXTextField。新增只读 `native-subrole-observation-candidate.patch`（相对冻结 v23），不改变输入/权限/缓存授权。Rust secure metadata 回归先因缺失 subtype 失败，再 4/4；contract 新回归 1/1；TS 投影先失败，再 projection/filter/schema 20/20。新 ABI 必须真实再生成，不手改生成结果。
+- 两次 release 生成在 zerofrom_derive E0463 失败，包括空 release 目录，故撤回旧缓存根因推断。本机 dlopen 对旧 dylib 明确报 mis-aligned LINKEDIT string pool；只设置 CARGO_PROFILE_RELEASE_STRIP=none 后同依赖 release 编译及 dlopen 通过。符合 [Rust 上游问题 157750](https://github.com/rust-lang/rust/issues/157750)。此构建绕行只在独立候选环境，未更改生产工具链、优化级别或权限。失败缓存保留。
+- 新 canonical TS/Python 生成、重复 --check、SDK computer TS emit 和匹配 SDK 类型检查通过。新隔离候选 native SHA256 `143b64cb4d84f2c815f41a0cfca6066eb4e892defa05392b81d43a4988c881e7`，manifest `7dd31dd79871e5646491c8de55d64c61045b8d42fdd7787d65a0ea3860e72c5a`，bridge `2e629a60e98ba99733300c59f15ae1da91b0a2c355d1999f1aca5db6d37bb317`；不安装。
+- `subrole-gui-1` 因等待不足未见网页树失败；`subrole-gui-2` 的过早 activate 产生 foreground_focus_unproved/inputCommitted=true，后续 fill 被 previous_intent_unresolved 阻断，不重放。移除夹具多余激活并按页面树就绪读回，`subrole-gui-3` 通过：模型观察包含 AXSecureTextField、无密码值，真实 fill 仍 target_not_editable/inputCommitted=false，独立页面值未变、input/change 零次，Chrome 正常退出、clean09f0。两次失败保留，不改 oracle；登录业务仍不支持。
+- `subrole-model-fields-1` 真实模型两项 1/2，cost0.0931476 USD，全部正常关闭、clean09f1/09f2。enter-text 22.934s/6轮、model22.302s/tool0.617s、rawReward=1；login 14.913s/4轮、model14.629s/tool0.274s，读取 secure subtype 后准确报告不支持并结束，零输入/拒绝/坐标回退。login 仍按独立业务 oracle 计失败，不伪造成功；较旧43.218s/13轮样本减少徒劳尝试，但仅一次对照，不宣称稳定速度倍率。
+- readonly subtype 补丁 SHA256 `6152027dc6875bf3669f504595c4bf0c1f3b4e914325ced19d67e0997d3773f6`，根检查完整通过；匹配 SDK 类型检查、TS20项再运行通过。安装版 bridge/native 哈希仍为 a28cd243/a1f1aea2，未安装新候选。全树 diff check 仅发现用户既有 LEARNS.md EOF 空行；本批次明确路径 diff check 通过，不动用户日志。
+
 ## Final validation result
 
 - Result: partial

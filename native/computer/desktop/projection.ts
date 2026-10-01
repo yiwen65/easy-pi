@@ -73,6 +73,7 @@ export function projectObservation(observation: WindowStateOutput, filter: { tex
 			Buffer.byteLength(selector.label) <= 256;
 		const line = JSON.stringify({
 			role: row.role,
+			subrole: row.subrole,
 			label: row.label,
 			identifier: row.identifier,
 			value: row.value,

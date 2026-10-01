@@ -33,8 +33,21 @@ const dimension = Type.Number({ minimum: 1, maximum: 32768 });
 const bounds = { x: position, y: position, width: dimension, height: dimension };
 const delta = Type.Number({ minimum: -4096, maximum: 4096 });
 const action = Type.Union([
-	Type.Object({ op: Type.Literal("focus"), target }, closed),
-	Type.Object({ op: Type.Literal("fill"), target, text }, closed),
+	Type.Object(
+		{ op: Type.Literal("focus"), target },
+		{
+			...closed,
+			description: "Focus an observed control. Native AXSecureTextField subroles are unsupported.",
+		},
+	),
+	Type.Object(
+		{ op: Type.Literal("fill"), target, text },
+		{
+			...closed,
+			description:
+				"Replace an observed text field. Native AXSecureTextField subroles are unsupported; do not use coordinate input to bypass this refusal.",
+		},
+	),
 	Type.Object({ op: Type.Literal("type_text"), text }, closed),
 	Type.Object(
 		{

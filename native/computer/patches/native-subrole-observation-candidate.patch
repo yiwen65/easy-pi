@@ -1,0 +1,76 @@
+diff --git a/rust/crates/cua-driver-contract/src/windows.rs b/rust/crates/cua-driver-contract/src/windows.rs
+index 54ef3c54f..63bf625d3 100644
+--- a/rust/crates/cua-driver-contract/src/windows.rs
++++ b/rust/crates/cua-driver-contract/src/windows.rs
+@@ -268,6 +268,9 @@ pub struct WindowElement {
+     pub min: Option<f64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub max: Option<f64>,
++    /// Observed native subtype; descriptive evidence, never input authority.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub subrole: Option<String>,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, uniffi::Record)]
+@@ -362,6 +365,19 @@ mod tests {
+     use super::*;
+     use serde_json::json;
+ 
++    #[test]
++    fn window_element_preserves_optional_native_subrole() {
++        let mut value = json!({"element_index": 0, "role": "AXTextField", "depth": 0});
++        let ordinary: WindowElement = serde_json::from_value(value.clone()).unwrap();
++        assert_eq!(ordinary.subrole, None);
++        assert!(serde_json::to_value(ordinary).unwrap().get("subrole").is_none());
++        value["subrole"] = json!("AXSecureTextField");
++        let secure: WindowElement = serde_json::from_value(value).unwrap();
++        assert_eq!(secure.subrole.as_deref(), Some("AXSecureTextField"));
++        assert_eq!(secure.value, None);
++        assert_eq!(serde_json::to_value(secure).unwrap()["subrole"], "AXSecureTextField");
++    }
++
+     #[test]
+     fn computer_window_query_is_bounded_literal_conjunction_and_keeps_unknown_focus() {
+         let query = ComputerWindowQuery { app: Some("FIX.*".into()), title: Some("中文".into()), focused: true };
+diff --git a/rust/crates/platform-macos/src/tools/computer/observation.rs b/rust/crates/platform-macos/src/tools/computer/observation.rs
+index b8fb7c660..2dcec3ca4 100644
+--- a/rust/crates/platform-macos/src/tools/computer/observation.rs
++++ b/rust/crates/platform-macos/src/tools/computer/observation.rs
+@@ -138,6 +138,9 @@ impl<E> Scan<E> {
+                 if let Some(label) = &row.data.label {
+                     value["label"] = json!(label);
+                 }
++                if let Some(subrole) = &row.data.subrole {
++                    value["subrole"] = json!(subrole);
++                }
+                 if let Some(identifier) = &row.data.identifier {
+                     value["identifier"] = json!(identifier);
+                 }
+diff --git a/rust/crates/platform-macos/src/tools/computer/observation/metadata_tests.rs b/rust/crates/platform-macos/src/tools/computer/observation/metadata_tests.rs
+index 5bf1a92e0..e2a3191ff 100644
+--- a/rust/crates/platform-macos/src/tools/computer/observation/metadata_tests.rs
++++ b/rust/crates/platform-macos/src/tools/computer/observation/metadata_tests.rs
+@@ -1,5 +1,23 @@
+ use super::*;
+ 
++#[test]
++fn controlled_general_observation_preserves_secure_subrole_without_a_value() {
++    let tree = Scan {
++        rows: vec![Row {
++            element: 1usize, depth: 0, parent: None, web: true,
++            data: Data { role: "AXTextField".into(),
++                subrole: Some("AXSecureTextField".into()), enabled: Some(true),
++                ..Default::default() },
++        }],
++        truncated: false, failure: None,
++    };
++    let rows = tree.general_elements(1);
++    assert_eq!(rows[0]["subrole"], "AXSecureTextField");
++    assert!(rows[0].get("value").is_none());
++    assert!(!tree.rows[0].data.general_fillable());
++    assert!(rows[0].get("element_token").is_some());
++}
++
+ struct MetadataFixture {
+     broken_children: bool,
+ }
