@@ -54,7 +54,7 @@ includes `modelRequestMs` as well as their sum `modelMs`; idle failures retain
 the fixed category `provider_idle_timeout`. Results collected before this policy
 must not be pooled into a comparable speedup claim.
 
-The desktop fixture uses an empty profile, `--use-mock-keychain`, disabled sync/extensions/background networking, loopback-only task server and CDP. The model only receives `computer`, no shell/filesystem/network/evaluator tool. CDP is used by trusted harness setup, independent result checks and graceful close, never to perform task actions. Browser mode uses the native-owned isolated profile lifecycle. Profiles and failed evidence are retained for diagnosis, not force-deleted.
+The desktop fixture uses an empty profile, `--use-mock-keychain`, disabled sync/extensions/background networking, loopback-only task server and CDP. It launches the dedicated CfT with `--force-renderer-accessibility` so the renderer prepares its web AX tree at startup instead of relying on delayed activation during the first model observation. This is fixture preparation, not a fix for existing desktop applications; native permissions and target/input checks remain unchanged. The contract records the launcher hash and this startup condition; earlier on-demand-startup results are a separate protocol. The model only receives `computer`, no shell/filesystem/network/evaluator tool. CDP is used by trusted harness setup, independent result checks and graceful close, never to perform task actions. Browser mode uses the native-owned isolated profile lifecycle. Profiles and failed evidence are retained for diagnosis, not force-deleted.
 
 ## Evidence and acceptance
 

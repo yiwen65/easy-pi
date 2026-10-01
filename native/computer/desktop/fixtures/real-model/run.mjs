@@ -67,6 +67,8 @@ writeFileSync(
 			miniRevision: execFileSync("git", ["-C", miniRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
 			probeSha256: sha(fileURLToPath(import.meta.url)),
 			fixtureSha256: sha(fileURLToPath(new URL("./tasks.mjs", import.meta.url))),
+			launcherSha256: sha(fileURLToPath(new URL("./chrome.mjs", import.meta.url))),
+			forceRendererAccessibility: mode === "desktop",
 			bridgeSha256: sha(bridgePath),
 			bridgePath,
 			nativeSha256: sha(

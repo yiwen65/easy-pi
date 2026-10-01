@@ -291,6 +291,9 @@
 - 非替代修复：`subrole-readiness-role-1` 在首次工具调用前只读同一新拥有PID的AXApplication角色，读取成功且权限未提示；仍约2.036s才出现网页，正常退出、clean0a30。仅补读AXRole不能消除网页树延迟。
 - 捕获启用返回码与真实副作用的首次分歧：`ax-enablement-role-1` 仅只读应用角色/角色树，30次读取4.092s无AXWebArea、零读取错误；独立新进程 `ax-enablement-enhanced-1` 仅额外设置现有 prepare 已使用的 AXEnhancedUserInterface=true，返回 -25208（NotImplemented），却在约2.035s出现AXWebArea，零读取错误。两者均只操作新创建测试Chrome、未读字段内容/生成输入、正常关闭，native lease维持clean0a30。因此 Native.prepare 的“unsupported setter没有变化”不能推广到这条Chrome路径；Cocoa已验证的无副作用优化也不能因此一律移除。
 - [Chromium 当前源码](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/chrome_browser_application_mac.mm) 的 Enhanced setter 先安排两秒 debounce，再调用 super返回；角色读取在新macOS仅请求NativeAPIs，不等于网页完整树。与本机对照吻合，但153.0.8010.52精确tag未能通过网页工具获取，不冒充逐行版本匹配证据。下一步只做可取消、有界、不会重设debounce的读取就绪候选及Cocoa不退化对照；尚未修改或安装Native.prepare。
+- 最小夹具修复：只有受控桌面评测 launchChrome 的空CfT启动参数增加 force-renderer-accessibility；没有修改安装包、个人浏览器、Native.prepare或输入保护。contract新增launcherSha256和forceRendererAccessibility，明确与旧按需启用协议分开。相关模型夹具19/19、完整根check exit0，四个无关formatter改动已撤回；其他会话新TUI改动保持原样。
+- 新夹具协议真实模型 `subrole-model-desktop-tab-preenabled-1` seed42 1/1：首次select已有47个网页行，三次target.ref点击真实派发，rawReward=1，26.254s/8轮，model25.341s/tool0.888s，cost0.0496556 USD，正常关闭、clean0a31。相邻 `subrole-model-desktop-preenabled-neighbors-1` seed43 2/2：choose-list 30.650s/9轮、rawReward=1（保留一次target_geometry_unknown拒绝，不记无拒绝资格）；click-tab-2 18.611s/6轮、rawReward=1、零拒绝。cost合计0.0866656 USD，正常关闭、clean0a32/0a33。共3/3不是长期稳定率，不跨种子/协议/传输计算倍率。
+- 最新安装版bridge/native哈希仍a28cd243/a1f1aea2，未安装候选。通用既有Chrome冷启动AX就绪与拖拽整图校验仍开放；夹具预启用只解决可控评测启动条件，不冒充所有应用已修复。下一轮优先验证移动后窗口命中竞态和更精简观察是否保留通用能力；受限拖拽候选仍等授权，不默默放宽。
 
 ## Final validation result
 

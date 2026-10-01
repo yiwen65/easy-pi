@@ -103,6 +103,7 @@ export async function launchChrome(bundle, profile, url) {
 			"--use-mock-keychain",
 			"--no-first-run",
 			"--no-default-browser-check",
+			"--force-renderer-accessibility",
 			"--disable-sync",
 			"--disable-background-networking",
 			"--disable-component-update",
