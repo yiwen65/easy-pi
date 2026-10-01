@@ -16,7 +16,7 @@ const TICK_MS = 1_000;
 const OUTPUT_PREVIEW_BYTES = 8 * 1024;
 
 /**
- * One folding transcript block for all background bash tasks. Collapsed: a single live line
+ * One folding transcript block for a user turn's background bash tasks. Collapsed: a single live line
  * ("⚙ N background tasks · latest command") refreshed once per second while tasks are active;
  * the command shows its head while tasks come and go and scrolls its truncated part into view
  * once the line sits idle.
@@ -30,18 +30,37 @@ export class BackgroundTaskGroupComponent extends Container {
 	private ticker: ReturnType<typeof setInterval> | undefined;
 	private readonly scroller: LiveLineScroller;
 	private readonly unsubscribes: Array<() => void> = [];
+	private readonly taskIds: Set<string>;
+	private acceptingTasks = true;
 
 	/** The manager this block renders; the TUI remounts when a session swap changes it. */
 	readonly manager: BackgroundTaskManager;
 	private readonly onRequestRender: () => void;
 
-	constructor(manager: BackgroundTaskManager, onRequestRender: () => void) {
+	constructor(manager: BackgroundTaskManager, onRequestRender: () => void, taskIds?: readonly string[]) {
 		super();
 		this.manager = manager;
 		this.onRequestRender = onRequestRender;
+		this.taskIds = new Set(taskIds ?? manager.list({ activeOnly: false }).map((task) => task.id));
 		this.scroller = new LiveLineScroller({ requestRender: onRequestRender });
-		const refresh = (): void => this.requestRender();
-		this.unsubscribes.push(manager.onStart(refresh), manager.onTerminal(refresh));
+		this.unsubscribes.push(
+			manager.onStart((task) => {
+				if (this.acceptingTasks) this.addTask(task.id);
+			}),
+			manager.onTerminal((task) => {
+				if (this.taskIds.has(task.id)) this.requestRender();
+			}),
+		);
+	}
+
+	addTask(taskId: string): void {
+		this.taskIds.add(taskId);
+		this.requestRender();
+	}
+
+	/** Retain live status updates, but do not collect tasks from subsequent user turns. */
+	completeTurn(): void {
+		this.acceptingTasks = false;
 	}
 
 	private requestRender(): void {
@@ -52,10 +71,10 @@ export class BackgroundTaskGroupComponent extends Container {
 	private syncTicker(): void {
 		// Keep ticking while tasks are active, expanded or not: the expanded rows show the same
 		// live elapsed time, and stopping the ticker there froze it until an unrelated render.
-		const active = this.manager.list().length > 0;
+		const active = this.tasks().some((task) => !isTerminalTaskStatus(task.status));
 		if (active && !this.ticker) {
 			this.ticker = setInterval(() => {
-				if (this.manager.list().length === 0) {
+				if (!this.tasks().some((task) => !isTerminalTaskStatus(task.status))) {
 					if (this.ticker) clearInterval(this.ticker);
 					this.ticker = undefined;
 				}
@@ -67,7 +86,7 @@ export class BackgroundTaskGroupComponent extends Container {
 
 	/** Single snapshot per render: sorting and copying records once keeps big task lists cheap. */
 	private tasks(): BackgroundTaskRecord[] {
-		return sortBackgroundTasks(this.manager.list({ activeOnly: false }));
+		return sortBackgroundTasks(this.manager.list({ activeOnly: false }).filter((task) => this.taskIds.has(task.id)));
 	}
 
 	private collapsedLine(width: number, tasks: BackgroundTaskRecord[]): string {
