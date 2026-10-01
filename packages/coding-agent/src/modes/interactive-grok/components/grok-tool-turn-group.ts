@@ -9,9 +9,9 @@ import { GrokToolExecutionComponent } from "./grok-tool-execution.ts";
  *
  * All tool calls of one turn (user prompt → final answer) live in a single
  * group. Collapsed — the default — the group renders exactly one row: the tool
- * whose call is current (or the last one once the turn settled, with a count
- * suffix). While its args keep streaming the row shows their head; once nothing
- * changed for a moment the row scrolls the truncated args into view and cycles
+ * most recently added to the group (with a count suffix once all tools settle).
+ * While its args keep streaming the row shows their head; once nothing changed
+ * for a moment the row scrolls the truncated args into view and cycles
  * them, so the full command can be read without expanding. A click on that row
  * expands the group into one overview row per tool (level 1); clicking a tool
  * row toggles that tool's full details (level 2, handled by
@@ -115,17 +115,6 @@ export class GrokToolTurnGroupComponent extends Container {
 		return false;
 	}
 
-	/** Tool whose call the collapsed row represents: the active one, else the last (errors win). */
-	private representativeTool(): GrokToolExecutionComponent | undefined {
-		const tools = this.tools();
-		const active = this.activeTool();
-		if (active) return active;
-		const last = tools[tools.length - 1];
-		if (!last) return undefined;
-		// Never hide a failed call behind a later successful tool in the summary.
-		return [...tools].reverse().find((tool) => tool.getGrokState() === "error") ?? last;
-	}
-
 	/**
 	 * Collapsed row: tool symbol, name and args summary; plus the aggregate count
 	 * once the turn settled. The summary scrolls its hidden part into view while
@@ -133,7 +122,7 @@ export class GrokToolTurnGroupComponent extends Container {
 	 */
 	private collapsedLine(width: number): string {
 		const tools = this.tools();
-		const tool = this.representativeTool();
+		const tool = tools.at(-1);
 		if (!tool) return "";
 		this.scroller.setText(flattenInline(tool.summarizeCurrentArgs()));
 
