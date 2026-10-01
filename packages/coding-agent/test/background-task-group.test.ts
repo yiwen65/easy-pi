@@ -102,6 +102,58 @@ describe("BackgroundTaskGroupComponent", () => {
 		group.dispose();
 	});
 
+	it.each([0, 1])("keeps the latest added task in the header regardless of state (start delta %s)", (startDelta) => {
+		const older: BackgroundTaskRecord = {
+			id: "older-task",
+			command: "older-command",
+			cwd: dir,
+			status: "running",
+			startedAt: 10,
+			outputPath: join(dir, "older.log"),
+			promoted: false,
+			lastOutputAt: 10,
+		};
+		const latest: BackgroundTaskRecord = {
+			...older,
+			id: "latest-task",
+			command: "latest-command",
+			startedAt: 10 + startDelta,
+		};
+		const fixtureManager = {
+			list: () => [older, latest],
+			onStart: () => () => {},
+			onTerminal: () => () => {},
+			stallTimeoutMs: 0,
+		} as unknown as BackgroundTaskManager;
+		const group = new BackgroundTaskGroupComponent(fixtureManager, () => {});
+		const header = () => stripVTControlCharacters(group.render(120)[0] ?? "");
+		try {
+			expect(header()).toContain("latest-command");
+			for (const status of ["succeeded", "failed", "stopped"] as const) {
+				latest.status = status;
+				latest.endedAt = 20;
+				expect(header()).toContain("1 running · 1 finished");
+				expect(header()).toContain("latest-command");
+				expect(header()).not.toContain("older-command");
+			}
+			older.status = "succeeded";
+			older.endedAt = 30;
+			// Repeated task registration and later completion cannot change the start order.
+			group.addTask(older.id);
+			group.completeTurn();
+			expect(header()).toContain("0 running · 2 finished");
+			expect(header()).toContain("latest-command");
+			group.setExpanded(true);
+			const expanded = group.render(120).map(stripVTControlCharacters);
+			expect(expanded[1]).toContain("older-command");
+			expect(expanded[2]).toContain("latest-command");
+			group.setExpanded(false);
+			expect(header()).toContain("latest-command");
+		} finally {
+			group.dispose();
+		}
+	});
+
 	it("scrolls the truncated command into view once the header goes idle", () => {
 		vi.useFakeTimers();
 		const record = {

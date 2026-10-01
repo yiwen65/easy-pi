@@ -93,10 +93,11 @@ export class BackgroundTaskGroupComponent extends Container {
 	private collapsedLine(width: number, tasks: BackgroundTaskRecord[]): string {
 		const active = tasks.filter((record) => !isTerminalTaskStatus(record.status));
 		const terminalCount = tasks.length - active.length;
-		const latest = active[active.length - 1];
+		// Membership insertion order tracks starts, including equal timestamps and repeated registrations.
+		const latestTaskId = [...this.taskIds].at(-1);
+		const latest = tasks.find((task) => task.id === latestTaskId);
 		const count = `${active.length} running${terminalCount > 0 ? ` · ${terminalCount} finished` : ""}`;
-		const fallback = tasks[0];
-		const command = latest ? oneLine(latest.command) : fallback ? oneLine(fallback.command) : "";
+		const command = latest ? oneLine(latest.command) : "";
 		this.scroller.setText(command);
 		const prefix = `⚙ background tasks · ${count}`;
 		const gap = command ? " · " : "";

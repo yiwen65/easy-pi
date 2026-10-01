@@ -9,7 +9,8 @@ beforeAll(() => initTheme("dark"));
 test.each([false, true])("thinking mouse clicks toggle without copying (stationary motion: %s)", async (motion) => {
 	const terminal = new VirtualTerminal(80, 10);
 	const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
-	group.updateThinking({}, "first reasoning\n\nsecond reasoning");
+	group.updateThinking({}, "first reasoning");
+	group.updateThinking({}, "second reasoning");
 	group.completeTurn();
 	const scrollView = new ScrollView(group, { primary: true });
 	const copySelection = vi.fn(async () => true);
@@ -42,7 +43,8 @@ test.each([false, true])("thinking mouse clicks toggle without copying (stationa
 		terminal.sendInput(`\x1b[<0;6;${bodyRow}M`);
 		terminal.sendInput(`\x1b[<0;6;${bodyRow}m`);
 		await terminal.waitForRender();
-		expect(terminal.getViewport().join("\n")).not.toContain("second reasoning");
+		expect(terminal.getViewport().join("\n")).not.toContain("first reasoning");
+		expect(terminal.getViewport().join("\n")).toContain("second reasoning");
 		expect(copySelection).not.toHaveBeenCalled();
 
 		// Deliberate drag selection must still copy rather than toggle.

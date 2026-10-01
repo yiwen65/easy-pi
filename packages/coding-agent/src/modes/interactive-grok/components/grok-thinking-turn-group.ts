@@ -20,8 +20,8 @@ const PREFIX = "✦ ";
  * keeps the newest text on screen while the entry grows; once the entry stopped
  * changing for a moment the row scrolls the hidden beginning into view and
  * cycles the whole text, so it can be read without expanding. Once the turn
- * completes the row falls back to the static hidden label. A click on the row
- * expands the block into the full thinking content of the turn.
+ * completes the row keeps the newest entry visible without scrolling. A click
+ * on the row expands the block into the full thinking content of the turn.
  */
 export class GrokThinkingTurnGroupComponent extends Container {
 	private readonly entries = new Map<object, string>();
@@ -31,7 +31,6 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	private readonly outputPad: number;
 	private readonly userHidden: boolean;
 	private expanded = false;
-	private turnComplete = false;
 	private markdown: Markdown | undefined;
 	private renderedRowCount = 0;
 
@@ -57,7 +56,6 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	}
 
 	completeTurn(): void {
-		this.turnComplete = true;
 		this.scroller.completeTurn();
 		this.syncScroller();
 	}
@@ -82,7 +80,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 
 	/** Only the visible live thinking text participates in the idle scroll. */
 	private syncScroller(): void {
-		const live = this.userHidden || this.expanded || this.turnComplete ? undefined : this.latestThinking();
+		const live = this.userHidden || this.expanded ? undefined : this.latestThinking();
 		this.scroller.setText(live ? flattenInline(live) : "");
 	}
 
@@ -105,7 +103,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	private overviewLine(width: number): string {
 		const padLeft = " ".repeat(this.outputPad);
 		const contentWidth = Math.max(1, width - this.outputPad);
-		const liveThinking = this.userHidden || this.expanded || this.turnComplete ? undefined : this.latestThinking();
+		const liveThinking = this.userHidden || this.expanded ? undefined : this.latestThinking();
 		const body = liveThinking
 			? this.scroller.window(Math.max(1, contentWidth - visibleWidth(PREFIX)))
 			: this.hiddenLabel;
