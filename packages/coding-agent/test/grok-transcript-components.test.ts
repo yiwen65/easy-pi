@@ -312,6 +312,26 @@ describe("Grok transcript components", () => {
 				}
 				expect(sawTail).toBe(true);
 				expect(requestRender).toHaveBeenCalled();
+
+				tool.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
+				group.completeTurn();
+				const completed = stripAnsi(group.render(40)[0] ?? "");
+				expect(completed).toContain('◆ bash  rg -n "thinking-turn-group"');
+				requestRender.mockClear();
+				vi.advanceTimersByTime(10_000);
+				expect(stripAnsi(group.render(40)[0] ?? "")).toBe(completed);
+				expect(requestRender).not.toHaveBeenCalled();
+
+				// Expanding, collapsing, or a later text change cannot rearm a completed row.
+				group.setExpanded(true);
+				group.setExpanded(false);
+				tool.updateArgs({ command: `npm run check ${"long".repeat(30)}` });
+				const updated = stripAnsi(group.render(40)[0] ?? "");
+				expect(updated).toContain("npm run check");
+				requestRender.mockClear();
+				vi.advanceTimersByTime(10_000);
+				expect(stripAnsi(group.render(40)[0] ?? "")).toBe(updated);
+				expect(requestRender).not.toHaveBeenCalled();
 				expectFits(group, [20, 40, 80]);
 			} finally {
 				group.dispose();

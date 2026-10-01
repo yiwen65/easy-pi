@@ -5,6 +5,7 @@ import { type SessionEntry, SessionManager } from "../src/core/session-manager.t
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { GrokToolTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-tool-turn-group.ts";
 import { GrokTurnDurationComponent } from "../src/modes/interactive-grok/components/grok-turn-duration.ts";
 import { GrokComponentFactory } from "../src/modes/interactive-grok/grok-component-factory.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -35,6 +36,13 @@ describe("InteractiveMode compaction events", () => {
 			render(width: number): string[];
 		};
 		const chatContainer = new Container();
+		// Independent tools can split one turn into multiple folding groups.
+		const toolGroups = [new GrokToolTurnGroupComponent(), new GrokToolTurnGroupComponent()];
+		const completeToolGroups = toolGroups.map((group) => {
+			const completeTurn = vi.spyOn(group, "completeTurn");
+			chatContainer.addChild(group);
+			return completeTurn;
+		});
 		const session = {
 			isStreaming: true,
 			abortCompaction: vi.fn(),
@@ -78,7 +86,7 @@ describe("InteractiveMode compaction events", () => {
 				"restoreActiveTurnStatusAfterCompaction",
 			),
 			finishGrokTurnTiming: Reflect.get(InteractiveMode.prototype, "finishGrokTurnTiming"),
-			completeCurrentTurnThinking: Reflect.get(InteractiveMode.prototype, "completeCurrentTurnThinking"),
+			completeTurnGroups: Reflect.get(InteractiveMode.prototype, "completeTurnGroups"),
 			addMessageToChat: vi.fn(),
 			addCompactionCostNotice: vi.fn(),
 			showError: vi.fn(),
@@ -97,7 +105,7 @@ describe("InteractiveMode compaction events", () => {
 						aborted: false;
 						willRetry: false;
 				  }
-				| { type: "agent_end"; messages: []; willRetry: false },
+				| { type: "agent_end"; messages: []; willRetry: boolean },
 		) => Promise<void>;
 
 		await handleEvent.call(fakeThis, { type: "agent_start" });
@@ -114,8 +122,13 @@ describe("InteractiveMode compaction events", () => {
 		const statusTextAfterCompaction = stripAnsi(fakeThis.activeStatusIndicator?.render(80).join("\n") ?? "");
 		const timerAfterCompaction = fakeThis.grokTurnStartedAt;
 
+		await handleEvent.call(fakeThis, { type: "agent_end", messages: [], willRetry: true });
+		for (const completeTurn of completeToolGroups) expect(completeTurn).not.toHaveBeenCalled();
+		expect(fakeThis.grokTurnStartedAt).toBe(startedAt);
+		await handleEvent.call(fakeThis, { type: "agent_start" });
 		await handleEvent.call(fakeThis, { type: "agent_end", messages: [], willRetry: false });
 
+		for (const completeTurn of completeToolGroups) expect(completeTurn).toHaveBeenCalledOnce();
 		expect(statusAfterCompaction).toBe("working");
 		expect(statusTextAfterCompaction).toContain("Working...");
 		expect(timerAfterCompaction).toBe(startedAt);

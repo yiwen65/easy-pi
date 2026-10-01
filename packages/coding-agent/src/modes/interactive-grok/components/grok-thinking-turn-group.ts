@@ -58,6 +58,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 
 	completeTurn(): void {
 		this.turnComplete = true;
+		this.scroller.completeTurn();
 		this.syncScroller();
 	}
 

@@ -61,6 +61,7 @@ export class BackgroundTaskGroupComponent extends Container {
 	/** Retain live status updates, but do not collect tasks from subsequent user turns. */
 	completeTurn(): void {
 		this.acceptingTasks = false;
+		this.scroller.completeTurn();
 	}
 
 	private requestRender(): void {

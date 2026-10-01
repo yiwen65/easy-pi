@@ -859,8 +859,17 @@ export class InteractiveMode {
 		this.chatContainer.addChild(component);
 	}
 
-	private completeCurrentTurnThinking(): void {
-		this.currentTurnThinkingGroup?.completeTurn();
+	/** Settle every folding row, including groups split by independent tools. */
+	private completeTurnGroups(): void {
+		for (const child of this.chatContainer.children) {
+			if (
+				child instanceof GrokThinkingTurnGroupComponent ||
+				child instanceof GrokToolTurnGroupComponent ||
+				child instanceof BackgroundTaskGroupComponent
+			) {
+				child.completeTurn();
+			}
+		}
 	}
 
 	/** Aggregate one assistant message's thinking into the current turn block. */
@@ -3629,7 +3638,7 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 				if (!event.willRetry) {
-					this.completeCurrentTurnThinking();
+					this.completeTurnGroups();
 					const duration = this.finishGrokTurnTiming();
 					if (duration !== undefined) {
 						// Keep the marker when the transcript is rebuilt or the session is resumed.
@@ -3871,8 +3880,7 @@ export class InteractiveMode {
 		if (!text && skillNames.length === 0) return;
 
 		// A user prompt closes the previous history turn and starts new groups.
-		this.completeCurrentTurnThinking();
-		this.backgroundTaskGroup?.completeTurn();
+		this.completeTurnGroups();
 		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
@@ -4069,7 +4077,7 @@ export class InteractiveMode {
 			this.pendingTools.set(toolCallId, component);
 		}
 		// Replayed session items are settled history, not an active streaming turn.
-		this.completeCurrentTurnThinking();
+		this.completeTurnGroups();
 		this.ui.requestRender();
 	}
 

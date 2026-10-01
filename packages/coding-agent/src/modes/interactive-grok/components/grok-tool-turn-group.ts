@@ -30,6 +30,11 @@ export class GrokToolTurnGroupComponent extends Container {
 		this.addChild(component);
 	}
 
+	/** Stop automatic scrolling without changing expansion or tool state. */
+	completeTurn(): void {
+		this.scroller.completeTurn();
+	}
+
 	/** Stop the idle scroll timer. Called when the group leaves the transcript. */
 	dispose(): void {
 		this.scroller.dispose();
