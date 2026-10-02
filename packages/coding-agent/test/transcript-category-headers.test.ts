@@ -56,10 +56,10 @@ test("category headers have stable names, distinct symbols/colors and no failure
 		resultValidation: { contract: "not_completed" },
 	});
 	const categories = [
-		{ component: thinking, label: "✦ Thinking", color: "accent" },
-		{ component: tools, label: "◆ Tools", color: "text" },
-		{ component: background, label: "⚙ Background", color: "warning" },
-		{ component: subagent, label: "↳ Subagent", color: "success" },
+		{ component: thinking, label: "✦", color: "accent" },
+		{ component: tools, label: "◆", color: "text" },
+		{ component: background, label: "⚙", color: "warning" },
+		{ component: subagent, label: "↳", color: "success" },
 	] as const;
 	try {
 		expect(new Set(categories.map(({ color }) => theme.getFgAnsi(color))).size).toBe(4);
@@ -69,6 +69,7 @@ test("category headers have stable names, distinct symbols/colors and no failure
 			expect(stripAnsi(lines[0])).toBeTruthy();
 			expect(stripAnsi(lines[0]).trimStart().startsWith(label)).toBe(true);
 			expect(stripAnsi(lines[0])).not.toMatch(/[▸▾]/);
+			expect(stripAnsi(lines[0])).not.toMatch(/Thinking|Tools|Background|Subagent/);
 			expect(lines[0]).toContain(theme.getFgAnsi(color));
 			expect(stripAnsi(lines[0])).not.toMatch(/\bfailed\b/i);
 			for (const width of [1, 2, 8, 24, 40])

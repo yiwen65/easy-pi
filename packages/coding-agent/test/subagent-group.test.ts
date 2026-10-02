@@ -149,7 +149,8 @@ describe("SubagentGroupComponent", () => {
 				resultValidation: { contract: "valid", outcome },
 			});
 			const header = group.render(160).map(stripVTControlCharacters).join("\n");
-			expect(header).toContain("↳ Subagent");
+			expect(header).toMatch(/^↳ /);
+			expect(header).not.toContain("Subagent");
 			expect(header).toContain("Completed");
 			if (outcome === "blocked" || outcome === "partial") expect(header).toContain(outcome);
 			else expect(header).not.toContain(outcome);
@@ -194,7 +195,8 @@ describe("SubagentGroupComponent", () => {
 			const lines = group.render(width).map(stripVTControlCharacters);
 			expect(lines).toHaveLength(1);
 			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
-			expect(lines[0]).toContain("↳ Subagent");
+			expect(lines[0]).toMatch(/^↳ /);
+			expect(lines[0]).not.toContain("Subagent");
 			expect(lines[0]).toContain("Completed");
 			if (outcome === "blocked") expect(lines[0]).toContain(outcome);
 			else expect(lines[0]).not.toContain("succeeded");
@@ -706,7 +708,8 @@ describe("SubagentGroupComponent", () => {
 			isError: true,
 		});
 		const header = group.render(100).join("\n");
-		expect(header).toContain("↳ Subagent");
+		expect(stripVTControlCharacters(header)).toMatch(/^↳ /);
+		expect(header).not.toContain("Subagent");
 		expect(header).toContain("Ended");
 		expect(header).not.toContain("Failed");
 		expect(header).not.toContain("Running");

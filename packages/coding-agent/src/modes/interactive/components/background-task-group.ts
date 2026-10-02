@@ -24,7 +24,7 @@ const OUTPUT_PREVIEW_BYTES = 8 * 1024;
 
 /**
  * One folding transcript block for a user turn's background bash tasks. Collapsed: a single live line
- * ("⚙ Background · N · latest command") refreshed once per second while tasks are active;
+ * ("⚙ N · latest command") refreshed once per second while tasks are active;
  * the command shows its head while tasks come and go and scrolls its truncated part into view
  * once the line sits idle.
  * Expanded: one line per task (icon, id, state, duration, command). Clicking a task row expands
@@ -107,7 +107,7 @@ export class BackgroundTaskGroupComponent extends Container {
 		const count = active.length > 0 ? `${active.length} running · ${tasks.length}` : `${terminalCount}`;
 		const command = latest ? oneLine(latest.command) : "";
 		this.scroller.setText(command);
-		const prefix = `⚙ Background · ${count}`;
+		const prefix = `⚙ ${count}`;
 		const gap = command ? " · " : "";
 		const commandWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(gap));
 		const suffix = this.scroller.window(commandWidth);
