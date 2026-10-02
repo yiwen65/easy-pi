@@ -7,7 +7,11 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { formatCollaborationError } from "@easy-pi/subagent/collaboration-contract";
+import {
+	type CollaborationTurnPage,
+	type CollaborationTurnView,
+	formatCollaborationError,
+} from "@easy-pi/subagent/collaboration-contract";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
 import type {
 	AgentListRow,
@@ -15,6 +19,7 @@ import type {
 	PiCollaborationMonitor,
 } from "../../../extensions/pi-collaboration-monitor.ts";
 import { formatWorkedDuration } from "../../../utils/duration.ts";
+import { parseDeliverResult, resultQueryText } from "../../interactive/components/subagent-group.ts";
 import type { Theme } from "../../interactive/theme/theme.ts";
 
 const safe = (text: string) =>
@@ -43,6 +48,10 @@ const STATE_PRESENTATION: Record<
 
 /** Running agents show active duration; settled agents show how long ago their last activity was. */
 function rowTime(row: AgentListRow, now: number): string {
+	if (row.turnDuration !== undefined)
+		return row.turnDuration === null
+			? "duration unknown"
+			: `${formatWorkedDuration(Math.max(0, row.turnDuration))} turn`;
 	const active = row.state === "running" || row.state === "pending" || row.state === "idle";
 	if (row.lastActivityAt === undefined) return "";
 	return active
@@ -87,6 +96,18 @@ export class GrokAgentsPanel implements Component, Focusable {
 	private selected = 0;
 	private listStart = 0;
 	private watching = false;
+	private history:
+		| {
+				path: string;
+				turns: CollaborationTurnView[];
+				selectedId?: string;
+				cursor: string | null;
+				coverage: string;
+				detail: string;
+		  }
+		| undefined;
+	private turnDetailOpen = false;
+	private turnDetailScroll = 0;
 	private composing: "send" | "followup" | "interrupt" | undefined;
 	private scroll = 0;
 	private follow = true;
@@ -139,6 +160,9 @@ export class GrokAgentsPanel implements Component, Focusable {
 	}
 	private open(): void {
 		this.watching = true;
+		this.history = undefined;
+		this.turnDetailOpen = false;
+		this.turnDetailScroll = 0;
 		this.scroll = 0;
 		this.follow = true;
 		this.notice = "";
@@ -183,17 +207,94 @@ export class GrokAgentsPanel implements Component, Focusable {
 		this.open();
 	}
 
+	private historyPage(next = false): void {
+		const path = this.path();
+		try {
+			const previous = next ? this.history : undefined;
+			if (next && !previous?.cursor) return;
+			const page: CollaborationTurnPage = this.monitor.turns(path, previous?.cursor ?? undefined);
+			const turns = [...(previous?.turns ?? []), ...page.turns];
+			this.history = {
+				path,
+				turns,
+				selectedId: previous?.selectedId ?? turns.at(-1)?.turn_id,
+				cursor: page.next_cursor,
+				coverage: page.history_coverage,
+				detail: "",
+			};
+			this.turnDetailOpen = false;
+			this.turnDetailScroll = 0;
+			this.historyDetail();
+		} catch (error) {
+			this.notice = `Turn history unavailable: ${formatCollaborationError(error)}`;
+			this.noticeError = true;
+		}
+	}
+
+	private historyDetail(): void {
+		if (!this.history) return;
+		try {
+			if (!this.history.selectedId) {
+				this.history.detail = "No retained turns";
+				return;
+			}
+			const query = this.monitor.result(this.history.path, this.history.selectedId);
+			if (query.state !== "history_unavailable")
+				this.history.turns = this.history.turns.map((turn) =>
+					turn.turn_id === query.turn.turn_id ? query.turn : turn,
+				);
+			const text = resultQueryText(query);
+			if (query.state === "found") {
+				const summary = parseDeliverResult(query.result.preview).displayText;
+				const [first, ...remaining] = summary.split("\n");
+				// Keep provenance discoverable even when a long summary exceeds the viewport.
+				this.history.detail = [first, text.slice(summary.length + 1), ...remaining].join("\n");
+			} else this.history.detail = text;
+		} catch (error) {
+			this.history.detail = `Retained result unavailable: ${formatCollaborationError(error)}`;
+		}
+	}
+
 	handleInput(data: string): void {
 		if (this.closed) return;
 		if (this.keys.matches(data, "tui.select.cancel")) {
 			if (this.composing && !this.busy) {
 				this.composing = undefined;
 				this.focused = this.focus;
+			} else if (this.history && this.turnDetailOpen && !this.busy) {
+				this.turnDetailOpen = false;
+				this.turnDetailScroll = 0;
+			} else if (this.history && !this.busy) {
+				this.history = undefined;
+				this.notice = "";
 			} else if (this.watching && !this.busy) {
 				this.watching = false;
 			} else this.close();
 		} else if (this.busy) return;
-		else if (this.composing) {
+		else if (this.history) {
+			if (this.turnDetailOpen) {
+				if (this.keys.matches(data, "tui.select.pageUp"))
+					this.turnDetailScroll = Math.max(0, this.turnDetailScroll - Math.max(1, this.height() - 9));
+				else if (this.keys.matches(data, "tui.select.pageDown"))
+					this.turnDetailScroll += Math.max(1, this.height() - 9);
+			} else if (this.keys.matches(data, "tui.select.confirm")) {
+				this.historyDetail();
+				this.turnDetailOpen = true;
+				this.turnDetailScroll = 0;
+			} else if (this.keys.matches(data, "tui.select.pageDown")) this.historyPage(true);
+			else if (this.keys.matches(data, "tui.select.up") || this.keys.matches(data, "tui.select.down")) {
+				const index = this.history.turns.findIndex((turn) => turn.turn_id === this.history?.selectedId);
+				const delta = this.keys.matches(data, "tui.select.down") ? 1 : -1;
+				this.history.selectedId =
+					this.history.turns[Math.max(0, Math.min(this.history.turns.length - 1, index + delta))]?.turn_id;
+				this.historyDetail();
+			}
+		} else if (!this.composing && this.keys.matches(data, "app.agents.turns")) {
+			if (this.path() !== "/root") {
+				this.watching = true;
+				this.historyPage();
+			}
+		} else if (this.composing) {
 			if (this.composing === "interrupt") {
 				if (this.keys.matches(data, "tui.select.confirm")) void this.submit("");
 			} else this.input.handleInput(data);
@@ -223,7 +324,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 		} else if (this.keys.matches(data, "tui.select.pageDown")) {
 			this.scroll = Math.max(0, this.scroll - Math.max(1, this.height() - 9));
 			if (this.scroll === 0) this.follow = true;
-		} else if (data === "\x1b[F" || data === "\x1b[4~") {
+		} else if (this.keys.matches(data, "app.agents.latest")) {
 			this.follow = true;
 			this.scroll = 0;
 		} else if (
@@ -267,7 +368,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 			lines.push(
 				th.fg(
 					"dim",
-					`${running} running · ${idle} idle · ${settled} settled — ${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} inspect · ${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt`,
+					`${running} running · ${idle} idle · ${settled} settled — ${hint("tui.select.up")}/${hint("tui.select.down")} select · ${hint("tui.select.confirm")} inspect · ${hint("app.agents.turns")} turns · ${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt`,
 				),
 			);
 		if (rows.length === 1) {
@@ -316,7 +417,15 @@ export class GrokAgentsPanel implements Component, Focusable {
 			this.notice || this.busy
 				? wrapTextWithAnsi(oneLine(this.busy ? "Submitting…" : this.notice), contentWidth).slice(0, NOTICE_LINES)
 				: [];
-		const cancelTarget = this.composing ? "cancel action" : this.watching ? "back to list" : "return to main session";
+		const cancelTarget = this.composing
+			? "cancel action"
+			: this.history
+				? this.turnDetailOpen
+					? "back to turns"
+					: "back to preview"
+				: this.watching
+					? "back to list"
+					: "return to main session";
 		const lines = [
 			th.fg("accent", th.bold("Agents — shared workspace")),
 			th.fg("warning", `${hint("tui.select.cancel")}: ${cancelTarget} · Main editor inactive`),
@@ -337,7 +446,63 @@ export class GrokAgentsPanel implements Component, Focusable {
 			if (this.composing !== "interrupt") footer.push(...this.input.render(contentWidth));
 		}
 		footer.push(...notice.map((line) => th.fg(this.noticeError ? "error" : "success", line)));
-		if (!this.watching) {
+		if (this.history) {
+			const history = this.history;
+			const selected = history.turns.find((turn) => turn.turn_id === history.selectedId);
+			const headings = [
+				th.fg(
+					"accent",
+					`Turns — ${history.path} · ${history.coverage} · ${history.turns.length} retained on loaded pages · result viewport`,
+				),
+				th.fg(
+					"dim",
+					`${hint("tui.select.up")}/${hint("tui.select.down")} turn · ${hint("tui.select.pageDown")} ${history.cursor ? "next page" : "traversal exhausted"} · ${hint("tui.select.confirm")} detail · ${hint("tui.select.cancel")} preview`,
+				),
+			];
+			const totals = ["input", "output", "cacheRead", "cacheWrite"] as const;
+			const usage = totals
+				.map((key) => {
+					const known = history.turns
+						.map((turn) => turn.usage[key])
+						.filter((value): value is number => value !== null);
+					return `${key} ${known.length ? known.reduce((sum, value) => sum + value, 0) : "unknown"} (${known.length}/${history.turns.length} reported)`;
+				})
+				.join(" / ");
+			headings.push(th.fg("dim", `Usage known-range · loaded pages only (partial history coverage): ${usage}`));
+			const detail = wrapTextWithAnsi(safe(history.detail), contentWidth).map((line) => th.fg("text", line));
+			if (this.turnDetailOpen) {
+				const detailHeadings = [
+					th.fg("accent", `Turn detail — ${history.selectedId ?? "unknown"}`),
+					th.fg(
+						"dim",
+						`${hint("tui.select.pageUp")}/${hint("tui.select.pageDown")} detail scroll · ${hint("tui.select.cancel")} turns`,
+					),
+				];
+				while (
+					lines.length + detailHeadings.length + 1 + footer.length > maxHeight &&
+					(lines.length || detailHeadings.length)
+				) {
+					if (lines.length) lines.pop();
+					else detailHeadings.pop();
+				}
+				lines.push(...detailHeadings);
+				const room = Math.max(1, maxHeight - lines.length - footer.length);
+				this.turnDetailScroll = Math.min(this.turnDetailScroll, Math.max(0, detail.length - room));
+				lines.push(...detail.slice(this.turnDetailScroll, this.turnDetailScroll + room));
+			} else {
+				// Selected identity and real result take priority over decorative headers on short terminals.
+				while (
+					lines.length + headings.length + 2 + footer.length > maxHeight &&
+					(lines.length || headings.length)
+				) {
+					if (lines.length) lines.pop();
+					else headings.pop();
+				}
+				lines.push(...headings);
+				if (selected) lines.push(th.fg("accent", `› ${selected.turn_id} · ${selected.status}`));
+				lines.push(...detail.slice(0, Math.max(1, maxHeight - lines.length - footer.length)));
+			}
+		} else if (!this.watching) {
 			// On short terminals keep the selection and essential action lines ahead of
 			// extra notice text and decorative headers. The draft itself stays untouched.
 			if (notice.length > 1 && footer.length + 1 > maxHeight) footer.pop();
@@ -354,7 +519,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 					`${presentation.icon} ${view.path} · ${presentation.word} · ${oneLine(view.model)}`,
 				),
 			);
-			if (view.objective) lines.push(th.fg("text", oneLine(`Task: ${view.objective}`)));
+			if (view.objective) lines.push(th.fg("text", oneLine(`Task preview (first line): ${view.objective}`)));
 			lines.push(
 				th.fg(
 					"muted",
@@ -366,18 +531,32 @@ export class GrokAgentsPanel implements Component, Focusable {
 			lines.push(
 				th.fg(
 					"dim",
-					`${hint("app.agents.previous")}/${hint("app.agents.next")} agent · ${hint("tui.select.pageUp")}/${hint("tui.select.pageDown")} scroll · End latest · ${hint("tui.select.cancel")} list`,
+					`${hint("app.agents.previous")}/${hint("app.agents.next")} agent · ${hint("tui.select.pageUp")}/${hint("tui.select.pageDown")} scroll · ${hint("app.agents.latest")} latest · ${hint("tui.select.cancel")} list`,
 				),
 			);
 			lines.push(
 				th.fg(
 					"dim",
-					`${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt`,
+					`${hint("app.agents.message")} message · ${hint("app.agents.followup")} new task · ${hint("app.agents.interrupt")} interrupt · ${hint("app.agents.turns")} turns`,
 				),
 			);
-			const body = wrapTextWithAnsi(safe(view.text || "Waiting for session activity…"), contentWidth).map((line) =>
-				roleLine(line, th),
-			);
+			if (view.resultMetadata) {
+				const metadata = view.resultMetadata.split("\n");
+				// Detailed retained result references are available in the turn history entry.
+				lines.push(
+					...metadata
+						.filter((line) => line.startsWith("Format:") || line.startsWith("Duration:"))
+						.map((line) => th.fg("dim", oneLine(line))),
+				);
+			}
+			if (view.queryUnavailable) lines.push(th.fg("warning", view.queryUnavailable));
+			if (view.resultSummary) lines.push(th.fg("text", `Result: ${oneLine(view.resultSummary)}`));
+			const body = wrapTextWithAnsi(
+				safe((maxHeight < 8 ? view.resultSummary : undefined) || view.text || "Waiting for session activity…"),
+				contentWidth,
+			).map((line) => roleLine(line, th));
+			// Keep a real conversation/result row visible rather than filling a short viewport with headers.
+			while (lines.length + 2 + footer.length > maxHeight && lines.length) lines.pop();
 			const room = Math.max(1, maxHeight - lines.length - 1 - footer.length);
 			this.scroll = Math.min(this.scroll, Math.max(0, body.length - room));
 			if (this.follow) this.scroll = 0;
@@ -388,7 +567,7 @@ export class GrokAgentsPanel implements Component, Focusable {
 					? ""
 					: this.follow
 						? "  [latest]"
-						: `  [${Math.round((top / Math.max(1, body.length - room)) * 100)}% — End for latest]`;
+						: `  [${Math.round((top / Math.max(1, body.length - room)) * 100)}% — ${hint("app.agents.latest")} for latest]`;
 			const divider = `── conversation ${"─".repeat(Math.max(2, contentWidth - 18 - visibleWidth(marker)))}${th.fg("warning", marker)}`;
 			lines.push(th.fg("dim", divider));
 			lines.push(...body.slice(top, end));

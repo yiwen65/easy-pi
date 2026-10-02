@@ -1,17 +1,25 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	assertAgentTransition,
+	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
 	COLLABORATION_TEAM_TOOL_NAMES,
-	type CollaborationAgentView,
+	type CollaborationArguments,
 	CollaborationError,
 	type CollaborationMessage,
+	type CollaborationResultQuery,
+	type CollaborationResults,
 	type CollaborationStatus,
+	type CollaborationTargetedWaitResult,
+	type CollaborationTurnPage,
 	childAgentPath,
 	type Delegation,
+	parseCollaborationArguments,
+	parseDelegationResultText,
 	resolveAgentPath,
+	type StagedCollaborationAgentView,
 	validateCollaborationMessage,
 	validateCollaborationTask,
 	validateDelegation,
@@ -23,6 +31,7 @@ import type {
 	CollaborationSnapshot,
 	CollaborationStore,
 	StoredCollaborationAgent,
+	TurnPatch,
 } from "./collaboration-store.ts";
 import { prepareCollaborationFork } from "./context-fork.ts";
 import type {
@@ -103,36 +112,171 @@ export class CollaborationController {
 		return record;
 	}
 
-	list(caller: ChildSessionIdentity, prefix?: string): CollaborationAgentView[] {
+	list(caller: ChildSessionIdentity, prefix?: string): StagedCollaborationAgentView[] {
 		this.assertReady();
 		this.assertCaller(caller);
 		const path = prefix === undefined ? undefined : resolveAgentPath(caller.agentPath, prefix);
 		return this.store
 			.read()
 			.agents.filter((agent) => !path || agent.path === path || agent.path.startsWith(`${path}/`))
-			.map((agent) => ({
-				task_name: agent.path,
-				status: agent.status,
-				loaded: this.sessions.has(agent.path),
-				...(agent.delegation
-					? {
-							context: {
-								mode: agent.delegation.context.mode,
-								...(agent.contextBytes === undefined ? {} : { bytes: agent.contextBytes }),
-								measured:
-									agent.delegation.context.mode === "fork" && agent.delegation.context.prefix === "preserve"
-										? ("request_prefix" as const)
-										: ("messages" as const),
-								prefix:
-									agent.delegation.context.mode === "fork" && agent.delegation.context.prefix === "preserve"
-										? ("required" as const)
-										: ("rebuilt" as const),
-							},
-						}
-					: {}),
-				...(agent.resultValidation ? { resultValidation: agent.resultValidation } : {}),
-				...(agent.usage ? { usage: agent.usage } : {}),
-			}));
+			.map((agent) => {
+				const turn = this.store.getTurn(agent.path, { turn_id: agent.turnId });
+				if (!turn) throw new CollaborationError("storage_error", "Missing latest turn ledger");
+				return {
+					turn_id: turn.turn_id,
+					task_message_id: turn.task_message_id,
+					result_message_id: turn.result_message_id,
+					history_coverage: turn.history_coverage,
+					delivery: turn.delivery,
+					turn_usage: turn.usage,
+					usage_scope: "latest_turn" as const,
+					task_name: agent.path,
+					status: agent.status,
+					loaded: this.sessions.has(agent.path),
+					...(agent.delegation
+						? {
+								context: {
+									mode: agent.delegation.context.mode,
+									...(agent.contextBytes === undefined ? {} : { bytes: agent.contextBytes }),
+									measured:
+										agent.delegation.context.mode === "fork" && agent.delegation.context.prefix === "preserve"
+											? ("request_prefix" as const)
+											: ("messages" as const),
+									prefix:
+										agent.delegation.context.mode === "fork" && agent.delegation.context.prefix === "preserve"
+											? ("required" as const)
+											: ("rebuilt" as const),
+								},
+							}
+						: {}),
+					...(agent.resultValidation ? { resultValidation: agent.resultValidation } : {}),
+					...(agent.usage ? { usage: agent.usage } : {}),
+				};
+			});
+	}
+
+	private assertRootQuery(
+		caller: ChildSessionIdentity,
+		tool: "get_agent_result" | "list_agent_turns" | "wait_agent",
+	): void {
+		this.assertReady();
+		this.assertCaller(caller);
+		if (caller.agentPath !== "/root")
+			throw new CollaborationError("forbidden", "Only /root may query team history", "nested_delegation");
+		if (!this.toolAllowed(caller, tool))
+			throw new CollaborationError("forbidden", "History query tool was revoked", "tools_unavailable", [tool]);
+	}
+
+	private boundedResponse<T>(response: T, maxBytes: number): T {
+		if (Buffer.byteLength(JSON.stringify(response)) > maxBytes)
+			throw new CollaborationError("storage_error", "History response exceeds budget");
+		return response;
+	}
+
+	/** Read-only lookup; resolve the latest selector once without loading or consuming anything. */
+	getAgentResult(caller: ChildSessionIdentity, input: unknown): CollaborationResultQuery {
+		this.assertRootQuery(caller, "get_agent_result");
+		return this.readAgentResult(caller, parseCollaborationArguments("get_agent_result", input));
+	}
+
+	// Trusted readers (including future targeted wait) apply their own live capability guard.
+	private readAgentResult(
+		caller: ChildSessionIdentity,
+		args: CollaborationArguments["get_agent_result"],
+	): CollaborationResultQuery {
+		const agent = this.target(caller, args.target);
+		const selector =
+			"message_id" in args
+				? { message_id: args.message_id }
+				: { turn_id: "turn_id" in args ? args.turn_id : agent.turnId };
+		const record = this.store.getTurn(agent.path, selector);
+		if (!record) {
+			const known =
+				this.store.hasTurnSelector(selector) ||
+				(this.store.read().messages ?? []).some(
+					(message) => message.id === (selector.turn_id ?? selector.message_id),
+				);
+			if (!known && this.store.historyCoverage() === "retained_only")
+				return { state: "history_unavailable", target: agent.path, history_coverage: "retained_only" };
+			throw new CollaborationError("invalid_arguments", "Unknown turn selector for this target", "unknown_turn");
+		}
+		const { rootSessionId: _root, delegation: _delegation, result: retained, ...turn } = record;
+		let result = retained;
+		if (result && result.truncated !== true && record.resultValidation?.contract === "valid") {
+			try {
+				const delivered = parseDelegationResultText(result.preview);
+				if (delivered.artifacts) result = { ...result, artifacts: delivered.artifacts };
+			} catch {
+				// Legacy valid-format proof may use an older contract. Keep the original output.
+			}
+		}
+		if (!result && record.status === "unknown") {
+			if (record.history_coverage === "retained_only")
+				return { state: "history_unavailable", target: agent.path, history_coverage: "retained_only" };
+			throw new CollaborationError("storage_error", "Complete history lacks turn status proof");
+		}
+		const response: CollaborationResultQuery = result
+			? { state: "found", turn, result }
+			: { state: record.status === "pending" || record.status === "running" ? "pending" : "no_result", turn };
+		return this.boundedResponse(response, COLLABORATION_HISTORY_LIMITS.maxResultResponseBytes);
+	}
+
+	/** Cursor fixes page membership, not the completion/ack metadata of existing turns. */
+	listAgentTurns(caller: ChildSessionIdentity, input: unknown): CollaborationTurnPage {
+		this.assertRootQuery(caller, "list_agent_turns");
+		const args = parseCollaborationArguments("list_agent_turns", input);
+		const agent = this.target(caller, args.target);
+		const scope = createHash("sha256")
+			.update(JSON.stringify([this.store.rootSessionId, agent.path]))
+			.digest("hex");
+		let after = 0;
+		let highWater = this.store.highWater();
+		if (args.cursor !== undefined) {
+			let cursor: unknown;
+			try {
+				const decoded = Buffer.from(args.cursor, "base64url");
+				if (decoded.toString("base64url") !== args.cursor) throw new Error("Noncanonical cursor");
+				cursor = JSON.parse(decoded.toString("utf8"));
+			} catch {
+				throw new CollaborationError("invalid_arguments", "Invalid history cursor");
+			}
+			if (
+				!cursor ||
+				typeof cursor !== "object" ||
+				Array.isArray(cursor) ||
+				Object.keys(cursor).sort().join(",") !== "after,highWater,scope"
+			)
+				throw new CollaborationError("invalid_arguments", "Invalid history cursor shape");
+			const data = cursor as { scope: unknown; after: unknown; highWater: unknown };
+			if (
+				data.scope !== scope ||
+				typeof data.after !== "number" ||
+				typeof data.highWater !== "number" ||
+				!Number.isSafeInteger(data.after) ||
+				!Number.isSafeInteger(data.highWater) ||
+				data.after < 1 ||
+				data.highWater < data.after ||
+				data.highWater > highWater
+			)
+				throw new CollaborationError("invalid_arguments", "Foreign or invalid history cursor");
+			after = data.after;
+			highWater = data.highWater;
+			if (this.store.pageTurns(agent.path, { after: after - 1, highWater: after, limit: 1 })[0]?.sequence !== after)
+				throw new CollaborationError("invalid_arguments", "Cursor anchor belongs to another target");
+		}
+		const turns = this.store.pageTurns(agent.path, { after, highWater, limit: args.limit });
+		const last = turns.at(-1)?.sequence;
+		const more =
+			last !== undefined && this.store.pageTurns(agent.path, { after: last, highWater, limit: 1 }).length > 0;
+		const next_cursor = more
+			? Buffer.from(JSON.stringify({ scope, after: last, highWater })).toString("base64url")
+			: null;
+		if (next_cursor && next_cursor.length > 512)
+			throw new CollaborationError("storage_error", "History cursor exceeds budget");
+		return this.boundedResponse(
+			{ target: agent.path, history_coverage: this.store.historyCoverage(), turns, next_cursor },
+			COLLABORATION_HISTORY_LIMITS.maxPageResponseBytes,
+		);
 	}
 
 	/** Observation never loads a session, admits work, or consumes mailbox messages. */
@@ -225,6 +369,20 @@ export class CollaborationController {
 		signal?: AbortSignal,
 		admission?: { delegation: Delegation; tools: string[]; prefix?: ChildRequestPrefix },
 	): Promise<string> {
+		return this.spawnTurn(caller, taskName, message, model, fork, signal, admission).then(
+			(receipt) => receipt.task_name,
+		);
+	}
+
+	spawnTurn(
+		caller: ChildSessionIdentity,
+		taskName: string,
+		message: string,
+		model: ChildSessionModel,
+		fork?: AgentMessage[],
+		signal?: AbortSignal,
+		admission?: { delegation: Delegation; tools: string[]; prefix?: ChildRequestPrefix },
+	): Promise<CollaborationResults["spawn_agent"]> {
 		validateCollaborationTask(message);
 		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
 		const context = fork ? prepareCollaborationFork(fork) : undefined;
@@ -258,6 +416,7 @@ export class CollaborationController {
 					"Team retained-agent history limit reached",
 					"team_history_full",
 				);
+			this.store.assertTurnCapacity();
 			this.checkCapacity();
 			this.checkMailboxCapacity(snapshot, caller.agentPath);
 			const record: StoredCollaborationAgent = {
@@ -285,10 +444,13 @@ export class CollaborationController {
 			snapshot.agents.push(record);
 			this.persist(snapshot);
 			// Wrap the promise so the control queue does not adopt lifecycle work.
-			return { path, ready: this.schedule(record, signal, context, admission?.prefix) };
-		}).then(async ({ path, ready }) => {
+			return {
+				receipt: { task_name: path, turn_id: record.turnId, message_id: record.taskMessage!.id },
+				ready: this.schedule(record, signal, context, admission?.prefix),
+			};
+		}).then(async ({ receipt, ready }) => {
 			await ready;
-			return path;
+			return receipt;
 		});
 	}
 
@@ -299,6 +461,16 @@ export class CollaborationController {
 		signal?: AbortSignal,
 		admission?: { delegation: Delegation; tools: string[] },
 	): Promise<string> {
+		return this.followupTurn(caller, target, message, signal, admission).then((receipt) => receipt.message_id);
+	}
+
+	followupTurn(
+		caller: ChildSessionIdentity,
+		target: string,
+		message: string,
+		signal?: AbortSignal,
+		admission?: { delegation: Delegation; tools: string[] },
+	): Promise<CollaborationResults["followup_task"]> {
 		validateCollaborationTask(message);
 		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
 		return this.serialize(() => {
@@ -325,6 +497,7 @@ export class CollaborationController {
 				record.status === "closed"
 			)
 				throw new CollaborationError("busy", "Agent cannot accept a follow-up now");
+			this.store.assertTurnCapacity();
 			this.checkCapacity();
 			this.checkMailboxCapacity(this.store.read(), record.parent);
 			if (delegation) {
@@ -352,8 +525,14 @@ export class CollaborationController {
 			record.turnId = randomUUID();
 			this.reserve(record, message, caller, "existing");
 			this.update(record.path, (current) => Object.assign(current, record));
-			return { ready: this.schedule(record, signal) };
-		}).then(({ ready }) => ready);
+			return {
+				receipt: { message_id: record.taskMessage!.id, turn_id: record.turnId, status: "accepted" as const },
+				ready: this.schedule(record, signal),
+			};
+		}).then(async ({ receipt, ready }) => {
+			await ready;
+			return receipt;
+		});
 	}
 
 	private checkMailboxCapacity(snapshot: CollaborationSnapshot, target: string): void {
@@ -411,7 +590,16 @@ export class CollaborationController {
 			const selected = new Set(ids);
 			const messages = snapshot.messages ?? [];
 			snapshot.messages = messages.filter((message) => message.to !== caller.agentPath || !selected.has(message.id));
-			if (snapshot.messages.length !== messages.length) this.persist(snapshot);
+			if (snapshot.messages.length !== messages.length)
+				this.persist(
+					snapshot,
+					messages
+						.filter(
+							(message) =>
+								message.kind === "result" && message.to === caller.agentPath && selected.has(message.id),
+						)
+						.map((message) => ({ target: message.from, turn_id: message.turnId, acknowledged: true })),
+				);
 		});
 	}
 
@@ -431,6 +619,59 @@ export class CollaborationController {
 		this.assertReady();
 		this.assertCaller(caller);
 		return this.activity.wait(caller.agentPath, () => this.pending(caller).length > 0, timeout, signal);
+	}
+
+	/** Pin one retained turn. Ending a wait never ends the child's execution. */
+	waitForTurn(
+		caller: ChildSessionIdentity,
+		input: unknown,
+		signal?: AbortSignal,
+	): Promise<CollaborationTargetedWaitResult> {
+		this.assertRootQuery(caller, "wait_agent");
+		const args = parseCollaborationArguments("wait_agent", input);
+		if (!("target" in args)) throw new CollaborationError("invalid_arguments", "Targeted wait requires target");
+		const initial = this.readAgentResult(caller, {
+			target: args.target,
+			...(args.turn_id === undefined ? {} : { turn_id: args.turn_id }),
+		});
+		if (initial.state === "history_unavailable" || initial.turn.status === "unknown")
+			throw new CollaborationError("context_unavailable", "Turn completion is not known", "history_unavailable");
+		const target = initial.turn.target;
+		const turn_id = initial.turn.turn_id;
+		let latest = initial;
+		// A change before waiter registration is caught by Activity.wait's initial check;
+		// subsequent completion, startup cleanup and recovery changes wake the pinned check.
+		const unsubscribe = this.subscribe(() => this.activity.notify(caller.agentPath));
+		return this.activity
+			.wait(
+				caller.agentPath,
+				() => {
+					this.assertRootQuery(caller, "wait_agent");
+					const observed = this.readAgentResult(caller, { target, turn_id });
+					if (observed.state === "history_unavailable" || observed.turn.status === "unknown")
+						throw new CollaborationError(
+							"context_unavailable",
+							"Turn completion is not known",
+							"history_unavailable",
+						);
+					latest = observed;
+					return ["completed", "failed", "interrupted"].includes(observed.turn.status);
+				},
+				args.timeout_ms,
+				signal,
+			)
+			.then(
+				(activity): CollaborationTargetedWaitResult =>
+					activity.reason === "mailbox"
+						? this.boundedResponse(
+								{ reason: "terminal", timed_out: false, target, turn_id, result: latest },
+								COLLABORATION_HISTORY_LIMITS.maxResultResponseBytes,
+							)
+						: activity.reason === "user_input"
+							? { reason: "user_input", timed_out: false, target, turn_id }
+							: { reason: "timeout", timed_out: true, target, turn_id },
+			)
+			.finally(unsubscribe);
 	}
 
 	private checkCapacity(): void {
@@ -565,9 +806,9 @@ export class CollaborationController {
 		this.persist(snapshot);
 	}
 
-	private persist(snapshot: CollaborationSnapshot): void {
+	private persist(snapshot: CollaborationSnapshot, patches: readonly TurnPatch[] = []): void {
 		try {
-			this.store.commit(snapshot);
+			this.store.commit(snapshot, patches);
 		} catch (error) {
 			this.failure = error;
 			this.refreshAuthority();
@@ -644,12 +885,20 @@ export class CollaborationController {
 			if (current.status !== "interrupted") current.status = result.status;
 			// The complete answer remains in the native session. Truncation is explicit.
 			const suffix = "\n[Preview truncated; inspect child session for complete output.]";
-			current.result =
-				Buffer.byteLength(result.text) <= COLLABORATION_LIMITS.maxMessageBytes
-					? result.text
-					: Buffer.from(result.text)
-							.subarray(0, COLLABORATION_LIMITS.maxMessageBytes - Buffer.byteLength(suffix) - 3)
-							.toString("utf8") + suffix;
+			const truncated = Buffer.byteLength(result.text) > COLLABORATION_LIMITS.maxMessageBytes;
+			current.result = result.text;
+			if (truncated) {
+				const budget = COLLABORATION_LIMITS.maxMessageBytes - Buffer.byteLength(suffix);
+				let bytes = 0;
+				const characters: string[] = [];
+				for (const character of result.text) {
+					const size = Buffer.byteLength(character);
+					if (bytes + size > budget) break;
+					bytes += size;
+					characters.push(character);
+				}
+				current.result = characters.join("") + suffix;
+			}
 			current.completionPending = false;
 			if (current.delegation) current.resultValidation = validateDelegationResult(result.text, current.status);
 			current.usage = result.usage
@@ -672,7 +921,7 @@ export class CollaborationController {
 				text: current.result,
 				...(current.resultValidation ? { resultValidation: current.resultValidation } : {}),
 			});
-			this.persist(snapshot);
+			this.persist(snapshot, [{ target: current.path, turn_id: current.turnId, result: { truncated } }]);
 			this.activity.notify(current.parent);
 		});
 	}

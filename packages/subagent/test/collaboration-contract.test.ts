@@ -1,8 +1,14 @@
+import { Buffer } from "node:buffer";
+import { Value } from "typebox/value";
 import { describe, expect, test } from "vitest";
 import {
 	assertAgentTransition,
+	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
+	CollaborationArtifactSchema,
+	CollaborationArtifactsSchema,
 	CollaborationError,
+	CollaborationSchemas,
 	childAgentPath,
 	collaborationWaitMs,
 	DELIVER_RESULT_TOOL_NAME,
@@ -10,7 +16,9 @@ import {
 	normalizeDelegation,
 	parseCollaborationArguments,
 	parseDelegationResult,
+	parseDelegationResultText,
 	parseForkSelection,
+	parseStagedCollaborationArguments,
 	resolveAgentPath,
 	validateAgentPath,
 	validateDelegation,
@@ -236,6 +244,138 @@ describe("collaboration contract", () => {
 	});
 });
 
+describe("staged result reliability contract", () => {
+	test("requires a target and never chooses precedence between result selectors", () => {
+		for (const selection of [{}, { turn_id: "turn-1" }, { message_id: "message-1" }]) {
+			const input = { target: "worker", ...selection };
+			expect(parseStagedCollaborationArguments("get_agent_result", input)).toEqual(input);
+		}
+		for (const input of [
+			{},
+			{ turn_id: "turn-1" },
+			{ target: "worker", turn_id: "turn-1", message_id: "message-1" },
+			{ target: "worker", turn_id: "" },
+			{ target: "worker", message_id: " " },
+			{ target: "worker", turn_id: "x".repeat(129) },
+			{ target: "worker", extra: true },
+		]) {
+			expect(() => parseStagedCollaborationArguments("get_agent_result", input)).toThrow(CollaborationError);
+		}
+	});
+
+	test("bounds pagination without coercion and detaches staged inputs", () => {
+		const input = { target: "worker", limit: COLLABORATION_HISTORY_LIMITS.maxPageSize, cursor: "opaque_cursor" };
+		const parsed = parseStagedCollaborationArguments("list_agent_turns", input);
+		input.target = "changed";
+		expect(parsed.target).toBe("worker");
+		expect(parseStagedCollaborationArguments("list_agent_turns", { target: "worker" })).toEqual({ target: "worker" });
+		for (const limit of [0, 21, 1.5, "10", Number.NaN]) {
+			expect(() => parseStagedCollaborationArguments("list_agent_turns", { target: "worker", limit })).toThrow(
+				CollaborationError,
+			);
+		}
+		for (const cursor of ["", "x".repeat(513), "../foreign", 1]) {
+			expect(() => parseStagedCollaborationArguments("list_agent_turns", { target: "worker", cursor })).toThrow(
+				CollaborationError,
+			);
+		}
+	});
+
+	test("targeted wait requires target for a turn and preserves old timeout bounds", () => {
+		for (const input of [
+			{},
+			{ timeout_ms: 0 },
+			{ target: "worker" },
+			{ target: "worker", turn_id: "turn-1", timeout_ms: COLLABORATION_LIMITS.maxWaitMs },
+		]) {
+			expect(parseStagedCollaborationArguments("wait_agent", input)).toEqual(input);
+		}
+		for (const input of [
+			{ turn_id: "turn-1" },
+			{ target: "worker", turn_id: "" },
+			{ target: "worker", message_id: "message-1" },
+			{ target: "worker", timeout_ms: -1 },
+			{ target: "worker", timeout_ms: COLLABORATION_LIMITS.maxWaitMs + 1 },
+		]) {
+			expect(() => parseStagedCollaborationArguments("wait_agent", input)).toThrow(CollaborationError);
+		}
+	});
+
+	test("result queries, targeted wait and bounded artifact references are live", () => {
+		expect(Object.keys(CollaborationSchemas)).toEqual([
+			"spawn_agent",
+			"send_message",
+			"followup_task",
+			"wait_agent",
+			"interrupt_agent",
+			"close_agent",
+			"list_agents",
+			"get_agent_result",
+			"list_agent_turns",
+		]);
+		expect(parseCollaborationArguments("get_agent_result", { target: "worker" })).toEqual({ target: "worker" });
+		expect(parseCollaborationArguments("list_agent_turns", { target: "worker", limit: 20 })).toEqual({
+			target: "worker",
+			limit: 20,
+		});
+		expect(parseCollaborationArguments("wait_agent", { target: "worker" })).toEqual({ target: "worker" });
+		expect(() => parseCollaborationArguments("wait_agent", { turn_id: "turn-1" })).toThrow(CollaborationError);
+		expect(parseDelegationResult({ summary: "Done", outcome: "succeeded", artifacts: [] })).toMatchObject({
+			artifacts: [],
+		});
+	});
+
+	test("reserves a minimal bounded artifact reference, not acceptance or executable evidence", () => {
+		expect(Value.Check(CollaborationArtifactSchema, { path: "report.md", purpose: "Full test report" })).toBe(true);
+		expect(
+			Value.Check(CollaborationArtifactSchema, { path: "report.md", purpose: "Evidence", sha256: "a".repeat(64) }),
+		).toBe(true);
+		const reference = { path: "report.md", purpose: "Evidence" };
+		expect(Value.Check(CollaborationArtifactsSchema, Array(8).fill(reference))).toBe(true);
+		expect(Value.Check(CollaborationArtifactsSchema, Array(9).fill(reference))).toBe(false);
+		for (const artifact of [
+			{ path: "report.md", purpose: " " },
+			{ path: "x".repeat(2049), purpose: "Evidence" },
+			{ path: "report.md", purpose: "x".repeat(257) },
+			{ path: "report.md", purpose: "Evidence", sha256: "A".repeat(64) },
+			{ path: "report.md", purpose: "Evidence", accepted: true },
+		])
+			expect(Value.Check(CollaborationArtifactSchema, artifact)).toBe(false);
+	});
+
+	test("bounded fixture favors incremental rows over growing snapshot history rewrites", () => {
+		const rows: { turn_id: string; delegation: ReturnType<typeof delegation>; preview: string }[] = [];
+		let snapshotBytes = 0;
+		let incrementalBytes = 0;
+		for (let index = 1; index <= 4; index++) {
+			const row = { turn_id: `turn-${index}`, delegation: delegation(), preview: "界".repeat(128) };
+			rows.push(row);
+			snapshotBytes += Buffer.byteLength(JSON.stringify(rows));
+			incrementalBytes += Buffer.byteLength(JSON.stringify(row));
+		}
+		expect(snapshotBytes).toBeGreaterThan(incrementalBytes * 2);
+		expect(COLLABORATION_HISTORY_LIMITS.maxRetainedTurns).toBe(4096);
+		expect(COLLABORATION_LIMITS.maxRetainedAgents).toBe(2048);
+		const maxTurnBytes =
+			COLLABORATION_LIMITS.maxDelegationBytes +
+			COLLABORATION_LIMITS.maxMessageBytes +
+			COLLABORATION_HISTORY_LIMITS.maxTurnMetadataBytes;
+		expect(maxTurnBytes * COLLABORATION_HISTORY_LIMITS.maxRetainedTurns).toBe(1088 * 1024 * 1024);
+	});
+
+	test("retention and unavailable-history diagnostics are fixed safe hints", () => {
+		expect(
+			formatCollaborationError(new CollaborationError("limit_reached", "secret", "turn_history_full")),
+		).toContain("new root session");
+		expect(
+			formatCollaborationError(new CollaborationError("context_unavailable", "secret", "history_unavailable")),
+		).not.toContain("secret");
+		expect(formatCollaborationError(new CollaborationError("invalid_arguments", "secret", "unknown_turn"))).toContain(
+			"list_agent_turns",
+		);
+	});
+});
+
 describe("delegation result validation", () => {
 	const valid = JSON.stringify({
 		summary: "Done",
@@ -271,7 +411,7 @@ describe("relaxed delegation result", () => {
 		).toMatchObject({ contract: "valid", outcome: "succeeded" });
 	});
 
-	test("the removed array fields are now rejected, not shape-checked", () => {
+	test("unsupported sections and malformed artifact arrays are rejected", () => {
 		const base = { summary: "done", outcome: "succeeded" };
 		for (const field of ["artifacts", "evidence", "checks", "risks"]) {
 			expect(validateDelegationResult(JSON.stringify({ ...base, [field]: ["x"] }), "completed").contract).toBe(
@@ -279,6 +419,41 @@ describe("relaxed delegation result", () => {
 			);
 		}
 		expect(validateDelegationResult(JSON.stringify({ ...base, extra: 1 }), "completed").contract).toBe("invalid");
+	});
+});
+
+describe("bounded report references", () => {
+	test("minimal result stays valid and optional refs are detached, not read or accepted", () => {
+		const ref = { path: "/tmp/nonexistent-report.txt", purpose: "Full verification", sha256: "a".repeat(64) };
+		const input = { summary: "Report available", outcome: "partial" as const, artifacts: [ref] };
+		const result = parseDelegationResult(input);
+		ref.path = "changed";
+		expect(result.artifacts?.[0].path).toBe("/tmp/nonexistent-report.txt");
+		expect(parseDelegationResultText(`Result:\n${JSON.stringify(result)}\n(end)`)).toEqual(result);
+		expect(validateDelegationResult(JSON.stringify(result), "completed")).toEqual({
+			contract: "valid",
+			outcome: "partial",
+		});
+		expect(result).not.toHaveProperty("acceptance");
+	});
+
+	test("ref count, hash, NUL and complete multi-byte delivery budgets are enforced", () => {
+		const base = { summary: "报告", outcome: "succeeded" as const };
+		const ref = { path: "report.txt", purpose: "Tests" };
+		expect(parseDelegationResult({ ...base, artifacts: Array(8).fill(ref) }).artifacts).toHaveLength(8);
+		for (const artifacts of [
+			Array(9).fill(ref),
+			[{ ...ref, sha256: "A".repeat(64) }],
+			[{ ...ref, path: "bad\0path" }],
+			[{ ...ref, purpose: "bad\0purpose" }],
+		])
+			expect(() => parseDelegationResult({ ...base, artifacts })).toThrow(CollaborationError);
+		const large = { ...base, artifacts: Array(8).fill({ path: "界".repeat(400), purpose: "Full report" }) };
+		expect(Buffer.byteLength(JSON.stringify(large))).toBeGreaterThan(8192);
+		expect(() => parseDelegationResult(large)).toThrow(/8192-byte/);
+		expect(validateDelegationResult(JSON.stringify(large), "completed").contract).toBe("invalid");
+		const legal = { ...base, artifacts: Array(8).fill({ path: "界".repeat(100), purpose: "Full report" }) };
+		expect(parseDelegationResult(legal)).toEqual(legal);
 	});
 });
 

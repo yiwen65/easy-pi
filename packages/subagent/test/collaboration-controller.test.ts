@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, test, vi } from "vitest";
-import { COLLABORATION_LIMITS } from "../src/collaboration-contract.ts";
+import { COLLABORATION_LIMITS, CollaborationError } from "../src/collaboration-contract.ts";
 import { CollaborationController } from "../src/collaboration-controller.ts";
 import { CollaborationStore } from "../src/collaboration-store.ts";
 import type { ChildSessionHost, ChildSessionIdentity, ChildTurnResult } from "../src/session-host.ts";
@@ -956,4 +956,424 @@ test("close requires a settled child and stays idempotent and terminal", async (
 	expect(await f.controller.close(caller, "a")).toBe("closed");
 	await expect(f.controller.spawn(caller, "a", "task", model)).rejects.toThrow(/already exists/);
 	await expect(f.controller.close(caller, "/root/missing")).rejects.toThrow(/Unknown child/);
+});
+
+test.each([false, true])(
+	"four turns retain distinct task/result/usage after ack, close and reopen (%s)",
+	async (file) => {
+		const f = fixture(file);
+		const turns: Array<{ turn: string; task: string; message: string }> = [];
+		for (let index = 0; index < 4; index++) {
+			if (index === 0) await f.controller.spawn(caller, "a", `task ${index}`, model);
+			else await f.controller.followup(caller, "a", `task ${index}`);
+			const admitted = f.store.read().agents[0];
+			f.finishes.get("/root/a")?.({
+				status: "completed",
+				text: `answer ${index}`,
+				usage: {
+					input: index + 1,
+					output: 2,
+					cacheRead: 3,
+					cacheWrite: 4,
+					totalTokens: index + 10,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+			await f.controller.settled();
+			const message = f.controller.pending(caller)[0].id;
+			turns.push({ turn: admitted.turnId, task: admitted.taskMessage!.id, message });
+			await f.controller.acknowledge(caller, [message]);
+			const ack = f.store.getTurn("/root/a", { message_id: message })!.delivery.acknowledged_at;
+			await f.controller.acknowledge(caller, [message]);
+			expect(f.store.getTurn("/root/a", { message_id: message })!.delivery.acknowledged_at).toBe(ack);
+		}
+		await f.controller.close(caller, "a");
+		function check(store: CollaborationStore) {
+			expect(store.countTurns()).toBe(4);
+			for (const [index, ids] of turns.entries())
+				expect(store.getTurn("/root/a", { turn_id: ids.turn })).toMatchObject({
+					task_message_id: ids.task,
+					result_message_id: ids.message,
+					task_preview: `task ${index}`,
+					status: "completed",
+					result: { preview: `answer ${index}`, truncated: false },
+					usage: { input: index + 1, coverage: "complete" },
+					delivery: { state: "acknowledged" },
+				});
+		}
+		check(f.store);
+		expect(f.runs).toHaveLength(4);
+		expect(f.loads).toHaveLength(1);
+		if (file) {
+			await f.controller.shutdown();
+			const restored = new CollaborationStore({
+				path: join(f.cwd, "registry.sqlite"),
+				cwd: f.cwd,
+				rootSessionId: "team",
+			});
+			cleanups.push(() => restored.close());
+			check(restored);
+			expect(f.runs).toHaveLength(4);
+		}
+	},
+);
+
+test("startup failure has a terminal ledger without notification and interrupted usage is partial", async () => {
+	const f = fixture();
+	const original = f.host.create;
+	f.host.create = async () => {
+		throw new Error("failed startup");
+	};
+	await expect(f.controller.spawn(caller, "bad", "task", model)).rejects.toThrow(/failed startup/);
+	const bad = f.store.read().agents[0];
+	expect(f.store.getTurn(bad.path, { turn_id: bad.turnId })).toMatchObject({
+		status: "failed",
+		finished_at: expect.any(Number),
+		started_at: null,
+		result_message_id: null,
+		delivery: { state: "not_enqueued" },
+	});
+	expect(f.controller.pending(caller)).toEqual([]);
+	f.host.create = original;
+	await f.controller.spawn(caller, "abort", "task", model);
+	await f.controller.interrupt(caller, "abort");
+	await f.controller.settled();
+	const interrupted = f.store.read().agents[1];
+	expect(f.store.getTurn(interrupted.path, { turn_id: interrupted.turnId })).toMatchObject({
+		status: "interrupted",
+		usage: { coverage: "partial", input: null, output: null },
+	});
+});
+
+test("turn capacity rejection is before persistence/loading and does not poison the controller", async () => {
+	const f = fixture();
+	await f.controller.spawn(caller, "a", "one", model);
+	f.finishes.get("/root/a")?.({ status: "completed", text: "done" });
+	await f.controller.settled();
+	const original = f.store.assertTurnCapacity.bind(f.store);
+	const capacity = vi.spyOn(f.store, "assertTurnCapacity").mockImplementation(() => {
+		throw new CollaborationError("limit_reached", "Turn history full", "turn_history_full");
+	});
+	const commit = vi.spyOn(f.store, "commit");
+	await expect(f.controller.followup(caller, "a", "not admitted")).rejects.toMatchObject({
+		reason: "turn_history_full",
+	});
+	await expect(f.controller.spawn(caller, "b", "not admitted", model)).rejects.toMatchObject({
+		reason: "turn_history_full",
+	});
+	expect(commit).not.toHaveBeenCalled();
+	expect(f.loads).toHaveLength(1);
+	expect(f.runs).toHaveLength(1);
+	capacity.mockImplementation(original);
+	await f.controller.acknowledge(
+		caller,
+		f.controller.pending(caller).map((message) => message.id),
+	);
+	expect(await f.controller.send(caller, "/root", "still usable")).toEqual(expect.any(String));
+});
+
+test("Unicode preview fits byte budget including marker and preserves native turn-only source", async () => {
+	const f = fixture(true);
+	await f.controller.spawn(caller, "a", "task", model);
+	f.finishes.get("/root/a")?.({ status: "completed", text: "🙂界".repeat(3000) });
+	await f.controller.settled();
+	const current = f.store.read().agents[0];
+	const turn = f.store.getTurn(current.path, { turn_id: current.turnId })!;
+	expect(Buffer.byteLength(turn.result!.preview)).toBeLessThanOrEqual(8192);
+	expect(turn.result!.preview).not.toContain("�");
+	expect(turn.result!.truncated).toBe(true);
+	expect(turn.result!.source).toEqual({
+		kind: "native_history",
+		session_path: join(realpathSync(f.cwd), current.id, "session.jsonl"),
+		turn_id: current.turnId,
+		coverage: "turn",
+	});
+	await f.controller.close(caller, "a");
+	expect(f.store.getTurn(current.path, { turn_id: current.turnId })!.result!.truncated).toBe(true);
+});
+
+test("interrupt request is not ledger settlement while a noncooperative run is still alive", async () => {
+	const f = fixture();
+	const original = f.host.create;
+	f.host.create = async (options) => {
+		const session = await original(options);
+		session.abort = async () => {};
+		return session;
+	};
+	await f.controller.spawn(caller, "a", "task", model);
+	const current = f.store.read().agents[0];
+	await f.controller.interrupt(caller, "a");
+	expect(f.store.read().agents[0].status).toBe("interrupted");
+	expect(f.store.getTurn(current.path, { turn_id: current.turnId })).toMatchObject({
+		status: "running",
+		finished_at: null,
+	});
+	expect(f.controller.pending(caller)).toEqual([]);
+	f.finishes.get("/root/a")?.({ status: "interrupted", text: "partial" });
+	await f.controller.settled();
+	expect(f.store.getTurn(current.path, { turn_id: current.turnId })).toMatchObject({
+		status: "interrupted",
+		finished_at: expect.any(Number),
+		usage: { coverage: "partial", input: null },
+	});
+});
+
+test("interrupted pending startup becomes terminal only after late host cleanup", async () => {
+	const f = fixture();
+	const original = f.host.create;
+	let entered!: () => void;
+	let release!: () => void;
+	const creating = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const barrier = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	f.host.create = async (options) => {
+		entered();
+		await barrier;
+		return original(options);
+	};
+	const spawning = f.controller.spawn(caller, "a", "task", model);
+	const rejected = expect(spawning).rejects.toThrow(/cancelled/);
+	await creating;
+	const current = f.store.read().agents[0];
+	await f.controller.interrupt(caller, "a");
+	expect(f.store.getTurn(current.path, { turn_id: current.turnId })).toMatchObject({
+		status: "pending",
+		finished_at: null,
+	});
+	release();
+	await rejected;
+	expect(f.store.getTurn(current.path, { turn_id: current.turnId })).toMatchObject({
+		status: "interrupted",
+		finished_at: expect.any(Number),
+		result_message_id: null,
+	});
+	expect(f.runs).toEqual([]);
+});
+
+test("read-only result lookup survives ack/followup/close/cold reopen without running or consuming", async () => {
+	const f = fixture(true);
+	const receipt = await f.controller.spawnTurn(caller, "a", "first", model);
+	expect(receipt).toMatchObject({ task_name: "/root/a", turn_id: expect.any(String), message_id: expect.any(String) });
+	expect(f.controller.getAgentResult(caller, { target: "a" })).toMatchObject({
+		state: "pending",
+		turn: { turn_id: receipt.turn_id, task_message_id: receipt.message_id },
+	});
+	f.finishes.get("/root/a")?.({ status: "completed", text: "first result" });
+	await f.controller.settled();
+	const message = f.controller.pending(caller)[0];
+	const before = f.controller.pending(caller);
+	expect(f.controller.getAgentResult(caller, { target: "a", message_id: message.id })).toMatchObject({
+		state: "found",
+		result: { preview: "first result" },
+	});
+	expect(f.controller.pending(caller)).toEqual(before);
+	await f.controller.acknowledge(caller, [message.id]);
+	const second = await f.controller.followupTurn(caller, "a", "second");
+	expect(second.turn_id).not.toBe(receipt.turn_id);
+	expect(f.controller.getAgentResult(caller, { target: "a", turn_id: receipt.turn_id })).toMatchObject({
+		state: "found",
+		turn: { delivery: { state: "acknowledged" } },
+		result: { preview: "first result" },
+	});
+	expect(f.controller.getAgentResult(caller, { target: "a" })).toMatchObject({
+		state: "pending",
+		turn: { turn_id: second.turn_id },
+	});
+	f.finishes.get("/root/a")?.({ status: "completed", text: "second result" });
+	await f.controller.settled();
+	await f.controller.close(caller, "a");
+	expect(f.controller.getAgentResult(caller, { target: "a", message_id: message.id })).toMatchObject({
+		state: "found",
+		turn: { status: "completed" },
+		result: { preview: "first result" },
+	});
+	await f.controller.shutdown();
+	const store = new CollaborationStore({ path: join(f.cwd, "registry.sqlite"), cwd: f.cwd, rootSessionId: "team" });
+	const controller = new CollaborationController({
+		store,
+		host: f.host,
+		agentDir: f.cwd,
+		getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }),
+	});
+	cleanups.push(() => controller.shutdown());
+	expect(controller.getAgentResult(caller, { target: "a", turn_id: receipt.turn_id })).toMatchObject({
+		state: "found",
+		result: { preview: "first result" },
+	});
+	expect(controller.list(caller)[0]).toMatchObject({
+		turn_id: second.turn_id,
+		task_message_id: second.message_id,
+		result_message_id: expect.any(String),
+		history_coverage: "complete",
+		turn_usage: { coverage: "unknown", input: null },
+		usage_scope: "latest_turn",
+	});
+	expect(f.runs).toEqual(["first", "second"]);
+	expect(f.loads).toEqual(["/root/a"]);
+});
+
+test("history cursor binds root/target and stable high-water membership; pages never include bodies", async () => {
+	const f = fixture();
+	const ids: string[] = [];
+	for (let index = 0; index < 3; index++) {
+		const receipt =
+			index === 0
+				? await f.controller.spawnTurn(caller, "a", `task ${index}`, model)
+				: await f.controller.followupTurn(caller, "a", `task ${index}`);
+		ids.push(receipt.turn_id);
+		f.finishes.get("/root/a")?.({ status: "completed", text: `result ${index}` });
+		await f.controller.settled();
+	}
+	const first = f.controller.listAgentTurns(caller, { target: "a", limit: 1 });
+	expect(first.turns.map((turn) => turn.turn_id)).toEqual(ids.slice(0, 1));
+	expect(first.next_cursor).toEqual(expect.any(String));
+	await f.controller.followup(caller, "a", "fourth");
+	f.finishes.get("/root/a")?.({ status: "completed", text: "late" });
+	await f.controller.settled();
+	const second = f.controller.listAgentTurns(caller, { target: "/root/a", cursor: first.next_cursor, limit: 20 });
+	expect(second.turns.map((turn) => turn.turn_id)).toEqual(ids.slice(1));
+	expect(second.next_cursor).toBeNull();
+	expect(second.turns[0]).not.toHaveProperty("result");
+	expect(second.turns[0]).not.toHaveProperty("delegation");
+	expect(f.controller.listAgentTurns(caller, { target: "a" }).turns).toHaveLength(4);
+	await f.controller.spawn(caller, "b", "b", model);
+	expect(() => f.controller.listAgentTurns(caller, { target: "b", cursor: first.next_cursor })).toThrow(
+		/Foreign|invalid/i,
+	);
+	const cursor = JSON.parse(Buffer.from(first.next_cursor!, "base64url").toString());
+	for (const payload of [
+		null,
+		[],
+		{},
+		{ ...cursor, after: 0 },
+		{ ...cursor, after: 1.5 },
+		{ ...cursor, highWater: 9999 },
+		{ ...cursor, extra: true },
+		{ ...cursor, scope: "foreign-root" },
+	]) {
+		const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+		expect(() => f.controller.listAgentTurns(caller, { target: "a", cursor: encoded })).toThrow(CollaborationError);
+	}
+	for (const malformed of ["x", "%%%%", `${first.next_cursor!}=`, "A".repeat(513)])
+		expect(() => f.controller.listAgentTurns(caller, { target: "a", cursor: malformed })).toThrow(CollaborationError);
+	expect(() => f.controller.listAgentTurns({ ...caller, rootSessionId: "foreign" }, { target: "a" })).toThrow(
+		/another root/,
+	);
+});
+
+test("result selectors reject wrong target/task/passive IDs, child/foreign callers and revoked live queries", async () => {
+	const f = fixture();
+	const a = await f.controller.spawnTurn(caller, "a", "a", model);
+	f.finishes.get("/root/a")?.({ status: "completed", text: "a" });
+	await f.controller.settled();
+	await f.controller.spawn(caller, "b", "b", model);
+	const result = f.controller.pending(caller)[0].id;
+	const passive = await f.controller.send(caller, "a", "mail");
+	for (const selector of [
+		{ target: "b", turn_id: a.turn_id },
+		{ target: "b", message_id: result },
+		{ target: "a", message_id: a.message_id },
+		{ target: "a", message_id: passive },
+		{ target: "a", turn_id: "missing" },
+	])
+		expect(() => f.controller.getAgentResult(caller, selector)).toThrow(
+			expect.objectContaining({ reason: "unknown_turn" }),
+		);
+	for (const input of [{}, { target: "a", turn_id: a.turn_id, message_id: result }, { target: "a", message_id: " " }])
+		expect(() => f.controller.getAgentResult(caller, input)).toThrow(CollaborationError);
+	const child = { ...caller, agentPath: "/root/a" };
+	expect(() => f.controller.getAgentResult(child, { target: "a" })).toThrow(
+		expect.objectContaining({ reason: "nested_delegation" }),
+	);
+	expect(() => f.controller.listAgentTurns(child, { target: "a" })).toThrow(
+		expect.objectContaining({ reason: "nested_delegation" }),
+	);
+	expect(() => f.controller.getAgentResult({ ...caller, rootSessionId: "foreign" }, { target: "a" })).toThrow(
+		/another root/,
+	);
+	const detach = f.controller.bindTools(caller, () => ["read"]);
+	expect(() => f.controller.getAgentResult(caller, { target: "a" })).toThrow(
+		expect.objectContaining({ code: "forbidden" }),
+	);
+	expect(() => f.controller.listAgentTurns(caller, { target: "a" })).toThrow(
+		expect.objectContaining({ code: "forbidden" }),
+	);
+	detach();
+});
+
+test("escaped raw result fits complete response budget; failed startup is no_result", async () => {
+	const f = fixture();
+	const receipt = await f.controller.spawnTurn(caller, "a", "a", model);
+	const output = "\u0001".repeat(8192);
+	f.finishes.get("/root/a")?.({ status: "completed", text: output });
+	await f.controller.settled();
+	const result = f.controller.getAgentResult(caller, { target: "a", turn_id: receipt.turn_id });
+	expect(result).toMatchObject({ state: "found", result: { preview: output, truncated: false } });
+	expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(65536);
+	f.host.create = async () => {
+		throw new Error("startup failed");
+	};
+	await expect(f.controller.spawn(caller, "bad", "bad", model)).rejects.toThrow(/startup failed/);
+	expect(f.controller.getAgentResult(caller, { target: "bad" })).toMatchObject({
+		state: "no_result",
+		turn: { status: "failed", result_message_id: null },
+	});
+});
+
+test("partial legacy history distinguishes unretained IDs from known mismatched selectors", async () => {
+	const f = fixture(true);
+	const receipt = await f.controller.spawnTurn(caller, "a", "a", model);
+	f.finishes.get("/root/a")?.({ status: "completed", text: "retained" });
+	await f.controller.settled();
+	const message = f.controller.pending(caller)[0].id;
+	await f.controller.spawn(caller, "b", "b", model);
+	f.finishes.get("/root/b")?.({ status: "completed", text: "b" });
+	await f.controller.settled();
+	const legacy = f.store.read();
+	legacy.agents[1].status = "closed";
+	legacy.agents[1].result = undefined;
+	legacy.messages = legacy.messages?.filter((message) => message.from !== "/root/b");
+	await f.controller.shutdown();
+	const database = new DatabaseSync(join(f.cwd, "registry.sqlite"));
+	database.exec("DROP TABLE turns; DROP TABLE history");
+	database.prepare("UPDATE team SET snapshot=?").run(JSON.stringify(legacy));
+	database.close();
+	const store = new CollaborationStore({ path: join(f.cwd, "registry.sqlite"), cwd: f.cwd, rootSessionId: "team" });
+	const controller = new CollaborationController({
+		store,
+		host: f.host,
+		agentDir: f.cwd,
+		getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }),
+	});
+	cleanups.push(() => controller.shutdown());
+	expect(controller.getAgentResult(caller, { target: "a", turn_id: "unretained" })).toEqual({
+		state: "history_unavailable",
+		target: "/root/a",
+		history_coverage: "retained_only",
+	});
+	for (const selector of [
+		{ target: "b", turn_id: receipt.turn_id },
+		{ target: "b", message_id: message },
+		{ target: "a", message_id: receipt.message_id },
+		{ target: "a", turn_id: receipt.message_id },
+		{ target: "a", message_id: receipt.turn_id },
+		{ target: "a", turn_id: message },
+	])
+		expect(() => controller.getAgentResult(caller, selector)).toThrow(
+			expect.objectContaining({ reason: "unknown_turn" }),
+		);
+	expect(controller.getAgentResult(caller, { target: "a" })).toMatchObject({
+		state: "found",
+		result: { preview: "retained", truncated: null },
+	});
+	expect(controller.getAgentResult(caller, { target: "b" })).toEqual({
+		state: "history_unavailable",
+		target: "/root/b",
+		history_coverage: "retained_only",
+	});
+	expect(f.loads).toHaveLength(2);
+	expect(f.runs).toHaveLength(2);
 });

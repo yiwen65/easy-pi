@@ -277,7 +277,7 @@ test("controller unload and cold followup preserve native history without replay
 		return { store, controller };
 	};
 	const first = make();
-	for (let index = 0; index < 4; index++) {
+	for (let index = 0; index < COLLABORATION_LIMITS.maxActiveSessions; index++) {
 		f.faux.setResponses([fauxAssistantMessage(`durable-${index}`)]);
 		await first.controller.spawn(caller, `worker${index}`, `task-${index}`, {
 			provider: f.faux.provider.id,
@@ -286,12 +286,14 @@ test("controller unload and cold followup preserve native history without replay
 		});
 		await first.controller.settled();
 	}
-	expect(first.controller.list(caller).filter((agent) => agent.loaded)).toHaveLength(3);
+	expect(first.controller.list(caller).filter((agent) => agent.loaded)).toHaveLength(
+		COLLABORATION_LIMITS.maxActiveSessions - 1,
+	);
 	expect(first.controller.list(caller)[0].loaded).toBe(false);
 	await first.controller.shutdown();
 	const second = make();
 	expect(second.controller.list(caller).every((agent) => !agent.loaded)).toBe(true);
-	expect(f.faux.state.callCount).toBe(4);
+	expect(f.faux.state.callCount).toBe(COLLABORATION_LIMITS.maxActiveSessions);
 	let context: Context | undefined;
 	f.faux.setResponses([
 		(request) => {
@@ -301,7 +303,7 @@ test("controller unload and cold followup preserve native history without replay
 	]);
 	await second.controller.followup(caller, "worker0", "explicit followup");
 	await second.controller.settled();
-	expect(f.faux.state.callCount).toBe(5);
+	expect(f.faux.state.callCount).toBe(COLLABORATION_LIMITS.maxActiveSessions + 1);
 	expect(JSON.stringify(context?.messages)).toContain("durable-0");
 	expect(JSON.stringify(context?.messages)).not.toContain("durable-1");
 	expect(second.store.read().agents[0]).toMatchObject({ status: "completed", result: "new explicit answer" });
@@ -577,6 +579,8 @@ test("initial and cold followup requests carry the deliver_result contract witho
 		expect(deliver!.parameters).toEqual(DelegationResultSchema);
 		expect(text).toContain("only summary and outcome are required");
 		expect(text).toContain("residual risks in the summary text");
+		expect(text).toContain("You cannot call send_message or any other root team tool");
+		expect(text).toContain("deliver_result is your automatic final return to the creation parent");
 		expect(text).toContain(`${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes`);
 		expect(context.systemPrompt).not.toContain("Final result JSON Schema:");
 	}
@@ -695,6 +699,74 @@ test("a delivery batch finishes its other tools and keeps the last delivered res
 			expect.objectContaining({ role: "toolResult", toolName: "probe_identity", isError: false }),
 		]),
 	);
+});
+
+test("artifact delivery is retained/queryable without automatically reading report paths", async () => {
+	const f = await fixture();
+	const caller = { rootSessionId: "artifact-delivery", agentPath: "/root" };
+	const assignment = validateDelegation({
+		task: taskContract("Deliver references, do not read them"),
+		context: "isolated",
+		tools: [],
+	});
+	const store = new CollaborationStore({ path: ":memory:", cwd: f.cwd, rootSessionId: caller.rootSessionId });
+	const controller = new CollaborationController({ store, host: f.host, agentDir: f.root, getPermissions: full });
+	cleanups.push(() => controller.shutdown());
+	const artifact = {
+		path: join(f.root, "absent-report.txt"),
+		purpose: "Full verification report",
+		sha256: "a".repeat(64),
+	};
+	const delivered = {
+		summary: "References are claims, not acceptance",
+		outcome: "partial" as const,
+		artifacts: [artifact],
+	};
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, delivered), { stopReason: "toolUse" }),
+	]);
+	const receipt = await controller.spawnTurn(
+		caller,
+		"worker",
+		assignment.task.objective,
+		{ provider: f.faux.provider.id, id: f.faux.getModel().id, thinkingLevel: "off" },
+		[],
+		undefined,
+		{ delegation: assignment, tools: [] },
+	);
+	await controller.settled();
+	const before = f.faux.state.callCount;
+	const query = controller.getAgentResult(caller, { target: "worker", turn_id: receipt.turn_id });
+	expect(query).toMatchObject({
+		state: "found",
+		turn: { resultValidation: { contract: "valid", outcome: "partial" } },
+		result: { artifacts: [artifact], preview: JSON.stringify(delivered) },
+	});
+	expect(store.getTurn("/root/worker", { turn_id: receipt.turn_id })?.result).not.toHaveProperty("artifacts");
+	expect(existsSync(artifact.path)).toBe(false);
+	expect(f.faux.state.callCount).toBe(before);
+	expect(before).toBe(1);
+});
+
+test("oversized multibyte artifact delivery can be compacted without relaxing the byte budget", async () => {
+	const f = await fixture();
+	const child = await f.create("artifact-budget", full);
+	const oversized = {
+		summary: "报告",
+		outcome: "partial",
+		artifacts: Array(8).fill({ path: "界".repeat(400), purpose: "Full report" }),
+	};
+	const valid = { summary: "Compact report", outcome: "partial", artifacts: [] };
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, oversized), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, valid), { stopReason: "toolUse" }),
+	]);
+	expect(await child.session.run("deliver a bounded report")).toMatchObject({
+		status: "completed",
+		text: JSON.stringify(valid),
+	});
+	expect(f.faux.state.callCount).toBe(2);
+	expect(JSON.stringify(child.session.context())).toContain("8192-byte budget");
 });
 
 test("a failed extension startup rejects the host instead of silently continuing without its hooks", async () => {

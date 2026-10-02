@@ -42,7 +42,7 @@ try {
 	modelRuntime.registerNativeProvider(faux.provider);
 	({ session } = await createAgentSession({ cwd, agentDir, modelRuntime, model: faux.getModel(), thinkingLevel: "off", sessionManager: SessionManager.inMemory(cwd), settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }) }));
 	await session.bindExtensions({ mode: "rpc" });
-	for (const name of ["spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"]) assert(session.getActiveToolNames().includes(name));
+	for (const name of ["spawn_agent", "send_message", "followup_task", "wait_agent", "interrupt_agent", "close_agent", "list_agents", "get_agent_result", "list_agent_turns"]) assert(session.getActiveToolNames().includes(name));
 	assert(!session.getActiveToolNames().includes("subagent"));
 	let rootTurns = 0;
 	let childCalls = 0;

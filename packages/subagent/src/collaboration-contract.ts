@@ -43,6 +43,18 @@ const ERROR_REASONS = {
 		code: "limit_reached",
 		hint: "Close settled children to free team slots (the root counts toward the team limit).",
 	},
+	turn_history_full: {
+		code: "limit_reached",
+		hint: "This team has reached its retained-turn limit. Start a new root session; retained turns are never pruned automatically.",
+	},
+	history_unavailable: {
+		code: "context_unavailable",
+		hint: "Only retained turns are queryable. Inspect an available native session source; do not replay a task to recover history.",
+	},
+	unknown_turn: {
+		code: "invalid_arguments",
+		hint: "Select a retained turn or result message belonging to this target using list_agent_turns.",
+	},
 	team_history_full: {
 		code: "limit_reached",
 		hint: "This root team has reached its retained-agent history limit. Start a new root session; closed names and records cannot be deleted automatically.",
@@ -555,6 +567,32 @@ export function validateDelegation(value: unknown): Delegation {
 	return structuredClone(normalized);
 }
 
+/** Bounded result/history protocol; retention never prunes implicitly. */
+export const COLLABORATION_HISTORY_LIMITS = Object.freeze({
+	maxRetainedTurns: 4096,
+	defaultPageSize: 10,
+	maxPageSize: 20,
+	maxTurnMetadataBytes: 8192,
+	maxArtifacts: 8,
+	maxResultResponseBytes: 64 * 1024,
+	maxPageResponseBytes: 64 * 1024,
+	maxTaskPreviewCharacters: 256,
+});
+
+/** Delivery references are untrusted data, never an implicit read or authority. */
+export const CollaborationArtifactSchema = Type.Object(
+	{
+		path: Nonblank,
+		purpose: Type.String({ minLength: 1, maxLength: 256, pattern: "\\S" }),
+		sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+	},
+	{ additionalProperties: false },
+);
+export type CollaborationArtifact = Static<typeof CollaborationArtifactSchema>;
+export const CollaborationArtifactsSchema = Type.Array(CollaborationArtifactSchema, {
+	maxItems: COLLABORATION_HISTORY_LIMITS.maxArtifacts,
+});
+
 export const DelegationResultSchema = Type.Object(
 	{
 		summary: Type.String({
@@ -568,6 +606,7 @@ export const DelegationResultSchema = Type.Object(
 			[Type.Literal("succeeded"), Type.Literal("partial"), Type.Literal("blocked"), Type.Literal("failed")],
 			{ description: "Honest completion verdict." },
 		),
+		artifacts: Type.Optional(CollaborationArtifactsSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -579,6 +618,13 @@ export const DELIVER_RESULT_TOOL_NAME = "deliver_result";
 export function parseDelegationResult(value: unknown): DelegationResult {
 	if (!Value.Check(DelegationResultSchema, value))
 		throw new CollaborationError("invalid_arguments", "Invalid delegation result fields");
+	if (value.artifacts?.some((artifact) => artifact.path.includes("\0") || artifact.purpose.includes("\0")))
+		throw new CollaborationError("invalid_arguments", "Invalid artifact reference");
+	if (Buffer.byteLength(JSON.stringify(value), "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
+		throw new CollaborationError(
+			"invalid_arguments",
+			"Result exceeds the 8192-byte budget; compact it and deliver again",
+		);
 	return structuredClone(value);
 }
 
@@ -617,16 +663,63 @@ function extractResultJson(text: string): string {
 	return start >= 0 && end > start ? trimmed.slice(start, end + 1) : trimmed;
 }
 
+/** Read the same bounded tolerated wire forms without repairing or executing anything. */
+export function parseDelegationResultText(text: string): DelegationResult {
+	if (Buffer.byteLength(text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
+		throw new CollaborationError("invalid_arguments", "Result exceeds the 8192-byte budget");
+	return parseDelegationResult(JSON.parse(extractResultJson(text)) as unknown);
+}
+
 export function validateDelegationResult(text: string, status: CollaborationStatus): ResultValidation {
 	if (status !== "completed") return { contract: "not_completed" };
-	if (Buffer.byteLength(text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes) return { contract: "invalid" };
 	try {
-		const value: unknown = JSON.parse(extractResultJson(text));
-		if (Value.Check(DelegationResultSchema, value)) return { contract: "valid", outcome: value.outcome };
+		const value = parseDelegationResultText(text);
+		return { contract: "valid", outcome: value.outcome };
 	} catch {
 		/* Retain the original output; never retry inference to repair formatting. */
 	}
 	return { contract: "invalid" };
+}
+
+const TurnId = Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" });
+const WaitTimeout = Type.Optional(Type.Integer({ minimum: 0, maximum: COLLABORATION_LIMITS.maxWaitMs }));
+
+export const StagedCollaborationSchemas = {
+	get_agent_result: Type.Union([
+		Type.Object({ target: Target }, { additionalProperties: false }),
+		Type.Object({ target: Target, turn_id: TurnId }, { additionalProperties: false }),
+		Type.Object({ target: Target, message_id: TurnId }, { additionalProperties: false }),
+	]),
+	list_agent_turns: Type.Object(
+		{
+			target: Target,
+			/** Opaque cursor scoped to root+target and a fixed high-water sequence. */
+			cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 512, pattern: "^[A-Za-z0-9_-]+$" })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: COLLABORATION_HISTORY_LIMITS.maxPageSize })),
+		},
+		{ additionalProperties: false },
+	),
+	wait_agent: Type.Union([
+		Type.Object({ timeout_ms: WaitTimeout }, { additionalProperties: false }),
+		Type.Object(
+			{ target: Target, turn_id: Type.Optional(TurnId), timeout_ms: WaitTimeout },
+			{ additionalProperties: false },
+		),
+	]),
+} as const;
+export type StagedCollaborationToolName = keyof typeof StagedCollaborationSchemas;
+export type StagedCollaborationArguments = {
+	[Name in StagedCollaborationToolName]: Static<(typeof StagedCollaborationSchemas)[Name]>;
+};
+
+/** Shape validation only; live root/team, selector ownership and cursor checks belong to the controller. */
+export function parseStagedCollaborationArguments<Name extends StagedCollaborationToolName>(
+	name: Name,
+	input: unknown,
+): StagedCollaborationArguments[Name] {
+	if (!Value.Check(StagedCollaborationSchemas[name], input))
+		throw new CollaborationError("invalid_arguments", `Invalid ${name} arguments`);
+	return structuredClone(input) as StagedCollaborationArguments[Name];
 }
 
 /** Provider-neutral contract: model overrides are explicitly qualified as provider/model. */
@@ -651,22 +744,12 @@ export const CollaborationSchemas = {
 		},
 		{ additionalProperties: false },
 	),
-	wait_agent: Type.Object(
-		{
-			timeout_ms: Type.Optional(
-				Type.Integer({
-					description:
-						"Milliseconds to wait for this agent's mailbox or user input; short values are clamped to 10s. Timeout does not cancel children.",
-					minimum: 0,
-					maximum: COLLABORATION_LIMITS.maxWaitMs,
-				}),
-			),
-		},
-		{ additionalProperties: false },
-	),
+	wait_agent: StagedCollaborationSchemas.wait_agent,
 	interrupt_agent: Type.Object({ target: Target }, { additionalProperties: false }),
 	close_agent: Type.Object({ target: Target }, { additionalProperties: false }),
 	list_agents: Type.Object({ path_prefix: Type.Optional(Target) }, { additionalProperties: false }),
+	get_agent_result: StagedCollaborationSchemas.get_agent_result,
+	list_agent_turns: StagedCollaborationSchemas.list_agent_turns,
 } as const;
 
 /** Team-management tool names. Never delegated: child agents hold no team tools. */
@@ -842,13 +925,111 @@ export interface CollaborationAgentView {
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
+/** Staged ledger records: closure/residency are agent state, never a turn execution status. */
+export type CollaborationTurnStatus = Exclude<CollaborationStatus, "closed"> | "unknown";
+export type CollaborationHistoryCoverage = "complete" | "retained_only";
+export interface CollaborationResultSource {
+	kind: "native_history" | "unavailable";
+	/** A reference only; query must not read it. Absent for memory-only or missing histories. */
+	session_path?: string;
+	turn_id: string;
+	/** Exact native entry locator when known, otherwise turn-level coverage only. */
+	entry_id?: string;
+	coverage: "entry" | "turn" | "unknown";
+}
+export interface CollaborationTurnDelivery {
+	state: "not_enqueued" | "enqueued" | "acknowledged" | "unknown";
+	/** Epoch milliseconds; null means unknown, never inferred from file mtime. */
+	enqueued_at: number | null;
+	acknowledged_at: number | null;
+}
+export interface CollaborationTurnUsage {
+	coverage: "complete" | "partial" | "unknown";
+	/** Provider-reported counters for this turn only. Unknown is not zero. */
+	input: number | null;
+	output: number | null;
+	cacheRead: number | null;
+	cacheWrite: number | null;
+}
+export interface CollaborationTurnView {
+	target: string;
+	turn_id: string;
+	/** Positive monotonically increasing team sequence; never reused or renumbered. */
+	sequence: number;
+	task_message_id: string | null;
+	result_message_id: string | null;
+	status: CollaborationTurnStatus;
+	history_coverage: CollaborationHistoryCoverage;
+	task_preview: string;
+	task_truncated: boolean;
+	admitted_at: number | null;
+	started_at: number | null;
+	finished_at: number | null;
+	delivery: CollaborationTurnDelivery;
+	usage: CollaborationTurnUsage;
+	resultValidation?: ResultValidation;
+}
+export interface CollaborationTurnRecord extends CollaborationTurnView {
+	rootSessionId: string;
+	/** Canonical admitted task, unknown for legacy queued results without a task receipt. */
+	delegation?: Delegation;
+	result?: {
+		preview: string;
+		/** True if shortened, null if legacy snapshot cannot prove completeness. */
+		truncated: boolean | null;
+		source: CollaborationResultSource;
+		/** Validated references derived from the retained preview; never read automatically. */
+		artifacts?: CollaborationArtifact[];
+	};
+}
+export type CollaborationResultQuery =
+	/** Includes invalid fallback output, never silently repaired. */
+	| { state: "found"; turn: CollaborationTurnView; result: NonNullable<CollaborationTurnRecord["result"]> }
+	| { state: "pending" | "no_result"; turn: CollaborationTurnView }
+	| { state: "history_unavailable"; target: string; history_coverage: "retained_only" };
+export interface CollaborationTurnPage {
+	target: string;
+	history_coverage: CollaborationHistoryCoverage;
+	/** Ascending sequence; no result bodies, delegation bodies, or artifacts in pages. */
+	turns: CollaborationTurnView[];
+	next_cursor: string | null;
+}
+export interface CollaborationMailboxWaitResult {
+	reason: "mailbox" | "user_input" | "timeout";
+	timed_out: boolean;
+}
+export type CollaborationTargetedWaitResult =
+	| { reason: "terminal"; timed_out: false; target: string; turn_id: string; result: CollaborationResultQuery }
+	| { reason: "user_input"; timed_out: false; target: string; turn_id: string }
+	| { reason: "timeout"; timed_out: true; target: string; turn_id: string };
+/** Live latest-turn identity and ledger metadata; the base display view remains narrow. */
+export interface StagedCollaborationAgentView extends CollaborationAgentView {
+	turn_id: string;
+	task_message_id: string | null;
+	result_message_id: string | null;
+	history_coverage: CollaborationHistoryCoverage;
+	delivery: CollaborationTurnDelivery;
+	turn_usage: CollaborationTurnUsage;
+	usage_scope: "latest_turn";
+}
+export interface StagedCollaborationResults {
+	get_agent_result: CollaborationResultQuery;
+	list_agent_turns: CollaborationTurnPage;
+	list_agents: { agents: StagedCollaborationAgentView[] };
+	wait_agent: CollaborationMailboxWaitResult | CollaborationTargetedWaitResult;
+	spawn_agent: { task_name: string; turn_id: string; message_id: string };
+	followup_task: { message_id: string; turn_id: string; status: "accepted" };
+}
+
 /** Unlike a message receipt, a completed tool call never asserts that edits have been delivered. */
 export interface CollaborationResults {
-	spawn_agent: { task_name: string };
+	spawn_agent: { task_name: string; turn_id: string; message_id: string };
 	send_message: { message_id: string; status: "accepted" };
-	followup_task: { message_id: string; status: "accepted" };
-	wait_agent: { reason: "mailbox" | "user_input" | "timeout"; timed_out: boolean };
+	followup_task: { message_id: string; turn_id: string; status: "accepted" };
+	wait_agent: CollaborationMailboxWaitResult | CollaborationTargetedWaitResult;
 	interrupt_agent: { previous_status: CollaborationStatus };
 	close_agent: { previous_status: CollaborationStatus };
-	list_agents: { agents: CollaborationAgentView[] };
+	list_agents: { agents: StagedCollaborationAgentView[] };
+	get_agent_result: CollaborationResultQuery;
+	list_agent_turns: CollaborationTurnPage;
 }

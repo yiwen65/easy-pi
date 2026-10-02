@@ -547,6 +547,11 @@ test("preserved fork uses the real neutral parent request prefix and appends the
 	expect(childContext!.tools).toEqual(parentContext!.tools);
 	expect(childContext!.messages.slice(0, parentContext!.messages.length)).toEqual(parentContext!.messages);
 	expect(JSON.stringify(childContext!.messages.at(-1))).toContain("only child task");
+	expect(JSON.stringify(childContext!.messages.at(-1))).toContain("You cannot call send_message");
+	expect(JSON.stringify(parentContext!.messages)).toContain(
+		"query get_agent_result or list_agent_turns before requesting a resend",
+	);
+	expect(JSON.stringify(parentContext!.messages)).toContain("bash is not a read-only boundary");
 	expect(childContext!.systemPrompt).not.toContain("Collaboration identity:");
 	expect(f.controller.list(f.identity)[0]).toMatchObject({
 		resultValidation: { contract: "valid" },
@@ -992,7 +997,7 @@ test("oversized final output retains full native text and a bounded explicitly t
 
 test("unexpected collaboration exceptions expose a safe hint, never their original payload", async () => {
 	const f = await fixture();
-	vi.spyOn(f.controller, "spawn").mockRejectedValueOnce(new Error("SYNTHETIC_CREDENTIAL_DO_NOT_ECHO"));
+	vi.spyOn(f.controller, "spawnTurn").mockRejectedValueOnce(new Error("SYNTHETIC_CREDENTIAL_DO_NOT_ECHO"));
 	f.faux.setResponses([tool("spawn_agent", spawnArgs("worker", "task")), fauxAssistantMessage("rejected")]);
 	await f.session.prompt("exercise sanitized error");
 	const results = f.session.messages.filter((message) => message.role === "toolResult");
@@ -1031,4 +1036,188 @@ test("failed child startup releases native authority bindings for an explicit co
 	await f.controller.settled();
 	expect(f.store.read().agents[0]).toMatchObject({ status: "completed", result: "explicit followup completed" });
 	expect(f.faux.state.callCount).toBe(5);
+});
+
+test("native result/history queries retrieve acknowledged prior turns after followup/close/reopen without child inference", async () => {
+	const f = await fixture();
+	let rootStep = 0;
+	let childCalls = 0;
+	let firstTurn!: string;
+	let firstResultMessage!: string;
+	let firstTaskMessage!: string;
+	f.faux.setResponses(
+		Array.from({ length: 20 }, () => async (context: Context) => {
+			if (currentCollaborationPath(context) === "/root/worker")
+				return fauxAssistantMessage(++childCalls === 1 ? "ORIGINAL_RETAINED_RESULT" : "NEXT_TASK_RESULT");
+			switch (rootStep++) {
+				case 0:
+					return tool("spawn_agent", spawnArgs("worker", "first task"));
+				case 1:
+					await f.controller.settled();
+					firstTurn = f.store.read().agents[0].turnId;
+					firstTaskMessage = f.store.read().agents[0].taskMessage!.id;
+					firstResultMessage = f.controller.pending(f.identity)[0].id;
+					return tool("get_agent_result", { target: "worker", turn_id: firstTurn });
+				case 2:
+					return tool("get_agent_result", { target: "worker", message_id: firstResultMessage });
+				case 3:
+					return tool("followup_task", followupArgs("worker", "next task"));
+				case 4:
+					await f.controller.settled();
+					return tool("get_agent_result", { target: "worker", turn_id: firstTurn });
+				case 5:
+					return tool("close_agent", { target: "worker" });
+				case 6:
+					return tool("get_agent_result", { target: "worker", message_id: firstResultMessage });
+				case 7:
+					return tool("list_agent_turns", { target: "worker", limit: 20 });
+				default:
+					return fauxAssistantMessage("root finished");
+			}
+		}),
+	);
+	await f.session.prompt("query retained results before asking for a resend");
+	await f.controller.settled();
+	const results = f.session.messages.filter((message) => message.role === "toolResult");
+	expect(results).toHaveLength(8);
+	expect(results.every((result) => !result.isError)).toBe(true);
+	expect(results[0]).toMatchObject({
+		details: { task_name: "/root/worker", turn_id: firstTurn, message_id: firstTaskMessage },
+	});
+	expect(results[3]).toMatchObject({
+		details: {
+			status: "accepted",
+			turn_id: f.store.read().agents[0].turnId,
+			message_id: f.store.read().agents[0].taskMessage!.id,
+		},
+	});
+	for (const index of [1, 2, 4, 6])
+		expect(results[index]).toMatchObject({
+			details: { state: "found", turn: { turn_id: firstTurn }, result: { preview: "ORIGINAL_RETAINED_RESULT" } },
+		});
+	expect(results[2]).toMatchObject({ details: { turn: { delivery: { state: "acknowledged" } } } });
+	expect(results[7]).toMatchObject({
+		details: { turns: [{ turn_id: firstTurn }, { turn_id: f.store.read().agents[0].turnId }], next_cursor: null },
+	});
+	expect(childCalls).toBe(2);
+	expect(f.faux.state.callCount).toBe(11);
+	const count = f.faux.state.callCount;
+	const restarted = await f.restart();
+	const loads = vi.spyOn(restarted.controller, "spawnTurn");
+	const pending = restarted.controller.pending(f.identity);
+	expect(
+		restarted.controller.getAgentResult(f.identity, { target: "worker", message_id: firstResultMessage }),
+	).toMatchObject({ state: "found", result: { preview: "ORIGINAL_RETAINED_RESULT" } });
+	expect(restarted.controller.listAgentTurns(f.identity, { target: "worker" }).turns).toHaveLength(2);
+	expect(restarted.controller.pending(f.identity)).toEqual(pending);
+	expect(loads).not.toHaveBeenCalled();
+	expect(restarted.controller.list(f.identity)[0].loaded).toBe(false);
+	expect(f.faux.state.callCount).toBe(count);
+	expect(childCalls).toBe(2);
+});
+
+test("new query tools share root/child schemas but every child query is rejected", async () => {
+	const children: AgentSession[] = [];
+	const f = await fixture(undefined, [], (session) => children.push(session));
+	let root = 0;
+	let child = 0;
+	const catalogs: string[][] = [];
+	f.faux.setResponses(
+		Array.from({ length: 12 }, () => (context: Context) => {
+			catalogs.push(context.tools?.map((tool) => tool.name).filter((name) => name !== "deliver_result") ?? []);
+			if (currentCollaborationPath(context) === "/root/worker") {
+				switch (child++) {
+					case 0:
+						return tool("get_agent_result", { target: "worker" });
+					case 1:
+						return tool("list_agent_turns", { target: "worker" });
+					default:
+						return fauxAssistantMessage("done");
+				}
+			}
+			return root++ === 0
+				? tool(
+						"spawn_agent",
+						spawnArgs("worker", "query guard", { mode: "fork", turns: "all", prefix: "preserve" }),
+					)
+				: fauxAssistantMessage("root done");
+		}),
+	);
+	await f.session.prompt("guard new root-only queries");
+	await f.controller.settled();
+	expect(children).toHaveLength(1);
+	const childResults = children[0].messages.filter((message) => message.role === "toolResult");
+	expect(childResults.map((message) => message.toolName)).toEqual(["get_agent_result", "list_agent_turns"]);
+	expect(childResults.every((message) => message.isError)).toBe(true);
+	expect(JSON.stringify(childResults)).toContain("nested_delegation");
+	for (const catalog of catalogs) expect(catalog).toEqual(catalogs[0]);
+	expect(catalogs[0]).toEqual(expect.arrayContaining(["get_agent_result", "list_agent_turns"]));
+});
+
+test("targeted wait tool returns an already-ingested turn without another child or provider request", async () => {
+	const f = await fixture();
+	f.faux.setResponses([fauxAssistantMessage("warm root"), fauxAssistantMessage("ALREADY_INGESTED_RESULT")]);
+	await f.session.prompt("establish native receiving file");
+	const spawn = f.session.agent.state.tools.find((tool) => tool.name === "spawn_agent")!;
+	await spawn.execute("direct-spawn", spawnArgs("worker", "one task"));
+	await f.controller.settled();
+	const turnId = f.controller.inspect(f.identity, "worker").turnId;
+	f.faux.setResponses([fauxAssistantMessage("ingested")]);
+	await f.session.prompt("ingest completed result");
+	expect(f.controller.pending(f.identity)).toEqual([]);
+	const before = f.faux.state.callCount;
+	const wait = f.session.agent.state.tools.find((tool) => tool.name === "wait_agent")!;
+	const result = await wait.execute("direct-target-wait", { target: "worker", turn_id: turnId });
+	expect(result).toMatchObject({
+		details: {
+			reason: "terminal",
+			turn_id: turnId,
+			result: {
+				state: "found",
+				turn: { delivery: { state: "acknowledged" } },
+				result: { preview: "ALREADY_INGESTED_RESULT" },
+			},
+		},
+	});
+	expect(f.faux.state.callCount).toBe(before);
+	expect(f.controller.pending(f.identity)).toEqual([]);
+});
+
+test("spawn receipt remains the admitted turn even when a fast child is followed up before adapter return", async () => {
+	const f = await fixture();
+	let root = 0;
+	let childCalls = 0;
+	const realSpawn = f.controller.spawnTurn.bind(f.controller);
+	vi.spyOn(f.controller, "spawnTurn").mockImplementation(async (...args) => {
+		const receipt = await realSpawn(...args);
+		await f.controller.settled();
+		await f.controller.followup(f.identity, "worker", "racing next task", undefined, {
+			delegation: f.store.read().agents[0].delegation!,
+			tools: f.store.read().agents[0].tools!,
+		});
+		return receipt;
+	});
+	f.faux.setResponses(
+		Array.from({ length: 10 }, () => (context: Context) => {
+			if (currentCollaborationPath(context) === "/root/worker") {
+				childCalls++;
+				return fauxAssistantMessage("fast result");
+			}
+			return root++ === 0
+				? tool("spawn_agent", spawnArgs("worker", "first task"))
+				: fauxAssistantMessage("root done");
+		}),
+	);
+	await f.session.prompt("capture immutable admission identity");
+	await f.controller.settled();
+	const turns = f.controller.listAgentTurns(f.identity, { target: "worker" }).turns;
+	const result = f.session.messages.find(
+		(message) => message.role === "toolResult" && message.toolName === "spawn_agent",
+	);
+	expect(turns).toHaveLength(2);
+	expect(childCalls).toBe(2);
+	expect(result).toMatchObject({
+		details: { task_name: "/root/worker", turn_id: turns[0].turn_id, message_id: turns[0].task_message_id },
+	});
+	expect(f.store.read().agents[0].turnId).toBe(turns[1].turn_id);
 });

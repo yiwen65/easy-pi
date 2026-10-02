@@ -584,7 +584,8 @@ test("child terminal toast fires when the panel is closed and stays silent while
 	// panel closed: completion raises a toast
 	child.release(fauxAssistantMessage("first done"));
 	await vi.waitFor(
-		() => expect(f.notices.some((notice) => notice.includes("/root/worker") && notice.includes("done"))).toBe(true),
+		() =>
+			expect(f.notices.some((notice) => notice.includes("/root/worker") && notice.includes("completed"))).toBe(true),
 		{ timeout: 5_000 },
 	);
 
@@ -737,4 +738,171 @@ test("default child tools obey live tool removal while the viewer is open", asyn
 	f.key("\x1b");
 	await command;
 	child.release(fauxAssistantMessage("done"));
+});
+
+test("native turn history viewing never starts provider work or consumes root mail", async () => {
+	const f = await fixture();
+	const child = holdChild(f);
+	await f.session.prompt("delegate");
+	await child.ready;
+	child.release(fauxAssistantMessage(JSON.stringify({ summary: "RETAINED_NATIVE_RESULT", outcome: "blocked" })));
+	const { command } = await f.show();
+	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
+	const calls = f.faux.state.callCount;
+	const messages = JSON.stringify(f.session.messages);
+	f.key("\x1b[B");
+	f.key("\x14");
+	expect(f.text()).toContain("RETAINED_NATIVE_RESULT");
+	expect(f.text()).toContain("Turns — /root/worker");
+	expect(f.text()).toContain("Delivery: enqueued");
+	expect(f.faux.state.callCount).toBe(calls);
+	expect(child.childTurns).toBe(1);
+	expect(JSON.stringify(f.session.messages)).toBe(messages);
+	f.session.setActiveToolsByName(f.session.getActiveToolNames().filter((name) => name !== "get_agent_result"));
+	f.key("\x1b[A");
+	expect(f.text()).toContain("Retained result unavailable");
+	f.key("\x1b");
+	f.key("\x1b");
+	f.key("\x14");
+	f.session.setActiveToolsByName(f.session.getActiveToolNames().filter((name) => name !== "list_agent_turns"));
+	f.key("\x1b[6~"); // exhausted membership does not fetch or retry
+	expect(f.faux.state.callCount).toBe(calls);
+	f.key("\x1b");
+	f.key("\x1b");
+	f.key("\x1b");
+	await command;
+});
+
+test("configured history entry pins turn identity while paging and reserves result on short/narrow viewports", async () => {
+	initTheme("dark");
+	const turn = (index: number) => ({
+		target: "/root/worker",
+		turn_id: `turn-${index}`,
+		sequence: index,
+		task_message_id: `task-${index}`,
+		result_message_id: `result-${index}`,
+		status: "completed",
+		history_coverage: "complete",
+		task_preview: `task ${index}`,
+		task_truncated: true,
+		admitted_at: 10,
+		started_at: null,
+		finished_at: null,
+		delivery: { state: "acknowledged", enqueued_at: null, acknowledged_at: null },
+		usage: { coverage: "unknown", input: null, output: null, cacheRead: null, cacheWrite: null },
+	});
+	const turns = vi.fn((_path: string, cursor?: string) => ({
+		target: "/root/worker",
+		history_coverage: "retained_only",
+		turns: cursor ? [turn(11), turn(12)] : Array.from({ length: 10 }, (_, index) => turn(index + 1)),
+		next_cursor: cursor ? null : "page-2",
+	}));
+	const readHistory = vi.fn(async () => {});
+	const rows: AgentListRow[] = [
+		{ task_name: "/root", status: "idle", state: "idle", loaded: true, model: "faux" },
+		{
+			task_name: "/root/worker",
+			status: "completed",
+			state: "completed",
+			loaded: false,
+			model: "faux",
+			resultSummary: "LATEST",
+		},
+	];
+	const monitor = {
+		list: () => rows,
+		subscribe: () => () => {},
+		turns,
+		readHistory,
+		result: (_path: string, id: string) => ({
+			state: "found",
+			turn: turn(Number(id.split("-")[1])),
+			result: {
+				preview: JSON.stringify({
+					summary: [
+						`SELECTED ${id}`,
+						...Array.from({ length: 80 }, (_, index) => `RESULT_LINE_${index}`),
+						"TAIL_RESULT",
+					].join("\n"),
+					outcome: "blocked",
+				}),
+				truncated: false,
+				source: {
+					kind: "native_history",
+					session_path: "/fixture/long-result.jsonl",
+					turn_id: id,
+					entry_id: "fixture-entry",
+					coverage: "entry",
+				},
+				artifacts: [{ path: "/fixture/report", purpose: "Full evidence", sha256: "a".repeat(64) }],
+			},
+		}),
+		view: () => ({ path: "/root/worker", state: "completed", loaded: false, model: "faux", text: "LATEST PREVIEW" }),
+	} as unknown as PiCollaborationMonitor;
+	let height = 20;
+	const terminal = new VirtualTerminal(80, 20);
+	const tui = new TuiAltScreen(terminal);
+	const keys = new KeybindingsManager({ "app.agents.turns": "ctrl+y" });
+	const panel = new GrokAgentsPanel({
+		monitor,
+		theme,
+		keybindings: keys,
+		height: () => height,
+		requestRender: () => tui.requestRender(),
+		done: () => {},
+	});
+	tui.showOverlay(panel, { width: "100%", maxHeight: "100%" });
+	tui.start();
+	try {
+		terminal.sendInput("\x1b[B");
+		terminal.sendInput("\x19");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("SELECTED turn-10");
+		expect(turns).toHaveBeenCalledTimes(1);
+		expect(readHistory).not.toHaveBeenCalled();
+		rows[1].state = "running";
+		rows[1].objective = "new followup";
+		terminal.sendInput("\x1b[6~");
+		await terminal.waitForRender();
+		expect(turns).toHaveBeenLastCalledWith("/root/worker", "page-2");
+		expect(terminal.getViewport().join("\n")).toContain("SELECTED turn-10");
+		expect(terminal.getViewport().join("\n")).toContain("loaded pages only");
+		terminal.sendInput("\x1b[B");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("SELECTED turn-11");
+		terminal.sendInput("\r");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("Turn detail — turn-11");
+		const screens = [terminal.getViewport().join("\n")];
+		for (let index = 0; index < 12; index++) {
+			terminal.sendInput("\x1b[6~");
+			await terminal.waitForRender();
+			screens.push(terminal.getViewport().join("\n"));
+		}
+		expect(screens.join("\n")).toContain("/fixture/long-result.jsonl");
+		expect(screens.join("\n")).toContain("hash claim:");
+		expect(screens.join("\n")).toContain("TAIL_RESULT");
+		expect(turns).toHaveBeenCalledTimes(2); // detail PageDown never fetches membership
+		terminal.sendInput("\x1b[5~");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("RESULT_LINE_");
+		terminal.sendInput("\x1b");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("SELECTED turn-11");
+		for (const width of [1, 8, 24, 40]) {
+			height = 4;
+			const lines = panel.render(width);
+			expect(lines).toHaveLength(4);
+			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+			expect(stripVTControlCharacters(lines.join("\n"))).toContain("S");
+		}
+		height = 20;
+		terminal.sendInput("\x1b");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("LATEST PREVIEW");
+		expect(turns).toHaveBeenCalledTimes(2);
+	} finally {
+		panel.dispose();
+		tui.stop();
+	}
 });

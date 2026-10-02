@@ -9,6 +9,7 @@ import {
 	InMemoryCredentialStore,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { COLLABORATION_LIMITS } from "@easy-pi/subagent/collaboration-contract";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
 import type { ChildSessionCreateOptions } from "@easy-pi/subagent/session-host";
@@ -73,8 +74,7 @@ async function fixture(api = "openai-codex-responses") {
 		agentDir: join(cwd, "agent"),
 		settingsManager,
 		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
+		// Match the child's discovery policy so preserve tests use identical rules.
 		extensionFactories: [
 			{
 				name: "affinity-root",
@@ -106,24 +106,27 @@ async function fixture(api = "openai-codex-responses") {
 	});
 	const requests: SimpleStreamOptions[] = [];
 	faux.setResponses(
-		Array.from({ length: 16 }, () => (_context: Context, options: SimpleStreamOptions | undefined) => {
-			requests.push({
-				sessionId: options?.sessionId,
-				cacheAffinityId: options?.cacheAffinityId,
-				promptCacheKey: options?.promptCacheKey,
-				transport: options?.transport,
-			});
-			return fauxAssistantMessage(
-				JSON.stringify({
-					summary: "synthetic",
-					outcome: "succeeded",
-					artifacts: [],
-					evidence: [],
-					checks: [],
-					risks: [],
-				}),
-			);
-		}),
+		Array.from(
+			{ length: COLLABORATION_LIMITS.maxActiveSessions + 8 },
+			() => (_context: Context, options: SimpleStreamOptions | undefined) => {
+				requests.push({
+					sessionId: options?.sessionId,
+					cacheAffinityId: options?.cacheAffinityId,
+					promptCacheKey: options?.promptCacheKey,
+					transport: options?.transport,
+				});
+				return fauxAssistantMessage(
+					JSON.stringify({
+						summary: "synthetic",
+						outcome: "succeeded",
+						artifacts: [],
+						evidence: [],
+						checks: [],
+						risks: [],
+					}),
+				);
+			},
+		),
 	);
 	async function tool(session: AgentSession, name: string, args: Record<string, unknown>) {
 		const result = await session.agent.state.tools
@@ -134,7 +137,7 @@ async function fixture(api = "openai-codex-responses") {
 		return result;
 	}
 	async function evictFirstChild() {
-		for (let index = 0; index < 3; index++)
+		for (let index = 0; index < COLLABORATION_LIMITS.maxActiveSessions - 1; index++)
 			await tool(root, "spawn_agent", spawnArgs(`filler${index}`, "isolate for LRU pressure"));
 	}
 	return { cwd, root, controller, children, requests, tool, host, faux, identity, getPermissions, evictFirstChild };

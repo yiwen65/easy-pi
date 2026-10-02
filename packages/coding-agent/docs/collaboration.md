@@ -1,6 +1,6 @@
 # Native collaboration wiring
 
-The CLI/SDK built-in factory now composes native collaboration instead of the old DAG. The seven delegation tools are registered when the root session binds its extensions, and the child host registers the `deliver_result` protocol tool in every child; discovery/help alone opens no team. Persistent teams live under `.epi/agent/teams/<root-session-id>/`; ephemeral roots use memory only. These are internal host APIs, not a new public npm API. Custom ResourceLoaders remain embedding-owned.
+The CLI/SDK built-in factory now composes native collaboration instead of the old DAG. The nine delegation tools are registered when the root session binds its extensions, and the child host registers the `deliver_result` protocol tool in every child; discovery/help alone opens no team. Persistent teams live under `.epi/agent/teams/<root-session-id>/`; ephemeral roots use memory only. These are internal host APIs, not a new public npm API. Custom ResourceLoaders remain embedding-owned.
 
 ## Grok-TUI: `/agents`
 
@@ -10,10 +10,21 @@ Within a child view:
 
 | Default key | Action | Configurable binding |
 | --- | --- | --- |
+| Ctrl+T | Retained turn history for the selected child | `app.agents.turns` |
+| End | Follow latest runtime preview | `app.agents.latest` |
 | Ctrl+S | Compose a passive message; Enter submits, Escape cancels | `app.agents.message` |
 | Ctrl+F | Paste an explicit `followup_task` JSON contract for an idle child (selected target is pinned) | `app.agents.followup` |
 | Ctrl+K | Request interrupt; Enter confirms, Escape cancels | `app.agents.interrupt` |
 | Alt+Left / Alt+Right | Previous / next agent | `app.agents.previous` / `app.agents.next` |
+
+In retained history, Up/Down select a stable turn ID and PageDown fetches the next
+metadata page on demand. Enter opens the selected result's full detail; PageUp/Down
+scroll that detail rather than changing pages. Escape returns detail → history →
+runtime preview → list → main editor, one step at a time. The visible hint names the
+current destination. Queries never load a native child, run inference, acknowledge
+mail or read referenced reports. Loaded-page usage is a known range, not complete
+team billing. Disabled query tools show an unavailable notice without hiding child
+rows. Runtime preview scrolling remains independent of retained result scrolling.
 
 Accepted is not consumed/completed. Busy followups are rejected, never silently queued. Rejected drafts remain in the panel for correction. Root tool filters apply to operator actions too. Children inherit live root permissions and the intersection of their creation ancestors' tool ceilings. Removed live ancestor tools are denied at the next tool-call boundary, including removals mid-turn. Followups may narrow but never expand a child's ceiling. Unloading an ancestor persists any further narrowing before removing its live binding, so losing an intermediate ancestor's getter (or reopening its stored ceiling) cannot restore that ancestor's revoked tools. Failed child startup releases installed bindings before disposal. This is an execution gate as well as a tool-schema filter, not an OS sandbox; already-admitted operations are not retroactively undone. The default host reloads only already-approved file extensions, not fresh child extension discovery; inline/custom ResourceLoader integrations must use the explicit host composition below for their child factories.
 
@@ -80,13 +91,179 @@ Children are asked to deliver one JSON object by calling the child-side `deliver
 {"summary":"Checked src/parser.ts:1-40; observed finding and test result; remaining risk: untested cases","outcome":"partial"}
 ```
 
-Only `summary` and `outcome` are required; extra fields are rejected. `summary` must be a nonblank string with schema `maxLength: 2048` and should contain the complete result, including key outputs, observed evidence (paths/line ranges/version hashes), checks actually run, and residual risks. The complete result must fit 8192 UTF-8 bytes. Curated input references are objects, but result evidence belongs in the `summary` text, not a separate `evidence` field. Cite only observed evidence; report unperformed checks and uncertainty honestly.
+Only `summary` and `outcome` are required. Optional `artifacts` contain at most eight `{path,purpose,sha256?}` report references; other extra fields are rejected. `summary` must be a nonblank string with schema `maxLength: 2048` and should contain the complete result, including key outputs, observed evidence (paths/line ranges/version hashes), checks actually run, and residual risks. The complete result must fit 8192 UTF-8 bytes. Curated input references are objects, but result evidence belongs in the `summary` text, not a separate `evidence` field. Cite only observed evidence; report unperformed checks and uncertainty honestly.
 
 Each initial task and explicit followup appends these output instructions after the assignment, without modifying the inherited request prefix; the validator's `DelegationResultSchema` travels as the input schema of the child's `deliver_result` protocol tool rather than as serialized schema text. A successful `deliver_result` ends the child turn after every already-admitted call in that tool batch settles, so it does not trigger another model request; invalid delivery arguments remain a model-visible tool error that can be corrected on the next turn. This is model guidance plus post-execution validation, not provider-enforced structured output or a guarantee that every model will comply.
 
 `outcome` is `succeeded`, `partial`, `blocked`, or `failed`. A delivered result replaces any earlier delivery in the same turn and overrides the final-text fallback; if the child never calls `deliver_result`, the final assistant text is retained and validated instead, so unstructured narrative output is `invalid`. The controller records `resultValidation.contract` as `valid`, `invalid`, or `not_completed`; `acceptance: "not_reviewed"` is only tolerated when reading legacy records, not written for new results. Valid format is not proof of the claims. Invalid fallback JSON is not discarded or automatically repaired by another inference request; an oversized `deliver_result` call is rejected at the tool boundary, leaving any earlier delivery in place. The native child history retains full output; the mailbox carries a bounded, explicitly truncated preview if needed. Non-completed turns never receive a successful format verdict. Results return to the creation parent even when another agent sent the followup.
 
 `list_agents` exposes creation projection bytes and measurement scope (`messages` or `request_prefix`), the requested prefix policy (`required` is not itself proof of successful execution), result-format state, and available latest-turn provider-reported input/output/cache usage. Missing sizes/usage are unknown, and interrupted zero usage can be incomplete. These are not current context-token estimates or an additional charge added to parent usage. Successful first-prefix checks also write a noncontextual `epi-collaboration-prefix` entry in native child history.
+
+### Retained result lookup and pinned waiting
+
+The source implementation registers `get_agent_result` and `list_agent_turns` and
+extends `wait_agent` with a target selector. Existing running sessions are not
+hot-switched; source tests are not proof that an installed build has these tools.
+`deliver_result` accepts required `summary` and `outcome` plus optional bounded
+`artifacts` references, with unchanged 2048-character/8192-byte limits. References
+are untrusted claims, not file reads, permission grants or acceptance.
+
+When a result seems missing, query retained work instead of starting inference to
+resend it. Admission receipts include `turn_id` and `message_id` (the **task**
+receipt). Use `turn_id` for result lookup/waiting; a result lookup by `message_id`
+requires the **result notification** ID, available in list/query metadata.
+
+```json
+{"target":"worker","turn_id":"<admitted-turn-id>"}
+```
+
+Use that input with `get_agent_result` or `wait_agent`. For history, call
+`list_agent_turns` with `{"target":"worker","limit":10}` and reuse its
+`next_cursor` for the next page. Never sum repeated latest-turn usage snapshots.
+A passive `send_message` does not wake an idle child; `followup_task` is for new
+work, not retrieving old output. Children cannot call `send_message` or other root
+team tools; use `deliver_result` for automatic return to the creation parent.
+A fresh isolated/curated verifier is independent context; a followup is continuous
+review. For small self-contained tasks choose isolated explicitly when appropriate,
+without changing the `continue` default. Read-only tasks need an actual allowlist;
+excluding write/edit while retaining bash does not provide a read-only boundary.
+
+#### Result selectors and read-only pages
+
+All queries require live root authority and same-team target/selector ownership,
+including closed or unloaded children. They never load/run a child, call a provider,
+ack/consume mail, read source files, or inject old messages into normal context.
+
+| `get_agent_result` input | Selection / rejection |
+| --- | --- |
+| `target` only | Capture this agent's current turn once; closed agents retain their last turn. |
+| `target` + `turn_id` | Exact retained turn of that target. |
+| `target` + `message_id` | Exact **result notification** ID of that target, not a task/passive message ID. |
+| Both IDs, missing target, empty ID, extra fields | `invalid_arguments`; never guess precedence. |
+| Known ID belongs to another target/team | `invalid_arguments` (`unknown_turn`) or `forbidden` for foreign authority; never return the other record. |
+| Unretained ID, complete history | `invalid_arguments / unknown_turn`. |
+| Unretained ID, legacy partial history | `history_unavailable` response; absence cannot prove the turn never existed. |
+
+IDs are nonblank ASCII identifiers of at most 128 characters. Path normalization
+uses the existing root-scoped resolver; shape validation alone cannot prove team
+membership. `found` returns a turn view and retained result, including invalid
+fallback output; `pending` has a pending/running turn and no result; `no_result`
+has a known terminal turn without output (for example failed startup).
+`history_unavailable` includes target and `retained_only` coverage, not a fabricated
+turn. Format validity, child outcome, execution status and parent acceptance are
+separate; this protocol has no automatic acceptance verdict.
+
+`list_agent_turns` requires target and accepts `limit` (default 10, integer 1–20)
+and an opaque base64url cursor of at most 512 characters. The cursor binds the root,
+canonical target, exclusive last sequence and an inclusive high-water sequence
+captured on the first page. Validate its encoding and bounds against this team;
+a malformed, foreign or mismatched cursor is `invalid_arguments`. Ascending team
+sequences are positive safe integers, never reused. Followups admitted after the
+high-water mark do not appear mid-pagination. Pages contain turn views, not result
+bodies, full delegation or artifacts. `next_cursor: null` means this bounded traversal
+is exhausted, not that legacy history is complete. Empty pages must not emit a
+nonadvancing cursor. Page metadata may reflect later completion/ack of existing turns;
+the cursor fixes membership, not an immutable historical snapshot.
+
+Query previews fit 8192 UTF-8 bytes; truncation preserves Unicode boundaries and
+includes any truncation marker in that budget. `truncated: false` is a proven full
+result, `true` is a shortened result, and `null` means legacy completeness is unknown.
+`source` identifies native history with a turn-level locator and, when proven, an
+exact native entry ID; missing/memory-only sources are `unavailable`. A path/entry
+reference is not an implicit read or authority grant. Whole result responses fit
+64 KiB (including JSON escaping of invalid raw output); whole pages fit 64 KiB and may return fewer than the requested count to fit.
+Do not silently drop fields: reject an individually unrepresentable record with
+`storage_error`. Task previews are capped at 256 Unicode characters with a separate
+`task_truncated` marker. Unknown legacy task text is empty with partial coverage,
+not a claim that the assignment was empty.
+
+#### Pinned wait truth table
+
+`wait_agent` allows `target` and optional `turn_id`; a `turn_id` without
+`target` is invalid. Without target the existing mailbox/user-input/timeout behavior
+is unchanged. With target, resolve and pin the explicit or current turn **once at
+entry**, before subscribing. Check before and after subscription to prevent lost
+wakeups; subsequent followups cannot replace the pinned turn.
+
+| Observed pinned turn / event | Targeted wait result |
+| --- | --- |
+| Pending/running, no activity | Stay subscribed to that turn, not arbitrary mailbox arrivals. |
+| Completed/failed/interrupted, even already acknowledged | Immediately `terminal`, `timed_out: false`, target, turn ID and result query. |
+| Startup failed before result notification | `terminal` with `no_result`; notification is not required. |
+| Followup admitted during wait | Keep waiting for the original turn, never the latest one. |
+| Close after a terminal turn | Return retained terminal status, not `closed` as a turn status. |
+| Dead-owner recovery | Interrupted pinned turn is terminal; no replay or restart. |
+| Simultaneous user input and terminal event | `user_input` wins; include pinned target/turn ID. |
+| Deadline without user input or terminal event | `timeout`, `timed_out: true`, pinned target/turn ID. |
+| Unknown legacy terminal status / missing legacy turn | `context_unavailable / history_unavailable`, not an infinite wait or guessed completion. |
+| Cancellation / shutdown / ownership loss | Existing safe error/cancellation path; release timer/listeners and never interrupt the child merely because waiting ended. |
+
+#### Incremental ledger and upgrade boundary
+
+Use indexed per-turn rows in the existing SQLite database, not a growing history
+array in every version-1 snapshot. A bounded four-turn fixture compares rewriting
+all serialized historical rows with writing only each changed row; this is an
+encoded-byte comparison, not a disk/performance benchmark. The memory store follows
+the same transactional semantics. Snapshot remains the current agent/mailbox and
+small authority projection, not the history container.
+
+Admission writes a new turn, snapshot/task receipt and completion reservation in
+one owner/CAS-checked transaction. Completion writes terminal turn, bounded result,
+message identity and notification in one transaction. Failure rolls back all of
+those changes. Startup failure records the failed/interrupted turn without requiring
+a notification. Followup never overwrites older turn task/result/usage. Closing
+changes agent lifecycle only; terminal turn status is retained. Recovery changes
+active turns to interrupted and records any notification atomically, without replay.
+Authority checks must not decode the entire ledger. Read-only pages do not advance
+any delivery state.
+
+`CollaborationTurnRecord` defines root/target/sequence/turn identity, task and result
+message IDs (null when unknown), bounded task preview, canonical delegation when
+known, status, result source/preview/truncation, known timestamps, delivery and usage.
+Turn timestamps are epoch milliseconds (`admitted_at`, `started_at`, `finished_at`);
+unknown is null, not zero or filesystem mtime. Delivery is `not_enqueued`, `enqueued`,
+`acknowledged`, or `unknown`, with nullable enqueue/ack timestamps. Acknowledgement
+requires receiving native persistence/sync evidence and is idempotent. It proves
+neither model attention nor parent acceptance. There is still no cross-DB/JSONL
+transaction or exactly-once execution promise.
+
+Usage coverage is `complete`, `partial`, or `unknown`; each input/output/cache counter
+is nullable and provider-reported for this turn only. Aborted/missing reports are
+not invented zeros. Legacy latest usage is partial unless completeness is provable;
+never copy it into queued older turns or sum repeated latest snapshots. Creation
+projection bytes are not current context or usage.
+
+New teams have `complete` history from admission onward. Upgrade seeds **only**
+provable latest task/result and already queued result envelopes from the snapshot,
+deduplicated by target+turn ID. Historical queued notifications without task receipts
+have unknown task IDs/delegations/timestamps/usage. A closed legacy agent without a
+provable terminal notification has turn status `unknown`, not guessed completed.
+Legacy records/teams remain `retained_only`; future turns cannot make overwritten
+past history complete. Do not scan full native histories, infer old acknowledgement,
+rewrite real session files or replay. Conflicting provable records fail atomically
+with `storage_error` rather than selecting an arbitrary result.
+
+Retention is a same-team cap of **4096 retained turns**, including failed startup
+and closed-agent turns. No automatic deletion/pruning on ack, close or recovery.
+Each retained turn has at most 256 KiB encoded delegation, 8192 result-preview bytes
+and 8192 encoded metadata bytes (remaining identity/time/source fields). Artifact
+references stay in the original preview instead of being duplicated in ledger metadata. Thus the
+logical payload ceiling is 1088 MiB/team, excluding SQLite/index overhead and native
+session files; it is not a physical disk quota. Admission at capacity rejects before
+persistence/loading/provider work with `limit_reached / turn_history_full` and a
+new-root-session hint. Reads, completion/ack and control of already-admitted work
+remain available at capacity. Upgrade overflow rejects atomically without pruning.
+The coordinator confirmed this bounded policy in the task authority document;
+The store enforces these budgets before admitting a new turn and preserves
+control/query access for already-admitted work.
+
+An artifact is `{path, purpose, sha256?}`: nonblank path <=2048 characters, nonblank
+purpose <=256, optional lowercase 64-hex SHA256, at most eight refs; path/purpose
+cannot contain NUL. All refs count against the complete result's unchanged
+8192-byte budget. Queries derive validated refs from the retained preview without
+reading the paths. They never trigger execution or acceptance; tests/checks/base
+revision remain in the referenced report and are parent-verified. Missing/changed
+reports are unavailable evidence, not a reason to restart inference automatically.
 
 ### Codex preserve cache affinity
 
@@ -101,11 +278,11 @@ Local Luna/Codex/SSE header-isolation experiments supported `session-id` as a fa
 ## Host composition
 
 - Create one `CollaborationStore` and `CollaborationController` per root session. Persistent teams require persistent receiving sessions. Use separate team storage, never the legacy DAG database or project files.
-- `registerPiCollaborationTools({ pi, controller, identity, getSession })` in `src/extensions/pi-collaboration-tools.ts` binds the seven tools to an exact native session instance. Root identity uses its actual session ID and `/root`.
+- `registerPiCollaborationTools({ pi, controller, identity, getSession })` in `src/extensions/pi-collaboration-tools.ts` binds the nine tools to an exact native session instance. Root identity uses its actual session ID and `/root`.
 - The native child host's `registerTools(identity, pi, getSession)` callback binds the same controller to every child. Team tools stay visible in child contexts so preserved prefixes remain byte-identical, but execution is rejected for non-root identities (`nested_delegation`); nested teams are not supported. Custom embeddings should pass the same live root `getDefaults: () => ({ subagentModel, subagentThinkingLevel })` to every `registerPiCollaborationTools` call; otherwise the adapter reads its own session settings. The built-in root already supplies this getter, avoiding stale defaults in child SettingsManager snapshots. Pass live parent permission capabilities through `createEasyPiHarness({ nativeSession: ... })`; do not register this adapter alone and omit the permission harness. Set `subagentEnabled: false` in settings to disable the whole collaboration stack (tools, contract, agents panel) for new sessions.
 - Tool checks read a small frozen store projection (path, parent, status, tool ceiling), not the full mailbox. Every query still checks SQLite ownership and `data_version`; external changes force full snapshot revalidation. Successful local commits refresh the projection. Live ancestor/root getters run on each decision, so this is not an allow/deny cache or a claim of zero database I/O.
 - Bind extensions after assigning the created `AgentSession` to the accessor. Root shutdown stops the team; child unload only closes that child's binding. Replacement sessions need fresh bindings, not reused callbacks.
-- `test/pi-collaboration-tools.test.ts` contains the complete offline SDK composition and faux-provider execution of all seven tools.
+- `test/pi-collaboration-tools.test.ts` contains the complete offline SDK composition and faux-provider execution of all nine tools; history/targeted-wait store regressions are under `packages/subagent/test/collaboration-*.test.ts`, and display/monitor regressions cover paging, malformed metadata and immutable mouse frames. These are offline source checks, not a physical-terminal or real-provider guarantee.
 
 ## Message and execution semantics
 
@@ -114,7 +291,9 @@ Local Luna/Codex/SSE header-isolation experiments supported `session-id` as a fa
 | `spawn_agent` | Validate explicit delegation/context/capabilities, reserve name, execution capacity and parent completion-mailbox capacity, persist a task receipt, and start a native child. Model/effort resolve explicit override → global Subagent default → caller, independently. |
 | `send_message` | Persist a same-team message and wake a current waiter. Never load, start or resume an idle recipient. |
 | `followup_task` | Start an explicit contracted turn on an idle child with existing context and no capability expansion; return the persisted task message ID. Reject running children and root targets. |
-| `wait_agent` | Observe the caller's pending mailbox or user-input activity. User input wins simultaneous activity; timeout and wait cancellation do not cancel children. |
+| `wait_agent` | With target, pin the specified/current turn and return terminal result even after ack. Without target, observe pending mailbox/user input, not history. User input wins; timeout/cancellation do not cancel children. |
+| `get_agent_result` | Read one retained result by target/current turn, explicit turn ID or result notification ID. No child loading/inference, mailbox consumption or source reading. |
+| `list_agent_turns` | Metadata-only history pages with scoped cursor/high-water membership and explicit coverage. No loading/inference or mailbox consumption. |
 | `interrupt_agent` | Cancel pending startup or abort execution without rolling back shared edits. Reject root/self and return the previous status. |
 | `list_agents` | Return child status and loaded state, optionally filtered by a canonical path subtree. Completion is not delivery. |
 | `close_agent` | Retire a settled descendant: keep its record, session file and last result for audit while releasing its team slot and native session, and return the previous status. Pending/running children must be interrupted first and descendants closed leaf-first; root, self and other branches are rejected. Idempotent on already-closed agents; closed names are never reused. |

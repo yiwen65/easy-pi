@@ -27,6 +27,8 @@ export interface AppKeybindings {
 	"app.prompt.prev": true;
 	"app.prompt.next": true;
 	"app.prompt.list": true;
+	"app.agents.turns": true;
+	"app.agents.latest": true;
 	"app.agents.message": true;
 	"app.agents.followup": true;
 	"app.agents.interrupt": true;
@@ -114,6 +116,8 @@ export const KEYBINDINGS = {
 		defaultKeys: ["super+g", "alt+g"],
 		description: "Open user prompt list to jump",
 	},
+	"app.agents.turns": { defaultKeys: "ctrl+t", description: "Agent viewer: retained turn history" },
+	"app.agents.latest": { defaultKeys: "end", description: "Agent viewer: follow newest preview" },
 	"app.agents.message": { defaultKeys: "ctrl+s", description: "Agent viewer: compose passive message" },
 	"app.agents.followup": { defaultKeys: "ctrl+f", description: "Agent viewer: compose new task" },
 	"app.agents.interrupt": { defaultKeys: "ctrl+k", description: "Agent viewer: confirm interrupt" },

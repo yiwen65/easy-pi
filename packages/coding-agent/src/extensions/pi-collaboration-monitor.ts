@@ -4,6 +4,8 @@ import { dirname } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	CollaborationError,
+	type CollaborationResultQuery,
+	type CollaborationTurnPage,
 	parseCollaborationArguments,
 	validateDelegation,
 } from "@easy-pi/subagent/collaboration-contract";
@@ -11,6 +13,7 @@ import type { CollaborationController } from "@easy-pi/subagent/collaboration-co
 import type { ChildSessionIdentity } from "@easy-pi/subagent/session-host";
 import type { AgentSession, AgentSessionEvent } from "../core/agent-session.ts";
 import { buildSessionContext, CURRENT_SESSION_VERSION, type SessionEntry } from "../core/session-manager.ts";
+import { parseDeliverResult, resultQueryText } from "../modes/interactive/components/subagent-group.ts";
 
 const MAX_PREVIEW = 64 * 1024;
 const MAX_HISTORY = 4 * 1024 * 1024;
@@ -62,6 +65,10 @@ export interface AgentListRow {
 	objective?: string;
 	/** First line of the delivered result, when the agent settled. */
 	resultSummary?: string;
+	turnId?: string;
+	turnDuration?: number | null;
+	resultMetadata?: string;
+	queryUnavailable?: string;
 	/** Last monitor-observed activity (status/loaded change or live session event). */
 	lastActivityAt?: number;
 }
@@ -74,6 +81,8 @@ export interface AgentRuntimeView {
 	model: string;
 	objective?: string;
 	resultSummary?: string;
+	resultMetadata?: string;
+	queryUnavailable?: string;
 	lastActivityAt?: number;
 	sessionFile?: string;
 	text: string;
@@ -91,6 +100,7 @@ export class PiCollaborationMonitor {
 	private children: ReturnType<CollaborationController["list"]>;
 	private readonly records = new Map<string, ReturnType<CollaborationController["inspect"]>>();
 	private readonly activity = new Map<string, number>();
+	private readonly results = new Map<string, CollaborationResultQuery>();
 	get isClosed(): boolean {
 		return this.closed;
 	}
@@ -117,6 +127,7 @@ export class PiCollaborationMonitor {
 					return;
 				}
 				this.records.clear();
+				this.results.clear();
 				this.changed();
 			}),
 		);
@@ -251,6 +262,20 @@ export class PiCollaborationMonitor {
 		return child.status as AgentRowState;
 	}
 
+	result(path: string, turnId?: string): CollaborationResultQuery {
+		if (this.closed) throw new Error("Team monitor closed");
+		if (!this.root.getActiveToolNames().includes("get_agent_result"))
+			throw new CollaborationError("forbidden", "Retained result query unavailable: get_agent_result disabled");
+		return this.controller.getAgentResult(this.identity, { target: path, ...(turnId ? { turn_id: turnId } : {}) });
+	}
+
+	turns(path: string, cursor?: string): CollaborationTurnPage {
+		if (this.closed) throw new Error("Team monitor closed");
+		if (!this.root.getActiveToolNames().includes("list_agent_turns"))
+			throw new CollaborationError("forbidden", "Retained turn query unavailable: list_agent_turns disabled");
+		return this.controller.listAgentTurns(this.identity, { target: path, ...(cursor ? { cursor } : {}) });
+	}
+
 	list(): AgentListRow[] {
 		if (this.closed) throw new Error("Team monitor closed");
 		const rootRow: AgentListRow = {
@@ -265,12 +290,33 @@ export class PiCollaborationMonitor {
 			rootRow,
 			...this.children.map((child) => {
 				const record = this.recordFor(child.task_name);
+				let retained: CollaborationResultQuery | undefined;
+				let queryUnavailable: string | undefined;
+				try {
+					if (!this.root.getActiveToolNames().includes("get_agent_result")) throw new Error("disabled");
+					retained = this.results.get(child.task_name) ?? this.result(child.task_name);
+					this.results.set(child.task_name, retained);
+				} catch {
+					queryUnavailable = "Retained result query unavailable";
+				}
 				return {
 					...child,
 					state: this.childState(child),
 					model: this.modelText(child.task_name),
 					objective: this.firstLine(record?.taskMessage?.text),
-					resultSummary: this.firstLine(record?.result),
+					resultSummary: this.firstLine(
+						parseDeliverResult(retained?.state === "found" ? retained.result.preview : undefined).displayText,
+					),
+					turnId: child.turn_id,
+					turnDuration:
+						retained &&
+						retained.state !== "history_unavailable" &&
+						retained.turn.started_at !== null &&
+						retained.turn.finished_at !== null
+							? retained.turn.finished_at - retained.turn.started_at
+							: null,
+					resultMetadata: retained ? resultQueryText(retained) : undefined,
+					queryUnavailable,
 					lastActivityAt: this.activity.get(child.task_name),
 				};
 			}),
@@ -289,11 +335,16 @@ export class PiCollaborationMonitor {
 			model: row.model,
 			objective: row.objective,
 			resultSummary: row.resultSummary,
+			resultMetadata: row.resultMetadata,
+			queryUnavailable: row.queryUnavailable,
 			lastActivityAt: row.lastActivityAt,
 			sessionFile: record?.sessionPath ?? (path === "/root" ? this.root.sessionFile : undefined),
 			text: preview
 				? bound([preview.text, preview.partial, ...preview.tools.values()].filter(Boolean).join("\n\n"))
-				: (record?.result ?? "No runtime preview. Open retained history to inspect."),
+				: (row.queryUnavailable ??
+					(record?.result
+						? parseDeliverResult(record.result).displayText
+						: "No runtime preview. Open retained history to inspect.")),
 		};
 	}
 	/** Cold history inspection is read-only and size bounded; never creates a native session. */
@@ -410,6 +461,7 @@ export class PiCollaborationMonitor {
 		this.listeners.clear();
 		this.previews.clear();
 		this.records.clear();
+		this.results.clear();
 		this.children = [];
 	}
 }

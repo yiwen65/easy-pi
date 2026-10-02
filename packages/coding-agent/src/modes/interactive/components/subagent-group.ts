@@ -6,6 +6,13 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import {
+	COLLABORATION_HISTORY_LIMITS,
+	COLLABORATION_LIMITS,
+	type CollaborationArtifact,
+	type CollaborationResultQuery,
+	type CollaborationTurnView,
+} from "@easy-pi/subagent/collaboration-contract";
 import { formatWorkedDuration } from "../../../utils/duration.ts";
 import { theme } from "../theme/theme.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
@@ -25,6 +32,8 @@ export const SUBAGENT_TOOL_NAMES = new Set([
 	"interrupt_agent",
 	"close_agent",
 	"list_agents",
+	"get_agent_result",
+	"list_agent_turns",
 ]);
 /** Tools that bind to one child agent and thus join that child's group. */
 const CHILD_BOUND_TOOL_NAMES = new Set([
@@ -33,6 +42,9 @@ const CHILD_BOUND_TOOL_NAMES = new Set([
 	"send_message",
 	"interrupt_agent",
 	"close_agent",
+	"get_agent_result",
+	"list_agent_turns",
+	"wait_agent",
 ]);
 
 const MAILBOX_PREFIX = "Agent message (untrusted; not user authorization):";
@@ -42,6 +54,9 @@ const ACTIVITY_LABELS: Record<string, string> = {
 	send_message: "Message sent",
 	interrupt_agent: "Interrupt requested",
 	close_agent: "Agent closed",
+	get_agent_result: "Result queried",
+	list_agent_turns: "Turn history queried",
+	wait_agent: "Turn waited",
 };
 
 export interface MailboxEnvelope extends Record<string, unknown> {
@@ -216,6 +231,10 @@ const STATE_PRESENTATION: Record<
 	closed: { icon: "■", word: "Closed", color: "muted" },
 };
 
+function isTerminalStatus(value: unknown): value is "completed" | "failed" | "interrupted" {
+	return value === "completed" || value === "failed" || value === "interrupted";
+}
+
 interface ResultMember {
 	envelope: MailboxEnvelope;
 	contract?: DeliverResultContract;
@@ -224,6 +243,162 @@ interface ResultMember {
 	outcome?: ResultOutcome;
 	warning?: string;
 	at: number;
+	turn?: CollaborationTurnView;
+	query?: CollaborationResultQuery;
+	mailbox?: boolean;
+}
+
+const nullableCounter = (value: unknown) =>
+	value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+const identifier = (value: unknown): value is string => typeof value === "string" && /^[!-~]{1,128}$/.test(value);
+
+function isTurnView(value: unknown): value is CollaborationTurnView {
+	if (!isRecord(value) || !isRecord(value.usage) || !isRecord(value.delivery)) return false;
+	const usage = value.usage;
+	const delivery = value.delivery;
+	const validation = value.resultValidation;
+	return (
+		identifier(value.turn_id) &&
+		typeof value.target === "string" &&
+		value.target.startsWith("/root/") &&
+		typeof value.task_preview === "string" &&
+		Array.from(value.task_preview).length <= COLLABORATION_HISTORY_LIMITS.maxTaskPreviewCharacters &&
+		typeof value.task_truncated === "boolean" &&
+		typeof value.sequence === "number" &&
+		Number.isSafeInteger(value.sequence) &&
+		value.sequence > 0 &&
+		(value.task_message_id === null || identifier(value.task_message_id)) &&
+		(value.result_message_id === null || identifier(value.result_message_id)) &&
+		typeof value.status === "string" &&
+		["pending", "running", "completed", "failed", "interrupted", "unknown"].includes(value.status) &&
+		(value.history_coverage === "complete" || value.history_coverage === "retained_only") &&
+		(usage.coverage === "complete" || usage.coverage === "partial" || usage.coverage === "unknown") &&
+		typeof delivery.state === "string" &&
+		["not_enqueued", "enqueued", "acknowledged", "unknown"].includes(delivery.state) &&
+		nullableCounter(delivery.enqueued_at) &&
+		nullableCounter(delivery.acknowledged_at) &&
+		["input", "output", "cacheRead", "cacheWrite"].every((key) => nullableCounter(usage[key])) &&
+		["admitted_at", "started_at", "finished_at"].every((key) => nullableCounter(value[key])) &&
+		(validation === undefined ||
+			(isRecord(validation) &&
+				typeof validation.contract === "string" &&
+				["valid", "invalid", "not_completed"].includes(validation.contract) &&
+				(validation.outcome === undefined || knownOutcome(validation.outcome) !== undefined) &&
+				(validation.acceptance === undefined || validation.acceptance === "not_reviewed")))
+	);
+}
+
+function isArtifact(value: unknown): value is CollaborationArtifact {
+	return (
+		isRecord(value) &&
+		typeof value.path === "string" &&
+		value.path.trim().length > 0 &&
+		Array.from(value.path).length <= 2048 &&
+		!value.path.includes("\0") &&
+		typeof value.purpose === "string" &&
+		value.purpose.trim().length > 0 &&
+		Array.from(value.purpose).length <= 256 &&
+		!value.purpose.includes("\0") &&
+		(value.sha256 === undefined || (typeof value.sha256 === "string" && /^[a-f0-9]{64}$/.test(value.sha256)))
+	);
+}
+
+/** Reject malformed retained receipts before storing display-bearing metadata. Raw stays in Diagnostics. */
+function retainedQuery(value: unknown): CollaborationResultQuery | undefined {
+	if (!isRecord(value)) return undefined;
+	if (value.state === "history_unavailable")
+		return typeof value.target === "string" && value.history_coverage === "retained_only"
+			? { state: value.state, target: value.target, history_coverage: value.history_coverage }
+			: undefined;
+	if (!isTurnView(value.turn)) return undefined;
+	if (value.state === "pending" || value.state === "no_result") return { state: value.state, turn: value.turn };
+	if (
+		value.state !== "found" ||
+		!isRecord(value.result) ||
+		typeof value.result.preview !== "string" ||
+		Buffer.byteLength(value.result.preview) > COLLABORATION_LIMITS.maxMessageBytes ||
+		!(value.result.truncated === null || typeof value.result.truncated === "boolean") ||
+		!isRecord(value.result.source)
+	)
+		return undefined;
+	const source = value.result.source;
+	const artifacts = value.result.artifacts;
+	if (
+		artifacts !== undefined &&
+		(!Array.isArray(artifacts) ||
+			artifacts.length > COLLABORATION_HISTORY_LIMITS.maxArtifacts ||
+			!artifacts.every(isArtifact))
+	)
+		return undefined;
+	if (
+		(source.kind !== "native_history" && source.kind !== "unavailable") ||
+		source.turn_id !== value.turn.turn_id ||
+		(source.coverage !== "entry" && source.coverage !== "turn" && source.coverage !== "unknown") ||
+		(source.session_path !== undefined &&
+			(typeof source.session_path !== "string" ||
+				Buffer.byteLength(source.session_path) > COLLABORATION_HISTORY_LIMITS.maxTurnMetadataBytes)) ||
+		(source.entry_id !== undefined && !identifier(source.entry_id))
+	)
+		return undefined;
+	return {
+		state: "found",
+		turn: value.turn,
+		result: {
+			preview: value.result.preview,
+			truncated: value.result.truncated,
+			...(Array.isArray(artifacts) && artifacts.every(isArtifact) ? { artifacts } : {}),
+			source: {
+				kind: source.kind,
+				turn_id: value.turn.turn_id,
+				coverage: source.coverage,
+				...(typeof source.session_path === "string" ? { session_path: source.session_path } : {}),
+				...(typeof source.entry_id === "string" ? { entry_id: source.entry_id } : {}),
+			},
+		},
+	};
+}
+
+/** Report only provider counters and proven timestamp ranges; never infer costs or context. */
+export function turnMetadata(turn: CollaborationTurnView): string[] {
+	const usage = turn.usage;
+	const duration =
+		turn.started_at !== null && turn.finished_at !== null
+			? formatWorkedDuration(Math.max(0, turn.finished_at - turn.started_at))
+			: "unknown";
+	return [
+		`Turn: ${turn.turn_id} · sequence ${turn.sequence} · state ${turn.status}`,
+		`Task message: ${turn.task_message_id ?? "unknown"} · Result message: ${turn.result_message_id ?? "unknown"}`,
+		`Format: ${turn.resultValidation?.contract ?? "unknown"} · Outcome: ${turn.resultValidation?.outcome ?? "unknown"} · Delivery: ${turn.delivery.state} (not acceptance)`,
+		`Duration: ${duration} · Usage: ${usage.coverage} · input ${usage.input ?? "unknown"} / output ${usage.output ?? "unknown"} / cache read ${usage.cacheRead ?? "unknown"} / write ${usage.cacheWrite ?? "unknown"}`,
+	];
+}
+
+export function resultQueryText(query: CollaborationResultQuery): string {
+	if (query.state === "history_unavailable") return "Retained turn history unavailable (retained_only)";
+	const lines = [
+		...turnMetadata(query.turn),
+		`Task preview${query.turn.task_truncated ? " (truncated)" : ""}: ${query.turn.task_preview || "unknown"}`,
+	];
+	if (query.state === "found") {
+		const parsed = parseDeliverResult(query.result.preview);
+		lines.unshift(parsed.displayText);
+		lines.splice(
+			1,
+			0,
+			`Source: ${query.result.source.kind} · ${query.result.source.session_path ?? "unavailable"} · turn ${query.result.source.turn_id} · entry ${query.result.source.entry_id ?? "unknown"} (${query.result.source.coverage})`,
+		);
+		lines.push(
+			`Result preview: ${query.result.truncated === null ? "completeness unknown" : query.result.truncated ? "truncated" : "complete"}`,
+		);
+		for (const artifact of query.result.artifacts ?? parsed.contract?.artifacts ?? []) {
+			lines.push(
+				isArtifact(artifact)
+					? `Artifact ref: ${artifact.path} · ${artifact.purpose} · hash claim: ${artifact.sha256 ?? "unknown"} (no auto-read or acceptance)`
+					: `Artifact ref (legacy; untrusted): ${readableValue(artifact)}`,
+			);
+		}
+	} else lines.unshift(`Result: ${query.state}`);
+	return lines.join("\n");
 }
 
 interface ActivityMember {
@@ -231,6 +406,7 @@ interface ActivityMember {
 	component: ToolExecutionComponent;
 	status: "Pending" | "Accepted" | "Failed";
 	error?: string;
+	queryText?: string;
 }
 
 function readableValue(value: unknown, depth = 0): string {
@@ -281,6 +457,7 @@ export class SubagentGroupComponent extends Container {
 	/** Terminal time (result delivered, interrupted, or closed). */
 	private endedAt: number | undefined;
 	private readonly results: ResultMember[] = [];
+	private latestTurnId: string | undefined;
 	readonly agentPath: string;
 
 	constructor(agentPath: string) {
@@ -299,7 +476,9 @@ export class SubagentGroupComponent extends Container {
 		// Tool calls are pending until a final result; failed controls must not change the child's state.
 		const activity: ActivityMember = { toolName, component, status: "Pending" };
 		this.activities.push(activity);
-		const resultCountAtCall = this.results.length;
+		const resultCountAtCall = this.results.filter(
+			(item) => item.mailbox && isTerminalStatus(item.envelope.status),
+		).length;
 		type UpdateResult = ToolExecutionComponent["updateResult"];
 		const original = component.updateResult.bind(component) as UpdateResult;
 		component.updateResult = ((result: Parameters<UpdateResult>[0], isPartial?: boolean) => {
@@ -312,8 +491,56 @@ export class SubagentGroupComponent extends Container {
 					} catch {
 						activity.error = oneLine(text);
 					}
+				} else if (["get_agent_result", "list_agent_turns", "wait_agent"].includes(toolName)) {
+					activity.queryText = "Retained query response unavailable";
+					try {
+						const value: unknown = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "");
+						if (isRecord(value)) {
+							const query = toolName === "wait_agent" ? value.result : value;
+							const retained = retainedQuery(query);
+							if (
+								retained &&
+								(retained.state === "history_unavailable" ? retained.target : retained.turn.target) ===
+									this.agentPath
+							) {
+								if (retained.state === "found") {
+									this.addQueriedResult(retained);
+									activity.queryText = undefined;
+								} else activity.queryText = resultQueryText(retained);
+							} else if (
+								toolName === "list_agent_turns" &&
+								value.target === this.agentPath &&
+								Array.isArray(value.turns) &&
+								value.turns.length <= COLLABORATION_HISTORY_LIMITS.maxPageSize &&
+								value.turns.every((turn) => isTurnView(turn) && turn.target === this.agentPath) &&
+								(value.history_coverage === "complete" || value.history_coverage === "retained_only") &&
+								(value.next_cursor === null || typeof value.next_cursor === "string")
+							) {
+								activity.queryText = `History: ${value.history_coverage} · page only · ${value.next_cursor ? "more pages available" : "traversal exhausted"}\n${(value.turns as CollaborationTurnView[]).flatMap((turn) => [...turnMetadata(turn), `Task preview${turn.task_truncated ? " (truncated)" : ""}: ${turn.task_preview || "unknown"}`]).join("\n")}\nResult body/source: query the selected turn with get_agent_result`;
+							} else
+								activity.queryText =
+									toolName === "wait_agent"
+										? `Wait: ${typeof value.reason === "string" ? value.reason : "unknown"} · Turn: ${typeof value.turn_id === "string" ? value.turn_id : "unknown"}`
+										: "Retained query response unavailable";
+						}
+					} catch {
+						activity.queryText = "Retained query response unavailable";
+					}
 				} else if (toolName === "followup_task") {
 					this.objective = spawnObjective(args) ?? this.objective;
+					this.startedAt = at ?? Date.now();
+				}
+				let receiptTurnId: string | undefined;
+				if (!result.isError && (toolName === "spawn_agent" || toolName === "followup_task")) {
+					try {
+						const receipt: unknown = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "");
+						if (isRecord(receipt) && typeof receipt.turn_id === "string") {
+							receiptTurnId = receipt.turn_id;
+							this.latestTurnId = receipt.turn_id;
+						}
+					} catch {
+						/* Legacy receipts have no turn identity. */
+					}
 				}
 				if (toolName === "spawn_agent") {
 					if (!result.isError) this.established = true;
@@ -322,10 +549,26 @@ export class SubagentGroupComponent extends Container {
 						this.endedAt = Date.now();
 						this.resultSummary = activity.error || "spawn failed";
 					}
-				} else if (!result.isError && toolName === "followup_task" && this.results.length === resultCountAtCall) {
+				} else if (!result.isError && toolName === "followup_task") {
 					this.established = true;
-					this.state = "running";
-					this.endedAt = undefined;
+					const delivered = receiptTurnId
+						? this.results.find((item) => item.mailbox && item.envelope.turnId === receiptTurnId)
+						: undefined;
+					const deliveredStatus = delivered?.envelope.status;
+					if (delivered && isTerminalStatus(deliveredStatus)) {
+						this.state = deliveredStatus;
+						this.endedAt = delivered.at;
+						this.resultSummary = oneLine(delivered.displayText);
+						this.results.splice(this.results.indexOf(delivered), 1);
+						this.results.push(delivered);
+					} else if (
+						receiptTurnId ||
+						this.results.filter((item) => item.mailbox && isTerminalStatus(item.envelope.status)).length ===
+							resultCountAtCall
+					) {
+						this.state = "running";
+						this.endedAt = undefined;
+					}
 				} else if (!result.isError && toolName === "close_agent") {
 					this.established = true;
 					this.state = "closed";
@@ -361,26 +604,72 @@ export class SubagentGroupComponent extends Container {
 		component.setExpanded(false);
 	}
 
+	private addQueriedResult(query: Extract<CollaborationResultQuery, { state: "found" }>): void {
+		const turn = query.turn;
+		const existing = this.results.find(
+			(item) => item.envelope.turnId === turn.turn_id && item.envelope.id === turn.result_message_id,
+		);
+		if (existing) {
+			existing.turn = turn;
+			existing.query = query;
+			return;
+		}
+		const parsed = parseDeliverResult(query.result.preview);
+		this.results.unshift({
+			...parsed,
+			envelope: { id: turn.result_message_id, turnId: turn.turn_id, text: query.result.preview },
+			at: turn.finished_at ?? 0,
+			turn,
+			query,
+		});
+		// Explicit reads never change the live child's task/status/preview, even for an old terminal turn.
+	}
+
 	/** Register a delivered mailbox result belonging to this child. */
 	addMailboxResult(envelope: MailboxEnvelope, at?: number): void {
+		const duplicate = this.results.find(
+			(item) =>
+				typeof envelope.id === "string" &&
+				item.envelope.id === envelope.id &&
+				item.envelope.turnId === envelope.turnId,
+		);
+		if (duplicate?.mailbox) return;
+		if (duplicate) this.results.splice(this.results.indexOf(duplicate), 1);
 		this.established = true;
 		const { contract, raw, displayText, outcome, warning } = parseDeliverResult(envelope.text);
 		const validation = normalizeResultValidation(envelope.resultValidation);
-		if (envelope.status === "completed") this.state = "completed";
-		else if (envelope.status === "failed") this.state = "failed";
-		else if (envelope.status === "interrupted") this.state = "interrupted";
-		this.endedAt = at ?? Date.now();
-		this.resultSummary = oneLine(displayText);
-		this.results.push({
+		const latest = !this.latestTurnId || envelope.turnId === this.latestTurnId;
+		if (latest && envelope.status === "completed") this.state = "completed";
+		else if (latest && envelope.status === "failed") this.state = "failed";
+		else if (latest && envelope.status === "interrupted") this.state = "interrupted";
+		const terminalStatus = isTerminalStatus(envelope.status);
+		if (latest && terminalStatus) {
+			this.endedAt = at ?? Date.now();
+			this.resultSummary = oneLine(displayText);
+		}
+		const member: ResultMember = {
 			envelope,
 			contract,
 			raw,
 			displayText,
 			outcome: outcome ?? validation.outcome,
 			warning:
-				[...new Set([warning, validation.warning].filter((item) => item !== undefined))].join(" · ") || undefined,
-			at: Date.now(),
-		});
+				[
+					...new Set(
+						[
+							warning,
+							validation.warning,
+							envelope.status !== undefined && !terminalStatus ? "Format warning: invalid status" : undefined,
+						].filter((item) => item !== undefined),
+					),
+				].join(" · ") || undefined,
+			at: at ?? Date.now(),
+			mailbox: true,
+			turn: duplicate?.turn,
+			query: duplicate?.query,
+		};
+		if (latest) this.results.push(member);
+		else this.results.unshift(member);
 	}
 
 	get resultCount(): number {
@@ -389,15 +678,39 @@ export class SubagentGroupComponent extends Container {
 
 	/** Work duration: delegation → completion (or now while still running). */
 	private elapsed(now: number): string {
-		const start = this.startedAt ?? now;
-		return formatWorkedDuration((this.endedAt ?? now) - start);
+		const turn = (
+			this.latestTurnId
+				? this.results.find((item) => item.envelope.turnId === this.latestTurnId)
+				: this.results.at(-1)
+		)?.turn;
+		if (turn)
+			return turn.started_at !== null && turn.finished_at !== null
+				? formatWorkedDuration(Math.max(0, turn.finished_at - turn.started_at))
+				: "unknown";
+		if (this.startedAt === undefined) return "unknown";
+		return formatWorkedDuration((this.endedAt ?? now) - this.startedAt);
 	}
 
 	private headerLine(width: number, now: number): string {
-		const presentation = STATE_PRESENTATION[this.state];
-		const summary = this.state === "running" ? this.objective : (this.resultSummary ?? this.objective);
+		const queryOnly =
+			!this.established &&
+			this.activities.length > 0 &&
+			this.activities.every((item) =>
+				["get_agent_result", "list_agent_turns", "wait_agent"].includes(item.toolName),
+			);
+		const presentation = queryOnly
+			? { icon: "?", word: "State unknown", color: "dim" as const }
+			: STATE_PRESENTATION[this.state];
+		const summary =
+			queryOnly && this.results[0]
+				? `Read: ${this.results[0].displayText}`
+				: this.state === "running"
+					? this.objective
+					: (this.resultSummary ?? this.objective);
 		const name = oneLine(this.agentPath.replace(/^\/root\//, ""));
-		const latest = this.results.at(-1);
+		const latest = this.latestTurnId
+			? this.results.find((item) => item.envelope.turnId === this.latestTurnId && item.mailbox)
+			: this.results.at(-1);
 		const outcome = this.state !== "running" ? latest?.outcome : undefined;
 		const compact = width < 60;
 		const separator = compact ? " " : " · ";
@@ -457,10 +770,23 @@ export class SubagentGroupComponent extends Container {
 				lines.push(...wrapTextWithAnsi(`Outcome: ${result.outcome}`, width).map((line) => theme.fg("muted", line)));
 			if (result.warning)
 				lines.push(...wrapTextWithAnsi(result.warning, width).map((line) => theme.fg("warning", line)));
+			const format = isRecord(result.envelope.resultValidation)
+				? result.envelope.resultValidation.contract
+				: undefined;
+			const knownFormat =
+				format === "valid" || format === "invalid" || format === "not_completed" ? format : "unknown";
+			const references = result.query
+				? resultQueryText(result.query).split("\n").slice(result.displayText.split("\n").length)
+				: [
+						`Turn: ${typeof result.envelope.turnId === "string" ? result.envelope.turnId : "unknown"} · Result message: ${typeof result.envelope.id === "string" ? result.envelope.id : "unknown"}`,
+						`Format: ${knownFormat} · Delivery: unknown (mailbox display is not acknowledgement)`,
+					];
+			for (const reference of references)
+				lines.push(...wrapTextWithAnsi(safe(reference), width).map((line) => theme.fg("dim", line)));
 			const text = result.displayText;
 			lines.push(...wrapTextWithAnsi(safe(text || "(empty result)"), width).map((line) => theme.fg("text", line)));
 			if (result.contract) {
-				lines.push(...sectionLines("Artifacts", result.contract.artifacts ?? [], width));
+				if (!result.query) lines.push(...sectionLines("Artifacts", result.contract.artifacts ?? [], width));
 				lines.push(...sectionLines("Checks", result.contract.checks ?? [], width));
 				lines.push(...sectionLines("Evidence", result.contract.evidence ?? [], width));
 				lines.push(...sectionLines("Risks", result.contract.risks ?? [], width));
@@ -488,6 +814,10 @@ export class SubagentGroupComponent extends Container {
 			);
 		}
 		lines.push(...this.resultBlocks(width));
+		for (const activity of this.activities) {
+			if (activity.queryText)
+				lines.push(...wrapTextWithAnsi(safe(activity.queryText), width).map((line) => theme.fg("dim", line)));
+		}
 		if (this.state === "failed" && this.results.length === 0 && this.resultSummary) {
 			lines.push(
 				"",

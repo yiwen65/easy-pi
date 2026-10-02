@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Container, type TUI, visibleWidth } from "@earendil-works/pi-tui";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	collaborationToolTarget,
 	normalizeAgentPath,
@@ -179,6 +179,8 @@ describe("SubagentGroupComponent", () => {
 		group.addMailboxResult({ ...ENVELOPE, text: JSON.stringify({ summary: "OLD_PREVIEW", outcome: "failed" }) });
 		group.addMailboxResult({
 			...ENVELOPE,
+			id: "m-2",
+			turnId: "t-2",
 			text: JSON.stringify({
 				summary: "LATEST最新预览",
 				outcome,
@@ -306,7 +308,7 @@ describe("SubagentGroupComponent", () => {
 			expect(group.render(100).join("\n")).toContain("Original task");
 			followup.updateResult({ content: [{ type: "text", text: "partial" }], isError: false }, true);
 			expect(group.render(100).join("\n")).not.toContain("FULL_FOLLOWUP_END");
-			if (resultFirst) group.addMailboxResult({ ...ENVELOPE, text: "Followup finished" });
+			if (resultFirst) group.addMailboxResult({ ...ENVELOPE, id: "m-2", turnId: "t-2", text: "Followup finished" });
 			followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
 			const lines = group.render(100).map(stripVTControlCharacters);
 			expect(lines[0]).toContain(resultFirst ? "Completed" : "Running");
@@ -362,6 +364,68 @@ describe("SubagentGroupComponent", () => {
 		expect(text).not.toContain("Outcome: 42");
 	});
 
+	it.each([42, null, {}, ["valid"], "accepted", { toString: 42, valueOf: 42 }].map((contract) => ({ contract })))(
+		"renders unknown mailbox contract metadata without invoking primitive conversion: %j",
+		({ contract }) => {
+			const group = new SubagentGroupComponent("/root/worker");
+			group.addMailboxResult({ ...ENVELOPE, text: "Plain result", resultValidation: { contract } });
+			group.setExpanded(true);
+			for (const width of [1, 8, 40, 120]) expect(() => group.render(width)).not.toThrow();
+			const lines = group.render(120).map(stripVTControlCharacters);
+			expect(lines.join("\n")).toContain("Format: unknown");
+			expect(lines.join("\n")).toContain("Format warning");
+			group.handleOverviewClick(
+				lines.findIndex((line) => line.includes("Diagnostics")),
+				120,
+			);
+			expect(() => group.render(120)).not.toThrow();
+			expect(group.render(120).join("\n")).toContain('"resultValidation"');
+		},
+	);
+
+	it.each([false, true])(
+		"does not settle a new turn from malformed fast mailbox status (identified receipt: %s)",
+		(identified) => {
+			const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+			try {
+				const group = new SubagentGroupComponent("/root/worker");
+				const spawn = makeTool("spawn_agent", {});
+				group.addTool("spawn_agent", spawn, { task: { objective: "old task" } }, 100);
+				spawn.updateResult({
+					content: [{ type: "text", text: identified ? '{"turn_id":"t-1"}' : '{"status":"accepted"}' }],
+					isError: false,
+				});
+				group.addMailboxResult(ENVELOPE, 500);
+				const followup = makeTool("followup_task", {});
+				group.addTool("followup_task", followup, { task: { objective: "NEW_TASK" } }, 1000);
+				group.addMailboxResult(
+					{
+						...ENVELOPE,
+						id: "m-2",
+						turnId: "t-2",
+						status: { toString: 42, valueOf: 42 },
+						text: "Unproved completion",
+					},
+					2000,
+				);
+				expect(() =>
+					followup.updateResult({
+						content: [{ type: "text", text: identified ? '{"turn_id":"t-2"}' : '{"status":"accepted"}' }],
+						isError: false,
+					}),
+				).not.toThrow();
+				const header = stripVTControlCharacters(group.render(120)[0]);
+				expect(header).toContain("Running");
+				expect(header).toContain("NEW_TASK");
+				expect(header).toContain("9.0s");
+				group.setExpanded(true);
+				expect(group.render(120).join("\n")).toContain("Format warning: invalid status");
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+
 	it("normalizes each result independently and keeps the newest outcome in the header", () => {
 		const group = new SubagentGroupComponent("/root/worker");
 		group.addMailboxResult({
@@ -371,6 +435,8 @@ describe("SubagentGroupComponent", () => {
 		});
 		group.addMailboxResult({
 			...ENVELOPE,
+			id: "m-2",
+			turnId: "t-2",
 			text: "LATEST_PARTIAL",
 			resultValidation: { contract: "valid", outcome: "partial" },
 		});
@@ -523,9 +589,26 @@ describe("SubagentGroupComponent", () => {
 		group.addMailboxResult(ENVELOPE);
 		const followup = makeTool("followup_task", {});
 		group.addTool("followup_task", followup, {});
-		group.addMailboxResult({ ...ENVELOPE, text: "Followup finished" });
+		group.addMailboxResult({ ...ENVELOPE, id: "m-2", turnId: "t-2", text: "Followup finished" });
 		followup.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
 		expect(group.render(100).join("\n")).toContain("Completed");
+	});
+
+	it("promotes a fast mailbox result only after its matching followup receipt pins the new turn", () => {
+		const group = new SubagentGroupComponent("/root/worker");
+		const spawn = makeTool("spawn_agent", {});
+		group.addTool("spawn_agent", spawn, { task: { objective: "original" } }, 10);
+		spawn.updateResult({ content: [{ type: "text", text: '{"turn_id":"t-1"}' }], isError: false });
+		group.addMailboxResult(ENVELOPE, 20);
+		const followup = makeTool("followup_task", {});
+		group.addTool("followup_task", followup, { task: { objective: "new objective" } }, 30);
+		group.addMailboxResult({ ...ENVELOPE, id: "m-2", turnId: "t-2", text: "FAST_NEW_RESULT" }, 40);
+		followup.updateResult({ content: [{ type: "text", text: '{"turn_id":"t-2"}' }], isError: false });
+		expect(group.render(120).join("\n")).toContain("FAST_NEW_RESULT");
+		expect(group.render(120).join("\n")).toContain("Completed");
+		group.addMailboxResult(ENVELOPE, 50);
+		expect(group.resultCount).toBe(2);
+		expect(group.render(120).join("\n")).toContain("FAST_NEW_RESULT");
 	});
 
 	it("interrupt uses the returned previous status rather than assuming it stopped running work", () => {
@@ -670,7 +753,12 @@ describe("SubagentGroupComponent", () => {
 		const group = new SubagentGroupComponent("/root/worker");
 		group.addTool("spawn_agent", makeTool("spawn_agent", {}), { task: { objective: "inspect" } });
 		group.addMailboxResult({ ...ENVELOPE, text: "OLD_RESULT_SENTINEL" });
-		group.addMailboxResult({ ...ENVELOPE, text: JSON.stringify({ ...CONTRACT, summary: "NEW_RESULT_SENTINEL" }) });
+		group.addMailboxResult({
+			...ENVELOPE,
+			id: "m-2",
+			turnId: "t-2",
+			text: JSON.stringify({ ...CONTRACT, summary: "NEW_RESULT_SENTINEL" }),
+		});
 		group.setExpanded(true);
 		const text = group.render(100).map(stripVTControlCharacters).join("\n");
 		expect(text.indexOf("NEW_RESULT_SENTINEL")).toBeLessThan(text.indexOf("OLD_RESULT_SENTINEL"));

@@ -7,6 +7,45 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 beforeAll(() => initTheme("dark"));
 
+test("displayed mouse snapshot keeps Activity target when a retained result shifts mutable rows", async () => {
+	const terminal = new VirtualTerminal(40, 24);
+	const group = new SubagentGroupComponent("/root/reviewer");
+	const tool = new ToolExecutionComponent(
+		"get_agent_result",
+		"query",
+		{ target: "/root/reviewer" },
+		{},
+		undefined,
+		{ requestRender: vi.fn() } as unknown as TUI,
+		process.cwd(),
+	);
+	group.addTool("get_agent_result", tool, { target: "/root/reviewer" });
+	group.setExpanded(true);
+	const scrollView = new ScrollView(group, { primary: true });
+	const tui = new TuiAltScreen(terminal);
+	tui.setLayoutRoot(scrollView);
+	tui.start();
+	try {
+		await terminal.waitForRender();
+		const activityRow = group.render(40).findIndex((line) => line.includes("Activity"));
+		const displayed = tui.getRenderedContentClickHandler(scrollView, group)!;
+		group.addMailboxResult({
+			id: "retained",
+			turnId: "old-turn",
+			status: "completed",
+			text: "Retained result\n".repeat(10),
+		});
+		expect(group.render(40).findIndex((line) => line.includes("Activity"))).toBeGreaterThan(activityRow);
+		expect(displayed(activityRow, 1)).toBe(true);
+		expect(group.render(40).join("\n")).toContain("Result queried");
+		expect(group.render(40).join("\n")).not.toContain("Tool receipts");
+		group.setExpanded(false);
+		expect(displayed(activityRow, 1)).toBe(false);
+	} finally {
+		tui.stop();
+	}
+});
+
 test("subagent mouse controls keep activity human-readable and diagnostics opt-in", async () => {
 	const width = 80;
 	const terminal = new VirtualTerminal(width, 40);

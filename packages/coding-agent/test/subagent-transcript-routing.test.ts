@@ -362,3 +362,208 @@ describe("subagent transcript routing", () => {
 		}
 	});
 });
+
+it.each([
+	["result.source.session_path", { toString: 42, valueOf: 42 }],
+	["result.source.entry_id", {}],
+	["result.source.turn_id", []],
+	["result.source.coverage", {}],
+	["result.source.kind", {}],
+	["turn.resultValidation.contract", { toString: 42, valueOf: 42 }],
+	["turn.resultValidation.outcome", {}],
+	["turn.resultValidation.acceptance", {}],
+	["turn.sequence", 0],
+	["turn.sequence", -1],
+	["turn.sequence", 1.5],
+	["turn.usage.input", -1],
+	["turn.usage.input", "NONFINITE_NUMBER"],
+	["turn.usage.output", {}],
+	["turn.usage.cacheRead", []],
+	["turn.usage.coverage", {}],
+	["turn.delivery.state", {}],
+	["turn.delivery.enqueued_at", -1],
+	["turn.delivery.acknowledged_at", {}],
+	["turn.task_message_id", {}],
+	["turn.result_message_id", []],
+	["turn.turn_id", {}],
+	["turn.started_at", {}],
+	["turn.finished_at", -1],
+	["turn.task_preview", []],
+	["turn.task_truncated", {}],
+	["result.truncated", {}],
+	["result.artifacts", [{ path: {}, purpose: "unsafe" }]],
+	["result.artifacts", [{ path: "bad\0path", purpose: "report" }]],
+	["result.artifacts", [{ path: "report.txt", purpose: "bad\0purpose" }]],
+] as const)("rejects retained metadata %s before retention and rendering", (path, bad) => {
+	initTheme("dark");
+	const mode = fakeMode();
+	mode.addMessageToChat(mailboxMessage(JSON.stringify({ ...ENVELOPE, text: "CURRENT_RESULT" })));
+	const query = {
+		state: "found",
+		turn: {
+			target: "/root/worker",
+			turn_id: "old",
+			sequence: 1,
+			task_message_id: null,
+			result_message_id: "old-result",
+			status: "completed",
+			history_coverage: "complete",
+			task_preview: "old",
+			task_truncated: false,
+			admitted_at: null,
+			started_at: null,
+			finished_at: null,
+			usage: { coverage: "unknown", input: null, output: null, cacheRead: null, cacheWrite: null },
+			delivery: { state: "unknown", enqueued_at: null, acknowledged_at: null },
+			resultValidation: { contract: "valid", outcome: "blocked", acceptance: "not_reviewed" },
+		},
+		result: {
+			preview: '{"summary":"UNSAFE_RESULT","outcome":"blocked"}',
+			truncated: false,
+			source: { kind: "unavailable", turn_id: "old", coverage: "unknown" },
+		},
+	};
+	const external = JSON.parse(JSON.stringify(query)) as Record<string, unknown>;
+	const parts = path.split(".");
+	let parent = external;
+	for (const part of parts.slice(0, -1)) parent = parent[part] as Record<string, unknown>;
+	parent[parts.at(-1)!] = bad;
+	const wire = JSON.stringify(external).replace('"NONFINITE_NUMBER"', "1e999");
+	const tool = spawnTool(mode, "get_agent_result", "query", { target: "/root/worker" });
+	expect(() => tool.updateResult({ content: [{ type: "text", text: wire }], isError: false })).not.toThrow();
+	const group = mode.chatContainer.children[0] as SubagentGroupComponent;
+	expect(group.resultCount).toBe(1);
+	group.setExpanded(true);
+	for (const width of [1, 8, 24, 40, 80]) expect(() => group.render(width)).not.toThrow();
+	const text = stripVTControlCharacters(group.render(120).join("\n"));
+	expect(text).toContain("CURRENT_RESULT");
+	expect(text).toContain("Retained query response unavailable");
+	expect(text).not.toContain("UNSAFE_RESULT");
+});
+
+it("retains a valid native source path beyond the artifact-only 2048-character limit", () => {
+	initTheme("dark");
+	const mode = fakeMode();
+	const sourcePath = `/${"x".repeat(2200)}/session.jsonl`;
+	const query = {
+		state: "found",
+		turn: {
+			target: "/root/worker",
+			turn_id: "long-source",
+			sequence: 1,
+			task_message_id: null,
+			result_message_id: "long-result",
+			status: "completed",
+			history_coverage: "complete",
+			task_preview: "task",
+			task_truncated: false,
+			admitted_at: null,
+			started_at: null,
+			finished_at: null,
+			delivery: { state: "unknown", enqueued_at: null, acknowledged_at: null },
+			usage: { coverage: "unknown", input: null, output: null, cacheRead: null, cacheWrite: null },
+		},
+		result: {
+			preview: "LONG_SOURCE_RESULT",
+			truncated: false,
+			source: { kind: "native_history", session_path: sourcePath, turn_id: "long-source", coverage: "turn" },
+		},
+	};
+	const tool = spawnTool(mode, "get_agent_result", "long-query", { target: "/root/worker" });
+	tool.updateResult({ content: [{ type: "text", text: JSON.stringify(query) }], isError: false });
+	const group = mode.chatContainer.children[0] as SubagentGroupComponent;
+	expect(group.resultCount).toBe(1);
+	expect(stripVTControlCharacters(group.render(120)[0])).toContain("Read: LONG_SOURCE_RESULT");
+	expect(stripVTControlCharacters(group.render(120)[0])).toContain("State unknown");
+	group.setExpanded(true);
+	const text = stripVTControlCharacters(group.render(4096).join("\n"));
+	expect(text).toContain("LONG_SOURCE_RESULT");
+	expect(text).toContain(sourcePath);
+	expect(text).not.toContain("Retained query response unavailable");
+});
+
+it("reads retained results/history/targeted wait without replacing newer lifecycle and deduplicates IDs", () => {
+	initTheme("dark");
+	const mode = fakeMode();
+	const spawn = spawnTool(mode, "spawn_agent", "spawn-new", { task_name: "worker", task: { objective: "NEW_TASK" } });
+	spawn.updateResult({ content: [{ type: "text", text: JSON.stringify({ turn_id: "new" }) }], isError: false });
+	mode.addMessageToChat(
+		mailboxMessage(
+			JSON.stringify({
+				...ENVELOPE,
+				id: "new-result",
+				turnId: "new",
+				text: JSON.stringify({ summary: "NEW_RESULT", outcome: "blocked" }),
+			}),
+		),
+	);
+	const turn = {
+		target: "/root/worker",
+		turn_id: "old",
+		sequence: 1,
+		task_message_id: "old-task",
+		result_message_id: "old-result",
+		status: "completed",
+		history_coverage: "complete",
+		task_preview: "OLD_TASK_PREVIEW",
+		task_truncated: true,
+		admitted_at: 10,
+		started_at: 20,
+		finished_at: 1520,
+		delivery: { state: "acknowledged", enqueued_at: 1520, acknowledged_at: 1600 },
+		usage: { coverage: "partial", input: 7, output: null, cacheRead: null, cacheWrite: null },
+		resultValidation: { contract: "valid", outcome: "blocked" },
+	};
+	const query = {
+		state: "found",
+		turn,
+		result: {
+			preview: JSON.stringify({ summary: "OLD_RESULT", outcome: "blocked" }),
+			artifacts: [{ path: "/fixture/report", purpose: "full evidence", sha256: "a".repeat(64) }],
+			truncated: false,
+			source: {
+				kind: "native_history",
+				session_path: "/fixture/session.jsonl",
+				turn_id: "old",
+				entry_id: "entry-old",
+				coverage: "entry",
+			},
+		},
+	};
+	for (const [name, receipt] of [
+		["get_agent_result", query],
+		["get_agent_result", query],
+		["wait_agent", { reason: "terminal", result: query }],
+		[
+			"list_agent_turns",
+			{ target: "/root/worker", turns: [turn], history_coverage: "complete", next_cursor: "next" },
+		],
+	] as const) {
+		const tool = spawnTool(mode, name, name, { target: "/root/worker", turn_id: "old" });
+		tool.updateResult({ content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false });
+	}
+	const group = mode.chatContainer.children[0] as SubagentGroupComponent;
+	expect(group.resultCount).toBe(2);
+	expect(stripVTControlCharacters(group.render(120)[0])).toContain("NEW_RESULT");
+	expect(stripVTControlCharacters(group.render(120)[0])).not.toContain("OLD_RESULT");
+	group.setExpanded(true);
+	const text = stripVTControlCharacters(group.render(120).join("\n"));
+	expect(text.match(/OLD_RESULT/g)).toHaveLength(1);
+	expect(text).toContain("Task: NEW_TASK");
+	expect(text).toContain("Task preview (truncated): OLD_TASK_PREVIEW");
+	expect(text).toContain("Delivery: acknowledged (not acceptance)");
+	expect(text).toContain("Duration: 1.5s");
+	expect(text).toContain("output unknown");
+	expect(text).toContain("entry entry-old");
+	expect(text).toContain("Artifact ref: /fixture/report");
+	expect(text).toContain("hash claim:");
+	expect(text).toContain("no auto-read or acceptance");
+	expect(text).toContain("page only");
+	expect(text).not.toContain('"summary"');
+	const denied = spawnTool(mode, "get_agent_result", "denied", { target: "/root/worker" });
+	denied.updateResult({ content: [{ type: "text", text: "forbidden" }], isError: true });
+	expect(stripVTControlCharacters(group.render(120)[0])).toContain("Completed");
+	expect(group.resultCount).toBe(2);
+	for (const width of [1, 8, 24, 40])
+		expect(group.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+});

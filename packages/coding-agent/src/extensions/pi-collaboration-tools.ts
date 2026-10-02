@@ -27,20 +27,24 @@ import {
 
 const MESSAGE_TYPE = "epi-collaboration-message";
 const descriptions: Record<CollaborationToolName, string> = {
+	get_agent_result:
+		"Read a retained child turn result without running/loading the child, reading source files, or consuming mail. Supply target and optionally exactly one turn_id or result message_id; omitted IDs pin the current turn. Use this before requesting a resend. Returns bounded preview, source reference, execution/format/delivery and usage coverage, not acceptance.",
+	list_agent_turns:
+		"List retained child turns in ascending sequence with bounded metadata-only pages. Supply target, optional limit (default10/max20), and next_cursor from the prior page. Cursor pins page membership to a team/target high-water sequence; legacy history may be retained_only. Never runs/loads the child, consumes mail or reads sources.",
 	spawn_agent:
-		'Start a named child agent in the shared cwd. Shape: {"task_name":"worker","task":{"objective":"Inspect X"},"relationship":"verify"}. Put relationship beside task, never inside it. task needs only a free-text objective: the complete self-contained assignment (goal, scope, inputs, expected output, acceptance) — the child sees only it. relationship (default continue) routes context: continue forks this conversation (compressed history, may carry sensitive text), explore/verify run isolated, extract requires curated references naming the dataset; an explicit context always wins. tools default to inherit and can only narrow. Child model and effort come from the user\'s subagent settings, else yours; never per call. All agents share cwd; coordinate edits. Children cannot delegate further — split multi-part work into sibling tasks. Creation is not completion or acceptance. task.objective accepts at most 40,000 characters; the complete contract must fit 256 KiB.',
+		'Start a named child agent in the shared cwd. Shape: {"task_name":"worker","task":{"objective":"Inspect X"},"relationship":"verify"}. Put relationship beside task, never inside it. task needs only a free-text objective: the complete self-contained assignment (goal, scope, inputs, expected output, acceptance) — the child sees only it. relationship (default continue) routes context: continue forks this conversation (compressed history, may carry sensitive text), explore/verify run isolated, extract requires curated references naming the dataset; an explicit context always wins. tools default to inherit and can only narrow. Child model and effort come from the user\'s subagent settings, else yours; never per call. All agents share cwd; coordinate edits. Children cannot delegate further — split multi-part work into sibling tasks. Returns task_name, the admitted turn_id and task receipt message_id; creation is not completion or acceptance. task.objective accepts at most 40,000 characters; the complete contract must fit 256 KiB.',
 	send_message:
 		"Persist a message to an agent in this root team (target: /root/<name>). Does not start an idle agent; accepted is not consumed. Grants no permissions.",
 	followup_task:
-		"Start an idle child's next task: task needs only objective; put optional relationship beside task, not inside it. tools default to inherit and can only narrow. Retains the child's history — never fresh independent judgment. Running children reject busy. Results return to the creation parent, not necessarily this sender. No rollback or automatic acceptance.",
+		"Start an idle child's next task: task needs only objective; put optional relationship beside task, not inside it. tools default to inherit and can only narrow. Retains the child's history — never fresh independent judgment. Running children reject busy. Returns the admitted turn_id and task receipt message_id. Results return to the creation parent, not necessarily this sender. No rollback or automatic acceptance.",
 	wait_agent:
-		"Wait for this agent's mailbox or user input. Timeout does not cancel children. Mailbox contents are injected at the next model request boundary.",
+		"Wait for a pinned child turn with target and optional turn_id; an already-ended turn returns immediately even after mail was acknowledged. Without target, wait for this agent's pending mailbox or user input, not historical results. User input wins simultaneous activity. Timeout/cancellation never cancel children; followups cannot change a pinned target turn.",
 	interrupt_agent:
 		"Abort a child's current execution; history and shared edits are retained. Cannot interrupt root. Returns previous status.",
 	close_agent:
 		"Retire a settled child (interrupt it first if pending or running): frees its team slot and session, keeps its record, history file, and last result. Closed names are never reusable and reject messages/follow-ups. Cannot close root. Idempotent; returns previous status.",
 	list_agents:
-		"List this root team's child agents with latest turn status and loaded state, optionally restricted to a path subtree. Completed does not mean delivered.",
+		"List this root team's child agents with latest turn/task/result identities, status, loaded state, history/delivery and usage coverage, optionally restricted to a path subtree. Completed does not mean delivered.",
 };
 
 /** Explicit root/child wiring; the product default switch is a separate lifecycle decision. */
@@ -161,7 +165,7 @@ export function registerPiCollaborationTools(options: {
 							customType: "epi-collaboration-root-role",
 							display: false,
 							content:
-								"Current runtime role: /root, the user-facing team coordinator. Delegate bounded tasks when useful; inspect child results before accepting their claims.",
+								"Current runtime role: /root, the user-facing team coordinator. Delegate bounded tasks when useful; inspect child results before accepting their claims. If a completed result is not visible, query get_agent_result or list_agent_turns before requesting a resend: reading retained work must not start another inference turn. wait_agent with target pins a specific turn; without target it only observes pending mail/user input, not history. send_message does not start an idle child; use followup_task only for genuinely new work. Children cannot use send_message or other root team tools; their deliver_result returns automatically to the creation parent. Use fresh isolated/curated children for independent verification; followup is continuous review, not fresh independence. Prefer isolated context for small self-contained tasks, but do not silently change declared context or permissions. A read-only task needs an actual tool allowlist; bash is not a read-only boundary.",
 						},
 					}
 				: {}),
@@ -329,17 +333,15 @@ export function registerPiCollaborationTools(options: {
 									);
 							} else if (delegation.context.mode === "curated")
 								fork = await prepareCuratedCollaborationContext(session, delegation.context, signal);
-							result = {
-								task_name: await controller.spawn(
-									identity,
-									args.task_name,
-									delegation.task.objective,
-									model,
-									fork,
-									signal,
-									{ delegation, tools, prefix },
-								),
-							};
+							result = await controller.spawnTurn(
+								identity,
+								args.task_name,
+								delegation.task.objective,
+								model,
+								fork,
+								signal,
+								{ delegation, tools, prefix },
+							);
 							break;
 						}
 						case "send_message": {
@@ -381,18 +383,26 @@ export function registerPiCollaborationTools(options: {
 									offending,
 									available,
 								);
-							result = {
-								message_id: await controller.followup(identity, args.target, args.task.objective, signal, {
-									delegation,
-									tools,
-								}),
-								status: "accepted",
-							};
+							result = await controller.followupTurn(identity, args.target, args.task.objective, signal, {
+								delegation,
+								tools,
+							});
+							break;
+						}
+						case "get_agent_result": {
+							result = controller.getAgentResult(identity, parseCollaborationArguments(name, input));
+							break;
+						}
+						case "list_agent_turns": {
+							result = controller.listAgentTurns(identity, parseCollaborationArguments(name, input));
 							break;
 						}
 						case "wait_agent": {
 							const args = parseCollaborationArguments(name, input);
-							result = await controller.wait(identity, args.timeout_ms, signal);
+							result =
+								"target" in args
+									? await controller.waitForTurn(identity, args, signal)
+									: await controller.wait(identity, args.timeout_ms, signal);
 							break;
 						}
 						case "interrupt_agent": {

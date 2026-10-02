@@ -86,3 +86,12 @@ describe("keybindings migration", () => {
 		expect(effective["app.interrupt"]).toBe("ctrl+x");
 	});
 });
+
+it("agent turn history binding is configurable without changing the thinking binding", () => {
+	const keys = new KeybindingsManager();
+	expect(keys.getKeys("app.agents.turns")).toEqual(["ctrl+t"]);
+	keys.setUserBindings({ "app.agents.turns": "ctrl+y" });
+	expect(keys.matches("\x19", "app.agents.turns")).toBe(true);
+	expect(keys.matches("\x14", "app.agents.turns")).toBe(false);
+	expect(keys.matches("\x14", "app.thinking.toggle")).toBe(true);
+});

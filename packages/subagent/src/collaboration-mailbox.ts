@@ -1,6 +1,10 @@
-import { CollaborationError, type CollaborationResults, collaborationWaitMs } from "./collaboration-contract.ts";
+import {
+	CollaborationError,
+	type CollaborationMailboxWaitResult,
+	collaborationWaitMs,
+} from "./collaboration-contract.ts";
 
-type WaitResult = CollaborationResults["wait_agent"];
+type WaitResult = CollaborationMailboxWaitResult;
 
 /** Activity only; message truth lives in the transactional team snapshot. No polling or task cancellation. */
 export class CollaborationMailboxActivity {

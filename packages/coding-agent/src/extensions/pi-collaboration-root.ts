@@ -51,7 +51,7 @@ export function registerPiCollaborationRoot(
 				if (!toastCtx || toastCtx.mode !== "tui" || panelOpen) return;
 				if (settled.length === 1) {
 					const row = settled[0];
-					const word = row.state === "completed" ? "done" : row.state;
+					const word = row.state;
 					const level = row.state === "completed" ? "info" : row.state === "failed" ? "error" : "warning";
 					toastCtx.ui.notify(`${row.task_name} ${word} — /agents to inspect`, level);
 					return;
@@ -149,7 +149,7 @@ export function registerPiCollaborationRoot(
 	});
 	pi.registerCommand("agents", {
 		description:
-			"Watch native agent sessions and explicitly message, follow up or interrupt; recover a dead owner with /agents recover",
+			"Inspect native agent sessions and retained turns; explicitly message, follow up or interrupt; recover a dead owner with /agents recover",
 		handler: async (args, ctx) => {
 			if (stopped) return;
 			if (args.trim() === "recover" && !controller) {
