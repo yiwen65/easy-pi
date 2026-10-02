@@ -66,6 +66,15 @@ export class BackgroundTaskGroupComponent extends Container {
 		this.requestRender();
 	}
 
+	/** Remove reassigned membership, preserving unrelated reader state. Returns the remaining count. */
+	removeTask(taskId: string): number {
+		if (this.taskIds.delete(taskId)) {
+			if (this.expandedTaskId === taskId) this.expandedTaskId = undefined;
+			this.requestRender();
+		}
+		return this.taskIds.size;
+	}
+
 	/** Retain live status updates, but do not collect tasks from subsequent user turns. */
 	completeTurn(): void {
 		this.acceptingTasks = false;

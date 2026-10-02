@@ -1,11 +1,76 @@
 import { ScrollView, type TUI, TuiAltScreen } from "@earendil-works/pi-tui";
 import { beforeAll, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
+import {
+	SubagentGroupComponent,
+	SubagentTurnGroupComponent,
+} from "../src/modes/interactive/components/subagent-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 beforeAll(() => initTheme("dark"));
+
+test("one aggregate row expands children and forwards painted nested SGR controls without copying", async () => {
+	const terminal = new VirtualTerminal(100, 40);
+	const aggregate = new SubagentTurnGroupComponent();
+	for (const name of ["first-agent", "second-agent"]) {
+		const leaf = new SubagentGroupComponent(`/root/${name}`);
+		const args = { task_name: name, task: { objective: `TASK_${name}` } };
+		const tool = new ToolExecutionComponent(
+			"spawn_agent",
+			name,
+			args,
+			{},
+			undefined,
+			{ requestRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		leaf.addTool("spawn_agent", tool, args);
+		tool.updateResult({ content: [{ type: "text", text: '{"status":"accepted"}' }], isError: false });
+		aggregate.addAgent(leaf);
+	}
+	const scrollView = new ScrollView(aggregate, { primary: true });
+	const copySelection = vi.fn(async () => true);
+	const tui = new TuiAltScreen(terminal, undefined, undefined, {
+		onContentClick: (click) =>
+			click.scrollView === scrollView &&
+			(tui.getRenderedContentClickHandler(scrollView, aggregate)?.(click.row, click.col) ?? false),
+		copySelection,
+	});
+	const clickRow = async (row: number) => {
+		terminal.sendInput(`\x1b[<0;8;${row + 1}M`);
+		terminal.sendInput(`\x1b[<0;8;${row + 1}m`);
+		await terminal.waitForRender();
+	};
+	tui.setLayoutRoot(scrollView);
+	tui.start();
+	try {
+		await terminal.waitForRender();
+		expect(aggregate.render(100)).toHaveLength(1);
+		await clickRow(0);
+		expect(aggregate.render(100)).toHaveLength(3);
+		await clickRow(1);
+		expect(terminal.getViewport().join("\n")).toContain("Task: TASK_first-agent");
+		const activityRow = terminal.getViewport().findIndex((line) => line.includes("Activity"));
+		expect(activityRow).toBeGreaterThan(1);
+		const leaf = aggregate.children[0] as SubagentGroupComponent;
+		leaf.addMailboxResult({
+			id: "late",
+			turnId: "late-turn",
+			from: "/root/first-agent",
+			status: "completed",
+			text: "LATE_RESULT\n".repeat(12),
+		});
+		// The displayed row still refers to Activity despite the unpainted mutable growth.
+		await clickRow(activityRow);
+		expect(aggregate.render(100).join("\n")).toContain("Task assigned");
+		await clickRow(0);
+		expect(aggregate.render(100)).toHaveLength(1);
+		expect(copySelection).not.toHaveBeenCalled();
+	} finally {
+		tui.stop();
+	}
+});
 
 test("displayed mouse snapshot keeps Activity target when a retained result shifts mutable rows", async () => {
 	const terminal = new VirtualTerminal(40, 24);

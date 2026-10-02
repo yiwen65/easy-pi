@@ -1,6 +1,8 @@
 import { stripVTControlCharacters } from "node:util";
 import {
 	Container,
+	getRenderedContentClickHandlers,
+	type RenderedContentClickHandler,
 	recordRenderedContentClickHandler,
 	truncateToWidth,
 	visibleWidth,
@@ -688,7 +690,12 @@ export class SubagentGroupComponent extends Container {
 		return formatWorkedDuration((this.endedAt ?? now) - this.startedAt);
 	}
 
-	private headerLine(width: number, now: number): string {
+	/** A non-mutating compact preview, also used by the parent turn aggregate. */
+	overviewLine(width: number): string {
+		return this.headerLine(width, Date.now(), true);
+	}
+
+	private headerLine(width: number, now: number, showPreview = !this.expanded): string {
 		const queryOnly =
 			!this.established &&
 			this.activities.length > 0 &&
@@ -724,7 +731,7 @@ export class SubagentGroupComponent extends Container {
 			theme.fg("muted", `${separator}${stateLabel}`) +
 			(outcome ? theme.fg("warning", `${separator}${outcome}`) : "") +
 			(badge ? theme.fg("warning", `${separator}${badge}`) : "");
-		const preview = !this.expanded && summary ? oneLine(summary) : "";
+		const preview = showPreview && summary ? oneLine(summary) : "";
 		const minimumPreview = Math.min(8, visibleWidth(preview));
 		const elapsed = this.elapsed(now);
 		const duration = elapsed === "unknown" ? "" : theme.fg("muted", `${separator}${elapsed}`);
@@ -943,46 +950,215 @@ export class SubagentGroupComponent extends Container {
 	}
 }
 
-/** Route decisions and group lifecycle for subagent transcript display. */
+/** One folding row for every child touched in a parent user turn. */
+export class SubagentTurnGroupComponent extends Container {
+	private expanded = false;
+	private expandChildren = false;
+	private latest: SubagentGroupComponent | undefined;
+	private disposed = false;
+
+	addAgent(group: SubagentGroupComponent): void {
+		if (!this.children.includes(group)) {
+			this.addChild(group);
+			group.setExpanded(this.expandChildren);
+		}
+		this.touch(group);
+	}
+
+	touch(group: SubagentGroupComponent): void {
+		if (!this.disposed && this.children.includes(group)) this.latest = group;
+	}
+
+	get agentCount(): number {
+		return this.children.length;
+	}
+	isExpanded(): boolean {
+		return this.expanded;
+	}
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		this.expandChildren = expanded;
+		for (const child of this.children) {
+			if (child instanceof SubagentGroupComponent) child.setExpanded(expanded);
+		}
+	}
+
+	/** No automatic scroller lives here; late child status updates remain visible. */
+	completeTurn(): void {}
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.setExpanded(false);
+	}
+
+	private toggleHeader(): void {
+		if (this.expanded) this.setExpanded(false);
+		else this.expanded = true;
+	}
+
+	private overviewLine(width: number): string {
+		const suffix = this.agentCount > 1 ? theme.fg("muted", ` · ${this.agentCount}`) : "";
+		const head = this.latest?.overviewLine(Math.max(1, width - visibleWidth(suffix))) ?? theme.fg("success", "↳");
+		return truncateToWidth(head + suffix, width, "");
+	}
+
+	handleOverviewClick(localRow: number, width: number): boolean {
+		if (this.disposed || width <= 0 || localRow < 0) return false;
+		if (localRow === 0) {
+			this.toggleHeader();
+			return true;
+		}
+		if (!this.expanded) return false;
+		let cursor = 1;
+		for (const child of this.children) {
+			if (!(child instanceof SubagentGroupComponent)) continue;
+			const lines = child.render(width);
+			if (localRow < cursor + lines.length) {
+				return getRenderedContentClickHandlers(lines)?.get(child)?.(localRow - cursor, 0) ?? false;
+			}
+			cursor += lines.length;
+		}
+		return false;
+	}
+
+	override render(width: number): string[] {
+		if (width <= 0 || this.agentCount === 0) return [];
+		const expanded = this.expanded;
+		const lines = [this.overviewLine(width)];
+		const ranges: Array<{
+			group: SubagentGroupComponent;
+			start: number;
+			height: number;
+			handler?: RenderedContentClickHandler;
+		}> = [];
+		if (expanded) {
+			for (const child of this.children) {
+				if (!(child instanceof SubagentGroupComponent)) continue;
+				const rendered = child.render(width);
+				ranges.push({
+					group: child,
+					start: lines.length,
+					height: rendered.length,
+					handler: getRenderedContentClickHandlers(rendered)?.get(child),
+				});
+				lines.push(...rendered);
+			}
+		}
+		const rowCount = lines.length;
+		recordRenderedContentClickHandler(this, lines, (localRow, col) => {
+			if (this.disposed || this.expanded !== expanded || localRow < 0 || localRow >= rowCount) return false;
+			if (localRow === 0) {
+				this.toggleHeader();
+				return true;
+			}
+			const range = ranges.find((entry) => localRow >= entry.start && localRow < entry.start + entry.height);
+			if (!range || !this.children.includes(range.group)) return false;
+			return range.handler?.(localRow - range.start, col) ?? false;
+		});
+		return lines;
+	}
+}
+
+export interface SubagentTranscriptTurnPlacement {
+	getTurn: () => object;
+	mount: (group: SubagentTurnGroupComponent, owner: object) => void;
+}
+interface SubagentTurnRecord {
+	owner: object;
+	component: SubagentTurnGroupComponent;
+	groups: Map<string, SubagentGroupComponent>;
+}
+interface SubagentGroupOwner {
+	turn: SubagentTurnRecord;
+	group: SubagentGroupComponent;
+}
+
+/** Route child work to its owning parent user turn, never the current arrival position. */
 export class SubagentTranscriptRouter {
-	private readonly groups = new Map<string, SubagentGroupComponent>();
+	private readonly turns = new Map<object, SubagentTurnRecord>();
+	private readonly childTurns = new Map<string, SubagentGroupOwner>();
+	private readonly pendingAssignments = new Map<string, SubagentGroupOwner & { component: ToolExecutionComponent }>();
 	private readonly container: Container;
 	private readonly getExpanded: () => boolean;
+	private readonly placement?: SubagentTranscriptTurnPlacement;
+	private defaultTurn: object = {};
 
-	constructor(container: Container, getExpanded: () => boolean) {
+	constructor(container: Container, getExpanded: () => boolean, placement?: SubagentTranscriptTurnPlacement) {
 		this.container = container;
 		this.getExpanded = getExpanded;
+		this.placement = placement;
 	}
 
 	clear(): void {
-		this.groups.clear();
+		for (const turn of this.turns.values()) {
+			turn.component.dispose();
+			this.container.removeChild(turn.component);
+		}
+		this.turns.clear();
+		this.childTurns.clear();
+		this.pendingAssignments.clear();
+		this.defaultTurn = {};
+	}
+
+	private groupOwner(path: string, owner = this.placement?.getTurn() ?? this.defaultTurn): SubagentGroupOwner {
+		let turn = this.turns.get(owner);
+		if (!turn) {
+			const component = new SubagentTurnGroupComponent();
+			component.setExpanded(this.getExpanded());
+			turn = { owner, component, groups: new Map() };
+			this.turns.set(owner, turn);
+			if (this.placement) this.placement.mount(component, owner);
+			else this.container.addChild(component);
+		}
+		let group = turn.groups.get(path);
+		if (!group) {
+			group = new SubagentGroupComponent(path);
+			turn.groups.set(path, group);
+			turn.component.addAgent(group);
+		}
+		return { turn, group };
 	}
 
 	groupFor(path: string): SubagentGroupComponent {
-		let group = this.groups.get(path);
-		if (!group) {
-			group = new SubagentGroupComponent(path);
-			group.setExpanded(this.getExpanded());
-			this.groups.set(path, group);
-			this.container.addChild(group);
-		} else if (this.container.children.at(-1) !== group) {
-			// Keep the live group at the latest chronological position, like the turn tool group.
-			this.container.removeChild(group);
-			this.container.addChild(group);
-		}
-		return group;
+		return this.groupOwner(path).group;
 	}
 
-	/** Collaboration tool executions join their child's group. Returns true when routed. */
 	handleTool(toolName: string, args: unknown, component: ToolExecutionComponent, at?: number): boolean {
 		if (!SUBAGENT_TOOL_NAMES.has(toolName)) return false;
-		const target = collaborationToolTarget(toolName, args);
-		if (!target) return false;
-		this.groupFor(target).addTool(toolName, component, args, at);
+		const path = collaborationToolTarget(toolName, args);
+		if (!path) return false;
+		const entry = this.groupOwner(path);
+		entry.group.addTool(toolName, component, args, at);
+		entry.turn.component.touch(entry.group);
+		const assignment = toolName === "spawn_agent" || toolName === "followup_task";
+		if (assignment) this.pendingAssignments.set(path, { ...entry, component });
+		const original = component.updateResult.bind(component);
+		component.updateResult = ((result, isPartial) => {
+			const output = original(result, isPartial);
+			if (!isPartial) {
+				if (assignment && !result.isError) {
+					let receipt: unknown = result.details;
+					if (!isRecord(receipt) || typeof receipt.turn_id !== "string") {
+						try {
+							receipt = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "");
+						} catch {
+							receipt = undefined;
+						}
+					}
+					if (isRecord(receipt) && identifier(receipt.turn_id)) {
+						const key = JSON.stringify([path, receipt.turn_id]);
+						if (!this.childTurns.has(key)) this.childTurns.set(key, entry);
+					}
+				}
+				if (assignment && this.pendingAssignments.get(path)?.component === component)
+					this.pendingAssignments.delete(path);
+				entry.turn.component.touch(entry.group);
+			}
+			return output;
+		}) as ToolExecutionComponent["updateResult"];
 		return true;
 	}
 
-	/** Mailbox results join the sender child's group. Returns true when routed. */
 	handleMailboxMessage(message: {
 		customType?: string;
 		display?: boolean;
@@ -993,12 +1169,19 @@ export class SubagentTranscriptRouter {
 		const envelope = parseMailboxEnvelope(message.content);
 		const path = normalizeAgentPath(envelope?.from);
 		if (!envelope || !path) return false;
-		this.groupFor(path).addMailboxResult(envelope, message.timestamp);
+		const key = identifier(envelope.turnId) ? JSON.stringify([path, envelope.turnId]) : undefined;
+		const entry =
+			(key ? this.childTurns.get(key) : undefined) ?? this.pendingAssignments.get(path) ?? this.groupOwner(path);
+		if (key && !this.childTurns.has(key)) this.childTurns.set(key, entry);
+		entry.group.addMailboxResult(envelope, message.timestamp);
+		entry.turn.component.touch(entry.group);
 		return true;
 	}
 
-	/** Test/introspection access to current groups in creation order. */
 	currentGroups(): SubagentGroupComponent[] {
-		return [...this.groups.values()];
+		return [...this.turns.values()].flatMap((turn) => [...turn.groups.values()]);
+	}
+	turnGroups(): SubagentTurnGroupComponent[] {
+		return [...this.turns.values()].map((turn) => turn.component);
 	}
 }

@@ -2,7 +2,10 @@ import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-work
 import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { expect, test } from "vitest";
 import { BackgroundTaskGroupComponent } from "../src/modes/interactive/components/background-task-group.ts";
-import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
+import {
+	SubagentGroupComponent,
+	SubagentTurnGroupComponent,
+} from "../src/modes/interactive/components/subagent-group.ts";
 import { getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { GrokThinkingTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-thinking-turn-group.ts";
 import { GrokToolExecutionComponent } from "../src/modes/interactive-grok/components/grok-tool-execution.ts";
@@ -46,8 +49,8 @@ test("category headers have stable names, distinct symbols/colors and no failure
 	} as unknown as BackgroundTaskManager;
 	const background = new BackgroundTaskGroupComponent(manager, () => {});
 	background.completeTurn();
-	const subagent = new SubagentGroupComponent("/root/worker");
-	subagent.addMailboxResult({
+	const childAgent = new SubagentGroupComponent("/root/worker");
+	childAgent.addMailboxResult({
 		id: "m1",
 		from: "/root/worker",
 		turnId: "t1",
@@ -55,6 +58,8 @@ test("category headers have stable names, distinct symbols/colors and no failure
 		text: JSON.stringify({ summary: "latest result", outcome: "failed" }),
 		resultValidation: { contract: "not_completed" },
 	});
+	const subagent = new SubagentTurnGroupComponent();
+	subagent.addAgent(childAgent);
 	const categories = [
 		{ component: thinking, label: "✦", color: "accent" },
 		{ component: tools, label: "◆", color: "text" },

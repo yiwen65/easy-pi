@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { MarkdownTransformer } from "../src/core/extensions/types.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -16,6 +17,7 @@ import { GrokComponentFactory } from "../src/modes/interactive-grok/grok-compone
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 interface ComponentCreationContext {
+	chatContainer: TurnTranscriptContainer;
 	grokComponentFactory: GrokComponentFactory | undefined;
 	hideThinkingBlock: boolean;
 	hiddenThinkingLabel: string;
@@ -46,14 +48,14 @@ const createAssistant = Reflect.get(InteractiveMode.prototype, "createAssistantM
 const createTool = Reflect.get(InteractiveMode.prototype, "createToolExecutionComponent") as CreateTool;
 const addToolToChat = Reflect.get(InteractiveMode.prototype, "addToolComponentToChat") as (
 	this: ComponentCreationContext & {
-		chatContainer: Container;
+		chatContainer: TurnTranscriptContainer;
 		currentTurnToolGroup?: GrokToolTurnGroupComponent;
 	},
 	component: ToolExecutionComponent,
 ) => void;
 const updateTurnThinking = Reflect.get(InteractiveMode.prototype, "updateTurnThinking") as (
 	this: ComponentCreationContext & {
-		chatContainer: Container;
+		chatContainer: TurnTranscriptContainer;
 		currentTurnThinkingGroup?: GrokThinkingTurnGroupComponent;
 	},
 	component: GrokAssistantMessageComponent,
@@ -79,6 +81,7 @@ const setWorkingVisible = Reflect.get(InteractiveMode.prototype, "setWorkingVisi
 
 function createContext(grok: boolean): ComponentCreationContext {
 	return {
+		chatContainer: new TurnTranscriptContainer(),
 		grokComponentFactory: grok ? new GrokComponentFactory() : undefined,
 		hideThinkingBlock: false,
 		hiddenThinkingLabel: "Thinking...",
@@ -149,7 +152,7 @@ describe("InteractiveMode Grok component routing", () => {
 
 	test("groups one turn's tools into one line and keeps it at the latest position", () => {
 		const context = Object.assign(createContext(true), {
-			chatContainer: new Container(),
+			chatContainer: new TurnTranscriptContainer(),
 			currentTurnToolGroup: undefined as GrokToolTurnGroupComponent | undefined,
 		});
 		const first = createTool.call(context, "read", "tool-1", { path: "/tmp/a.ts" });
@@ -167,9 +170,9 @@ describe("InteractiveMode Grok component routing", () => {
 		expect((group as GrokToolTurnGroupComponent).toolCount).toBe(2);
 	});
 
-	test("keeps subagent independent from surrounding tool groups", () => {
+	test("keeps independent tools in body without splitting the turn tools tail", () => {
 		const context = Object.assign(createContext(true), {
-			chatContainer: new Container(),
+			chatContainer: new TurnTranscriptContainer(),
 			currentTurnToolGroup: undefined as GrokToolTurnGroupComponent | undefined,
 		});
 		const first = createTool.call(context, "read", "tool-1", { path: "/tmp/a.ts" });
@@ -179,22 +182,22 @@ describe("InteractiveMode Grok component routing", () => {
 
 		const subagent = createTool.call(context, "subagent", "tool-2", { agent: "worker", task: "review" });
 		addToolToChat.call(context, subagent);
-		expect(context.chatContainer.children).toEqual([firstGroup, subagent]);
-		expect(context.currentTurnToolGroup).toBeUndefined();
+		expect(context.chatContainer.children).toEqual([subagent, firstGroup]);
+		expect(context.currentTurnToolGroup).toBe(firstGroup);
 		expect((firstGroup as GrokToolTurnGroupComponent).toolCount).toBe(1);
 
 		const last = createTool.call(context, "bash", "tool-3", { command: "npm test" });
 		addToolToChat.call(context, last);
-		const lastGroup = context.chatContainer.children[2];
+		const lastGroup = context.chatContainer.children[1];
 		expect(lastGroup).toBeInstanceOf(GrokToolTurnGroupComponent);
-		expect(lastGroup).not.toBe(firstGroup);
-		expect((lastGroup as GrokToolTurnGroupComponent).toolCount).toBe(1);
-		expect(context.chatContainer.children).toEqual([firstGroup, subagent, lastGroup]);
+		expect(lastGroup).toBe(firstGroup);
+		expect((lastGroup as GrokToolTurnGroupComponent).toolCount).toBe(2);
+		expect(context.chatContainer.children).toEqual([subagent, firstGroup]);
 	});
 
 	test("merges multiple assistant thinking messages into one turn-level row", () => {
 		const context = Object.assign(createContext(true), {
-			chatContainer: new Container(),
+			chatContainer: new TurnTranscriptContainer(),
 			currentTurnThinkingGroup: undefined as GrokThinkingTurnGroupComponent | undefined,
 		});
 		const firstMessage = { ...assistantMessage(), content: [{ type: "thinking" as const, thinking: "first" }] };
@@ -217,7 +220,7 @@ describe("InteractiveMode Grok component routing", () => {
 
 		groups[0]?.completeTurn();
 		const collapsed = stripAnsi(context.chatContainer.render(80).join("\n"));
-		expect(collapsed.match(/▸ ✦ /g)).toHaveLength(1);
+		expect(collapsed.match(/✦ /g)).toHaveLength(1);
 		expect(collapsed).not.toContain("first");
 		expect(collapsed).toContain("second");
 

@@ -11,6 +11,7 @@ import {
 	backgroundTaskDuration,
 	backgroundTaskStallHint,
 } from "../src/modes/interactive/components/background-task-view.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { formatDisplayPath } from "../src/utils/display-path.ts";
@@ -19,7 +20,7 @@ import { formatDisplayPath } from "../src/utils/display-path.ts";
 const proto = InteractiveMode.prototype as any;
 
 function fakeMode() {
-	const chatContainer = new Container();
+	const chatContainer = new TurnTranscriptContainer();
 	const mode: any = {
 		chatContainer,
 		toolOutputExpanded: false,
@@ -38,6 +39,7 @@ function fakeMode() {
 		"addMessageToChat",
 		"renderUserMessage",
 		"subscribeToBackgroundTasks",
+		"syncBackgroundTaskManager",
 		"ensureBackgroundTaskGroup",
 		"clearChatContainer",
 	])
@@ -156,6 +158,51 @@ describe("BackgroundTaskGroupComponent", () => {
 			expect(header()).toContain("latest-command");
 		} finally {
 			group.dispose();
+		}
+	});
+
+	it("removes only reassigned membership and clears only that task's open detail", () => {
+		vi.useFakeTimers();
+		const records: BackgroundTaskRecord[] = ["moved", "legit"].map((id, index) => ({
+			id,
+			command: `${id} ${"long".repeat(30)}`,
+			cwd: dir,
+			status: "succeeded",
+			startedAt: index,
+			endedAt: 2,
+			lastOutputAt: 2,
+			outputPath: join(dir, `${id}.log`),
+			promoted: false,
+		}));
+		const fixtureManager = {
+			list: () => records,
+			onStart: () => () => {},
+			onTerminal: () => () => {},
+			stallTimeoutMs: 0,
+			readOutput: (id: string) => ({ ok: true, value: { output: `${id} output` } }),
+		} as unknown as BackgroundTaskManager;
+		const requestRender = vi.fn();
+		const group = new BackgroundTaskGroupComponent(fixtureManager, requestRender);
+		try {
+			group.completeTurn();
+			group.setExpanded(true);
+			const row = group.render(200).findIndex((line, index) => index > 0 && line.includes("moved"));
+			expect(group.handleOverviewClick(row, 200)).toBe(true);
+			expect(group.render(200).join("\n")).toContain("moved output");
+			expect(group.removeTask("moved")).toBe(1);
+			expect(group.render(200)).toHaveLength(2);
+			expect(group.render(200).join("\n")).toContain("legit");
+			group.addTask("moved");
+			expect(group.render(200)).toHaveLength(3);
+			expect(group.render(200).join("\n")).not.toContain("moved output");
+			group.render(20);
+			requestRender.mockClear();
+			vi.advanceTimersByTime(10_000);
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(group.removeTask("missing")).toBe(2);
+		} finally {
+			group.dispose();
+			vi.useRealTimers();
 		}
 	});
 
@@ -558,6 +605,8 @@ describe("background task transcript mounting", () => {
 		});
 		mode.session = { backgroundTasks: other, extensionRunner: { getMessageRenderer: () => undefined } };
 		proto.subscribeToBackgroundTasks.call(mode);
+		expect(mode.chatContainer.children).toHaveLength(0);
+		expect(mode.backgroundTaskOwners.size).toBe(0);
 		const second = await other.start("echo other", { cwd: dir, env: { ...process.env } });
 		if (!second.ok) throw new Error("start failed");
 		expect(mode.chatContainer.children).toHaveLength(1);

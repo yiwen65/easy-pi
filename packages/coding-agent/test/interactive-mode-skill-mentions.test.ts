@@ -1,14 +1,14 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { Container } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { createSkillPromptMessage } from "../src/core/messages.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 type SkillMentionHarness = {
-	chatContainer: Container;
+	chatContainer: TurnTranscriptContainer;
 	pendingSkillMentions: Array<{ name: string; timestamp: number }>;
 	pendingSkillMentionsPopulateHistory: boolean;
 	currentTurnThinkingGroup: undefined;
@@ -37,7 +37,7 @@ const addMessageToChat = Reflect.get(prototype, "addMessageToChat") as (
 function createHarness() {
 	const addToHistory = vi.fn<(text: string) => void>();
 	const harness: SkillMentionHarness = {
-		chatContainer: new Container(),
+		chatContainer: new TurnTranscriptContainer(),
 		pendingSkillMentions: [],
 		pendingSkillMentionsPopulateHistory: false,
 		currentTurnThinkingGroup: undefined,

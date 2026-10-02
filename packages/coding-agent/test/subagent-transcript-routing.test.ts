@@ -1,8 +1,13 @@
 import { stripVTControlCharacters } from "node:util";
 import { Container, ScrollView, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
+import {
+	type SubagentGroupComponent,
+	type SubagentTranscriptRouter,
+	SubagentTurnGroupComponent,
+} from "../src/modes/interactive/components/subagent-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -39,7 +44,7 @@ function mailboxMessage(content: string) {
 }
 
 function fakeMode() {
-	const chatContainer = new Container();
+	const chatContainer = new TurnTranscriptContainer();
 	const documentContainer = new Container();
 	documentContainer.addChild(chatContainer);
 	const mode: any = {
@@ -82,6 +87,10 @@ function fakeMode() {
 	return mode;
 }
 
+function agentGroups(mode: ReturnType<typeof fakeMode>): SubagentGroupComponent[] {
+	return (mode.subagentRouter as SubagentTranscriptRouter | undefined)?.currentGroups() ?? [];
+}
+
 function spawnTool(mode: any, name: string, id: string, args: unknown) {
 	const component = mode.createRoutedToolComponent(name, id, args);
 	if (!component) return undefined;
@@ -112,9 +121,9 @@ describe("subagent transcript routing", () => {
 		expect(mode.chatContainer.children).toHaveLength(0);
 		const args = { target: "/root/validate-extra-key", message: "Check status" };
 		await mode.handleEvent({ type: "message_end", message: toolCallMessage("c1", "send_message", args) });
-		const groups = mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent);
+		const groups = agentGroups(mode);
 		expect(groups).toHaveLength(1);
-		expect((groups[0] as SubagentGroupComponent).agentPath).toBe("/root/validate-extra-key");
+		expect(groups[0].agentPath).toBe("/root/validate-extra-key");
 		expect(mode.pendingTools.has("c1")).toBe(true);
 		await mode.handleEvent({
 			type: "tool_execution_start",
@@ -128,8 +137,9 @@ describe("subagent transcript routing", () => {
 			result: { content: [{ type: "text", text: "Accepted" }] },
 			isError: false,
 		});
+		expect(agentGroups(mode)).toHaveLength(1);
 		expect(
-			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent),
+			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentTurnGroupComponent),
 		).toHaveLength(1);
 		expect(mode.pendingTools.has("c1")).toBe(false);
 		(groups[0] as SubagentGroupComponent).setExpanded(true);
@@ -162,9 +172,7 @@ describe("subagent transcript routing", () => {
 			args: { task_name: "worker", task: { objective: "probe" } },
 		});
 		expect(mode.pendingTools.has("c2")).toBe(true);
-		expect(
-			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent),
-		).toHaveLength(1);
+		expect(agentGroups(mode)).toHaveLength(1);
 	});
 
 	it("does not group abandoned partial collaboration targets", async () => {
@@ -202,9 +210,7 @@ describe("subagent transcript routing", () => {
 		spawnTool(mode, "list_agents", "c4", {});
 		spawnTool(mode, "bash", "c5", { command: "ls" });
 
-		const groups = mode.chatContainer.children.filter(
-			(child: unknown) => child instanceof SubagentGroupComponent,
-		) as SubagentGroupComponent[];
+		const groups = agentGroups(mode);
 		expect(groups).toHaveLength(1);
 		expect(groups[0].agentPath).toBe("/root/worker");
 
@@ -217,9 +223,7 @@ describe("subagent transcript routing", () => {
 		expect(standaloneCollab).toHaveLength(0);
 
 		// team-scope operations produce no transcript entries at all
-		expect(
-			mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent),
-		).toHaveLength(1);
+		expect(agentGroups(mode)).toHaveLength(1);
 		expect(mode.pendingTools.has("c3")).toBe(false);
 		expect(mode.pendingTools.has("c4")).toBe(false);
 		// regular tools still render standalone
@@ -233,9 +237,7 @@ describe("subagent transcript routing", () => {
 		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
 
 		expect(mode.chatContainer.children.length).toBe(before); // group already existed; result joined it
-		const group = mode.chatContainer.children.find(
-			(child: unknown) => child instanceof SubagentGroupComponent,
-		) as SubagentGroupComponent;
+		const group = agentGroups(mode)[0];
 		expect(group.resultCount).toBe(1);
 		const header = group.render(100).join("\n");
 		expect(header).toContain("Completed");
@@ -248,8 +250,9 @@ describe("subagent transcript routing", () => {
 	it("creates a group from a mailbox result alone (resumed history)", () => {
 		const mode = fakeMode();
 		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
-		const groups = mode.chatContainer.children.filter((child: unknown) => child instanceof SubagentGroupComponent);
+		const groups = agentGroups(mode);
 		expect(groups).toHaveLength(1);
+		expect(mode.chatContainer.children[0]).toBeInstanceOf(SubagentTurnGroupComponent);
 	});
 
 	it("expands and collapses through the real transcript click path", () => {
@@ -257,8 +260,8 @@ describe("subagent transcript routing", () => {
 		spawnTool(mode, "spawn_agent", "c1", { task_name: "worker", delegation: { task: { objective: "probe" } } });
 		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
 		const group = mode.chatContainer.children.find(
-			(child: unknown) => child instanceof SubagentGroupComponent,
-		) as SubagentGroupComponent;
+			(child: unknown) => child instanceof SubagentTurnGroupComponent,
+		) as SubagentTurnGroupComponent;
 		const collapsedLines = group.render(100).length;
 
 		const expanded = mode.handleTranscriptContentClick({ scrollView: mode.transcriptScrollView, row: 0, col: 1 });
@@ -286,12 +289,11 @@ describe("subagent transcript routing", () => {
 		});
 		tool.updateResult({ content: [{ type: "text", text: '{"status":"accepted","raw":"DIAG"}' }], isError: false });
 		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
-		const group = mode.chatContainer.children.find(
-			(child: unknown) => child instanceof SubagentGroupComponent,
-		) as SubagentGroupComponent;
+		const group = agentGroups(mode)[0];
 		const render = () => group.render(40).map(stripVTControlCharacters);
 		const click = (row: number) =>
-			mode.handleTranscriptContentClick({ scrollView: mode.transcriptScrollView, row, col: 1 });
+			mode.handleTranscriptContentClick({ scrollView: mode.transcriptScrollView, row: row + 1, col: 1 });
+		expect(mode.handleTranscriptContentClick({ scrollView: mode.transcriptScrollView, row: 0, col: 1 })).toBe(true);
 		expect(click(0)).toBe(true);
 		const taskRow = render().findIndex((line) => line.includes("TASK_END_SENTINEL"));
 		const activityRow = render().findIndex((line) => line.includes("Activity"));
@@ -331,9 +333,7 @@ describe("subagent transcript routing", () => {
 			isError: false,
 		});
 		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
-		const group = mode.chatContainer.children.find(
-			(child: unknown) => child instanceof SubagentGroupComponent,
-		) as SubagentGroupComponent;
+		const group = agentGroups(mode)[0];
 		const collapsed = group.render(100).length;
 		mode.setToolsExpanded(true);
 		const expandedText = group.render(100).map(stripVTControlCharacters).join("\n");
@@ -353,9 +353,7 @@ describe("subagent transcript routing", () => {
 		const mode = fakeMode();
 		spawnTool(mode, "spawn_agent", "c1", { task_name: "worker", delegation: { task: { objective: "probe" } } });
 		mode.addMessageToChat(mailboxMessage(JSON.stringify(ENVELOPE)));
-		const group = mode.chatContainer.children.find(
-			(child: unknown) => child instanceof SubagentGroupComponent,
-		) as SubagentGroupComponent;
+		const group = agentGroups(mode)[0];
 		group.setExpanded(true);
 		for (const width of [40, 80, 120]) {
 			expect(group.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
@@ -431,7 +429,7 @@ it.each([
 	const wire = JSON.stringify(external).replace('"NONFINITE_NUMBER"', "1e999");
 	const tool = spawnTool(mode, "get_agent_result", "query", { target: "/root/worker" });
 	expect(() => tool.updateResult({ content: [{ type: "text", text: wire }], isError: false })).not.toThrow();
-	const group = mode.chatContainer.children[0] as SubagentGroupComponent;
+	const group = agentGroups(mode)[0];
 	expect(group.resultCount).toBe(1);
 	group.setExpanded(true);
 	for (const width of [1, 8, 24, 40, 80]) expect(() => group.render(width)).not.toThrow();
@@ -471,7 +469,7 @@ it("retains a valid native source path beyond the artifact-only 2048-character l
 	};
 	const tool = spawnTool(mode, "get_agent_result", "long-query", { target: "/root/worker" });
 	tool.updateResult({ content: [{ type: "text", text: JSON.stringify(query) }], isError: false });
-	const group = mode.chatContainer.children[0] as SubagentGroupComponent;
+	const group = agentGroups(mode)[0];
 	expect(group.resultCount).toBe(1);
 	expect(stripVTControlCharacters(group.render(120)[0])).toContain("Read: LONG_SOURCE_RESULT");
 	expect(stripVTControlCharacters(group.render(120)[0])).toContain("State unknown");
@@ -542,7 +540,7 @@ it("reads retained results/history/targeted wait without replacing newer lifecyc
 		const tool = spawnTool(mode, name, name, { target: "/root/worker", turn_id: "old" });
 		tool.updateResult({ content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false });
 	}
-	const group = mode.chatContainer.children[0] as SubagentGroupComponent;
+	const group = agentGroups(mode)[0];
 	expect(group.resultCount).toBe(2);
 	expect(stripVTControlCharacters(group.render(120)[0])).toContain("NEW_RESULT");
 	expect(stripVTControlCharacters(group.render(120)[0])).not.toContain("OLD_RESULT");

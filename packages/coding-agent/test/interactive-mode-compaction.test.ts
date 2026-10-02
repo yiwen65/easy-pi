@@ -3,6 +3,7 @@ import { Container, ScrollView } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { GrokToolTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-tool-turn-group.ts";
@@ -35,8 +36,8 @@ describe("InteractiveMode compaction events", () => {
 			dispose(): void;
 			render(width: number): string[];
 		};
-		const chatContainer = new Container();
-		// Independent tools can split one turn into multiple folding groups.
+		const chatContainer = new TurnTranscriptContainer();
+		// All folding rows settle only when the run finishes, not during retry.
 		const toolGroups = [new GrokToolTurnGroupComponent(), new GrokToolTurnGroupComponent()];
 		const completeToolGroups = toolGroups.map((group) => {
 			const completeTurn = vi.spyOn(group, "completeTurn");
@@ -326,7 +327,7 @@ describe("InteractiveMode compaction events", () => {
 			timestamp: 1,
 		});
 		const width = 100;
-		const chatContainer = new Container();
+		const chatContainer = new TurnTranscriptContainer();
 		chatContainer.addChild(component);
 		const scrollView = new ScrollView(chatContainer, { follow: "end" });
 		const fakeThis = {

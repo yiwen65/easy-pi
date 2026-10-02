@@ -119,6 +119,7 @@ export {
 	CURSOR_MARKER,
 	compositeTuiLine,
 	type Focusable,
+	getRenderedContentClickHandlers,
 	isFocusable,
 	isViewportTUI,
 	type OverlayAnchor,

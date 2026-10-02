@@ -174,10 +174,12 @@ import {
 	SUBAGENT_TOOL_NAMES,
 	SubagentGroupComponent,
 	SubagentTranscriptRouter,
+	SubagentTurnGroupComponent,
 } from "./components/subagent-group.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
+import { TurnTranscriptContainer } from "./components/turn-transcript-container.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { editInExternalEditor } from "./external-editor.ts";
@@ -573,7 +575,7 @@ export class InteractiveMode {
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
 	private loadedResourcesContainer: Container;
-	private chatContainer: Container;
+	private chatContainer: TurnTranscriptContainer;
 	private documentContainer: Container;
 	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
 	private fullscreenLayoutRoot: Component | undefined;
@@ -625,8 +627,11 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private transcriptTools = new Set<ToolExecutionComponent>();
 	private subagentRouter!: SubagentTranscriptRouter;
 	private backgroundTaskGroup: BackgroundTaskGroupComponent | undefined;
+	private backgroundTaskOwners = new Map<string, { group: BackgroundTaskGroupComponent; owner: object }>();
+	private toolTurnOwners = new Map<string, object>();
 	private backgroundTaskUnsubscribe: (() => void) | undefined;
 	private grokTurnStartedAt: number | undefined = undefined;
 	private currentTurnThinkingGroup: GrokThinkingTurnGroupComponent | undefined = undefined;
@@ -798,6 +803,10 @@ export class InteractiveMode {
 			this.sessionManager.getCwd(),
 		);
 		component.setExpanded(this.toolOutputExpanded);
+		this.toolTurnOwners ??= new Map();
+		this.toolTurnOwners.set(toolCallId, this.chatContainer.currentTurn);
+		this.transcriptTools ??= new Set();
+		this.transcriptTools.add(component);
 		return component;
 	}
 
@@ -817,7 +826,7 @@ export class InteractiveMode {
 	/**
 	 * Add a tool execution component to the transcript. In Grok mode groupable
 	 * tool calls of the current turn share a collapsible GrokToolTurnGroupComponent
-	 * (one compact line by default); independent tools remain direct chat children.
+	 * (one compact line by default); independent tools remain body children above the tail.
 	 * Legacy mode keeps every tool as a direct chat child.
 	 */
 	/** Collaboration tools join their child's group; team-scope ones produce no transcript surface. */
@@ -836,38 +845,34 @@ export class InteractiveMode {
 		args: unknown,
 		at?: number,
 	): void {
-		this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
+		this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded, {
+			getTurn: () => this.chatContainer.currentTurn,
+			mount: (group, owner) => this.chatContainer.mountActivity("subagent", group, owner),
+		});
 		if (this.subagentRouter.handleTool(toolName, args, component, at)) return;
 		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent && component.canUseTurnGroup()) {
 			let group = this.currentTurnToolGroup;
 			if (!group || !this.chatContainer.children.includes(group)) {
 				group = new GrokToolTurnGroupComponent(this.ui);
 				group.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(group);
+				this.chatContainer.mountActivity("tools", group);
 				this.currentTurnToolGroup = group;
-			} else if (this.chatContainer.children.at(-1) !== group) {
-				// Keep the live current-tool line at the latest chronological position.
-				this.chatContainer.removeChild(group);
-				this.chatContainer.addChild(group);
 			}
 			component.setTurnGrouped(true);
 			group.addTool(component);
 			return;
 		}
-		if (this.grokComponentFactory && component instanceof GrokToolExecutionComponent) {
-			// Keep independent tools between the groups that occurred before and after them.
-			this.currentTurnToolGroup = undefined;
-		}
 		this.chatContainer.addChild(component);
 	}
 
-	/** Settle every folding row, including groups split by independent tools. */
+	/** Settle every folding row without moving its turn-owned position. */
 	private completeTurnGroups(): void {
 		for (const child of this.chatContainer.children) {
 			if (
 				child instanceof GrokThinkingTurnGroupComponent ||
 				child instanceof GrokToolTurnGroupComponent ||
-				child instanceof BackgroundTaskGroupComponent
+				child instanceof BackgroundTaskGroupComponent ||
+				child instanceof SubagentTurnGroupComponent
 			) {
 				child.completeTurn();
 			}
@@ -892,10 +897,7 @@ export class InteractiveMode {
 			this.currentTurnThinkingGroup = group;
 		}
 		group.updateThinking(component, thinking);
-		this.chatContainer.removeChild(group);
-		const componentIndex = this.chatContainer.children.indexOf(component);
-		if (componentIndex >= 0) this.chatContainer.children.splice(componentIndex, 0, group);
-		else this.chatContainer.addChild(group);
+		this.chatContainer.mountActivity("thinking", group);
 	}
 
 	/** Clear transcript content and stop the Grok live-row scroll timers first. */
@@ -904,7 +906,8 @@ export class InteractiveMode {
 			if (
 				child instanceof GrokThinkingTurnGroupComponent ||
 				child instanceof GrokToolTurnGroupComponent ||
-				child instanceof BackgroundTaskGroupComponent
+				child instanceof BackgroundTaskGroupComponent ||
+				child instanceof SubagentTurnGroupComponent
 			) {
 				child.dispose();
 			}
@@ -912,6 +915,9 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		this.promptNavigation = undefined;
 		this.subagentRouter?.clear();
+		this.backgroundTaskOwners?.clear();
+		this.toolTurnOwners?.clear();
+		this.transcriptTools?.clear();
 		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
@@ -948,7 +954,7 @@ export class InteractiveMode {
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
-		this.chatContainer = new Container();
+		this.chatContainer = new TurnTranscriptContainer();
 		this.documentContainer = new Container();
 		this.documentContainer.addChild(this.headerContainer);
 		this.documentContainer.addChild(this.loadedResourcesContainer);
@@ -3384,18 +3390,18 @@ export class InteractiveMode {
 
 	/**
 	 * Task starts that do not come from a bash tool result (extensions/SDK callers) still surface in
-	 * the transcript. The block is a peer of the turn tool group: always the latest transcript line.
+	 * the transcript. The block stays at its owning turn's ordered activity tail.
 	 */
 	private subscribeToBackgroundTasks(): void {
 		this.backgroundTaskUnsubscribe?.();
+		this.syncBackgroundTaskManager(this.session.backgroundTasks);
 		this.backgroundTaskUnsubscribe = this.session.backgroundTasks?.onStart((task) =>
 			this.ensureBackgroundTaskGroup(task.id),
 		);
 	}
 
-	private ensureBackgroundTaskGroup(taskId: string): void {
-		const manager = this.session.backgroundTasks;
-		if (!manager) return;
+	private syncBackgroundTaskManager(manager: BackgroundTaskGroupComponent["manager"] | undefined): void {
+		this.backgroundTaskOwners ??= new Map();
 		for (const child of [...this.chatContainer.children]) {
 			if (child instanceof BackgroundTaskGroupComponent && child.manager !== manager) {
 				this.chatContainer.removeChild(child);
@@ -3403,14 +3409,41 @@ export class InteractiveMode {
 				if (child === this.backgroundTaskGroup) this.backgroundTaskGroup = undefined;
 			}
 		}
-		if (!this.backgroundTaskGroup) {
-			this.backgroundTaskGroup = new BackgroundTaskGroupComponent(manager, () => this.ui.requestRender(), [taskId]);
-			this.backgroundTaskGroup.setExpanded(this.toolOutputExpanded);
-		} else {
-			this.backgroundTaskGroup.addTask(taskId);
+		for (const [id, entry] of this.backgroundTaskOwners) {
+			if (entry.group.manager !== manager) this.backgroundTaskOwners.delete(id);
 		}
-		this.chatContainer.removeChild(this.backgroundTaskGroup);
-		this.chatContainer.addChild(this.backgroundTaskGroup);
+	}
+
+	private ensureBackgroundTaskGroup(taskId: string, owner?: object): void {
+		const manager = this.session.backgroundTasks;
+		this.syncBackgroundTaskManager(manager);
+		if (!manager || !manager.list({ activeOnly: false }).some((task) => task.id === taskId)) return;
+		let existing = this.backgroundTaskOwners.get(taskId);
+		if (existing && owner && existing.owner !== owner) {
+			// A promoted tool can publish its start after a newer user boundary.
+			// Correct only its membership; keep unrelated reader state and mounting intact.
+			const old = existing;
+			this.backgroundTaskOwners.delete(taskId);
+			if (old.group.removeTask(taskId) === 0) {
+				this.chatContainer.removeChild(old.group);
+				old.group.dispose();
+				if (this.backgroundTaskGroup === old.group) this.backgroundTaskGroup = undefined;
+			}
+			existing = undefined;
+		}
+		const turnOwner = existing?.owner ?? owner ?? this.chatContainer.currentTurn;
+		let group = existing?.group;
+		if (!group) {
+			group = [...this.backgroundTaskOwners.values()].find((entry) => entry.owner === turnOwner)?.group;
+			if (!group) {
+				group = new BackgroundTaskGroupComponent(manager, () => this.ui.requestRender(), [taskId]);
+				group.setExpanded(this.toolOutputExpanded);
+				if (turnOwner !== this.chatContainer.currentTurn) group.completeTurn();
+			} else group.addTask(taskId);
+			this.backgroundTaskOwners.set(taskId, { group, owner: turnOwner });
+		}
+		if (turnOwner === this.chatContainer.currentTurn) this.backgroundTaskGroup = group;
+		this.chatContainer.mountActivity("background", group, turnOwner);
 		this.ui.requestRender();
 	}
 
@@ -3633,7 +3666,7 @@ export class InteractiveMode {
 				const taskId = (event.result as { details?: { backgroundTaskId?: string } } | undefined)?.details
 					?.backgroundTaskId;
 				if (taskId && this.session.backgroundTasks) {
-					this.ensureBackgroundTaskGroup(taskId);
+					this.ensureBackgroundTaskGroup(taskId, this.toolTurnOwners?.get(event.toolCallId));
 				}
 				break;
 			}
@@ -3823,7 +3856,7 @@ export class InteractiveMode {
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
 	private showStatus(message: string): void {
-		const children = this.chatContainer.children;
+		const children = this.chatContainer.currentBodyChildren;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
@@ -3893,6 +3926,7 @@ export class InteractiveMode {
 
 		// A user prompt closes the previous history turn and starts new groups.
 		this.completeTurnGroups();
+		this.chatContainer.beginTurn();
 		this.backgroundTaskGroup = undefined;
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
@@ -3945,7 +3979,10 @@ export class InteractiveMode {
 					) {
 						break;
 					}
-					this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded);
+					this.subagentRouter ??= new SubagentTranscriptRouter(this.chatContainer, () => this.toolOutputExpanded, {
+						getTurn: () => this.chatContainer.currentTurn,
+						mount: (group, owner) => this.chatContainer.mountActivity("subagent", group, owner),
+					});
 					if (this.subagentRouter.handleMailboxMessage(message)) break;
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(
@@ -4078,6 +4115,8 @@ export class InteractiveMode {
 					component.updateResult(message);
 					renderedPendingTools.delete(message.toolCallId);
 				}
+				const taskId = (message.details as { backgroundTaskId?: string } | undefined)?.backgroundTaskId;
+				if (taskId) this.ensureBackgroundTaskGroup(taskId, this.toolTurnOwners?.get(message.toolCallId));
 			} else {
 				// All other messages use standard rendering
 				this.addMessageToChat(message, options);
@@ -4584,7 +4623,10 @@ export class InteractiveMode {
 			toggled = target.component.handleOverviewClick(localRow, width);
 		} else if (target.component instanceof BackgroundTaskGroupComponent) {
 			toggled = target.component.handleOverviewClick(localRow, width);
-		} else if (target.component instanceof SubagentGroupComponent) {
+		} else if (
+			target.component instanceof SubagentGroupComponent ||
+			target.component instanceof SubagentTurnGroupComponent
+		) {
 			toggled = target.component.handleOverviewClick(localRow, width);
 		} else if (target.component instanceof GrokToolExecutionComponent) {
 			toggled = target.component.handleOverviewClick(localRow);
@@ -4604,7 +4646,7 @@ export class InteractiveMode {
 						? "Tools"
 						: component instanceof BackgroundTaskGroupComponent
 							? "Background tasks"
-							: component instanceof SubagentGroupComponent
+							: component instanceof SubagentGroupComponent || component instanceof SubagentTurnGroupComponent
 								? "Subagent"
 								: component instanceof CompactionSummaryMessageComponent
 									? "Compaction"
@@ -5178,19 +5220,11 @@ export class InteractiveMode {
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof GrokToolTurnGroupComponent) {
-								child.setShowImages(enabled);
-							}
-						}
+						for (const tool of this.transcriptTools) tool.setShowImages(enabled);
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof GrokToolTurnGroupComponent) {
-								child.setImageWidthCells(width);
-							}
-						}
+						for (const tool of this.transcriptTools) tool.setImageWidthCells(width);
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
@@ -7254,6 +7288,19 @@ export class InteractiveMode {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
+		for (const child of this.chatContainer.children) {
+			if (
+				child instanceof GrokThinkingTurnGroupComponent ||
+				child instanceof GrokToolTurnGroupComponent ||
+				child instanceof BackgroundTaskGroupComponent ||
+				child instanceof SubagentTurnGroupComponent
+			)
+				child.dispose();
+		}
+		this.subagentRouter?.clear();
+		this.backgroundTaskOwners.clear();
+		this.toolTurnOwners.clear();
+		this.transcriptTools.clear();
 		// Interactive quit stops rendering before runtime disposal. Keep signal
 		// listeners alive until disposal finishes, including repeated interrupts.
 		if (!this.isShuttingDown) this.unregisterSignalHandlers();

@@ -8,6 +8,7 @@ import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -79,7 +80,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("coalesces immediately-sequential status messages", () => {
 		const fakeThis: any = {
-			chatContainer: new Container(),
+			chatContainer: new TurnTranscriptContainer(),
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -98,7 +99,7 @@ describe("InteractiveMode.showStatus", () => {
 
 	test("appends a new status line if something else was added in between", () => {
 		const fakeThis: any = {
-			chatContainer: new Container(),
+			chatContainer: new TurnTranscriptContainer(),
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,

@@ -889,11 +889,14 @@ describe("SubagentTranscriptRouter", () => {
 		).toBe(true);
 		const groups = router.currentGroups();
 		expect(groups.map((group) => group.agentPath).sort()).toEqual(["/root/a", "/root/b", "/root/term-bench"]);
-		expect(container.children).toHaveLength(3);
+		expect(container.children).toHaveLength(1);
+		expect(router.turnGroups()[0].agentCount).toBe(3);
+		expect(router.turnGroups()[0].render(120)).toHaveLength(1);
 
-		// a new member moves the group to the latest position
+		// New activity updates the preview without moving the parent's turn footer.
 		router.handleTool("send_message", { target: "/root/a" }, makeTool("send_message", {}));
-		expect(container.children.at(-1)).toBe(router.groupFor("/root/a"));
+		expect(container.children.at(-1)).toBe(router.turnGroups()[0]);
+		expect(router.currentGroups()).toHaveLength(3);
 	});
 
 	it.each([42, [], {}, true, null].map((from) => ({ from })))(

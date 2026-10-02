@@ -6,6 +6,7 @@ import { CompactionSummaryMessageComponent } from "../src/modes/interactive/comp
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { getEditorTheme, getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -111,7 +112,7 @@ test("manual scroll away/back and geometry/removal invalidate prompt identity", 
 test("fullscreen hit testing uses displayed offsets without rendering changed children", async () => {
 	const terminal = new VirtualTerminal(80, 12);
 	const header = new Text("header", 0, 0);
-	const chat = new Container();
+	const chat = new TurnTranscriptContainer();
 	const before = new Text("before", 0, 0);
 	const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking", 1, false);
 	group.updateThinking({}, "reasoning");
@@ -165,7 +166,7 @@ test("fullscreen hit testing uses displayed offsets without rendering changed ch
 
 test("painted subagent Activity click survives an unseen multiline result without measuring again", async () => {
 	const terminal = new VirtualTerminal(100, 30);
-	const chat = new Container();
+	const chat = new TurnTranscriptContainer();
 	const group = new SubagentGroupComponent("/root/worker");
 	const copySelection = vi.fn(async () => true);
 	const tui = new TuiAltScreen(terminal, undefined, undefined, {
@@ -218,7 +219,7 @@ test("painted subagent Activity click survives an unseen multiline result withou
 test("mouse expansion detaches follow before layout so a long block header stays visible; End restores follow", async () => {
 	setKeybindings(new KeybindingsManager());
 	const terminal = new VirtualTerminal(80, 10);
-	const chat = new Container();
+	const chat = new TurnTranscriptContainer();
 	chat.addChild(new Text(Array.from({ length: 20 }, (_, i) => `history ${i}`).join("\n"), 0, 0));
 	const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking", 1, false);
 	group.updateThinking({}, Array.from({ length: 100 }, (_, i) => `reasoning ${i}`).join("\n"));
@@ -248,7 +249,7 @@ test("mouse expansion detaches follow before layout so a long block header stays
 		expect(scroll.isFollowingEnd).toBe(false);
 		await terminal.waitForRender();
 		expect(scroll.scrollTop).toBe(top);
-		expect(terminal.getViewport().join("\n")).toContain("Thinking");
+		expect(terminal.getViewport().join("\n")).toContain("✦");
 		terminal.sendInput("\x1b[F");
 		await terminal.waitForRender();
 		expect(scroll.isFollowingEnd).toBe(true);
@@ -268,7 +269,7 @@ test("local keyboard selector restores editor focus and draft without changing g
 	editor.setText(draft);
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
-	const chat = new Container();
+	const chat = new TurnTranscriptContainer();
 	const first = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking", 1, false);
 	const second = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking", 1, false);
 	first.updateThinking({}, "first reasoning");
@@ -357,7 +358,7 @@ test.each(["compaction", "tool"])("selector toggles an individual %s block in bo
 			: new GrokToolExecutionComponent("unknown", "call", {}, {}, undefined, tui, "/tmp");
 	if (block instanceof GrokToolExecutionComponent)
 		block.updateResult({ content: [{ type: "text", text: "tool details" }], isError: false });
-	const chat = new Container();
+	const chat = new TurnTranscriptContainer();
 	chat.addChild(block);
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
