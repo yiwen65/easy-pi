@@ -105,7 +105,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 		const pad = Math.min(this.outputPad, Math.max(0, width - 1));
 		const padLeft = " ".repeat(pad);
 		const contentWidth = width - pad;
-		const label = `${this.expanded ? "▾" : "▸"} ✦ Thinking`;
+		const label = "✦ Thinking";
 		const liveThinking = this.userHidden || this.expanded ? undefined : this.latestThinking();
 		const detail = liveThinking ? flattenInline(liveThinking) : this.hiddenLabel;
 		const prefix =

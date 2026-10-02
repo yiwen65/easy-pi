@@ -307,14 +307,14 @@ describe("Grok transcript components", () => {
 		group.addTool(latest);
 		try {
 			expect(stripAnsi(group.render(100)[0])).toContain("◆ Tools · bash  echo latest");
-			expect(stripAnsi(group.render(100)[0])).toMatch(/^▸/);
+			expect(stripAnsi(group.render(100)[0])).toMatch(/^◆ Tools/);
 			expect(stripAnsi(group.render(100)[0])).not.toContain("failed");
 			expect(stripAnsi(group.render(2)[0])).not.toContain("!");
 			expectFits(group, [1, 2, 4, 20, 80]);
 			group.completeTurn();
 			expect(stripAnsi(group.render(100)[0])).toContain("◆ Tools · bash  echo latest");
 			group.setExpanded(true);
-			expect(stripAnsi(group.render(100)[0])).toMatch(/^▾/);
+			expect(stripAnsi(group.render(100)[0])).toMatch(/^◆ Tools/);
 			expect(stripAnsi(group.render(100).join("\n"))).toContain("/tmp/older.ts");
 			if (state === "error") expect(stripAnsi(group.render(100).join("\n"))).toContain("✕ read");
 			group.setExpanded(false);
@@ -537,7 +537,7 @@ describe("Grok transcript components", () => {
 		// Internal assistant/tool boundaries keep the latest thinking visible.
 		const activeFrame = group.render(80).join("\n");
 		const active = stripAnsi(activeFrame);
-		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ Thinking · second reasoning")));
+		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "✦ Thinking · second reasoning")));
 		expect(active).toContain("✦ Thinking · second reasoning");
 		expect(active).not.toContain("first reasoning");
 		expect(active).not.toContain("Thinking...");
@@ -546,7 +546,7 @@ describe("Grok transcript components", () => {
 		group.completeTurn();
 		const collapsedFrame = group.render(80).join("\n");
 		const collapsed = stripAnsi(collapsedFrame);
-		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ Thinking · second reasoning")));
+		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "✦ Thinking · second reasoning")));
 		expect(group.entryCount).toBe(2);
 		expect(group.render(80)).toHaveLength(1);
 		expect(collapsed).toContain("✦ Thinking · second reasoning");

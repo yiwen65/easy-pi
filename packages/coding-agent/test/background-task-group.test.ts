@@ -433,9 +433,9 @@ describe("BackgroundTaskGroupComponent", () => {
 			expect(stripVTControlCharacters(group.render(120)[0])).not.toContain("failed");
 			expect(stripVTControlCharacters(group.render(2)[0])).not.toContain("!");
 			expect(stripVTControlCharacters(group.render(120)[0])).toContain("latest-command");
-			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^▸/);
+			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^⚙ Background/);
 			group.setExpanded(true);
-			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^▾/);
+			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^⚙ Background/);
 			expect(stripVTControlCharacters(group.render(120).join("\n"))).toContain("Failed");
 		} finally {
 			group.dispose();

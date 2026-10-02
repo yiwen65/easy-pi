@@ -136,7 +136,7 @@ export class GrokToolTurnGroupComponent extends Container {
 
 		const settled = this.activeTool() === undefined && tools.length > 1;
 		const suffix = settled ? ` · ${tools.length}` : "";
-		const prefix = `${this.groupExpanded ? "▾" : "▸"} ◆ Tools · `;
+		const prefix = "◆ Tools · ";
 		const gap = "  ";
 		const head = theme.fg("text", prefix) + theme.fg("toolTitle", theme.bold(tool.getGrokToolName()));
 		const available = Math.max(1, width - visibleWidth(suffix));

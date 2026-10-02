@@ -66,18 +66,29 @@ test("category headers have stable names, distinct symbols/colors and no failure
 		for (const { component, label, color } of categories) {
 			const lines = component.render(120);
 			expect(lines).toHaveLength(1);
-			expect(stripAnsi(lines[0])).toContain(label);
+			expect(stripAnsi(lines[0])).toBeTruthy();
+			expect(stripAnsi(lines[0]).trimStart().startsWith(label)).toBe(true);
+			expect(stripAnsi(lines[0])).not.toMatch(/[▸▾]/);
 			expect(lines[0]).toContain(theme.getFgAnsi(color));
 			expect(stripAnsi(lines[0])).not.toMatch(/\bfailed\b/i);
 			for (const width of [1, 2, 8, 24, 40])
 				expect(component.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
 		}
 		tools.setExpanded(true);
+		expect(stripAnsi(tools.render(120)[0])).not.toMatch(/[▸▾]/);
 		expect(stripAnsi(tools.render(120).join("\n"))).toContain("ERROR_DETAIL");
 		background.setExpanded(true);
+		expect(stripAnsi(background.render(120)[0])).not.toMatch(/[▸▾]/);
 		expect(stripAnsi(background.render(120).slice(1).join("\n"))).toContain("Failed");
 		subagent.setExpanded(true);
+		expect(stripAnsi(subagent.render(120)[0])).not.toMatch(/[▸▾]/);
 		expect(stripAnsi(subagent.render(120).join("\n"))).toContain("Outcome: failed");
+		thinking.setExpanded(true);
+		expect(stripAnsi(thinking.render(120)[0])).not.toMatch(/[▸▾]/);
+		for (const component of [thinking, tools, background, subagent]) {
+			expect(component.handleOverviewClick(0, 120)).toBe(true);
+			expect(component.render(120)).toHaveLength(1);
+		}
 	} finally {
 		thinking.dispose();
 		tools.dispose();

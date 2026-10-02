@@ -107,8 +107,7 @@ export class BackgroundTaskGroupComponent extends Container {
 		const count = active.length > 0 ? `${active.length} running · ${tasks.length}` : `${terminalCount}`;
 		const command = latest ? oneLine(latest.command) : "";
 		this.scroller.setText(command);
-		const disclosure = this.expanded ? "▾" : "▸";
-		const prefix = `${disclosure} ⚙ Background · ${count}`;
+		const prefix = `⚙ Background · ${count}`;
 		const gap = command ? " · " : "";
 		const commandWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(gap));
 		const suffix = this.scroller.window(commandWidth);

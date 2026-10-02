@@ -719,7 +719,7 @@ export class SubagentGroupComponent extends Container {
 					? "!incomplete"
 					: "!invalid"
 			: undefined;
-		const prefix = theme.fg("success", `${this.expanded ? "▾" : "▸"} ↳ Subagent `);
+		const prefix = theme.fg("success", "↳ Subagent ");
 		const metadata =
 			theme.fg("muted", `${separator}${stateLabel}`) +
 			(outcome ? theme.fg("warning", `${separator}${outcome}`) : "") +
