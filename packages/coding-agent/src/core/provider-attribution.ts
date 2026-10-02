@@ -34,21 +34,21 @@ function isCloudflareModel(model: Model<Api>): boolean {
 function getDefaultAttributionHeaders(model: Model<Api>): Record<string, string> | undefined {
 	if (isOpenRouterModel(model)) {
 		return {
-			"HTTP-Referer": "https://github.com/yiwen65/easy-pi",
-			"X-OpenRouter-Title": "easy-pi",
+			"HTTP-Referer": "https://pi.dev",
+			"X-OpenRouter-Title": "pi",
 			"X-OpenRouter-Categories": "cli-agent",
 		};
 	}
 
 	if (isNvidiaNimModel(model)) {
 		return {
-			"X-BILLING-INVOKE-ORIGIN": "easy-pi",
+			"X-BILLING-INVOKE-ORIGIN": "pi",
 		};
 	}
 
 	if (isCloudflareModel(model)) {
 		return {
-			"User-Agent": "easy-pi",
+			"User-Agent": "pi",
 		};
 	}
 
@@ -64,7 +64,7 @@ function getSessionHeaders(model: Model<Api>, sessionId: string | undefined): Re
 	) {
 		return undefined;
 	}
-	return { "x-opencode-session": sessionId, "x-opencode-client": "easy-pi" };
+	return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
 }
 
 export function mergeProviderAttributionHeaders(

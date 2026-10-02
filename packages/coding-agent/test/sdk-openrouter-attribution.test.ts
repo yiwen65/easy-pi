@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { mergeProviderAttributionHeaders } from "../src/core/provider-attribution.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -133,24 +134,24 @@ describe("createAgentSession provider attribution headers", () => {
 	it("adds default attribution headers for OpenRouter models", async () => {
 		const headers = await captureHeaders(createModel("openrouter", "https://openrouter.ai/api/v1"));
 
-		expect(headers?.["HTTP-Referer"]).toBe("https://github.com/yiwen65/easy-pi");
-		expect(headers?.["X-OpenRouter-Title"]).toBe("easy-pi");
+		expect(headers?.["HTTP-Referer"]).toBe("https://pi.dev");
+		expect(headers?.["X-OpenRouter-Title"]).toBe("pi");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("cli-agent");
 	});
 
 	it("adds attribution headers for custom providers routed through OpenRouter", async () => {
 		const headers = await captureHeaders(createModel("custom-openrouter", "https://openrouter.ai/api/v1"));
 
-		expect(headers?.["HTTP-Referer"]).toBe("https://github.com/yiwen65/easy-pi");
-		expect(headers?.["X-OpenRouter-Title"]).toBe("easy-pi");
+		expect(headers?.["HTTP-Referer"]).toBe("https://pi.dev");
+		expect(headers?.["X-OpenRouter-Title"]).toBe("pi");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("cli-agent");
 	});
 
 	it("preserves legacy OpenRouter base URL substring attribution matching", async () => {
 		const headers = await captureHeaders(createModel("custom-openrouter", "not-a-url-openrouter.ai"));
 
-		expect(headers?.["HTTP-Referer"]).toBe("https://github.com/yiwen65/easy-pi");
-		expect(headers?.["X-OpenRouter-Title"]).toBe("easy-pi");
+		expect(headers?.["HTTP-Referer"]).toBe("https://pi.dev");
+		expect(headers?.["X-OpenRouter-Title"]).toBe("pi");
 		expect(headers?.["X-OpenRouter-Categories"]).toBe("cli-agent");
 	});
 
@@ -173,13 +174,13 @@ describe("createAgentSession provider attribution headers", () => {
 	it("adds default attribution headers for direct NVIDIA NIM endpoints", async () => {
 		const headers = await captureHeaders(createModel("custom-nim", "https://integrate.api.nvidia.com/v1"));
 
-		expect(headers?.["X-BILLING-INVOKE-ORIGIN"]).toBe("easy-pi");
+		expect(headers?.["X-BILLING-INVOKE-ORIGIN"]).toBe("pi");
 	});
 
 	it("adds default attribution headers for the NVIDIA provider", async () => {
 		const headers = await captureHeaders(createModel("nvidia", "https://example.test/v1"));
 
-		expect(headers?.["X-BILLING-INVOKE-ORIGIN"]).toBe("easy-pi");
+		expect(headers?.["X-BILLING-INVOKE-ORIGIN"]).toBe("pi");
 	});
 
 	it("lets provider and request headers override NVIDIA NIM defaults", async () => {
@@ -200,7 +201,7 @@ describe("createAgentSession provider attribution headers", () => {
 			createModel("openrouter", "https://openrouter.ai/api/v1", "nvidia/nemotron-3-super-120b-a12b"),
 		);
 
-		expect(headers?.["HTTP-Referer"]).toBe("https://github.com/yiwen65/easy-pi");
+		expect(headers?.["HTTP-Referer"]).toBe("https://pi.dev");
 		expect(headers?.["X-BILLING-INVOKE-ORIGIN"]).toBeUndefined();
 	});
 
@@ -212,13 +213,23 @@ describe("createAgentSession provider attribution headers", () => {
 		expect(headers?.["X-BILLING-INVOKE-ORIGIN"]).toBeUndefined();
 	});
 
+	it.each([
+		["cloudflare-workers-ai", "https://api.cloudflare.com/client/v4/accounts/test/ai/v1"],
+		["cloudflare-ai-gateway", "https://gateway.ai.cloudflare.com/v1/test/gateway/compat"],
+		["custom-cloudflare", "https://gateway.ai.cloudflare.com/v1/test/gateway/compat"],
+	])("adds pi attribution for %s", (provider, baseUrl) => {
+		const headers = mergeProviderAttributionHeaders(createModel(provider, baseUrl), undefined);
+
+		expect(headers?.["User-Agent"]).toBe("pi");
+	});
+
 	it("adds OpenCode session headers", async () => {
 		const headers = await captureHeaders(createModel("opencode", "https://opencode.ai/zen/v1"), {
 			sessionId: "opencode-session",
 		});
 
 		expect(headers?.["x-opencode-session"]).toBe("opencode-session");
-		expect(headers?.["x-opencode-client"]).toBe("easy-pi");
+		expect(headers?.["x-opencode-client"]).toBe("pi");
 	});
 
 	it("lets configured OpenCode headers override the defaults", async () => {
