@@ -130,7 +130,7 @@ const categories = (children: Component[]) =>
 
 beforeAll(() => initTheme("dark"));
 describe("InteractiveMode turn activity footer", () => {
-	test("live paths keep late body/status/custom/worked above four adjacent categories", async () => {
+	test("live paths keep late body above four adjacent categories and duration last", async () => {
 		const { manager, add } = managerFixture();
 		const { host } = fixture(true, manager);
 		try {
@@ -170,6 +170,7 @@ describe("InteractiveMode turn activity footer", () => {
 			});
 			host.grokTurnStartedAt = performance.now() - 100;
 			await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+			host.showStatus("late final notice");
 			const groups = categories(host.chatContainer.children);
 			expect(groups.map((group) => group.constructor.name)).toEqual([
 				"BackgroundTaskGroupComponent",
@@ -177,14 +178,15 @@ describe("InteractiveMode turn activity footer", () => {
 				"GrokThinkingTurnGroupComponent",
 				"GrokToolTurnGroupComponent",
 			]);
-			expect(host.chatContainer.children.slice(-4)).toEqual(groups);
+			expect(host.chatContainer.children.slice(-5, -1)).toEqual(groups);
+			expect(host.chatContainer.children.at(-1)).toBeInstanceOf(GrokTurnDurationComponent);
 			const text = stripAnsi(host.chatContainer.render(100).join("\n"));
 			expect(text).toContain("updated notice");
 			expect(text).not.toMatch(/\n\s*notice\s*\n/);
-			expect(text.indexOf("worked")).toBeLessThan(text.indexOf("⚙"));
+			expect(text.indexOf("worked")).toBeGreaterThan(text.indexOf("⚙"));
 			expect(
 				host.chatContainer.children.findIndex((child) => child instanceof GrokTurnDurationComponent),
-			).toBeLessThan(host.chatContainer.children.indexOf(groups[0]));
+			).toBeGreaterThan(host.chatContainer.children.indexOf(groups.at(-1)!));
 		} finally {
 			host.clearChatContainer();
 		}
@@ -316,6 +318,27 @@ describe("InteractiveMode turn activity footer", () => {
 				expect(host.chatContainer.children.some((child) => child instanceof GrokToolTurnGroupComponent)).toBe(
 					false,
 				);
+		} finally {
+			host.clearChatContainer();
+		}
+	});
+
+	test("replayed duration stays below activity and later notices", () => {
+		const { host } = fixture();
+		try {
+			host.addMessageToChat({ role: "user", content: "user", timestamp: 0 });
+			host.addMessageToChat(assistant([{ type: "thinking", thinking: "reasoning" }]));
+			host.addCustomEntryToChat({
+				type: "custom",
+				customType: "pi-turn-duration",
+				id: "duration",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00Z",
+				data: { durationMs: 1000 },
+			});
+			host.showStatus("late notice");
+			expect(host.chatContainer.children.at(-1)).toBeInstanceOf(GrokTurnDurationComponent);
+			expect(host.chatContainer.children.at(-2)).toBeInstanceOf(GrokThinkingTurnGroupComponent);
 		} finally {
 			host.clearChatContainer();
 		}

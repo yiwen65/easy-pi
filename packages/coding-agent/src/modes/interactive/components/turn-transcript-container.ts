@@ -1,7 +1,7 @@
 import { type Component, Container } from "@earendil-works/pi-tui";
 
-export type TurnActivityKind = "background" | "subagent" | "thinking" | "tools";
-const ACTIVITY_ORDER: readonly TurnActivityKind[] = ["background", "subagent", "thinking", "tools"];
+export type TurnActivityKind = "background" | "subagent" | "thinking" | "tools" | "duration";
+const ACTIVITY_ORDER: readonly TurnActivityKind[] = ["background", "subagent", "thinking", "tools", "duration"];
 
 /** Flat transcript whose activity rows remain at their owning user turn's tail.
  * Inherit Container.render unchanged so displayed-frame child offsets remain native.

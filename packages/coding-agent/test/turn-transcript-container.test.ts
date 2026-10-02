@@ -69,6 +69,24 @@ describe("turn transcript tail", () => {
 		]);
 	});
 
+	test("duration remains last after late body, activity and old-turn updates", () => {
+		const chat = new TurnTranscriptContainer();
+		const owner = chat.currentTurn;
+		chat.mountActivity("duration", row("worked"));
+		chat.mountActivity("tools", row("tools"));
+		chat.addChild(row("late notice"));
+		chat.beginTurn();
+		chat.addChild(row("next user"));
+		chat.mountActivity("background", row("late background"), owner);
+		expect(chat.render(80).map((line) => line.trimEnd())).toEqual([
+			"late notice",
+			"late background",
+			"tools",
+			"worked",
+			"next user",
+		]);
+	});
+
 	test("clear retires ownership and does not resurrect old session rows", () => {
 		const chat = new TurnTranscriptContainer();
 		const old = chat.currentTurn;

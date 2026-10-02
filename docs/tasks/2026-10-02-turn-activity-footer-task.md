@@ -9,7 +9,7 @@
 <!-- task-doc-section:background-goal -->
 ## Background and goal
 
-每个用户turn只有一个subagent折叠总览，可展开到各agent及原详情。所有存在的活动类别固定按Background → Subagent → Thinking → Tools相邻排列在该turn正文、提示和worked时长之后。晚到回执只更新其原turn，不跨到新turn。
+每个用户turn只有一个subagent折叠总览，可展开到各agent及原详情。所有存在的活动类别固定按Background → Subagent → Thinking → Tools相邻排列在该turn正文、提示之后；用户后续明确worked时长必须位于这些活动类别之后，始终为该turn最后一行。晚到回执只更新其原turn，不跨到新turn。
 
 <!-- task-doc-section:scope-non-goals -->
 ## Scope and non-goals
@@ -39,7 +39,7 @@
 ## Acceptance criteria
 
 1. 同turn多个agent折叠时只有一个Subagent总览行，展开保留各agent完整任务/结果/Activity/Diagnostics。
-2. 每turn所有活动块严格B/S/Thinking/Tools顺序且相邻；晚正文、独立工具、状态、worked、compaction notice不能插入四组之间或之后。
+2. 每turn所有活动块严格B/S/Thinking/Tools顺序且相邻；晚正文、独立工具、状态、compaction notice不能插入四组之间或之后；worked时长作为唯一尾标位于四组之后。
 3. user新turn后老BG更新和旧child回执不移位；同agent新followup属于新parent turn，旧result ID仍能定位旧组。
 4. 流式与renderSessionItems/rebuild相同结构；legacy及没有user的恢复内容有合理隐式turn。
 5. Ctrl+O及局部选择/真实VirtualTerminal SGR展开/收起继续工作，快照定位不重新读取可变布局；选区、窄屏、turn结束停止滚动不回归。
@@ -53,7 +53,7 @@
 - Serialization constraints: authority文档仅root写；最终集成后独立只读审查，root复测验收；使用当前native spawn，不使用退役DAG。
 
 固定接线合同：
-- 新 `TurnTranscriptContainer extends Container`（不override render，以保留Container原生frame offsets）；`currentTurn: object`为不透明稳定token，`beginTurn(): void`切边界；`mountActivity(kind: "background"|"subagent"|"thinking"|"tools", component: Component, owner?: object): void`将组件放到所属turn尾部固定顺序；普通addChild自动保持当前尾部在正文之后。clear重置token/maps。
+- 新 `TurnTranscriptContainer extends Container`（不override render，以保留Container原生frame offsets）；`currentTurn: object`为不透明稳定token，`beginTurn(): void`切边界；`mountActivity(kind: "background"|"subagent"|"thinking"|"tools"|"duration", component: Component, owner?: object): void`将组件放到所属turn尾部固定顺序，duration始终最后；普通addChild自动保持当前尾部在正文之后。clear重置token/maps。
 - 新 `SubagentTurnGroupComponent extends Container`：setExpanded、handleOverviewClick(row,width)、completeTurn、dispose；折叠一行，展开各child原组件。
 - Router constructor原container/getExpanded后增加可选 `{getTurn:()=>object,mount:(group:SubagentTurnGroupComponent,owner:object)=>void}`；`groupFor(path)`仍返回当前turn leaf；`currentGroups()`返回所有leaf方便introspection；`turnGroups()`返回外层组。Router按receipt child turn_id保存owner，跨turnmailbox仅更新原组，fallback不猜旧归属。
 - `SubagentGroupComponent.overviewLine(width): string`供外层预览，不临时切换expanded；聚合鼠标用child.render返回lines绑定的不可变handler，而不是重新layout。TUI已有getRenderedContentClickHandlers从index追加导出，读元数据不授予权限。
@@ -168,6 +168,27 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-006 — Worked时长为turn最终尾标
+
+- Status: done
+- Owner: coordinator
+- Objective: 按用户后续纠正，将worked放在活动组之后并抵抗晚到内容移位。
+- Inputs and prerequisites: 用户“worked time 应该始终处于最底部”；T-004实现。
+- Scope or files: turn-transcript-container.ts、interactive-mode.ts、turn-transcript-container.test.ts、turn-activity-footer.test.ts、本文。
+- Expected output: duration尾部槽位；实时与历史custom entry相同挂载。
+- Dependencies: T-004.
+- Execution steps:
+  1. 在固定尾部顺序末尾增加duration。
+  2. 两个时长入口都用mountActivity。
+  3. 验证晚notice、晚旧BG和历史时长不越过worked。
+- Acceptance criteria:
+  - worked始终在所属turn最底部，新user仍在旧worked之后。
+- Verification method:
+  - container/footer/Grok/compaction定向测试、tsgo、Biome及npmcheck。
+- Validation evidence: 四目标文件30/30通过；新增实时晚notice、历史时长和跨turn晚BG排序断言。最终tsgo与owned diff通过，完整npmcheck格式通过后仍被无关computer-native材料pin阻断；4处formatter改写按已知hash核对后恢复。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -200,9 +221,13 @@
 
 - 2026-10-02: 18个owned源码/测试文件正常提交2e565d10e，无hook bypass；T004 done。外部全仓gate仍阻断，Final partial/Overall blocked。临时formatter备份确认恢复原bytes；未push。
 
+- 2026-10-02: 用户后续纠正worked必须最后；T006开始，前述worked在正文中排序被本合同覆盖。实现duration固定尾槽，实时及历史入口一致。
+
+- 2026-10-02: T006 done，duration作为四类别后的最终尾标；两入口及晚内容/跨turntests通过30/30。初次新增测试notice文本含worked导致字符串定位歧义，改为独立notice文本后通过，未削弱组件顺序断言。全仓gate仍受无关材料阻断，无关formatter4处已精确恢复。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: T001～T005全部完成；root17文件266/266、全量tsgo、scopedBiome18files/diff、shrinkwrap/install-lock/browser smoke通过，fresh静态review无可操作问题。实现提交2e565d10e。完整npmcheck运行后在其它session的computer-native材料依赖pin检查失败，故Overall blocked且最终保留partial，不宣称全仓通过。
+- Evidence: T001～T006全部完成；后续worked最底部修正4文件30/30及tsgo通过；root17文件266/266、全量tsgo、scopedBiome18files/diff、shrinkwrap/install-lock/browser smoke通过，fresh静态review无可操作问题。实现提交2e565d10e。完整npmcheck运行后在其它session的computer-native材料依赖pin检查失败，故Overall blocked且最终保留partial，不宣称全仓通过。
 - Limitations: 不build、不real API、不push，未做物理终端/字体截图验收；VirtualTerminal及render行序列已验证。无receipt旧mailbox不猜原turn，按接收turnfallback。未更改其它session的LEARNS.md；晚promotion阅读状态的因果回归已记录本文，受owned文件边界限制不写learns。

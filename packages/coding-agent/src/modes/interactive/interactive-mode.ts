@@ -3689,7 +3689,7 @@ export class InteractiveMode {
 						// Keep the marker when the transcript is rebuilt or the session is resumed.
 						// Custom entries are UI metadata and do not enter the provider context.
 						this.sessionManager.appendCustomEntry(TURN_DURATION_ENTRY_TYPE, { durationMs: duration });
-						this.chatContainer.addChild(new GrokTurnDurationComponent(duration, this.outputPad));
+						this.chatContainer.mountActivity("duration", new GrokTurnDurationComponent(duration, this.outputPad));
 					}
 				}
 
@@ -3887,7 +3887,10 @@ export class InteractiveMode {
 				Number.isFinite(data.durationMs) &&
 				data.durationMs >= 0
 			) {
-				this.chatContainer.addChild(new GrokTurnDurationComponent(data.durationMs, this.outputPad));
+				this.chatContainer.mountActivity(
+					"duration",
+					new GrokTurnDurationComponent(data.durationMs, this.outputPad),
+				);
 			}
 			return;
 		}
