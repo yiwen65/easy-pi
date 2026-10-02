@@ -220,15 +220,12 @@ export function parseDeliverResult(text: unknown): {
 }
 
 type SubagentState = "running" | "completed" | "failed" | "interrupted" | "closed";
-const STATE_PRESENTATION: Record<
-	SubagentState,
-	{ icon: string; word: string; color: "success" | "warning" | "error" | "muted" | "dim" }
-> = {
-	running: { icon: "●", word: "Running", color: "success" },
-	completed: { icon: "✓", word: "Completed", color: "dim" },
-	failed: { icon: "✗", word: "Failed", color: "error" },
-	interrupted: { icon: "⏸", word: "Interrupted", color: "warning" },
-	closed: { icon: "■", word: "Closed", color: "muted" },
+const STATE_LABELS: Record<SubagentState, string> = {
+	running: "Running",
+	completed: "Completed",
+	failed: "Ended",
+	interrupted: "Interrupted",
+	closed: "Closed",
 };
 
 function isTerminalStatus(value: unknown): value is "completed" | "failed" | "interrupted" {
@@ -698,9 +695,7 @@ export class SubagentGroupComponent extends Container {
 			this.activities.every((item) =>
 				["get_agent_result", "list_agent_turns", "wait_agent"].includes(item.toolName),
 			);
-		const presentation = queryOnly
-			? { icon: "?", word: "State unknown", color: "dim" as const }
-			: STATE_PRESENTATION[this.state];
+		const stateLabel = queryOnly ? "State unknown" : STATE_LABELS[this.state];
 		const summary =
 			queryOnly && this.results[0]
 				? `Read: ${this.results[0].displayText}`
@@ -711,7 +706,10 @@ export class SubagentGroupComponent extends Container {
 		const latest = this.latestTurnId
 			? this.results.find((item) => item.envelope.turnId === this.latestTurnId && item.mailbox)
 			: this.results.at(-1);
-		const outcome = this.state !== "running" ? latest?.outcome : undefined;
+		const outcome =
+			this.state !== "running" && latest?.outcome !== "succeeded" && latest?.outcome !== "failed"
+				? latest?.outcome
+				: undefined;
 		const compact = width < 60;
 		const separator = compact ? " " : " · ";
 		const badge = latest?.warning
@@ -721,24 +719,19 @@ export class SubagentGroupComponent extends Container {
 					? "!incomplete"
 					: "!invalid"
 			: undefined;
-		const prefix =
-			theme.fg("muted", this.expanded ? "▾ " : "▸ ") +
-			(!compact ? theme.fg(presentation.color, `${presentation.icon} `) : "");
+		const prefix = theme.fg("success", `${this.expanded ? "▾" : "▸"} ↳ Subagent `);
 		const metadata =
-			theme.fg(presentation.color, `${separator}${presentation.word}`) +
-			(outcome
-				? theme.fg(
-						outcome === "succeeded" ? "dim" : "warning",
-						`${separator}${compact ? "out:" : "Outcome: "}${outcome}`,
-					)
-				: "") +
+			theme.fg("muted", `${separator}${stateLabel}`) +
+			(outcome ? theme.fg("warning", `${separator}${outcome}`) : "") +
 			(badge ? theme.fg("warning", `${separator}${badge}`) : "");
 		const preview = !this.expanded && summary ? oneLine(summary) : "";
 		const minimumPreview = Math.min(8, visibleWidth(preview));
-		const duration = theme.fg("muted", `${separator}${this.elapsed(now)}`);
+		const elapsed = this.elapsed(now);
+		const duration = elapsed === "unknown" ? "" : theme.fg("muted", `${separator}${elapsed}`);
 		// Critical state/outcome/warning wins over time and identity. Reserve a readable newest preview
 		// when possible rather than letting a long name or warning consume the entire collapsed row.
 		const showDuration =
+			duration.length > 0 &&
 			visibleWidth(prefix + metadata + duration) + 1 + (preview ? separator.length + minimumPreview : 0) <= width;
 		const available = Math.max(0, width - visibleWidth(prefix + metadata + (showDuration ? duration : "")));
 		const previewReserve =

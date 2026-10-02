@@ -24,7 +24,7 @@ const OUTPUT_PREVIEW_BYTES = 8 * 1024;
 
 /**
  * One folding transcript block for a user turn's background bash tasks. Collapsed: a single live line
- * ("⚙ N background tasks · latest command") refreshed once per second while tasks are active;
+ * ("⚙ Background · N · latest command") refreshed once per second while tasks are active;
  * the command shows its head while tasks come and go and scrolls its truncated part into view
  * once the line sits idle.
  * Expanded: one line per task (icon, id, state, duration, command). Clicking a task row expands
@@ -104,22 +104,15 @@ export class BackgroundTaskGroupComponent extends Container {
 		// Membership insertion order tracks starts, including equal timestamps and repeated registrations.
 		const latestTaskId = [...this.taskIds].at(-1);
 		const latest = tasks.find((task) => task.id === latestTaskId);
-		const count = `${active.length} running${terminalCount > 0 ? ` · ${terminalCount} finished` : ""}`;
+		const count = active.length > 0 ? `${active.length} running · ${tasks.length}` : `${terminalCount}`;
 		const command = latest ? oneLine(latest.command) : "";
 		this.scroller.setText(command);
-		const failures = tasks.filter((task) => task.status === "failed" || task.status === "timed_out").length;
 		const disclosure = this.expanded ? "▾" : "▸";
-		const failureLabel = failures ? `! ⚙ ${failures} failed ·` : " ⚙";
-		// Put failures ahead of the long title so narrow headers still signal older errors.
-		const prefix = `${disclosure}${failureLabel} background tasks · ${count}`;
+		const prefix = `${disclosure} ⚙ Background · ${count}`;
 		const gap = command ? " · " : "";
 		const commandWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(gap));
 		const suffix = this.scroller.window(commandWidth);
-		return truncateToWidth(
-			(failures ? theme.fg("warning", prefix) : theme.fg("accent", prefix)) + theme.fg("muted", gap + suffix),
-			width,
-			"",
-		);
+		return truncateToWidth(theme.fg("warning", prefix) + theme.fg("muted", gap + suffix), width, "");
 	}
 
 	private taskLine(record: BackgroundTaskRecord, width: number, now: number): string {

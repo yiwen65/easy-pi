@@ -149,8 +149,11 @@ describe("SubagentGroupComponent", () => {
 				resultValidation: { contract: "valid", outcome },
 			});
 			const header = group.render(160).map(stripVTControlCharacters).join("\n");
+			expect(header).toContain("↳ Subagent");
 			expect(header).toContain("Completed");
-			expect(header).toContain(`Outcome: ${outcome}`);
+			if (outcome === "blocked" || outcome === "partial") expect(header).toContain(outcome);
+			else expect(header).not.toContain(outcome);
+			expect(header).not.toContain("Outcome:");
 			expect(header).not.toContain("Accepted");
 			group.setExpanded(true);
 			expect(group.render(160).map(stripVTControlCharacters).join("\n")).toContain(`Outcome: ${outcome}`);
@@ -191,9 +194,11 @@ describe("SubagentGroupComponent", () => {
 			const lines = group.render(width).map(stripVTControlCharacters);
 			expect(lines).toHaveLength(1);
 			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
+			expect(lines[0]).toContain("↳ Subagent");
 			expect(lines[0]).toContain("Completed");
-			expect(lines[0]).toContain(outcome);
-			expect(lines[0]).toMatch(/(?:out:|Outcome:)/);
+			if (outcome === "blocked") expect(lines[0]).toContain(outcome);
+			else expect(lines[0]).not.toContain("succeeded");
+			expect(lines[0]).not.toContain("Outcome:");
 			if (malformed) expect(lines[0]).toContain("!format");
 			if (width === 80) expect(lines[0]).toContain("LATEST");
 			expect(lines[0]).not.toContain("OLD_PREVIEW");
@@ -343,7 +348,9 @@ describe("SubagentGroupComponent", () => {
 	])("uses known envelope outcomes for result text wrappers: %j", ({ text, outcome }) => {
 		const group = new SubagentGroupComponent("/root/worker");
 		group.addMailboxResult({ ...ENVELOPE, text, resultValidation: { contract: "valid", outcome } });
-		expect(group.render(160).join("\n")).toContain(`Outcome: ${outcome}`);
+		const header = group.render(160).join("\n");
+		if (outcome === "failed") expect(header).not.toContain("failed");
+		else expect(header).toContain(outcome);
 		group.setExpanded(true);
 		expect(group.render(160).join("\n")).toContain(`Outcome: ${outcome}`);
 		expect(group.render(160).join("\n")).not.toContain('"summary"');
@@ -440,8 +447,8 @@ describe("SubagentGroupComponent", () => {
 			text: "LATEST_PARTIAL",
 			resultValidation: { contract: "valid", outcome: "partial" },
 		});
-		expect(group.render(160).join("\n")).toContain("Outcome: partial");
-		expect(group.render(160).join("\n")).not.toContain("Outcome: blocked");
+		expect(group.render(160).join("\n")).toContain("partial");
+		expect(group.render(160).join("\n")).not.toContain("blocked");
 		group.setExpanded(true);
 		const text = group.render(160).join("\n");
 		expect(text).toContain("Outcome: blocked");
@@ -684,7 +691,7 @@ describe("SubagentGroupComponent", () => {
 		},
 	);
 
-	it("a rejected spawn shows Failed with the reason instead of hanging at Running", () => {
+	it("a rejected spawn ends without a failure status badge and preserves the reason in details", () => {
 		const group = new SubagentGroupComponent("/root/w");
 		const tool = makeTool("spawn_agent", { task_name: "w" });
 		group.addTool("spawn_agent", tool, { delegation: { task: { objective: "probe" } } });
@@ -699,9 +706,13 @@ describe("SubagentGroupComponent", () => {
 			isError: true,
 		});
 		const header = group.render(100).join("\n");
-		expect(header).toContain("Failed");
-		expect(header).toContain("tools_unavailable");
+		expect(header).toContain("↳ Subagent");
+		expect(header).toContain("Ended");
+		expect(header).not.toContain("Failed");
 		expect(header).not.toContain("Running");
+		group.setExpanded(true);
+		expect(group.render(100).join("\n")).toContain("Failed:");
+		expect(group.render(100).join("\n")).toContain("tools_unavailable");
 	});
 
 	it("wraps the full objective without repeating the summary in the expanded header", () => {

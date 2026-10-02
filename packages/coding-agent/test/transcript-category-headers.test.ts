@@ -1,0 +1,86 @@
+import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
+import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { expect, test } from "vitest";
+import { BackgroundTaskGroupComponent } from "../src/modes/interactive/components/background-task-group.ts";
+import { SubagentGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
+import { getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { GrokThinkingTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-thinking-turn-group.ts";
+import { GrokToolExecutionComponent } from "../src/modes/interactive-grok/components/grok-tool-execution.ts";
+import { GrokToolTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-tool-turn-group.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
+
+test("category headers have stable names, distinct symbols/colors and no failure badges", () => {
+	initTheme("dark");
+	const thinking = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 0, false);
+	thinking.updateThinking({}, "latest reasoning");
+	thinking.completeTurn();
+	const tool = new GrokToolExecutionComponent(
+		"edit",
+		"failed-tool",
+		{ path: "/tmp/latest.ts" },
+		{},
+		undefined,
+		{ requestRender: () => {} } as unknown as TUI,
+		process.cwd(),
+	);
+	tool.updateResult({ content: [{ type: "text", text: "ERROR_DETAIL" }], isError: true }, false);
+	const tools = new GrokToolTurnGroupComponent();
+	tools.addTool(tool);
+	tools.completeTurn();
+	const task: BackgroundTaskRecord = {
+		id: "task-1",
+		command: "latest command",
+		cwd: process.cwd(),
+		status: "failed",
+		startedAt: 1,
+		endedAt: 2,
+		lastOutputAt: 1,
+		outputPath: "/tmp/log",
+		promoted: false,
+	};
+	const manager = {
+		list: () => [task],
+		onStart: () => () => {},
+		onTerminal: () => () => {},
+		stallTimeoutMs: 0,
+	} as unknown as BackgroundTaskManager;
+	const background = new BackgroundTaskGroupComponent(manager, () => {});
+	background.completeTurn();
+	const subagent = new SubagentGroupComponent("/root/worker");
+	subagent.addMailboxResult({
+		id: "m1",
+		from: "/root/worker",
+		turnId: "t1",
+		status: "failed",
+		text: JSON.stringify({ summary: "latest result", outcome: "failed" }),
+		resultValidation: { contract: "not_completed" },
+	});
+	const categories = [
+		{ component: thinking, label: "✦ Thinking", color: "accent" },
+		{ component: tools, label: "◆ Tools", color: "text" },
+		{ component: background, label: "⚙ Background", color: "warning" },
+		{ component: subagent, label: "↳ Subagent", color: "success" },
+	] as const;
+	try {
+		expect(new Set(categories.map(({ color }) => theme.getFgAnsi(color))).size).toBe(4);
+		for (const { component, label, color } of categories) {
+			const lines = component.render(120);
+			expect(lines).toHaveLength(1);
+			expect(stripAnsi(lines[0])).toContain(label);
+			expect(lines[0]).toContain(theme.getFgAnsi(color));
+			expect(stripAnsi(lines[0])).not.toMatch(/\bfailed\b/i);
+			for (const width of [1, 2, 8, 24, 40])
+				expect(component.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+		}
+		tools.setExpanded(true);
+		expect(stripAnsi(tools.render(120).join("\n"))).toContain("ERROR_DETAIL");
+		background.setExpanded(true);
+		expect(stripAnsi(background.render(120).slice(1).join("\n"))).toContain("Failed");
+		subagent.setExpanded(true);
+		expect(stripAnsi(subagent.render(120).join("\n"))).toContain("Outcome: failed");
+	} finally {
+		thinking.dispose();
+		tools.dispose();
+		background.dispose();
+	}
+});

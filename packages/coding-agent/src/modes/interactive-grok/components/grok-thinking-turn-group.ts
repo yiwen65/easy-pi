@@ -105,11 +105,16 @@ export class GrokThinkingTurnGroupComponent extends Container {
 		const pad = Math.min(this.outputPad, Math.max(0, width - 1));
 		const padLeft = " ".repeat(pad);
 		const contentWidth = width - pad;
-		const prefix = `${this.expanded ? "▾" : "▸"} ✦ `;
+		const label = `${this.expanded ? "▾" : "▸"} ✦ Thinking`;
 		const liveThinking = this.userHidden || this.expanded ? undefined : this.latestThinking();
+		const detail = liveThinking ? flattenInline(liveThinking) : this.hiddenLabel;
+		const prefix =
+			liveThinking || (detail && detail !== "Thinking..." && detail !== "Thinking") ? `${label} · ` : label;
 		const body = liveThinking
 			? this.scroller.window(Math.max(0, contentWidth - visibleWidth(prefix)))
-			: this.hiddenLabel;
+			: prefix === label
+				? ""
+				: detail;
 		const line = theme.italic(theme.fg("accent", `${prefix}${body}`));
 		return padLeft + truncateToWidth(line, contentWidth, "");
 	}

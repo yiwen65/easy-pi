@@ -250,7 +250,7 @@ describe("Grok transcript components", () => {
 		// Collapsed turn shows only the current tool, with no count while live.
 		const live = stripAnsi(group.render(80).join("\n"));
 		expect(group.render(80)).toHaveLength(1);
-		expect(live).toContain("◈ bash  npm run build");
+		expect(live).toContain("◆ Tools · bash  npm run build");
 		expect(live).not.toContain("2 tools");
 		expect(live).not.toContain("read");
 
@@ -258,8 +258,8 @@ describe("Grok transcript components", () => {
 		current.updateResult({ content: [{ type: "text", text: "build output" }], isError: false }, false);
 		const settled = stripAnsi(group.render(80).join("\n"));
 		expect(group.render(80)).toHaveLength(1);
-		expect(settled).toContain("◆ bash  npm run build");
-		expect(settled).toContain("2 tools");
+		expect(settled).toContain("◆ Tools · bash  npm run build");
+		expect(settled).toContain(" · 2");
 
 		// Level 1: click the summary to reveal one collapsed row per tool.
 		expect(group.handleOverviewClick(0, 80)).toBe(true);
@@ -306,20 +306,19 @@ describe("Grok transcript components", () => {
 		group.addTool(older);
 		group.addTool(latest);
 		try {
-			expect(stripAnsi(group.render(100)[0])).toContain("◆ bash  echo latest");
+			expect(stripAnsi(group.render(100)[0])).toContain("◆ Tools · bash  echo latest");
 			expect(stripAnsi(group.render(100)[0])).toMatch(/^▸/);
-			if (state === "error") {
-				expect(stripAnsi(group.render(100)[0])).toContain("1 failed");
-				expect(stripAnsi(group.render(2)[0])).toBe("▸!");
-			}
+			expect(stripAnsi(group.render(100)[0])).not.toContain("failed");
+			expect(stripAnsi(group.render(2)[0])).not.toContain("!");
 			expectFits(group, [1, 2, 4, 20, 80]);
 			group.completeTurn();
-			expect(stripAnsi(group.render(100)[0])).toContain("◆ bash  echo latest");
+			expect(stripAnsi(group.render(100)[0])).toContain("◆ Tools · bash  echo latest");
 			group.setExpanded(true);
 			expect(stripAnsi(group.render(100)[0])).toMatch(/^▾/);
 			expect(stripAnsi(group.render(100).join("\n"))).toContain("/tmp/older.ts");
+			if (state === "error") expect(stripAnsi(group.render(100).join("\n"))).toContain("✕ read");
 			group.setExpanded(false);
-			expect(stripAnsi(group.render(100)[0])).toContain("◆ bash  echo latest");
+			expect(stripAnsi(group.render(100)[0])).toContain("◆ Tools · bash  echo latest");
 		} finally {
 			group.dispose();
 		}
@@ -345,7 +344,7 @@ describe("Grok transcript components", () => {
 			try {
 				const row = group.render(40)[0] ?? "";
 				expect(visibleWidth(row)).toBeLessThanOrEqual(40);
-				expect(stripAnsi(row)).toContain('◈ bash  rg -n "thinking-turn-group"');
+				expect(stripAnsi(row)).toContain('◆ Tools · bash  rg -n "');
 				expect(stripAnsi(row)).not.toContain("head -20");
 
 				// Idle: the hidden part of the command scrolls through the row.
@@ -361,7 +360,7 @@ describe("Grok transcript components", () => {
 				tool.updateResult({ content: [{ type: "text", text: "done" }], isError: false }, false);
 				group.completeTurn();
 				const completed = stripAnsi(group.render(40)[0] ?? "");
-				expect(completed).toContain('◆ bash  rg -n "thinking-turn-group"');
+				expect(completed).toContain('◆ Tools · bash  rg -n "');
 				requestRender.mockClear();
 				vi.advanceTimersByTime(10_000);
 				expect(stripAnsi(group.render(40)[0] ?? "")).toBe(completed);
@@ -538,8 +537,8 @@ describe("Grok transcript components", () => {
 		// Internal assistant/tool boundaries keep the latest thinking visible.
 		const activeFrame = group.render(80).join("\n");
 		const active = stripAnsi(activeFrame);
-		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ second reasoning")));
-		expect(active).toContain("✦ second reasoning");
+		expect(activeFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ Thinking · second reasoning")));
+		expect(active).toContain("✦ Thinking · second reasoning");
 		expect(active).not.toContain("first reasoning");
 		expect(active).not.toContain("Thinking...");
 
@@ -547,17 +546,17 @@ describe("Grok transcript components", () => {
 		group.completeTurn();
 		const collapsedFrame = group.render(80).join("\n");
 		const collapsed = stripAnsi(collapsedFrame);
-		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ second reasoning")));
+		expect(collapsedFrame).toContain(theme.italic(theme.fg("accent", "▸ ✦ Thinking · second reasoning")));
 		expect(group.entryCount).toBe(2);
 		expect(group.render(80)).toHaveLength(1);
-		expect(collapsed).toContain("✦ second reasoning");
+		expect(collapsed).toContain("✦ Thinking · second reasoning");
 		expect(collapsed).not.toContain("Thought process");
 		expect(collapsed).not.toContain("first reasoning");
 		expect(collapsed).not.toContain("Thinking...");
 
 		expect(group.handleOverviewClick(0)).toBe(true);
 		const expanded = stripAnsi(group.render(80).join("\n"));
-		expect(expanded).toContain("✦ Thinking...");
+		expect(expanded).toContain("✦ Thinking");
 		expect(expanded).toContain("first reasoning");
 		expect(expanded).toContain("second reasoning");
 
@@ -576,31 +575,31 @@ describe("Grok transcript components", () => {
 		const owner = {};
 		try {
 			group.updateThinking(owner, "正在分析输入并检查边界条件，然后核对第二处");
-			const live = group.render(20)[0] ?? "";
-			expect(visibleWidth(live)).toBeLessThanOrEqual(20);
+			const live = group.render(32)[0] ?? "";
+			expect(visibleWidth(live)).toBeLessThanOrEqual(32);
 			// Streaming output: the newest text is on screen, earlier text already scrolled off.
 			expect(stripAnsi(live)).toContain("第二处");
 			expect(stripAnsi(live)).not.toContain("正在分析输入");
 
 			// Growing text keeps following the newest part.
 			group.updateThinking(owner, "正在分析输入并检查边界条件，然后核对第二处，最后汇总");
-			expect(stripAnsi(group.render(20)[0] ?? "")).toContain("最后汇总");
+			expect(stripAnsi(group.render(32)[0] ?? "")).toContain("最后汇总");
 
 			// Idle: the row keeps its place and then cycles the hidden beginning in.
-			const tail = stripAnsi(group.render(20)[0] ?? "");
+			const tail = stripAnsi(group.render(32)[0] ?? "");
 			vi.advanceTimersByTime(1_000);
-			expect(stripAnsi(group.render(20)[0] ?? "")).toBe(tail);
+			expect(stripAnsi(group.render(32)[0] ?? "")).toBe(tail);
 			let sawHead = false;
 			for (let tick = 0; tick < 80 && !sawHead; tick++) {
 				vi.advanceTimersByTime(120);
-				sawHead = stripAnsi(group.render(20)[0] ?? "").includes("正在分析输入");
+				sawHead = stripAnsi(group.render(32)[0] ?? "").includes("正在分析输入");
 			}
 			expect(sawHead).toBe(true);
 			expect(requestRender).toHaveBeenCalled();
 
 			// Expanding or completing the turn drops the scroll again.
 			group.setExpanded(true);
-			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking...");
+			expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking");
 			group.completeTurn();
 			group.setExpanded(false);
 			const completed = stripAnsi(group.render(80)[0]);
@@ -620,10 +619,10 @@ describe("Grok transcript components", () => {
 	test("preserves custom thinking labels and keeps hidden thinking private", () => {
 		const group = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Custom reasoning", 1, true);
 		group.updateThinking({}, "private content");
-		expect(stripAnsi(group.render(80)[0])).toContain("✦ Custom reasoning");
+		expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking · Custom reasoning");
 		expect(stripAnsi(group.render(80).join("\n"))).not.toContain("private content");
 		group.completeTurn();
-		expect(stripAnsi(group.render(80)[0])).toContain("✦ Custom reasoning");
+		expect(stripAnsi(group.render(80)[0])).toContain("✦ Thinking · Custom reasoning");
 	});
 
 	test("toggles turn thinking from every rendered row, including wrapped content", () => {

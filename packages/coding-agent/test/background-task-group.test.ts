@@ -75,9 +75,8 @@ describe("BackgroundTaskGroupComponent", () => {
 		// collapsed: exactly one line with the live count, showing the latest command verbatim
 		let lines = group.render(100);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("background tasks");
-		expect(lines[0]).toContain("1 running");
-		expect(lines[0]).toContain("1 finished");
+		expect(lines[0]).toContain("⚙ Background");
+		expect(lines[0]).toContain("1 running · 2");
 		expect(lines[0]).toContain("setTimeout");
 		// The command text never scrolls, so a later render shows the same line.
 		expect(group.render(100)[0]).toBe(lines[0]);
@@ -137,7 +136,7 @@ describe("BackgroundTaskGroupComponent", () => {
 			for (const status of ["succeeded", "failed", "stopped"] as const) {
 				latest.status = status;
 				latest.endedAt = 20;
-				expect(header()).toContain("1 running · 1 finished");
+				expect(header()).toContain("1 running · 2");
 				expect(header()).toContain("latest-command");
 				expect(header()).not.toContain("older-command");
 			}
@@ -146,7 +145,7 @@ describe("BackgroundTaskGroupComponent", () => {
 			// Repeated task registration and later completion cannot change the start order.
 			group.addTask(older.id);
 			group.completeTurn();
-			expect(header()).toContain("0 running · 2 finished");
+			expect(header()).toContain("Background · 2");
 			expect(header()).toContain("latest-command");
 			group.setExpanded(true);
 			const expanded = group.render(120).map(stripVTControlCharacters);
@@ -181,7 +180,7 @@ describe("BackgroundTaskGroupComponent", () => {
 		const group = new BackgroundTaskGroupComponent(manager, requestRender);
 		try {
 			const head = stripVTControlCharacters(group.render(60).join("\n"));
-			expect(head).toContain("background tasks");
+			expect(head).toContain("⚙ Background");
 			expect(head).toContain("npm run build");
 			expect(head).not.toContain("longlonglong");
 
@@ -255,7 +254,7 @@ describe("BackgroundTaskGroupComponent", () => {
 			requestRender.mockClear();
 			terminalListener?.(record);
 			expect(requestRender).toHaveBeenCalled();
-			expect(header()).toContain("0 running · 1 finished");
+			expect(header()).toContain("Background · 1");
 			const finishedHead = header();
 			vi.advanceTimersByTime(10_000);
 			expect(header()).toBe(finishedHead);
@@ -410,7 +409,7 @@ describe("BackgroundTaskGroupComponent", () => {
 		expect(visibleWidth(formatDisplayPath("\x1b[31m中文\x1b[0m", 1))).toBe(1);
 	});
 
-	it("summarizes failures without replacing the latest command or counting stopped tasks", () => {
+	it("keeps failures in expanded rows, not the compact category header", () => {
 		const records = (["failed", "timed_out", "stopped", "succeeded"] as const).map((status, index) => ({
 			id: `task-${index}`,
 			command: index === 3 ? "latest-command" : `older-${index}`,
@@ -430,12 +429,14 @@ describe("BackgroundTaskGroupComponent", () => {
 		const group = new BackgroundTaskGroupComponent(fixtureManager, () => {});
 		try {
 			group.completeTurn();
-			expect(stripVTControlCharacters(group.render(120)[0])).toContain("2 failed");
-			expect(stripVTControlCharacters(group.render(2)[0])).toBe("▸!");
+			expect(stripVTControlCharacters(group.render(120)[0])).toContain("⚙ Background · 4");
+			expect(stripVTControlCharacters(group.render(120)[0])).not.toContain("failed");
+			expect(stripVTControlCharacters(group.render(2)[0])).not.toContain("!");
 			expect(stripVTControlCharacters(group.render(120)[0])).toContain("latest-command");
 			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^▸/);
 			group.setExpanded(true);
 			expect(stripVTControlCharacters(group.render(120)[0])).toMatch(/^▾/);
+			expect(stripVTControlCharacters(group.render(120).join("\n"))).toContain("Failed");
 		} finally {
 			group.dispose();
 		}
@@ -515,7 +516,7 @@ describe("background task transcript mounting", () => {
 			);
 			await manager.stop(first.value.id);
 			await manager.wait(first.value.id, 10_000);
-			expect(firstGroup.render(200).join("\n")).toContain("0 running · 1 finished");
+			expect(firstGroup.render(200).join("\n")).toContain("Background · 1");
 			expect(secondGroup.render(200).join("\n")).toContain("1 running");
 			const disposeFirst = vi.spyOn(firstGroup, "dispose");
 			const disposeSecond = vi.spyOn(secondGroup, "dispose");
@@ -541,7 +542,7 @@ describe("background task transcript mounting", () => {
 		const group = mode.chatContainer.children[0] as BackgroundTaskGroupComponent;
 		expect(group).toBeInstanceOf(BackgroundTaskGroupComponent);
 		expect(group.manager).toBe(manager);
-		expect(group.render(100).join("\n")).toContain("background tasks");
+		expect(group.render(100).join("\n")).toContain("⚙ Background");
 
 		// later starts reuse the mounted block instead of stacking another one
 		await manager.start("echo mounted-2", { cwd: dir, env: { ...process.env } });

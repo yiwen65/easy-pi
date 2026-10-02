@@ -124,7 +124,7 @@ export class GrokToolTurnGroupComponent extends Container {
 	}
 
 	/**
-	 * Collapsed row: tool symbol, name and args summary; plus the aggregate count
+	 * Collapsed row: category marker, latest tool name and args; plus the aggregate count
 	 * once the turn settled. The summary scrolls its hidden part into view while
 	 * the row sits idle.
 	 */
@@ -135,19 +135,12 @@ export class GrokToolTurnGroupComponent extends Container {
 		this.scroller.setText(flattenInline(tool.summarizeCurrentArgs()));
 
 		const settled = this.activeTool() === undefined && tools.length > 1;
-		const failures = tools.filter((entry) => entry.getGrokState() === "error").length;
-		const suffix = settled ? ` · ${tools.length} tools` : "";
-		const prefix = `${this.groupExpanded ? "▾" : "▸"}${failures ? `! ${failures} failed · ` : " "}`;
+		const suffix = settled ? ` · ${tools.length}` : "";
+		const prefix = `${this.groupExpanded ? "▾" : "▸"} ◆ Tools · `;
 		const gap = "  ";
-		const head =
-			theme.fg(failures ? "warning" : "muted", prefix) +
-			theme.fg(tool.stateColor(), `${tool.stateSymbol()} `) +
-			theme.fg("toolTitle", theme.bold(tool.getGrokToolName()));
+		const head = theme.fg("text", prefix) + theme.fg("toolTitle", theme.bold(tool.getGrokToolName()));
 		const available = Math.max(1, width - visibleWidth(suffix));
-		const summaryWidth = Math.max(
-			0,
-			available - visibleWidth(`${prefix}${tool.stateSymbol()} ${tool.getGrokToolName()}${gap}`),
-		);
+		const summaryWidth = Math.max(0, available - visibleWidth(`${prefix}${tool.getGrokToolName()}${gap}`));
 		const summary = this.scroller.window(summaryWidth);
 		const body = summary ? head + theme.fg("muted", gap + summary) : head;
 		return truncateToWidth(body + theme.fg("muted", suffix), width, "");
