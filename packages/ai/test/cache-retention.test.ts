@@ -553,13 +553,22 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			expect(capturedPayload.prompt_cache_retention).toBeUndefined();
 		});
 
+		// The Go catalog no longer lists K2.6; retain its cache opt-out coverage with an explicit fixture.
+		const openCodeGoBaseModel = MODELS["opencode-go"]["kimi-k3"];
+		const openCodeGoNoLongCacheModel = {
+			...openCodeGoBaseModel,
+			id: "test-opencode-go-no-long-cache",
+			name: "OpenCode Go Cache Opt-out Fixture",
+			compat: { ...openCodeGoBaseModel.compat, supportsLongCacheRetention: false },
+		} satisfies Model<"openai-completions">;
+
 		it.each([
 			MODELS.opencode["deepseek-v4-flash"],
 			MODELS.opencode["deepseek-v4-pro"],
 			MODELS.opencode["kimi-k2.5"],
 			MODELS.opencode["kimi-k2.6"],
 			MODELS.opencode["minimax-m2.7"],
-			MODELS["opencode-go"]["kimi-k2.6"],
+			openCodeGoNoLongCacheModel,
 		] as const)("should omit long cache retention for $provider/$id", async (metadata) => {
 			const model = metadata as Model<"openai-completions">;
 			let capturedPayload: OpenAICompletionsCachePayload | undefined;
