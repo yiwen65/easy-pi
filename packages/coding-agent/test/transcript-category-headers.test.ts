@@ -14,7 +14,7 @@ import { stripAnsi } from "../src/utils/ansi.ts";
 
 test("category headers have stable names, distinct symbols/colors and no failure badges", () => {
 	initTheme("dark");
-	const thinking = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 0, false);
+	const thinking = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
 	thinking.updateThinking({}, "latest reasoning");
 	thinking.completeTurn();
 	const tool = new GrokToolExecutionComponent(
@@ -72,7 +72,7 @@ test("category headers have stable names, distinct symbols/colors and no failure
 			const lines = component.render(120);
 			expect(lines).toHaveLength(1);
 			expect(stripAnsi(lines[0])).toBeTruthy();
-			expect(stripAnsi(lines[0]).trimStart().startsWith(label)).toBe(true);
+			expect(stripAnsi(lines[0]).startsWith(label)).toBe(true);
 			expect(stripAnsi(lines[0])).not.toMatch(/[▸▾]/);
 			expect(stripAnsi(lines[0])).not.toMatch(/Thinking|Tools|Background|Subagent/);
 			expect(lines[0]).toContain(theme.getFgAnsi(color));
@@ -91,6 +91,7 @@ test("category headers have stable names, distinct symbols/colors and no failure
 		expect(stripAnsi(subagent.render(120).join("\n"))).toContain("Outcome: failed");
 		thinking.setExpanded(true);
 		expect(stripAnsi(thinking.render(120)[0])).not.toMatch(/[▸▾]/);
+		expect(stripAnsi(thinking.render(120)[0])).toBe("✦");
 		for (const component of [thinking, tools, background, subagent]) {
 			expect(component.handleOverviewClick(0, 120)).toBe(true);
 			expect(component.render(120)).toHaveLength(1);
