@@ -174,7 +174,7 @@ describe("InteractiveMode compaction events", () => {
 		) => void;
 		renderInitialMessages.call(replay);
 		const replayedText = stripAnsi(chatContainer.render(100).join("\n"));
-		expect(replayedText).toContain("Session compacted 7 times");
+		expect(replayedText).not.toContain("Session compacted");
 		expect(replayedText).toContain("worked ");
 		expect(chatContainer.children.filter((child) => child instanceof GrokTurnDurationComponent)).toHaveLength(1);
 	});
@@ -398,7 +398,10 @@ describe("InteractiveMode compaction events", () => {
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
 			clearChatContainer: vi.fn(),
-			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]) },
+			sessionManager: {
+				buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]),
+				getEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]),
+			},
 			renderSessionEntries: vi.fn(),
 			addMessageToChat: vi.fn(),
 			addCompactionCostNotice: vi.fn(),
@@ -436,6 +439,7 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Session compacted 2 times");
 		expect(fakeThis.clearChatContainer).toHaveBeenCalledTimes(1);
 		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction]);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
@@ -479,7 +483,10 @@ describe("InteractiveMode compaction events", () => {
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
-			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([checkpointEntry]) },
+			sessionManager: {
+				buildContextEntries: vi.fn().mockReturnValue([checkpointEntry]),
+				getEntries: vi.fn().mockReturnValue([checkpointEntry]),
+			},
 			renderSessionEntries: vi.fn(),
 			addMessageToChat: vi.fn(),
 			addCompactionCostNotice: vi.fn(),
@@ -513,6 +520,18 @@ describe("InteractiveMode compaction events", () => {
 			}),
 		).resolves.toBeUndefined();
 
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Session compacted 1 time");
+		fakeThis.showStatus.mockClear();
+		for (const event of [{ aborted: true }, { aborted: false, errorMessage: "failed compaction" }]) {
+			await handleEvent.call(fakeThis, {
+				type: "compaction_end",
+				reason: "manual",
+				result: undefined,
+				willRetry: false,
+				...event,
+			});
+		}
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
 		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
 		expect(fakeThis.renderSessionEntries).not.toHaveBeenCalled();
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
