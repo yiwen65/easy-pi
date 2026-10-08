@@ -997,6 +997,7 @@ export class SubagentTurnGroupComponent extends Container {
 	}
 
 	private overviewLine(width: number): string {
+		if (this.expanded) return truncateToWidth(theme.fg("success", `↳ ${this.agentCount}`), width, "");
 		const suffix = this.agentCount > 1 ? theme.fg("muted", ` · ${this.agentCount}`) : "";
 		const head = this.latest?.overviewLine(Math.max(1, width - visibleWidth(suffix))) ?? theme.fg("success", "↳");
 		return truncateToWidth(head + suffix, width, "");

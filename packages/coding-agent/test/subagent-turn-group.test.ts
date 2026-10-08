@@ -65,6 +65,29 @@ test("several children collapse to one newest preview, and expand in two levels"
 	expect(aggregate.render(120)).toHaveLength(1);
 });
 
+test("expanded aggregate does not repeat the latest child's summary", () => {
+	const aggregate = new SubagentTurnGroupComponent();
+	for (const name of ["vehicle-auth", "client-auth-review"]) {
+		const leaf = new SubagentGroupComponent(`/root/${name}`);
+		leaf.addMailboxResult({
+			from: `/root/${name}`,
+			id: name,
+			turnId: name,
+			status: "completed",
+			text: `RESULT_${name}`,
+		});
+		aggregate.addAgent(leaf);
+	}
+	expect(stripAnsi(aggregate.render(200)[0])).toContain("RESULT_client-auth-review");
+	aggregate.handleOverviewClick(0, 200);
+	const lines = aggregate.render(200).map(stripAnsi);
+	expect(lines.filter((line) => line.includes("RESULT_client-auth-review"))).toHaveLength(1);
+	expect(lines.filter((line) => line.includes("RESULT_vehicle-auth"))).toHaveLength(1);
+	expect(lines[0]).toBe("↳ 2");
+	aggregate.handleOverviewClick(0, 200);
+	expect(stripAnsi(aggregate.render(200)[0])).toContain("RESULT_client-auth-review");
+});
+
 test("aggregate preview never changes a child's expansion or diagnostics", () => {
 	const leaf = new SubagentGroupComponent("/root/a");
 	leaf.addMailboxResult({ from: "/root/a", id: "m", turnId: "t", status: "completed", text: "LATEST_RESULT" });
