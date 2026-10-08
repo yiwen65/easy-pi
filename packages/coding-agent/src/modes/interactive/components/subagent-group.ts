@@ -726,7 +726,7 @@ export class SubagentGroupComponent extends Container {
 					? "!incomplete"
 					: "!invalid"
 			: undefined;
-		const prefix = theme.fg("success", "↳ ");
+		const prefix = theme.fg("customMessageLabel", "↳ ");
 		const metadata =
 			theme.fg("muted", `${separator}${stateLabel}`) +
 			(outcome ? theme.fg("warning", `${separator}${outcome}`) : "") +
@@ -752,7 +752,7 @@ export class SubagentGroupComponent extends Container {
 		const previewWidth = Math.max(0, available - nameWidth - separator.length);
 		return truncateToWidth(
 			prefix +
-				theme.fg("accent", truncateToWidth(name, nameWidth, "…")) +
+				theme.fg("customMessageLabel", truncateToWidth(name, nameWidth, "…")) +
 				metadata +
 				(showDuration ? duration : "") +
 				(previewReserve ? theme.fg("dim", `${separator}${truncateToWidth(preview, previewWidth, "…")}`) : ""),
@@ -997,9 +997,10 @@ export class SubagentTurnGroupComponent extends Container {
 	}
 
 	private overviewLine(width: number): string {
-		if (this.expanded) return truncateToWidth(theme.fg("success", `↳ ${this.agentCount}`), width, "");
+		if (this.expanded) return truncateToWidth(theme.fg("customMessageLabel", `↳ ${this.agentCount}`), width, "");
 		const suffix = this.agentCount > 1 ? theme.fg("muted", ` · ${this.agentCount}`) : "";
-		const head = this.latest?.overviewLine(Math.max(1, width - visibleWidth(suffix))) ?? theme.fg("success", "↳");
+		const head =
+			this.latest?.overviewLine(Math.max(1, width - visibleWidth(suffix))) ?? theme.fg("customMessageLabel", "↳");
 		return truncateToWidth(head + suffix, width, "");
 	}
 

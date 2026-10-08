@@ -48,6 +48,22 @@ test("tool group marker follows the displayed tool's current state", () => {
 	}
 });
 
+test.each(["dark", "light"])("subagent marker and name use a distinct purple color in %s", (name) => {
+	initTheme(name);
+	const leaf = new SubagentGroupComponent("/root/worker");
+	leaf.addMailboxResult({ from: "/root/worker", id: "result", turnId: "turn", status: "completed", text: "summary" });
+	const group = new SubagentTurnGroupComponent();
+	group.addAgent(leaf);
+	const color = theme.getFgAnsi("customMessageLabel");
+	for (const other of ["warning", "accent", "success"] as const) expect(color).not.toBe(theme.getFgAnsi(other));
+	const row = group.render(120)[0];
+	expect(row).toContain(theme.fg("customMessageLabel", "↳ "));
+	expect(row).toContain(theme.fg("customMessageLabel", "worker"));
+	group.setExpanded(true);
+	expect(group.render(120)[0]).toContain(theme.fg("customMessageLabel", "↳ 1"));
+	group.dispose();
+});
+
 test("category headers have distinct symbols and no failure badges", () => {
 	initTheme("dark");
 	const thinking = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
@@ -100,7 +116,7 @@ test("category headers have distinct symbols and no failure badges", () => {
 		{ component: thinking, label: "✦", color: "accent" },
 		{ component: tools, label: "◆", color: "error" },
 		{ component: background, label: "⚙", color: "warning" },
-		{ component: subagent, label: "↳", color: "success" },
+		{ component: subagent, label: "↳", color: "customMessageLabel" },
 	] as const;
 	try {
 		expect(new Set(categories.map(({ color }) => theme.getFgAnsi(color))).size).toBe(4);
