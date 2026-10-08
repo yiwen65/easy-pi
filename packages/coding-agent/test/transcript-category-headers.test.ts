@@ -12,7 +12,43 @@ import { GrokToolExecutionComponent } from "../src/modes/interactive-grok/compon
 import { GrokToolTurnGroupComponent } from "../src/modes/interactive-grok/components/grok-tool-turn-group.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
-test("category headers have stable names, distinct symbols/colors and no failure badges", () => {
+test("tool group marker follows the displayed tool's current state", () => {
+	initTheme("dark");
+	const makeTool = (id: string) =>
+		new GrokToolExecutionComponent(
+			"read",
+			id,
+			{ path: `/tmp/${id}` },
+			{},
+			undefined,
+			{ requestRender: () => {} } as unknown as TUI,
+			process.cwd(),
+		);
+	const group = new GrokToolTurnGroupComponent();
+	const older = makeTool("older");
+	older.updateResult({ content: [], isError: true });
+	group.addTool(older);
+	const current = makeTool("current");
+	group.addTool(current);
+	const check = (color: "muted" | "accent" | "success" | "error") => {
+		const row = group.render(100)[0];
+		expect(row.startsWith(theme.fg(color, "◆ "))).toBe(true);
+		expect(stripAnsi(row)).toContain("/tmp/current");
+	};
+	try {
+		check("muted");
+		current.markExecutionStarted();
+		check("accent");
+		current.updateResult({ content: [], isError: false });
+		check("success");
+		current.updateResult({ content: [], isError: true });
+		check("error");
+	} finally {
+		group.dispose();
+	}
+});
+
+test("category headers have distinct symbols and no failure badges", () => {
 	initTheme("dark");
 	const thinking = new GrokThinkingTurnGroupComponent(getMarkdownTheme(), "Thinking...", 1, false);
 	thinking.updateThinking({}, "latest reasoning");
@@ -62,7 +98,7 @@ test("category headers have stable names, distinct symbols/colors and no failure
 	subagent.addAgent(childAgent);
 	const categories = [
 		{ component: thinking, label: "✦", color: "accent" },
-		{ component: tools, label: "◆", color: "text" },
+		{ component: tools, label: "◆", color: "error" },
 		{ component: background, label: "⚙", color: "warning" },
 		{ component: subagent, label: "↳", color: "success" },
 	] as const;
