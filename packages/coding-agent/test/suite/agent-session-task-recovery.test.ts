@@ -61,6 +61,61 @@ describe("native durable task recovery", () => {
 		return { journal, assistant };
 	}
 
+	it("opens legacy recovery state while preserving cancelled unknown effects and existing receipts", async () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"]);
+		journal.dispatch(call("effect"), {}, false);
+		const expectedIds = journal.state?.promptEntryIds;
+		const legacy: Record<string, unknown> = { ...journal.state, version: 1, status: "cancelled" };
+		delete legacy.promptEntryIds;
+		delete legacy.queued;
+		sessionManager.appendCustomEntry("pi-task-recovery", legacy);
+		const before = readFileSync(sessionManager.getSessionFile()!, "utf8");
+		const harness = await fixture(sessionManager);
+		expect(harness.session.taskRecovery).toMatchObject({
+			version: 2,
+			status: "cancelled",
+			promptEntryIds: expectedIds,
+			queued: [],
+			tools: [{ dispatched: true, safe: false }],
+		});
+		expect(readFileSync(sessionManager.getSessionFile()!, "utf8")).toBe(before);
+		await harness.session.bindExtensions({ mode: "print" });
+		expect(harness.getPendingResponseCount()).toBe(1);
+		await expect(harness.session.resumeTask()).rejects.toThrow("Unknown tool effects");
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("upgrades v1 stable receipt IDs and queues without replacing their identities", () => {
+		const sessionManager = manager();
+		const journal = new TaskRecoveryJournal(sessionManager);
+		journal.start([user]);
+		journal.queue("followUp", [{ role: "user", content: "queued", timestamp: 2 }], "queued");
+		const original = journal.state!;
+		sessionManager.appendCustomEntry("pi-task-recovery", { ...original, version: 1 });
+		expect(journal.state).toMatchObject({
+			version: 2,
+			promptEntryIds: original.promptEntryIds,
+			queued: original.queued,
+		});
+	});
+
+	it("uses stable targets for a legacy intent that has not delivered its prompt", async () => {
+		const sessionManager = manager();
+		const journal = new TaskRecoveryJournal(sessionManager);
+		journal.start([user]);
+		const legacy: Record<string, unknown> = { ...journal.state, version: 1 };
+		delete legacy.promptEntryIds;
+		delete legacy.queued;
+		sessionManager.appendCustomEntry("pi-task-recovery", legacy);
+		const firstIds = journal.state?.promptEntryIds;
+		expect(journal.state?.promptEntryIds).toEqual(firstIds);
+		const harness = await fixture(sessionManager);
+		await harness.session.resumeTask();
+		expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(harness.session.taskRecovery?.version).toBe(2);
+	});
+
 	it("restores accepted intent before the first user message exactly once", async () => {
 		const sessionManager = manager();
 		const journal = new TaskRecoveryJournal(sessionManager);

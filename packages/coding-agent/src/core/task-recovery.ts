@@ -28,7 +28,7 @@ export interface RecoveryTool {
 }
 
 export interface TaskRecoveryState {
-	version: 1;
+	version: 2;
 	id: string;
 	status: "running" | "interrupted" | "cancelled" | "needs_reconciliation" | "completed";
 	sourceLeafId: string | null;
@@ -53,6 +53,12 @@ export interface TaskRecoveryState {
 	tools: RecoveryTool[];
 }
 
+type StoredTaskRecoveryState = Omit<TaskRecoveryState, "version" | "promptEntryIds" | "queued"> & {
+	version: 1 | 2;
+	promptEntryIds?: string[];
+	queued?: TaskRecoveryState["queued"];
+};
+
 /** Branch-scoped execution facts. These entries never become model messages. */
 export class TaskRecoveryJournal {
 	private readonly manager: SessionManager;
@@ -64,15 +70,72 @@ export class TaskRecoveryJournal {
 	}
 
 	get state(): TaskRecoveryState | undefined {
-		const entry = this.manager
-			.getBranch()
+		const branch = this.manager.getBranch();
+		const entry = branch
+			.slice()
 			.reverse()
 			.find((entry) => entry.type === "custom" && entry.customType === ENTRY_TYPE);
 		if (!entry || entry.type !== "custom") return undefined;
-		const state = entry.data as TaskRecoveryState | undefined;
+		const stored = entry.data as StoredTaskRecoveryState | undefined;
+		if (
+			!stored ||
+			(stored.version !== 1 && stored.version !== 2) ||
+			typeof stored.id !== "string" ||
+			!Array.isArray(stored.prompt) ||
+			!Array.isArray(stored.tools)
+		)
+			throw new Error("Invalid task recovery record");
+		if (stored.version === 2 && (!Array.isArray(stored.promptEntryIds) || !Array.isArray(stored.queued)))
+			throw new Error("Invalid task recovery record");
+		let promptEntryIds = stored.promptEntryIds;
+		if (stored.version === 1 && promptEntryIds === undefined) {
+			const sourceIndex =
+				stored.sourceLeafId === null ? -1 : branch.findIndex((entry) => entry.id === stored.sourceLeafId);
+			if (stored.sourceLeafId !== null && sourceIndex < 0) throw new Error("Legacy task recovery anchor is missing");
+			const own = branch.slice(sourceIndex + 1, branch.indexOf(entry));
+			const assistantIndex = own.findIndex(
+				(entry) => entry.type === "message" && entry.message.role === "assistant",
+			);
+			const inputs = (assistantIndex < 0 ? own : own.slice(0, assistantIndex)).filter(
+				(entry) => (entry.type === "message" && entry.message.role === "user") || entry.type === "custom_message",
+			);
+			let cursor = 0;
+			promptEntryIds = stored.prompt.map((message, index) => {
+				const matches = inputs
+					.slice(cursor)
+					.filter((entry) =>
+						entry.type === "message"
+							? JSON.stringify(entry.message) === JSON.stringify(message)
+							: entry.type === "custom_message" &&
+								message.role === "custom" &&
+								entry.customType === message.customType &&
+								JSON.stringify(entry.content) === JSON.stringify(message.content) &&
+								JSON.stringify(entry.details) === JSON.stringify(message.details),
+					);
+				if (matches.length === 1) {
+					cursor = inputs.indexOf(matches[0]) + 1;
+					return matches[0].id;
+				}
+				// A recorded assistant step proves the entire initial group was
+				// delivered. Its one-to-one canonical prefix can include hook edits.
+				if (matches.length === 0 && stored.step && inputs.length === stored.prompt.length && inputs[index]) {
+					cursor = index + 1;
+					return inputs[index].id;
+				}
+				if (matches.length === 0 && !stored.step && cursor === inputs.length)
+					return `task_input_${stored.id}_${index}`;
+				throw new Error("Legacy task input receipts are ambiguous; inspect the session before continuing");
+			});
+		}
+		const state = {
+			...stored,
+			version: 2,
+			promptEntryIds,
+			queued: stored.version === 1 ? (stored.queued ?? []) : stored.queued,
+		} as TaskRecoveryState;
 		if (
 			!state ||
-			state.version !== 1 ||
+			state.version !== 2 ||
 			typeof state.id !== "string" ||
 			!Array.isArray(state.tools) ||
 			!Array.isArray(state.prompt) ||
@@ -108,7 +171,7 @@ export class TaskRecoveryJournal {
 			this.state?.queued.filter((group) => !group.cancelled && group.entryIds.some((id) => !branchIds.has(id))) ??
 			[];
 		this.save({
-			version: 1,
+			version: 2,
 			id: randomUUID(),
 			status: "running",
 			sourceLeafId: this.manager.getLeafId(),

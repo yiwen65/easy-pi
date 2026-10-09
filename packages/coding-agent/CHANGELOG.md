@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed reopening sessions with v1 task recovery records written before durable input IDs and queues were added, while preserving unconfirmed tool effects for verification.
 - Persisted accepted requests before the first response, synchronized JSONL commits, repaired torn tails before append, and rejected stale or concurrent session writers.
 - Rendered model and summarization retry errors as temporary TUI status notices instead of accumulating transcript errors; recovered errors stay hidden during history replay, and terminal failures remain visible.
 - Preserved completed Responses output items across stream interruption and collected complete tool-call results before retrying; recovery checkpoints do not reset the retry budget. See [stream recovery](docs/stream-recovery.md).
