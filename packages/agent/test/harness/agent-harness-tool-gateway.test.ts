@@ -273,25 +273,13 @@ describe("AgentHarness tool gateway (T-003)", () => {
 		);
 		try {
 			const outcome = await harness.prompt("go");
-			expect(outcome.ok && outcome.value.kind).toBe("needs_reconciliation");
-			const diagnostic = (await session.findRecords({ type: "tool_reconciliation" }))[0]?.diagnostic;
-			expect(diagnostic).toMatchObject({
-				content: [{ type: "text", text: "durable-failure\n\nCommand exited with code 7" }],
-				details: { exitCode: 7, terminationReason: "exit", timedOut: false },
-			});
+			expect(outcome.ok && outcome.value.kind).toBe("completed");
+			expect(await session.findRecords({ type: "tool_reconciliation" })).toHaveLength(0);
 			expect(
 				(await session.findEntries()).filter(
 					(entry) => entry.type === "message" && entry.message.role === "toolResult",
 				),
-			).toHaveLength(0);
-			if (!diagnostic) throw new Error("Expected durable failure diagnostics");
-			// This exact command only prints and exits; its observed exit status can be supplied explicitly.
-			await harness.reconcileTool("bash-failure", {
-				kind: "result",
-				result: diagnostic,
-			});
-			const resumed = await harness.resume();
-			expect(resumed.ok && resumed.value.kind).toBe("completed");
+			).toHaveLength(1);
 			const entry = (await session.findEntries({ order: "oldestFirst" })).find(
 				(entry) => entry.type === "message" && entry.message.role === "toolResult",
 			);
@@ -304,6 +292,7 @@ describe("AgentHarness tool gateway (T-003)", () => {
 				},
 			});
 			expect(await session.findRecords({ lane: "main", type: "tool_started" })).toMatchObject([{ replay: "never" }]);
+			expect(await session.findRecords({ lane: "main", type: "tool_started" })).toHaveLength(1);
 		} finally {
 			await harness.close();
 			await env.cleanup();

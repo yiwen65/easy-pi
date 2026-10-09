@@ -419,7 +419,7 @@ describe("native durable task recovery", () => {
 		expect(effects).toBe(1);
 	});
 
-	it("unsafe execution errors stop before another model request", async () => {
+	it("unsafe execution errors automatically enter investigation without replaying the effect", async () => {
 		const harness = await createHarness({
 			tools: [
 				{
@@ -438,11 +438,14 @@ describe("native durable task recovery", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage([call("effect")], { stopReason: "toolUse" }),
-			fauxAssistantMessage("must not run"),
+			fauxAssistantMessage("external inspection is inconclusive"),
 		]);
 		await harness.session.prompt("task");
-		expect(harness.getPendingResponseCount()).toBe(1);
-		expect(harness.session.taskRecovery?.status).toBe("needs_reconciliation");
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.taskRecovery?.status).toBe("completed");
+		expect(harness.session.suspendedTaskRecovery[0].state.status).toBe("needs_reconciliation");
+		expect(harness.eventsOfType("tool_execution_start")).toHaveLength(1);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
 	it("failed recovery remains interrupted rather than marking old progress completed", async () => {
@@ -487,7 +490,8 @@ describe("native durable task recovery", () => {
 			harness.sessionManager.buildSessionContext().messages.filter((message) => message.role === "toolResult"),
 		).toHaveLength(0);
 		harness.session.reconcileTool("effect", kind === "retry" ? { kind } : { kind, result: result("effect") });
-		await harness.session.resumeTask();
+		harness.setResponses([fauxAssistantMessage("resumed")]);
+		await harness.session.resumeTask(harness.session.suspendedTaskRecovery[0].state.id);
 		expect(effects).toBe(kind === "retry" ? 2 : 1);
 		expect(harness.session.taskRecovery?.status).toBe("completed");
 		const results = harness.sessionManager

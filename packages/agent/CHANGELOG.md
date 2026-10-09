@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Treated captured foreground Bash exit failures as committed tool results instead of unknown effects, allowing model continuation without replaying the command.
 - Persisted complete stream items and individual parallel tool results before further effects; added tool-batch recovery and explicit reconciliation, and cancelled timed-out tools without treating unknown outcomes as completed failures.
 - Fixed proxy thinking completion snapshots to update the accumulated thinking text.
 - Preserved confirmed completed output items after retryable model stream failures, collected completed tool-call results before recovery, and allowed continuation from interrupted text checkpoints without replaying incomplete calls.

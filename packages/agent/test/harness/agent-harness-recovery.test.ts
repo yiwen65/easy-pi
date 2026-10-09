@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { AgentHarness, HarnessFault, type HarnessTool } from "../../src/harness/agent-harness.ts";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { InMemorySessionStorage, JsonlSessionRepo, Session } from "../../src/harness/session/index.ts";
-import type { StreamFn } from "../../src/types.ts";
+import { AgentToolError, type StreamFn } from "../../src/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
 const model = getModel("google", "gemini-2.5-flash");
@@ -56,6 +56,46 @@ function finalStream() {
 }
 
 describe("durable atomic recovery", () => {
+	it("commits a non-replay-safe Bash exit error and continues without executing it twice", async () => {
+		const session = new Session(new InMemorySessionStorage({ id: "bash-exit", createdAt: 1 }));
+		let effects = 0;
+		let requests = 0;
+		const bashCall = { ...call, name: "bash", arguments: { command: "ls missing" } };
+		const bash: HarnessTool = {
+			name: "bash",
+			label: "bash",
+			description: "offline",
+			parameters: Type.Object({ command: Type.String() }),
+			replay: "never",
+			execute: async () => {
+				effects++;
+				throw new AgentToolError("Command exited with code 2", {
+					command: "ls missing",
+					cwd: "/workspace",
+					exitCode: 2,
+					signal: null,
+					terminationReason: "exit",
+					terminationRequested: false,
+					timedOut: false,
+					durationMs: 42,
+				});
+			},
+		};
+		const { harness: driver } = await harness(session, () => {
+			if (++requests > 1) return finalStream();
+			const stream = createAssistantMessageEventStream();
+			stream.end({ ...message("toolUse"), content: [bashCall] });
+			return stream;
+		}, [bash]);
+		const outcome = await driver.prompt("inspect");
+		expect(outcome.ok && outcome.value.kind).toBe("completed");
+		expect(effects).toBe(1);
+		expect(requests).toBe(2);
+		expect(await session.findRecords({ type: "tool_reconciliation" })).toHaveLength(0);
+		expect(
+			(await session.findEntries()).find((entry) => entry.type === "message" && entry.message.role === "toolResult"),
+		).toMatchObject({ message: { isError: true, details: { exitCode: 2 } } });
+	});
 	it("a network error after an unsafe side effect blocks model reissue", async () => {
 		const session = new Session(new InMemorySessionStorage({ id: "unsafe-error", createdAt: 1 }));
 		let effects = 0;

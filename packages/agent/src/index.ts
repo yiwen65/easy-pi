@@ -106,6 +106,7 @@ export {
 	startAiSpan,
 	startHarnessSpan,
 } from "./harness/telemetry.ts";
+export { hasConfirmedBashExit } from "./harness/tools/bash-outcome.ts";
 export * from "./harness/tools/index.ts";
 export {
 	type AgentHarnessResources,

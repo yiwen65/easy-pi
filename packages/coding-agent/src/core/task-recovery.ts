@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage, AgentToolCall } from "@earendil-works/pi-agent-core";
+import { hasConfirmedBashExit } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { SessionManager } from "./session-manager.ts";
@@ -182,7 +183,37 @@ export class TaskRecoveryJournal {
 		) {
 			throw new Error("Invalid task recovery record");
 		}
-		return structuredClone(state);
+		const restored = structuredClone(state);
+		// Older drivers saved confirmed Bash failures as diagnostic-only entries.
+		// Recover that recorded outcome without changing the file or replaying Bash.
+		for (const task of [restored, ...(restored.suspendedTasks ?? []).map((task) => task.state)]) {
+			const sourceLeafId = task.step ? task.step.sourceLeafId : task.sourceLeafId;
+			const anchorIndex = sourceLeafId === null ? -1 : branch.findIndex((entry) => entry.id === sourceLeafId);
+			if (sourceLeafId !== null && anchorIndex < 0) continue;
+			for (const tool of task.tools) {
+				if (!tool.dispatched || tool.safe || tool.result || tool.call.name !== "bash") continue;
+				for (const entry of branch.slice(anchorIndex + 1).reverse()) {
+					if (entry.type !== "custom" || entry.customType !== "pi-tool-interruption") continue;
+					const message = (entry.data as { message?: ToolResultMessage } | undefined)?.message;
+					if (
+						!message ||
+						message.role !== "toolResult" ||
+						message.toolCallId !== tool.call.id ||
+						!hasConfirmedBashExit(message.toolName, message.details) ||
+						message.details.command !== tool.call.arguments.command
+					)
+						continue;
+					tool.result = structuredClone(message);
+					break;
+				}
+			}
+			if (
+				task.status === "needs_reconciliation" &&
+				!task.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result)
+			)
+				task.status = "interrupted";
+		}
+		return restored;
 	}
 
 	start(
@@ -441,8 +472,14 @@ export class TaskRecoveryJournal {
 	result(message: ToolResultMessage, call: AgentToolCall, terminate: boolean, uncertain: boolean): void {
 		this.update((state) => {
 			const old = state.tools.find((tool) => tool.call.id === call.id);
-			if (uncertain && old?.dispatched && !old.safe && !old.result) {
-				state.status = "needs_reconciliation";
+			if (
+				uncertain &&
+				!hasConfirmedBashExit(message.toolName, message.details) &&
+				old?.dispatched &&
+				!old.safe &&
+				!old.result
+			) {
+				if (state.status !== "cancelled") state.status = "needs_reconciliation";
 				return;
 			}
 			state.tools = [

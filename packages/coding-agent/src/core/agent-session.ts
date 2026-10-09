@@ -25,7 +25,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { ok } from "@earendil-works/pi-agent-core";
+import { hasConfirmedBashExit, ok } from "@earendil-works/pi-agent-core";
 import { BackgroundTaskManager, type BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { contentText } from "@earendil-works/pi-ai";
 import type {
@@ -666,7 +666,7 @@ export class AgentSession {
 				customType: "task-recovery-context",
 				display: false,
 				timestamp: Date.now(),
-				content: `Previous tasks are paused, not failed or completed. Handle the current request normally. If relevant, inspect processes, logs, or files using read-only tools and use reconcile_task with recorded evidence when the outcome is established. Do not repeat unresolved operations or assume their success. Ask the user only if inspection cannot establish the outcome and further work depends on it. Paused tasks: ${JSON.stringify(suspended.map((task) => ({ taskId: task.state.id, prompt: task.state.prompt, tools: task.state.tools })))}`,
+				content: `Previous tasks are paused, not failed or completed. Handle the current request normally. If relevant, inspect processes, logs, or files using read-only tools and use reconcile_task with recorded evidence when the outcome is established. Do not repeat unresolved operations or assume their success. Ask the user only if inspection cannot establish the outcome and further work depends on it. Paused tasks: ${JSON.stringify(suspended.map((task) => ({ taskId: task.state.id, prompt: task.state.prompt, plannedCalls: task.state.step?.message?.content.filter((block) => block.type === "toolCall"), tools: task.state.tools })))}`,
 			});
 			return projected;
 		};
@@ -1775,6 +1775,27 @@ export class AgentSession {
 		let failed = false;
 		try {
 			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
+			const recoveredResults =
+				this._taskRecovery.state?.tools.flatMap((tool) =>
+					tool.result && hasConfirmedBashExit(tool.result.toolName, tool.result.details) ? [tool.result] : [],
+				) ?? [];
+			let publishedRecovery = false;
+			for (const result of recoveredResults) {
+				if (
+					this.sessionManager
+						.getBranch()
+						.some(
+							(entry) =>
+								entry.type === "message" &&
+								entry.message.role === "toolResult" &&
+								entry.message.toolCallId === result.toolCallId,
+						)
+				)
+					continue;
+				await this._handleAgentEvent({ type: "message_end", message: result });
+				publishedRecovery = true;
+			}
+			if (publishedRecovery) this._restoreSessionMessages();
 			const prompts = Array.isArray(messages) ? messages : [messages];
 			const ids = prompts.map((message) => {
 				const id = this._taskInputIds.get(message) ?? randomUUID();
@@ -1798,7 +1819,47 @@ export class AgentSession {
 			onAccepted?.();
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
+			let investigatedInterruption = false;
+			while (true) {
+				// Investigate an interrupted effect within this user turn, using the
+				// original goal and durable execution facts. Never loop on unknown effects.
+				if (
+					!investigatedInterruption &&
+					this._taskRecovery.state?.status !== "cancelled" &&
+					this._taskRecovery.unknownTools.length > 0
+				) {
+					investigatedInterruption = true;
+					const interruptedTaskId = this._taskRecovery.state!.id;
+					const investigation: CustomMessage = {
+						role: "custom",
+						customType: "task-interruption-recovery",
+						display: false,
+						timestamp: Date.now(),
+						content:
+							"Continue the original user task from its recorded progress. A tool was interrupted with an unconfirmed outcome. First inspect relevant external state with read-only tools; use reconcile_task with recorded evidence for established terminal outcomes. Do not repeat unresolved operations or previously completed effects. Continue independent work normally. Ask the user only when inspection is inconclusive and a necessary next step depends on that outcome.",
+					};
+					const id = randomUUID();
+					this._taskInputIds.set(investigation, id);
+					this._taskRecovery.start([investigation], this._systemPromptOverride, [id]);
+					this.agent.clearAllQueues();
+					this._steeringMessages = [];
+					this._followUpMessages = [];
+					for (const task of this._taskRecovery.suspendedTasks)
+						for (const group of task.state.queued)
+							for (const queuedId of group.entryIds) this._queuedTaskInputIds.delete(queuedId);
+					this._refreshToolRegistry({ activeToolNames: [...this.getActiveToolNames(), "reconcile_task"] });
+					this._restoreTaskQueues();
+					await this.agent.prompt(investigation);
+					this._taskRecovery.update((state) => {
+						const original = state.suspendedTasks?.find((task) => task.state.id === interruptedTaskId)?.state;
+						if (!original || original.status !== "interrupted" || original.tools.some((tool) => !tool.result))
+							return;
+						state.queued.push(...original.queued);
+						original.queued = [];
+					});
+					this._restoreTaskQueues();
+				}
+				if (!(await this._handlePostAgentRun())) break;
 				// continue() snapshots agent.state, which already contains any projection
 				// activated after the preceding agent-core loop ended.
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
@@ -1810,14 +1871,7 @@ export class AgentSession {
 		} finally {
 			try {
 				try {
-					if (started) {
-						this._finishTaskRecovery(failed);
-						if (this._taskRecovery.state?.status === "needs_reconciliation")
-							this._extensionUIContext?.notify(
-								`Task paused with an unconfirmed tool outcome. New prompts are available to inspect its state or do other work.`,
-								"warning",
-							);
-					}
+					if (started) this._finishTaskRecovery(failed);
 				} finally {
 					this._taskRecovery.release();
 				}
@@ -3190,9 +3244,29 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
-		if (this._taskRecovery.state?.status === "running") {
+		const recovery = this._taskRecovery.state;
+		const recoveredFailure =
+			recovery?.status === "interrupted" &&
+			recovery.tools.some(
+				(tool) =>
+					tool.result &&
+					hasConfirmedBashExit(tool.result.toolName, tool.result.details) &&
+					!this.agent.state.messages.some(
+						(message) => message.role === "toolResult" && message.toolCallId === tool.call.id,
+					),
+			);
+		if (recovery?.status === "running" || recoveredFailure) {
 			try {
-				await this.resumeTask();
+				if (this._taskRecovery.unknownTools.length > 0) {
+					await this._runAgentPrompt({
+						role: "custom",
+						customType: "task-interruption-recovery",
+						display: false,
+						timestamp: Date.now(),
+						content:
+							"Resume the original user task from recorded progress. Inspect unresolved tool outcomes using read-only tools and reconcile_task with recorded evidence. Do not repeat unresolved or completed effects. Continue independent work and ask the user only if necessary work depends on an outcome that inspection cannot establish.",
+					});
+				} else await this.resumeTask();
 			} catch (error) {
 				if (this.taskRecovery?.status !== "needs_reconciliation") throw error;
 				this._extensionUIContext?.notify(error instanceof Error ? error.message : String(error), "warning");
