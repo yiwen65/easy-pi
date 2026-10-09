@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Allowed new prompts while an earlier task has unconfirmed tool effects, retained paused tasks across restart, and added evidence-based model reconciliation while blocking identical unresolved operations.
 - Fixed reopening sessions with v1 task recovery records written before durable input IDs and queues were added, while preserving unconfirmed tool effects for verification.
 - Persisted accepted requests before the first response, synchronized JSONL commits, repaired torn tails before append, and rejected stale or concurrent session writers.
 - Rendered model and summarization retry errors as temporary TUI status notices instead of accumulating transcript errors; recovered errors stay hidden during history replay, and terminal failures remain visible.

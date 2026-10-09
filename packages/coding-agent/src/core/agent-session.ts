@@ -50,6 +50,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { getShellConfig, getShellEnv } from "../utils/shell.ts";
@@ -135,7 +136,7 @@ import { buildSkillPromptExpansion } from "./skill-invocations.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
-import { TaskRecoveryJournal, type TaskRecoveryState } from "./task-recovery.ts";
+import { type SuspendedTaskRecovery, TaskRecoveryJournal, type TaskRecoveryState } from "./task-recovery.ts";
 import { BACKGROUND_TASK_TOOL_NAMES, createBackgroundTaskToolDefinitions } from "./tools/background-tasks.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions, createBashToolDefinition } from "./tools/index.ts";
@@ -637,6 +638,38 @@ export class AgentSession {
 	}
 
 	private _installTaskRecoveryHooks(): void {
+		const previousTransform = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+			const suspended = this._taskRecovery.suspendedTasks;
+			if (suspended.length === 0) return transformed;
+			const pendingIds = new Set(
+				suspended.flatMap(
+					(task) =>
+						task.state.step?.message?.content
+							.filter((block) => block.type === "toolCall")
+							.map((call) => call.id) ?? [],
+				),
+			);
+			// The durable history keeps the original calls. Request projection replaces
+			// their incomplete protocol exchange with explicit execution facts.
+			const projected = transformed.flatMap<AgentMessage>((message) => {
+				if (message.role === "toolResult" && pendingIds.has(message.toolCallId)) return [];
+				if (message.role !== "assistant") return [message];
+				const content = message.content.filter((block) => block.type !== "toolCall" || !pendingIds.has(block.id));
+				if (content.length === message.content.length) return [message];
+				while (content.at(-1)?.type === "thinking") content.pop();
+				return content.length > 0 ? [{ ...message, content, stopReason: "stop" as const }] : [];
+			});
+			projected.push({
+				role: "custom",
+				customType: "task-recovery-context",
+				display: false,
+				timestamp: Date.now(),
+				content: `Previous tasks are paused, not failed or completed. Handle the current request normally. If relevant, inspect processes, logs, or files using read-only tools and use reconcile_task with recorded evidence when the outcome is established. Do not repeat unresolved operations or assume their success. Ask the user only if inspection cannot establish the outcome and further work depends on it. Paused tasks: ${JSON.stringify(suspended.map((task) => ({ taskId: task.state.id, prompt: task.state.prompt, tools: task.state.tools })))}`,
+			});
+			return projected;
+		};
 		const previousStop = this.agent.shouldStopAfterTurn;
 		this.agent.shouldStopAfterTurn = async (context, signal) =>
 			this._taskRecovery.state?.status === "needs_reconciliation" ||
@@ -1494,6 +1527,10 @@ export class AgentSession {
 		return this._taskRecovery.state;
 	}
 
+	get suspendedTaskRecovery(): SuspendedTaskRecovery[] {
+		return this._taskRecovery.suspendedTasks;
+	}
+
 	private _restoreTaskQueues(): void {
 		const branchIds = new Set(this.sessionManager.getBranch().map((entry) => entry.id));
 		for (const group of this._taskRecovery.state?.queued ?? []) {
@@ -1554,30 +1591,31 @@ export class AgentSession {
 		this._taskRecovery.acquire();
 		try {
 			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
-			this._taskRecovery.update((state) => {
-				const tool = state.tools.find(
-					(tool) => tool.call.id === toolCallId && tool.dispatched && !tool.result && !tool.safe,
-				);
-				if (!tool) throw new Error(`No unknown tool call ${toolCallId}`);
-				if (resolution.kind === "retry") tool.dispatched = false;
-				else {
-					if (resolution.result.toolCallId !== toolCallId || resolution.result.toolName !== tool.call.name)
-						throw new Error("Reconciled result does not match the tool call");
-					tool.result = resolution.result;
-				}
-				state.status = state.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result)
-					? "needs_reconciliation"
-					: "interrupted";
-			});
+			this._taskRecovery.reconcile(toolCallId, resolution);
 		} finally {
 			this._taskRecovery.release();
 		}
 	}
 
 	/** Resume a durable native task without adding a user message or replaying committed effects. */
-	async resumeTask(): Promise<void> {
+	async resumeTask(taskId?: string): Promise<void> {
 		if (this._disposed) throw new Error("This session cannot resume tasks");
 		if (!this.isIdle || this.isCompacting) throw new Error("Wait for the current session operation before recovery");
+		if (taskId && taskId !== this._taskRecovery.state?.id) {
+			this._taskRecovery.acquire();
+			try {
+				if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
+				this._taskRecovery.activateSuspended(taskId);
+				this.agent.clearAllQueues();
+				this._steeringMessages = [];
+				this._followUpMessages = [];
+				this._queuedTaskInputIds.clear();
+				this._pendingNextTurnMessages = [];
+				this._restoreSessionMessages();
+			} finally {
+				this._taskRecovery.release();
+			}
+		}
 		const initialTask = this._taskRecovery.state;
 		if (!initialTask || initialTask.status === "completed") return;
 		let task: TaskRecoveryState = initialTask;
@@ -1591,7 +1629,7 @@ export class AgentSession {
 					state.status = "needs_reconciliation";
 				});
 				throw new Error(
-					`Unknown tool effects: ${this._taskRecovery.unknownTools.map((tool) => tool.call.id).join(", ")}. Verify external state, then use /reconcile-task <callId> result <verified result> or retry.`,
+					`Unknown tool effects: ${this._taskRecovery.unknownTools.map((tool) => `${tool.call.name} (${tool.call.id})`).join(", ")}. The original task is paused. New prompts can inspect external state and record evidence with reconcile_task; /reconcile-task remains available as a manual override.`,
 				);
 			}
 			this._retryAttempt = task.retryAttempt;
@@ -1731,8 +1769,6 @@ export class AgentSession {
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
-		if (this._taskRecovery.unknownTools.length > 0)
-			throw new Error("Task has unknown tool effects. Use /reconcile-task before submitting another prompt.");
 		this._taskRecovery.acquire();
 		this._isAgentRunActive = true;
 		let started = false;
@@ -1746,8 +1782,19 @@ export class AgentSession {
 				return id;
 			});
 			this._taskRecovery.start(prompts, this._systemPromptOverride, ids);
-			this._restoreTaskQueues();
 			started = true;
+			const suspendedQueueIds = new Set(
+				this._taskRecovery.suspendedTasks.flatMap((task) => task.state.queued.flatMap((group) => group.entryIds)),
+			);
+			if ([...suspendedQueueIds].some((id) => this._queuedTaskInputIds.has(id))) {
+				this.agent.clearAllQueues();
+				this._steeringMessages = [];
+				this._followUpMessages = [];
+				for (const id of suspendedQueueIds) this._queuedTaskInputIds.delete(id);
+			}
+			if (this._taskRecovery.suspendedTasks.length > 0)
+				this._refreshToolRegistry({ activeToolNames: [...this.getActiveToolNames(), "reconcile_task"] });
+			this._restoreTaskQueues();
 			onAccepted?.();
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			await this.agent.prompt(messages);
@@ -1767,7 +1814,7 @@ export class AgentSession {
 						this._finishTaskRecovery(failed);
 						if (this._taskRecovery.state?.status === "needs_reconciliation")
 							this._extensionUIContext?.notify(
-								`Task paused: verify ${this._taskRecovery.unknownTools.map((tool) => `${tool.call.name} (${tool.call.id})`).join(", ")}, then use /reconcile-task and /resume-task.`,
+								`Task paused with an unconfirmed tool outcome. New prompts are available to inspect its state or do other work.`,
 								"warning",
 							);
 					}
@@ -1836,9 +1883,9 @@ export class AgentSession {
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
-		if (options?.expandPromptTemplates !== false && text.trim() === "/resume-task") {
+		if (options?.expandPromptTemplates !== false && /^\/resume-task(?:\s+\S+)?$/.test(text.trim())) {
 			try {
-				await this.resumeTask();
+				await this.resumeTask(text.trim().split(/\s+/)[1]);
 				options?.preflightResult?.(true);
 			} catch (error) {
 				options?.preflightResult?.(false);
@@ -1850,7 +1897,7 @@ export class AgentSession {
 			try {
 				const match = /^\/reconcile-task\s+(\S+)\s+(retry|result)(?:\s+([\s\S]+))?$/.exec(text);
 				if (!match) throw new Error("Usage: /reconcile-task <callId> retry | result <verified result>");
-				const tool = this._taskRecovery.unknownTools.find((tool) => tool.call.id === match[1]);
+				const tool = this._taskRecovery.allUnknownTools.find((tool) => tool.call.id === match[1]);
 				if (!tool) throw new Error(`No unknown tool call ${match[1]}`);
 				this.reconcileTool(
 					match[1],
@@ -3365,6 +3412,14 @@ export class AgentSession {
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
 			...registeredTools,
+			...(this._taskRecovery.allUnknownTools.length > 0
+				? [
+						{
+							definition: this._createTaskReconciliationTool(),
+							sourceInfo: createSyntheticSourceInfo("<builtin:reconcile_task>", { source: "builtin" }),
+						},
+					]
+				: []),
 			...this._customTools.map(
 				(definition) => ({
 					definition,
@@ -3447,6 +3502,41 @@ export class AgentSession {
 		}
 
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+	}
+
+	private _createTaskReconciliationTool(): ToolDefinition {
+		const parameters = Type.Object({
+			toolCallId: Type.String(),
+			evidenceToolCallIds: Type.Array(Type.String(), { minItems: 1 }),
+			observedOutcome: Type.String({ minLength: 1 }),
+			outcome: Type.Union([Type.Literal("succeeded"), Type.Literal("failed")]),
+		});
+		const definition: ToolDefinition<typeof parameters> = {
+			name: "reconcile_task",
+			label: "Record inspected task outcome",
+			description:
+				"Record a paused tool's terminal outcome using successful read-only inspection tool calls from the current task. Inspect first; do not infer success from absence of a process or lack of errors. If the operation is still running or evidence is inconclusive, keep the task paused. This tool never retries an operation or resumes the old task.",
+			parameters,
+			contract: { sideEffects: "none" },
+			execute: async (_id, params) => {
+				this._taskRecovery.reconcileFromEvidence(
+					params.toolCallId,
+					params.evidenceToolCallIds,
+					params.observedOutcome,
+					params.outcome === "failed",
+				);
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Observed outcome saved. The original task remains paused until explicitly resumed.",
+						},
+					],
+					details: {},
+				};
+			},
+		};
+		return definition;
 	}
 
 	/** Number of queued background task notifications (diagnostics/tests). */

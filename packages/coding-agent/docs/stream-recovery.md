@@ -25,14 +25,18 @@ Task records now use schema version 2. Version 1 records are upgraded in memory 
 
 Reopening a running task resumes it after extensions bind. Explicitly cancelled tasks stay paused. Use `/resume-task` or `session.resumeTask()` to continue from committed progress without adding a user message. Completed tasks are not executed again.
 
-A dispatched tool with no committed result has an unknown outcome. Only an unchanged tool declared read-only, idempotent, or without side effects may replay automatically. Unsafe execution failures also pause conservatively. No further normal model request or tool dispatch is admitted while verification is required; diagnostic errors do not masquerade as confirmed tool results.
+A dispatched tool with no committed result has an unknown outcome. Only an unchanged tool declared read-only, idempotent, or without side effects may replay automatically. Unsafe execution failures pause the affected task; diagnostic errors do not masquerade as confirmed tool results.
 
-After verifying external state, resolve a call with either:
+New prompts remain available. Starting another task durably retains the paused task, dependent queues, and dispatch facts in `session.suspendedTaskRecovery`; this survives restart. Dependent queued inputs remain with their original task; next-turn context accompanies the new prompt. Provider requests project the incomplete old tool exchange as explicit execution facts, including the original request, tool identity, arguments, and known results. The original transcript remains intact. Identical unresolved operations are rejected even if the model generates a new call ID; other tools and tasks remain available. This compares structured arguments, not semantic equivalence between different shell commands.
+
+The model can inspect external state with read-only tools, then call `reconcile_task` with recorded inspection call IDs, a terminal outcome (`succeeded` or `failed`), and its explanation. The runtime requires successful read-only evidence from the current task and persists both that evidence and the model's interpretation. Evidence relevance and the outcome's meaning remain model judgments; this is not a transactional proof of an arbitrary external effect. A running process or inconclusive evidence must remain unresolved. The model cannot authorize a retry through this tool. Users need to decide only when relevant inspection cannot establish the outcome and subsequent work depends on it.
+
+For a manual override after verifying external state, resolve a call with either:
 
 - `/reconcile-task <callId> result <verified result>` to supply its observed result;
 - `/reconcile-task <callId> retry` to authorize one new execution.
 
-Then use `/resume-task`. SDK callers can use `session.reconcileTool(callId, { kind: "result", result })` or `{ kind: "retry" }`, followed by `session.resumeTask()`. Verified results must name the original tool and call ID. Reconciliation is rejected while the session's tools are still running.
+Then use `/resume-task` for the current task. For a task suspended by a newer prompt, use `/resume-task <taskId>` or `session.resumeTask(taskId)` after its unknown effects have been resolved. This explicitly switches back to the old task's history branch; newer work remains in the session tree and can be reached with `/tree`. SDK callers can use `session.reconcileTool(callId, { kind: "result", result })` or `{ kind: "retry" }` for current or suspended calls. Verified results must name the original tool and call ID. Manual reconciliation is rejected while the session's tools are still running.
 
 ## Durable Harness
 

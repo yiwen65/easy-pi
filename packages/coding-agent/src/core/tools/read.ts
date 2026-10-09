@@ -219,6 +219,7 @@ export function createReadToolDefinition(
 		promptSnippet: readToolSystemPromptContribution.snippet,
 		promptGuidelines: [...readToolSystemPromptContribution.guidelines],
 		parameters: readSchema,
+		contract: { readOnly: true },
 		constrainedSampling: getExperimentalToolSampling(),
 		async execute(
 			_toolCallId,

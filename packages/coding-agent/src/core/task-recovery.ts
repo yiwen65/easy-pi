@@ -10,6 +10,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage, AgentToolCall } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
@@ -51,6 +52,12 @@ export interface TaskRecoveryState {
 		items: Array<{ index: number; block: AssistantMessage["content"][number] }>;
 	};
 	tools: RecoveryTool[];
+	suspendedTasks?: SuspendedTaskRecovery[];
+}
+
+export interface SuspendedTaskRecovery {
+	leafId: string;
+	state: Omit<TaskRecoveryState, "suspendedTasks">;
 }
 
 type StoredTaskRecoveryState = Omit<TaskRecoveryState, "version" | "promptEntryIds" | "queued"> & {
@@ -154,7 +161,24 @@ export class TaskRecoveryJournal {
 			) ||
 			!["running", "interrupted", "cancelled", "needs_reconciliation", "completed"].includes(state.status) ||
 			!Number.isSafeInteger(state.retryAttempt) ||
-			state.retryAttempt < 0
+			state.retryAttempt < 0 ||
+			(state.suspendedTasks !== undefined &&
+				(!Array.isArray(state.suspendedTasks) ||
+					state.suspendedTasks.some(
+						(task) =>
+							!task ||
+							typeof task.leafId !== "string" ||
+							!branch.some((entry) => entry.id === task.leafId) ||
+							!task.state ||
+							task.state.version !== 2 ||
+							typeof task.state.id !== "string" ||
+							!Array.isArray(task.state.tools) ||
+							!Array.isArray(task.state.prompt) ||
+							!Array.isArray(task.state.promptEntryIds) ||
+							!Array.isArray(task.state.queued) ||
+							task.state.prompt.length !== task.state.promptEntryIds.length ||
+							"suspendedTasks" in task.state,
+					)))
 		) {
 			throw new Error("Invalid task recovery record");
 		}
@@ -167,9 +191,29 @@ export class TaskRecoveryJournal {
 		promptEntryIds: string[] = prompt.map(() => randomUUID()),
 	): void {
 		const branchIds = new Set(this.manager.getBranch().map((entry) => entry.id));
+		const previous = this.state;
+		const suspendedTasks = previous?.suspendedTasks ?? [];
+		const suspending = previous?.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result);
+		if (previous && suspending) {
+			const { suspendedTasks: _suspended, ...paused } = previous;
+			const leafId = this.manager.getLeafId();
+			if (!leafId) throw new Error("Paused task has no recovery anchor");
+			suspendedTasks.push({
+				leafId,
+				state: {
+					...paused,
+					status: "needs_reconciliation",
+					queued: paused.queued.filter((group) => group.kind !== "nextTurn"),
+				},
+			});
+		}
 		const queued =
-			this.state?.queued.filter((group) => !group.cancelled && group.entryIds.some((id) => !branchIds.has(id))) ??
-			[];
+			previous?.queued.filter(
+				(group) =>
+					(!suspending || group.kind === "nextTurn") &&
+					!group.cancelled &&
+					group.entryIds.some((id) => !branchIds.has(id)),
+			) ?? [];
 		this.save({
 			version: 2,
 			id: randomUUID(),
@@ -181,7 +225,104 @@ export class TaskRecoveryJournal {
 			systemPrompt,
 			retryAttempt: 0,
 			tools: [],
+			suspendedTasks,
 		});
+	}
+
+	get suspendedTasks(): SuspendedTaskRecovery[] {
+		return this.state?.suspendedTasks ?? [];
+	}
+
+	get allUnknownTools(): RecoveryTool[] {
+		return [this.state, ...this.suspendedTasks.map((task) => task.state)].flatMap(
+			(state) => state?.tools.filter((tool) => tool.dispatched && !tool.safe && !tool.result) ?? [],
+		);
+	}
+
+	/** Caller owns the driver; archived updates must also work when the active task completed. */
+	reconcile(toolCallId: string, resolution: { kind: "retry" } | { kind: "result"; result: ToolResultMessage }): void {
+		const active = this.state;
+		if (!active) throw new Error(`No unknown tool call ${toolCallId}`);
+		const matches = [active, ...(active.suspendedTasks ?? []).map((task) => task.state)].filter((state) =>
+			state.tools.some((tool) => tool.call.id === toolCallId && tool.dispatched && !tool.result && !tool.safe),
+		);
+		if (matches.length !== 1) throw new Error(`No unique unknown tool call ${toolCallId}`);
+		const state = matches[0];
+		const tool = state.tools.find((tool) => tool.call.id === toolCallId)!;
+		if (resolution.kind === "retry") tool.dispatched = false;
+		else {
+			if (resolution.result.toolCallId !== toolCallId || resolution.result.toolName !== tool.call.name)
+				throw new Error("Reconciled result does not match the tool call");
+			tool.result = resolution.result;
+		}
+		state.status = state.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result)
+			? "needs_reconciliation"
+			: "interrupted";
+		this.save(active);
+	}
+
+	/** A model may record an observed outcome, but cannot authorize an unsafe retry. */
+	reconcileFromEvidence(toolCallId: string, evidenceIds: string[], conclusion: string, failed = false): void {
+		const tool = this.allUnknownTools.find((tool) => tool.call.id === toolCallId);
+		if (!tool) throw new Error(`No unknown tool call ${toolCallId}`);
+		if (evidenceIds.length === 0 || conclusion.trim().length === 0)
+			throw new Error("An observed outcome and recorded read-only evidence are required");
+		const all = this.manager.getBranch();
+		const anchor = this.state?.sourceLeafId;
+		const branch = all.slice(anchor === null ? 0 : all.findIndex((entry) => entry.id === anchor) + 1);
+		const evidence = evidenceIds.map((id) => {
+			for (const entry of branch.slice().reverse()) {
+				if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
+				const state = entry.data as TaskRecoveryState;
+				const observed = state.tools.find((candidate) => candidate.call.id === id && candidate.result);
+				if (!observed) continue;
+				const definition = observed.definition
+					? (JSON.parse(observed.definition) as { contract?: { readOnly?: boolean } })
+					: undefined;
+				if (!observed.safe || observed.result?.isError || definition?.contract?.readOnly !== true)
+					throw new Error(`Evidence ${id} is not a successful read-only inspection`);
+				return { call: observed.call, result: observed.result };
+			}
+			throw new Error(`No recorded evidence ${id}`);
+		});
+		this.reconcile(toolCallId, {
+			kind: "result",
+			result: {
+				role: "toolResult",
+				toolCallId,
+				toolName: tool.call.name,
+				content: [
+					{
+						type: "text",
+						text: `Observed outcome: ${conclusion}\nInspection evidence: ${JSON.stringify(evidence)}`,
+					},
+				],
+				details: { reconciliation: "inspection", evidence },
+				isError: failed,
+				timestamp: Date.now(),
+			},
+		});
+	}
+
+	/** Explicit recovery switches branches; subsequent work remains in the session tree. */
+	activateSuspended(taskId: string): void {
+		const suspended = this.suspendedTasks;
+		const task = suspended.find((task) => task.state.id === taskId);
+		if (!task) throw new Error(`No suspended task ${taskId}`);
+		if (task.state.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result))
+			throw new Error(`Unknown tool effects in task ${taskId}; inspect external state before resuming`);
+		const previousLeaf = this.manager.getLeafId();
+		this.manager.branch(task.leafId);
+		const branchIds = new Set(this.manager.getBranch().map((entry) => entry.id));
+		try {
+			this.save({
+				...task.state,
+				suspendedTasks: suspended.filter((other) => other.state.id !== taskId && branchIds.has(other.leafId)),
+			});
+		} catch (error) {
+			if (previousLeaf) this.manager.branch(previousLeaf);
+			throw error;
+		}
 	}
 
 	queue(kind: "steer" | "followUp" | "nextTurn", messages: AgentMessage[], label?: string): string[] {
@@ -256,6 +397,18 @@ export class TaskRecoveryJournal {
 	}
 
 	dispatch(call: AgentToolCall, args: unknown, safe: boolean, definition?: string): void {
+		const pending = this.suspendedTasks
+			.flatMap((task) => task.state.tools)
+			.find(
+				(tool) =>
+					tool.dispatched &&
+					!tool.safe &&
+					!tool.result &&
+					tool.call.name === call.name &&
+					(isDeepStrictEqual(tool.args, args) || isDeepStrictEqual(tool.call.arguments, call.arguments)),
+			);
+		if (pending)
+			throw new Error(`Tool ${pending.call.id} has an unknown outcome; inspect it before repeating this operation`);
 		const previous = this.state?.tools.find((tool) => tool.call.id === call.id);
 		if (
 			previous?.dispatched &&
@@ -288,7 +441,7 @@ export class TaskRecoveryJournal {
 	result(message: ToolResultMessage, call: AgentToolCall, terminate: boolean, uncertain: boolean): void {
 		this.update((state) => {
 			const old = state.tools.find((tool) => tool.call.id === call.id);
-			if (uncertain && old?.dispatched && !old.safe) {
+			if (uncertain && old?.dispatched && !old.safe && !old.result) {
 				state.status = "needs_reconciliation";
 				return;
 			}

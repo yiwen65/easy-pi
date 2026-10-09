@@ -47,12 +47,17 @@ describe("native durable task recovery", () => {
 		harness.setResponses([fauxAssistantMessage("done")]);
 		return harness;
 	}
-	function seedTools(sessionManager: SessionManager, names: string[]) {
+	function seedTools(sessionManager: SessionManager, names: string[], thinking = false) {
 		const journal = new TaskRecoveryJournal(sessionManager);
 		journal.start([user]);
 		sessionManager.appendMessage(user, journal.state?.promptEntryIds[0]);
 		const assistant = fauxAssistantMessage(
-			names.map((name) => call(name, name)),
+			[
+				...(thinking
+					? [{ type: "thinking" as const, thinking: "plan", thinkingSignature: "orphan-signature" }]
+					: []),
+				...names.map((name) => call(name, name)),
+			],
 			{ stopReason: "toolUse" },
 		);
 		journal.beginStep(assistant);
@@ -180,7 +185,6 @@ describe("native durable task recovery", () => {
 		await expect(harness.session.resumeTask()).rejects.toThrow("Unknown tool effects");
 		expect(harness.getPendingResponseCount()).toBe(1);
 		expect(harness.session.taskRecovery?.status).toBe("needs_reconciliation");
-		await expect(harness.session.prompt("another task")).rejects.toThrow("unknown tool effects");
 		harness.session.reconcileTool("effect", { kind: "result", result: result("effect") });
 		await harness.session.resumeTask();
 		expect(effects).toBe(0);
@@ -212,6 +216,207 @@ describe("native durable task recovery", () => {
 			"slow",
 			"fast",
 		]);
+	});
+
+	it("projects paused calls as execution facts without sending an orphaned tool exchange", async () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"], true);
+		journal.dispatch(call("effect"), {}, false);
+		const harness = await fixture(sessionManager);
+		const stream = harness.session.agent.streamFunction;
+		let observed = false;
+		harness.session.agent.streamFunction = (model, context, options) => {
+			observed = true;
+			expect(
+				context.messages.some(
+					(message) =>
+						message.role === "assistant" &&
+						message.content.some((block) => block.type === "toolCall" && block.id === "effect"),
+				),
+			).toBe(false);
+			expect(JSON.stringify(context.messages)).toContain("Previous tasks are paused");
+			expect(JSON.stringify(context.messages)).toContain('"taskId"');
+			expect(JSON.stringify(context.messages)).not.toContain("orphan-signature");
+			return stream(model, context, options);
+		};
+		await harness.session.prompt("inspect state");
+		expect(observed).toBe(true);
+		expect(
+			harness.sessionManager
+				.buildSessionContext()
+				.messages.some(
+					(message) =>
+						message.role === "assistant" &&
+						message.content.some((block) => block.type === "toolCall" && block.id === "effect"),
+				),
+		).toBe(true);
+	});
+
+	it.each([false, true])(
+		"records a model-inspected outcome with durable read-only evidence: failed=%s",
+		async (failed) => {
+			const sessionManager = manager();
+			const { journal } = seedTools(sessionManager, ["effect"]);
+			journal.dispatch(call("effect"), {}, false);
+			const harness = await fixture(sessionManager, [
+				{
+					name: "inspect",
+					label: "inspect",
+					description: "read output",
+					parameters: Type.Object({}),
+					contract: { readOnly: true },
+					execute: async () => ({ content: [{ type: "text", text: "output artifact: complete" }], details: {} }),
+				},
+			]);
+			harness.setResponses([
+				fauxAssistantMessage([call("inspection", "inspect")], { stopReason: "toolUse" }),
+				fauxAssistantMessage(
+					[
+						{
+							type: "toolCall",
+							id: "record",
+							name: "reconcile_task",
+							arguments: {
+								toolCallId: "effect",
+								evidenceToolCallIds: ["inspection"],
+								observedOutcome: "output is complete",
+								outcome: failed ? "failed" : "succeeded",
+							},
+						},
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("verified"),
+			]);
+			await harness.session.prompt("check the old operation");
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(harness.session.suspendedTaskRecovery[0]?.state).toMatchObject({
+				status: "interrupted",
+				tools: [{ result: { isError: failed, details: { reconciliation: "inspection" } } }],
+			});
+			const reopened = await fixture(harness.sessionManager);
+			expect(reopened.session.suspendedTaskRecovery[0]?.state.tools[0].result?.content).toEqual(
+				harness.session.suspendedTaskRecovery[0]?.state.tools[0].result?.content,
+			);
+			await reopened.session.resumeTask(reopened.session.suspendedTaskRecovery[0].state.id);
+			expect(reopened.session.taskRecovery?.status).toBe("completed");
+		},
+	);
+
+	it("does not accept stale inspection evidence from before the current task", () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"]);
+		journal.dispatch(call("effect"), {}, false);
+		journal.start([{ role: "user", content: "first inspection", timestamp: 2 }]);
+		journal.dispatch(call("observation", "inspect"), {}, true, JSON.stringify({ contract: { readOnly: true } }));
+		journal.result(result("observation", "inspect"), call("observation", "inspect"), false, false);
+		journal.start([{ role: "user", content: "later inspection", timestamp: 3 }]);
+		expect(() => journal.reconcileFromEvidence("effect", ["observation"], "done")).toThrow("No recorded evidence");
+		expect(journal.allUnknownTools).toHaveLength(1);
+	});
+
+	it("keeps the original dependent queue paused while a new task runs", async () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"]);
+		journal.dispatch(call("effect"), {}, false);
+		const originalId = journal.state!.id;
+		journal.queue("followUp", [{ role: "user", content: "dependent step", timestamp: 2 }], "dependent step");
+		const harness = await fixture(sessionManager);
+		await harness.session.prompt("independent task");
+		expect(harness.session.getFollowUpMessages()).toEqual([]);
+		expect(JSON.stringify(harness.session.messages)).not.toContain("dependent step");
+		expect(harness.session.suspendedTaskRecovery[0].state.queued).toHaveLength(1);
+		harness.session.reconcileTool("effect", { kind: "result", result: result("effect") });
+		harness.setResponses([fauxAssistantMessage("original done"), fauxAssistantMessage("dependent done")]);
+		await harness.session.resumeTask(originalId);
+		expect(
+			harness.session.messages.filter((message) => message.role === "user" && message.content === "dependent step"),
+		).toHaveLength(1);
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
+	it("preserves multiple paused tasks when resuming a later task", () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["first"]);
+		journal.dispatch(call("first", "first"), {}, false);
+		journal.start([{ role: "user", content: "second", timestamp: 2 }]);
+		const secondId = journal.state!.id;
+		journal.dispatch(call("second", "second"), {}, false);
+		journal.start([{ role: "user", content: "third", timestamp: 3 }]);
+		expect(journal.suspendedTasks).toHaveLength(2);
+		journal.reconcile("second", { kind: "result", result: result("second", "second") });
+		journal.activateSuspended(secondId);
+		expect(journal.allUnknownTools.map((tool) => tool.call.id)).toEqual(["first"]);
+		expect(journal.state?.tools[0].result?.toolCallId).toBe("second");
+	});
+
+	it("blocks the same unresolved operation with a new call ID while leaving other prompts available", async () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"]);
+		journal.dispatch(call("effect"), {}, false);
+		let effects = 0;
+		const harness = await fixture(sessionManager, [
+			{
+				name: "effect",
+				label: "effect",
+				description: "offline",
+				parameters: Type.Object({}),
+				execute: async () => {
+					effects++;
+					return { content: [], details: {} };
+				},
+			},
+		]);
+		harness.setResponses([fauxAssistantMessage([call("different-id", "effect")], { stopReason: "toolUse" })]);
+		await harness.session.prompt("continue");
+		expect(effects).toBe(0);
+		expect(JSON.stringify(harness.session.messages)).toContain("unknown outcome");
+		harness.setResponses([fauxAssistantMessage("other work")]);
+		await harness.session.prompt("independent task");
+		expect(harness.session.suspendedTaskRecovery).toHaveLength(1);
+	});
+
+	it("rejects unrecorded or unsafe inspection evidence without resolving the old effect", async () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"]);
+		journal.dispatch(call("effect"), {}, false);
+		journal.start([{ role: "user", content: "inspect", timestamp: 2 }]);
+		expect(() => journal.reconcileFromEvidence("effect", ["invented"], "done")).toThrow("No recorded evidence");
+		journal.dispatch(call("unsafe-inspection", "bash"), {}, false);
+		journal.result(result("unsafe-inspection", "bash"), call("unsafe-inspection", "bash"), false, false);
+		expect(() => journal.reconcileFromEvidence("effect", ["unsafe-inspection"], "done")).toThrow(
+			"read-only inspection",
+		);
+		expect(journal.allUnknownTools.map((tool) => tool.call.id)).toEqual(["effect"]);
+	});
+
+	it("retries a suspended task only after explicit authorization and preserves newer work", async () => {
+		const sessionManager = manager();
+		const { journal } = seedTools(sessionManager, ["effect"]);
+		journal.dispatch(call("effect"), {}, false);
+		const originalId = journal.state!.id;
+		let effects = 0;
+		const harness = await fixture(sessionManager, [
+			{
+				name: "effect",
+				label: "effect",
+				description: "offline",
+				parameters: Type.Object({}),
+				execute: async () => {
+					effects++;
+					return { content: [], details: {} };
+				},
+			},
+		]);
+		await harness.session.prompt("independent task");
+		await expect(harness.session.resumeTask(originalId)).rejects.toThrow("Unknown tool effects");
+		expect(harness.session.taskRecovery?.status).toBe("completed");
+		harness.session.reconcileTool("effect", { kind: "retry" });
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt(`/resume-task ${originalId}`);
+		expect(effects).toBe(1);
+		await harness.session.resumeTask();
+		expect(effects).toBe(1);
 	});
 
 	it("unsafe execution errors stop before another model request", async () => {
@@ -564,7 +769,7 @@ describe("native durable task recovery", () => {
 		expect(reopened.getPendingResponseCount()).toBe(0);
 	});
 
-	it("retains next-turn context when an attempted new task is rejected", async () => {
+	it("accepts new prompts and next-turn context while preserving the paused task across restart", async () => {
 		const sessionManager = manager();
 		const { journal } = seedTools(sessionManager, ["effect"]);
 		journal.dispatch(call("effect"), {}, false);
@@ -573,17 +778,29 @@ describe("native durable task recovery", () => {
 			{ customType: "aside", content: "retained", display: false, details: {} },
 			{ deliverAs: "nextTurn" },
 		);
-		await expect(harness.session.prompt("rejected")).rejects.toThrow("unknown tool effects");
-		harness.session.reconcileTool("effect", { kind: "result", result: result("effect") });
-		harness.setResponses([fauxAssistantMessage("resumed"), fauxAssistantMessage("new task done")]);
-		await harness.session.resumeTask();
-		expect(
-			harness.session.messages.some((message) => message.role === "custom" && message.customType === "aside"),
-		).toBe(false);
-		await harness.session.prompt("accepted next task");
+		const originalId = journal.state!.id;
+		await harness.session.prompt("inspect the previous operation");
 		expect(
 			harness.session.messages.filter((message) => message.role === "custom" && message.customType === "aside"),
 		).toHaveLength(1);
+		expect(harness.session.suspendedTaskRecovery).toMatchObject([{ state: { id: originalId } }]);
+		const reopened = await fixture(harness.sessionManager);
+		await reopened.session.prompt("independent task");
+		expect(reopened.session.suspendedTaskRecovery).toMatchObject([{ state: { id: originalId } }]);
+		reopened.session.reconcileTool("effect", { kind: "result", result: result("effect") });
+		reopened.setResponses([fauxAssistantMessage("resumed")]);
+		await reopened.session.resumeTask(originalId);
+		expect(reopened.session.taskRecovery).toMatchObject({ id: originalId, status: "completed" });
+		expect(
+			reopened.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes("independent task"),
+				),
+		).toBe(true);
 	});
 
 	it("does not revive a cancelled queue on an already completed task", async () => {

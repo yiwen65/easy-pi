@@ -42,7 +42,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "new", description: "Start a new session" },
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume a different session" },
-	{ name: "resume-task", description: "Continue an interrupted task from its committed progress" },
+	{
+		name: "resume-task",
+		description: "Continue an interrupted task from its committed progress",
+		argumentHint: "[taskId]",
+	},
 	{
 		name: "reconcile-task",
 		description: "Resolve a tool's unknown outcome after verifying external state",
