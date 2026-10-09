@@ -421,10 +421,7 @@ describe("AgentHarness tools", () => {
 		it("tolerates whitespace-run and indentation drift", async () => {
 			const context = createContext();
 			getOrThrow(
-				await context.env.writeFile(
-					"edit.txt",
-					"keep me  \n\t\tif (ready) {\n\t\t\treturn true;\n\t\t}\n",
-				),
+				await context.env.writeFile("edit.txt", "keep me  \n\t\tif (ready) {\n\t\t\treturn true;\n\t\t}\n"),
 			);
 
 			await createEditTool().execute(

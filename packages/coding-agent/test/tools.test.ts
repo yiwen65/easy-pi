@@ -317,7 +317,9 @@ describe("Coding Agent Tools", () => {
 					path: testFile,
 					edits: [{ oldText: "nonexistent line\nbeta", newText: "x" }],
 				}),
-			).rejects.toThrow(/No line of oldText \(starting with "nonexistent line"\) appears in the file and no similar region exists/);
+			).rejects.toThrow(
+				/No line of oldText \(starting with "nonexistent line"\) appears in the file and no similar region exists/,
+			);
 		});
 
 		it("should point at the most similar region when no oldText line is anchored", async () => {
@@ -338,7 +340,9 @@ describe("Coding Agent Tools", () => {
 						},
 					],
 				}),
-			).rejects.toThrow(/most similar region \(~\d+%\) starts at line 2\..*First difference inside it: oldText has "export function renderDashbord\(panel\) {", file has "export function renderDashboard\(panel\) {"/);
+			).rejects.toThrow(
+				/most similar region \(~\d+%\) starts at line 2\..*First difference inside it: oldText has "export function renderDashbord\(panel\) {", file has "export function renderDashboard\(panel\) {"/,
+			);
 		});
 
 		it("should include occurrence line numbers for duplicate matches", async () => {

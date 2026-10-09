@@ -96,6 +96,62 @@ describe("strict model generation", () => {
 		});
 	});
 
+	it("preserves Together DeepSeek effort metadata for versioned model IDs", () => {
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-together-models-"));
+		temporaryRoots.push(fixtureRoot);
+		const isolatedPackageRoot = join(fixtureRoot, "package");
+		mkdirSync(isolatedPackageRoot);
+		for (const entry of ["package.json", "scripts", "src"]) {
+			cpSync(join(packageRoot, entry), join(isolatedPackageRoot, entry), { recursive: true });
+		}
+		const modelId = "deepseek-ai/DeepSeek-V4-Pro-0813";
+		const catalog = {
+			together: {
+				models: {
+					[modelId]: {
+						id: modelId,
+						tool_call: true,
+						reasoning: true,
+						reasoning_options: [{ type: "toggle" }, { type: "effort", values: ["low", "high", "max"] }],
+					},
+				},
+			},
+		};
+		const preloadPath = join(fixtureRoot, "mock-catalog.mjs");
+		writeFileSync(
+			preloadPath,
+			`const catalog = ${JSON.stringify(catalog)};\n` +
+				`globalThis.fetch = async (input) => {\n` +
+				`  if (String(input) === "https://models.dev/api.json") return Response.json(catalog);\n` +
+				`  return Response.json({ data: [] });\n` +
+				`};\n`,
+		);
+		const outputDir = join(fixtureRoot, "catalog");
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				pathToFileURL(preloadPath).href,
+				"scripts/generate-models.ts",
+				"--json-only",
+				"--json-output",
+				outputDir,
+			],
+			{ cwd: isolatedPackageRoot, encoding: "utf8", timeout: 10_000 },
+		);
+		expect(result.status, result.stderr).toBe(0);
+		const values = JSON.parse(readFileSync(join(outputDir, "providers/together.json"), "utf8"));
+		expect(values[modelId].thinkingLevelMap).toEqual({
+			minimal: null,
+			low: "low",
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: "max",
+		});
+		expect(values[modelId].compat).toMatchObject({ supportsReasoningEffort: true, thinkingFormat: "together" });
+	});
+
 	it("fails before mutating generated data when an Individual model loses tool support", () => {
 		const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-generate-models-"));
 		temporaryRoots.push(fixtureRoot);

@@ -403,9 +403,7 @@ function findSimilarBlockMatch(content: string, oldText: string): SimilarBlockRe
 	const clusters: Accepted[][] = [];
 	for (const candidate of accepted) {
 		const current = clusters[clusters.length - 1];
-		const currentEnd = current
-			? Math.max(...current.map((c) => c.nonBlankStart + c.nonBlankCount))
-			: -1;
+		const currentEnd = current ? Math.max(...current.map((c) => c.nonBlankStart + c.nonBlankCount)) : -1;
 		if (current && candidate.nonBlankStart < currentEnd) {
 			current.push(candidate);
 		} else {
