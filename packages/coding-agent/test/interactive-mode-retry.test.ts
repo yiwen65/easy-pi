@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { Container, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
@@ -55,6 +55,7 @@ const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
 
 const availabilityErrors = [
 	"terminated (UND_ERR_SOCKET: other side closed)",
+	"fetch failed (ECONNRESET: Client network socket disconnected before secure TLS connection was established)",
 	"fetch failed (UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error (attempted address: chatgpt.com:443))",
 	"Codex error: Our servers are currently overloaded. Please try again later.",
 	"503 service unavailable",
@@ -105,6 +106,7 @@ describe("InteractiveMode bounded retry rendering", () => {
 		const pendingTool = { updateResult: vi.fn() };
 		host.pendingTools.set("unfinished-tool", pendingTool);
 		const message = fauxAssistantMessage("partial answer", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(message)).toBe(true);
 
 		await handleEvent.call(host, { type: "message_end", message });
 
@@ -293,51 +295,50 @@ describe("InteractiveMode bounded retry rendering", () => {
 		}
 	});
 
-	it.each(["regular", "fullscreen"] as const)(
-		"clears the temporary socket notice from the %s terminal",
-		async (mode) => {
-			const terminal = new VirtualTerminal(160, 24);
-			const ui = mode === "regular" ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
-			const host = createEventHost();
-			ui.addChild({
-				render: (width) => [
-					...host.chatContainer.render(width),
-					...(host.activeStatusIndicator?.render(width) ?? []),
-				],
-				invalidate() {},
+	it.each(
+		availabilityErrors.flatMap((errorMessage) => [
+			{ mode: "regular", errorMessage },
+			{ mode: "fullscreen", errorMessage },
+		]),
+	)("clears the temporary notice from the $mode terminal: $errorMessage", async ({ mode, errorMessage }) => {
+		const terminal = new VirtualTerminal(160, 24);
+		const ui = mode === "regular" ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
+		const host = createEventHost();
+		ui.addChild({
+			render: (width) => [...host.chatContainer.render(width), ...(host.activeStatusIndicator?.render(width) ?? [])],
+			invalidate() {},
+		});
+		ui.start();
+		try {
+			await handleEvent.call(host, {
+				type: "message_end",
+				message: fauxAssistantMessage("partial answer", {
+					stopReason: "error",
+					errorMessage,
+				}),
 			});
-			ui.start();
-			try {
-				await handleEvent.call(host, {
-					type: "message_end",
-					message: fauxAssistantMessage("partial answer", {
-						stopReason: "error",
-						errorMessage: availabilityErrors[0],
-					}),
-				});
-				ui.renderNow();
-				await terminal.flush();
-				expect(terminal.getScrollBuffer().join("\n")).not.toContain(availabilityErrors[0]);
-				await handleEvent.call(host, {
-					type: "auto_retry_start",
-					attempt: 1,
-					maxAttempts: 10,
-					delayMs: 1_000,
-					errorMessage: availabilityErrors[0]!,
-				});
-				ui.renderNow();
-				await terminal.flush();
-				expect(terminal.getViewport().join("\n")).toContain(availabilityErrors[0]);
-				await handleEvent.call(host, { type: "auto_retry_end", success: true, attempt: 1 });
-				ui.renderNow();
-				await terminal.flush();
-				expect(terminal.getScrollBuffer().join("\n")).not.toContain(availabilityErrors[0]);
-				expect(terminal.getViewport().join("\n")).toContain("partial answer");
-			} finally {
-				host.activeStatusIndicator?.dispose();
-				ui.stop();
-				await terminal.flush();
-			}
-		},
-	);
+			ui.renderNow();
+			await terminal.flush();
+			expect(terminal.getScrollBuffer().join("\n")).not.toContain(errorMessage);
+			await handleEvent.call(host, {
+				type: "auto_retry_start",
+				attempt: 1,
+				maxAttempts: 10,
+				delayMs: 1_000,
+				errorMessage,
+			});
+			ui.renderNow();
+			await terminal.flush();
+			expect(terminal.getViewport().join("\n")).toContain(errorMessage);
+			await handleEvent.call(host, { type: "auto_retry_end", success: true, attempt: 1 });
+			ui.renderNow();
+			await terminal.flush();
+			expect(terminal.getScrollBuffer().join("\n")).not.toContain(errorMessage);
+			expect(terminal.getViewport().join("\n")).toContain("partial answer");
+		} finally {
+			host.activeStatusIndicator?.dispose();
+			ui.stop();
+			await terminal.flush();
+		}
+	});
 });
