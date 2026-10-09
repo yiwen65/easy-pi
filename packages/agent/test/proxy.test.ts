@@ -29,6 +29,23 @@ afterEach(() => {
 });
 
 describe("streamProxy", () => {
+	it("reconciles thinking text supplied by an end snapshot", async () => {
+		const body = [
+			{ type: "thinking_start", contentIndex: 0 },
+			{ type: "thinking_delta", contentIndex: 0, delta: "Partial" },
+			{ type: "thinking_end", contentIndex: 0, content: "Complete thinking" },
+			{ type: "done", reason: "stop", usage },
+		]
+			.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+			.join("");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(body)),
+		);
+		const stream = streamProxy(model, { messages: [] }, { authToken: "test", proxyUrl: "https://proxy.example.com" });
+		expect((await stream.result()).content[0]).toMatchObject({ thinking: "Complete thinking" });
+	});
+
 	it("preserves tool-call metadata received only on toolcall_end", async () => {
 		const proxyEvents: ProxyAssistantMessageEvent[] = [
 			{ type: "start" },

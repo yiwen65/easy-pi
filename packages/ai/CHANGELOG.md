@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fixed Responses thinking text omitted when providers supply it only in reasoning completion events or the terminal response, without duplicating streamed text.
 - Fixed Azure OpenAI Responses ignoring `toolChoice` in provider-specific stream requests.
 - Fixed Together DeepSeek V4 Pro 0813 catalog generation to preserve supported reasoning-effort levels from models.dev.
 - Added `deepseek-v4-pro-0813` to the Qwen Token Plan Individual catalog ([#8194](https://github.com/earendil-works/pi/issues/8194)).

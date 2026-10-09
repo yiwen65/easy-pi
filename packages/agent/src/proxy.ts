@@ -40,7 +40,7 @@ export type ProxyAssistantMessageEvent =
 	| { type: "text_end"; contentIndex: number; contentSignature?: string; itemComplete?: boolean }
 	| { type: "thinking_start"; contentIndex: number }
 	| { type: "thinking_delta"; contentIndex: number; delta: string }
-	| { type: "thinking_end"; contentIndex: number; contentSignature?: string; itemComplete?: boolean }
+	| { type: "thinking_end"; contentIndex: number; content?: string; contentSignature?: string; itemComplete?: boolean }
 	| { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string }
 	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; itemComplete?: boolean }
@@ -301,6 +301,7 @@ function processProxyEvent(
 		case "thinking_end": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "thinking") {
+				if (proxyEvent.content !== undefined) content.thinking = proxyEvent.content;
 				content.thinkingSignature = proxyEvent.contentSignature;
 				return {
 					type: "thinking_end",

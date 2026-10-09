@@ -433,8 +433,16 @@ function appendCustomToolCallInput(block: StreamingToolCall, nextInput: string, 
 	return delta;
 }
 
+type ThinkingOutputSlot = {
+	type: "thinking";
+	block: ThinkingContent;
+	contentIndex: number;
+	summaryParts: Map<number, string>;
+	contentParts: Map<number, string>;
+};
+
 type ResponsesOutputSlot =
-	| { type: "thinking"; block: ThinkingContent; contentIndex: number }
+	| ThinkingOutputSlot
 	| { type: "text"; block: TextContent; contentIndex: number }
 	| { type: "toolCall"; block: StreamingToolCall; contentIndex: number };
 
@@ -449,7 +457,43 @@ export async function processResponsesStream<TApi extends Api>(
 ): Promise<void> {
 	let sawTerminalResponseEvent = false;
 	const outputSlots = new Map<number, ResponsesOutputSlot>();
-	const reasoningBlocksById = new Map<string, ThinkingContent>();
+	const reasoningSlotsById = new Map<string, ThinkingOutputSlot>();
+	const updateThinking = (slot: ThinkingOutputSlot, thinking: string): void => {
+		const previous = slot.block.thinking;
+		if (thinking === previous) return;
+		slot.block.thinking = thinking;
+		if (thinking.startsWith(previous)) {
+			stream.push({
+				type: "thinking_delta",
+				contentIndex: slot.contentIndex,
+				delta: thinking.slice(previous.length),
+				partial: output,
+			});
+		} else {
+			// A done snapshot can correct missing or different deltas. It does not
+			// authorize a recovery checkpoint until the whole output item is done.
+			stream.push({ type: "thinking_end", contentIndex: slot.contentIndex, content: thinking, partial: output });
+		}
+	};
+	const updateThinkingPart = (
+		slot: ThinkingOutputSlot,
+		kind: "summary" | "content",
+		index: number,
+		text: string,
+		append: boolean,
+	): void => {
+		const parts = kind === "summary" ? slot.summaryParts : slot.contentParts;
+		parts.set(index, append ? (parts.get(index) ?? "") + text : text);
+		const summary = [...slot.summaryParts]
+			.sort(([a], [b]) => a - b)
+			.map(([, text]) => text)
+			.join("\n\n");
+		const content = [...slot.contentParts]
+			.sort(([a], [b]) => a - b)
+			.map(([, text]) => text)
+			.join("\n\n");
+		updateThinking(slot, summary || content);
+	};
 	const applyMessagePhaseStopReason = (item: ResponseOutputItem): void => {
 		if (item.type === "message" && item.phase === "final_answer") {
 			output.stopReason = "stop";
@@ -479,8 +523,11 @@ export async function processResponsesStream<TApi extends Api>(
 				type: "thinking",
 				block,
 				contentIndex: output.content.length - 1,
+				summaryParts: new Map<number, string>(),
+				contentParts: new Map<number, string>(),
 			} satisfies ResponsesOutputSlot;
 			outputSlots.set(outputIndex, slot);
+			reasoningSlotsById.set(item.id, slot);
 			stream.push({ type: "thinking_start", contentIndex: slot.contentIndex, partial: output });
 			return slot;
 		}
@@ -541,21 +588,27 @@ export async function processResponsesStream<TApi extends Api>(
 	const getOrCreateSlot = (outputIndex: number, item: ResponseOutputItem): ResponsesOutputSlot | undefined => {
 		return outputSlots.get(outputIndex) ?? createSlot(outputIndex, item);
 	};
-	// Azure OpenAI can omit reasoning.encrypted_content from response.output_item.done
-	// and provide it only in response.completed.response.output. Backfill the
-	// persisted reasoning signature from the terminal response to keep store:false
-	// multi-turn replay stateless. See https://github.com/earendil-works/pi/issues/6409.
-	const backfillReasoningSignatures = (responseOutput: ResponseOutputItem[]): void => {
+	// Providers can supply visible reasoning or encrypted replay data only in
+	// the terminal response. Reconcile known items without replacing ciphertext
+	// already received in output_item.done (Azure issue #6409).
+	const backfillReasoning = (responseOutput: ResponseOutputItem[]): void => {
 		for (const item of responseOutput) {
-			if (item.type !== "reasoning" || !item.encrypted_content) continue;
-			const block = reasoningBlocksById.get(item.id);
-			if (!block?.thinkingSignature) continue;
-
-			const storedItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
-			if (storedItem.encrypted_content) continue;
-			block.thinkingSignature = JSON.stringify({
+			if (item.type !== "reasoning") continue;
+			const slot = reasoningSlotsById.get(item.id);
+			if (!slot) continue;
+			const summary = item.summary?.map((part) => part.text).join("\n\n");
+			const content = item.content?.map((part) => part.text).join("\n\n");
+			updateThinking(slot, summary || content || slot.block.thinking);
+			const storedItem = slot.block.thinkingSignature
+				? (JSON.parse(slot.block.thinkingSignature) as ResponseReasoningItem)
+				: item;
+			slot.block.thinkingSignature = JSON.stringify({
 				...storedItem,
-				encrypted_content: item.encrypted_content,
+				...(summary ? { summary: item.summary } : {}),
+				...(content ? { content: item.content } : {}),
+				...(!storedItem.encrypted_content && item.encrypted_content
+					? { encrypted_content: item.encrypted_content }
+					: {}),
 			});
 		}
 	};
@@ -563,7 +616,7 @@ export async function processResponsesStream<TApi extends Api>(
 		response: Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>["response"],
 	): void => {
 		sawTerminalResponseEvent = true;
-		backfillReasoningSignatures(response.output ?? []);
+		backfillReasoning(response.output ?? []);
 		if (response?.id) {
 			output.responseId = response.id;
 		}
@@ -613,33 +666,23 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.reasoning_summary_text.delta") {
 			const slot = getSlot(event.output_index, "thinking");
 			if (!slot) continue;
-			slot.block.thinking += event.delta;
-			stream.push({
-				type: "thinking_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
+			updateThinkingPart(slot, "summary", event.summary_index, event.delta, true);
+		} else if (event.type === "response.reasoning_summary_text.done") {
+			const slot = getSlot(event.output_index, "thinking");
+			if (!slot) continue;
+			updateThinkingPart(slot, "summary", event.summary_index, event.text, false);
 		} else if (event.type === "response.reasoning_summary_part.done") {
 			const slot = getSlot(event.output_index, "thinking");
 			if (!slot) continue;
-			slot.block.thinking += "\n\n";
-			stream.push({
-				type: "thinking_delta",
-				contentIndex: slot.contentIndex,
-				delta: "\n\n",
-				partial: output,
-			});
+			updateThinkingPart(slot, "summary", event.summary_index, event.part.text, false);
 		} else if (event.type === "response.reasoning_text.delta") {
 			const slot = getSlot(event.output_index, "thinking");
 			if (!slot) continue;
-			slot.block.thinking += event.delta;
-			stream.push({
-				type: "thinking_delta",
-				contentIndex: slot.contentIndex,
-				delta: event.delta,
-				partial: output,
-			});
+			updateThinkingPart(slot, "content", event.content_index, event.delta, true);
+		} else if (event.type === "response.reasoning_text.done") {
+			const slot = getSlot(event.output_index, "thinking");
+			if (!slot) continue;
+			updateThinkingPart(slot, "content", event.content_index, event.text, false);
 		} else if (event.type === "response.output_text.delta") {
 			const slot = getSlot(event.output_index, "text");
 			if (!slot) continue;
@@ -699,7 +742,6 @@ export async function processResponsesStream<TApi extends Api>(
 				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
 				slot.block.thinking = summaryText || contentText || slot.block.thinking;
 				slot.block.thinkingSignature = JSON.stringify(item);
-				reasoningBlocksById.set(item.id, slot.block);
 				stream.push({
 					type: "thinking_end",
 					contentIndex: slot.contentIndex,

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed proxy thinking completion snapshots to update the accumulated thinking text.
 - Preserved confirmed completed output items after retryable model stream failures, collected completed tool-call results before recovery, and allowed continuation from interrupted text checkpoints without replaying incomplete calls.
 
 ## [0.84.2] - 2026-08-14
