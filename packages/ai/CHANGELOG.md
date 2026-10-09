@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added upstream `itemComplete` stream markers and `AssistantMessage.isResponseCheckpoint` for recovering completed Responses output items after interrupted requests.
 - Added provider-neutral `toolChoice` support to simple stream requests.
 - Added China-specific ZAI Coding Plan models, including GLM-4.6V vision support, and API-equivalent usage cost estimates for models with published PAYG prices ([#8220](https://github.com/earendil-works/pi/issues/8220)).
 

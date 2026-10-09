@@ -37,13 +37,13 @@ export type ProxyAssistantMessageEvent =
 	| { type: "start" }
 	| { type: "text_start"; contentIndex: number }
 	| { type: "text_delta"; contentIndex: number; delta: string }
-	| { type: "text_end"; contentIndex: number; contentSignature?: string }
+	| { type: "text_end"; contentIndex: number; contentSignature?: string; itemComplete?: boolean }
 	| { type: "thinking_start"; contentIndex: number }
 	| { type: "thinking_delta"; contentIndex: number; delta: string }
-	| { type: "thinking_end"; contentIndex: number; contentSignature?: string }
+	| { type: "thinking_end"; contentIndex: number; contentSignature?: string; itemComplete?: boolean }
 	| { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string }
-	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall }
+	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; itemComplete?: boolean }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
@@ -274,6 +274,7 @@ function processProxyEvent(
 					contentIndex: proxyEvent.contentIndex,
 					content: content.text,
 					partial,
+					itemComplete: proxyEvent.itemComplete,
 				};
 			}
 			throw new Error("Received text_end for non-text content");
@@ -306,6 +307,7 @@ function processProxyEvent(
 					contentIndex: proxyEvent.contentIndex,
 					content: content.thinking,
 					partial,
+					itemComplete: proxyEvent.itemComplete,
 				};
 			}
 			throw new Error("Received thinking_end for non-thinking content");
@@ -347,6 +349,7 @@ function processProxyEvent(
 					contentIndex: proxyEvent.contentIndex,
 					toolCall: content,
 					partial,
+					itemComplete: proxyEvent.itemComplete,
 				};
 			}
 			return undefined;

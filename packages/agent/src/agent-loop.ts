@@ -7,6 +7,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
+	isRetryableAssistantError,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
@@ -80,9 +81,8 @@ export function agentLoop(
  * Continue an agent loop from the current context without adding a new message.
  * Used for retries - context already has user message or tool results.
  *
- * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * A completed response cannot be continued. A text-only response checkpoint
+ * may be continued because the enclosing response failed before completion.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -94,7 +94,8 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
+	const lastMessage = context.messages[context.messages.length - 1];
+	if (lastMessage.role === "assistant" && !(lastMessage.isResponseCheckpoint && lastMessage.stopReason === "stop")) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -152,7 +153,8 @@ export async function runAgentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
+	const lastMessage = context.messages[context.messages.length - 1];
+	if (lastMessage.role === "assistant" && !(lastMessage.isResponseCheckpoint && lastMessage.stopReason === "stop")) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -246,11 +248,34 @@ async function runLoop(
 				toolPlanRevision: stepSnapshot.toolPlan.revision,
 			};
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+			const streamed = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+			let message = streamed.message;
+			const recoveredToolResults: ToolResultMessage[] = [];
+			if (streamed.checkpoint) {
+				const checkpoint = streamed.checkpoint;
+				currentContext.messages.push(checkpoint);
+				newMessages.push(checkpoint);
+				// Await persistence/listeners before admitting any recovered tool effects.
+				await emit({ type: "message_end", message: checkpoint });
+				let terminate = false;
+				if (checkpoint.content.some((block) => block.type === "toolCall")) {
+					const batch = await executeToolCalls(currentContext, checkpoint, config, signal, emit);
+					recoveredToolResults.push(...batch.messages);
+					terminate = batch.terminate;
+					currentContext.messages.push(...batch.messages);
+					newMessages.push(...batch.messages);
+				}
+				if (signal?.aborted || terminate) {
+					message = { ...message, stopReason: "aborted", errorMessage: "Interrupted response recovery stopped" };
+				}
+				await emit({ type: "message_start", message });
+			}
+			currentContext.messages.push(message);
 			newMessages.push(message);
+			await emit({ type: "message_end", message });
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				await emit({ type: "turn_end", message, toolResults: [] });
+				await emit({ type: "turn_end", message, toolResults: recoveredToolResults });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -389,13 +414,15 @@ function createAbortedAssistantMessage(config: AgentLoopConfig): AssistantMessag
 	};
 }
 
+type StreamedAssistantResponse = { message: AssistantMessage; checkpoint?: AssistantMessage };
+
 async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
-): Promise<AssistantMessage> {
+): Promise<StreamedAssistantResponse> {
 	const llmContext = await buildProviderContext(context, config, signal);
 	// transformContext may atomically activate a new compaction projection. Resolve
 	// the authoritative system layer afterwards so messages and directives switch
@@ -447,8 +474,7 @@ async function streamAssistantResponse(
 			reason: "cancelled before provider request",
 		});
 		await emit({ type: "message_start", message: abortedMessage });
-		await emit({ type: "message_end", message: abortedMessage });
-		return abortedMessage;
+		return { message: abortedMessage };
 	}
 
 	const providerStartedAt = monotonicNow();
@@ -481,8 +507,9 @@ async function streamAssistantResponse(
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+	const completedBlocks = new Map<number, AssistantMessage["content"][number]>();
 
-	for await (const event of response) {
+	readResponse: for await (const event of response) {
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
@@ -500,6 +527,13 @@ async function streamAssistantResponse(
 			case "toolcall_start":
 			case "toolcall_delta":
 			case "toolcall_end":
+				if (
+					(event.type === "text_end" || event.type === "thinking_end" || event.type === "toolcall_end") &&
+					event.itemComplete === true
+				) {
+					const block = event.type === "toolcall_end" ? event.toolCall : event.partial.content[event.contentIndex];
+					if (block) completedBlocks.set(event.contentIndex, structuredClone(block));
+				}
 				if (partialMessage) {
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
@@ -512,33 +546,62 @@ async function streamAssistantResponse(
 				break;
 
 			case "done":
-			case "error": {
-				const finalMessage = await response.result();
-				reportProviderResult(finalMessage, providerStartedAt);
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
-				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				return finalMessage;
-			}
+			case "error":
+				break readResponse;
 		}
 	}
 
-	const finalMessage = await response.result();
+	const finalResult = await response.result();
+	// Cancellation can arrive after the provider queued its terminal error.
+	// The run's abort signal still wins over a stale retryable stream failure.
+	const finalMessage: AssistantMessage =
+		signal?.aborted && finalResult.stopReason === "error"
+			? { ...finalResult, stopReason: "aborted", errorMessage: "Operation aborted" }
+			: finalResult;
 	reportProviderResult(finalMessage, providerStartedAt);
 	if (addedPartial) {
-		context.messages[context.messages.length - 1] = finalMessage;
+		context.messages.pop();
 	} else {
-		context.messages.push(finalMessage);
 		await emit({ type: "message_start", message: { ...finalMessage } });
 	}
-	await emit({ type: "message_end", message: finalMessage });
-	return finalMessage;
+	if (!signal?.aborted && isRetryableAssistantError(finalMessage)) {
+		const completed = [...completedBlocks].sort(([left], [right]) => left - right);
+		// Responses reasoning without a following completed message/call is not
+		// replayable. Keep that trailing reasoning in the failure artifact instead.
+		while (completed.at(-1)?.[1].type === "thinking") completed.pop();
+		if (completed.length > 0) {
+			const content = completed.map(([, block]) => block);
+			const retainedIndexes = new Set(completed.map(([index]) => index));
+			const checkpoint: AssistantMessage = {
+				...finalMessage,
+				content,
+				isResponseCheckpoint: true,
+				stopReason: content.some((block) => block.type === "toolCall") ? "toolUse" : "stop",
+				responseId: undefined,
+				deferred: undefined,
+				errorMessage: undefined,
+				rawStopReason: undefined,
+				endTurn: undefined,
+				diagnostics: undefined,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			return {
+				checkpoint,
+				message: {
+					...finalMessage,
+					content: finalMessage.content.filter((_, index) => !retainedIndexes.has(index)),
+				},
+			};
+		}
+	}
+	return { message: finalMessage };
 }
 
 /**

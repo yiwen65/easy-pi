@@ -6,6 +6,10 @@
 
 - Changed `prepareNextTurn` and `prepareNextTurnWithContext` to run only after `shouldStopAfterTurn` and queued-message checks determine that the agent loop will start another assistant turn. They no longer run after final or terminating turns; move end-of-run work to `agent_end` handling.
 
+### Fixed
+
+- Preserved confirmed completed output items after retryable model stream failures, collected completed tool-call results before recovery, and allowed continuation from interrupted text checkpoints without replaying incomplete calls.
+
 ## [0.84.2] - 2026-08-14
 
 ### Fixed

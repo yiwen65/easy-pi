@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Preserved completed Responses output items across stream interruption and collected complete tool-call results before retrying; recovery checkpoints do not reset the retry budget. See [stream recovery](docs/stream-recovery.md).
 - `Ctrl+X` now copies the editor's input text when the editor has content (paste markers expanded, no composer frame or soft-wrap breaks), and keeps copying the last agent message when the editor is empty; previously the only way to copy typed input was a mouse-selection screen copy that pulled in composer borders, split soft-wrapped lines, and dropped input lines scrolled out of the editor window.
 - Background bash tasks are no longer capped by wall clock by default: long tasks keep running until they finish or are stopped, `backgroundBashTaskTimeoutSeconds` is now an opt-in hard cap (`0`/unset = no cap), and an explicit `timeout` still caps only that task.
 - Fixed background bash task timing: a foreground command promoted to a background task now keeps its real start time instead of counting from the promotion point, and finished tasks show their runtime (start to end) instead of a growing "ago" value.

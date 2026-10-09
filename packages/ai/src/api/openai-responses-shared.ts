@@ -690,6 +690,7 @@ export async function processResponsesStream<TApi extends Api>(
 			pushToolCallDelta(slot, appendCustomToolCallInput(slot.block, event.input, true));
 		} else if (event.type === "response.output_item.done") {
 			const item = event.item;
+			const upstreamItemComplete = !("status" in item) || item.status === undefined || item.status === "completed";
 			applyMessagePhaseStopReason(item);
 			const slot = getOrCreateSlot(event.output_index, item);
 
@@ -704,6 +705,7 @@ export async function processResponsesStream<TApi extends Api>(
 					contentIndex: slot.contentIndex,
 					content: slot.block.thinking,
 					partial: output,
+					itemComplete: upstreamItemComplete,
 				});
 				outputSlots.delete(event.output_index);
 			} else if (item.type === "message" && slot?.type === "text") {
@@ -714,6 +716,7 @@ export async function processResponsesStream<TApi extends Api>(
 					contentIndex: slot.contentIndex,
 					content: slot.block.text,
 					partial: output,
+					itemComplete: upstreamItemComplete,
 				});
 				outputSlots.delete(event.output_index);
 			} else if (
@@ -726,11 +729,23 @@ export async function processResponsesStream<TApi extends Api>(
 				// Finalize in-place and strip the scratch buffer so replay only
 				// carries parsed arguments.
 				delete slot.block.partialJson;
+				// The salvage parser remains useful for displaying truncated calls, but
+				// only strict, complete JSON may authorize interrupted-response recovery.
+				let itemComplete = false;
+				if (upstreamItemComplete) {
+					try {
+						const args: unknown = JSON.parse(item.arguments);
+						itemComplete = typeof args === "object" && args !== null && !Array.isArray(args);
+					} catch {
+						// A parseable prefix is not a completed tool invocation.
+					}
+				}
 				stream.push({
 					type: "toolcall_end",
 					contentIndex: slot.contentIndex,
 					toolCall: slot.block,
 					partial: output,
+					itemComplete,
 				});
 				outputSlots.delete(event.output_index);
 			} else if (item.type === "custom_tool_call" && slot?.type === "toolCall" && slot.block.customInput) {
@@ -745,6 +760,7 @@ export async function processResponsesStream<TApi extends Api>(
 					contentIndex: slot.contentIndex,
 					toolCall: slot.block,
 					partial: output,
+					itemComplete: upstreamItemComplete,
 				});
 				outputSlots.delete(event.output_index);
 			}

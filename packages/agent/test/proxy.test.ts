@@ -37,6 +37,7 @@ describe("streamProxy", () => {
 			{
 				type: "toolcall_end",
 				contentIndex: 0,
+				itemComplete: true,
 				toolCall: {
 					type: "toolCall",
 					id: "call_test|fc_test",
@@ -68,6 +69,7 @@ describe("streamProxy", () => {
 
 		expect(endEvent).toMatchObject({
 			type: "toolcall_end",
+			itemComplete: true,
 			toolCall: { namespace: "dynamic_tools" },
 		});
 		expect(result.content[0]).toMatchObject({
@@ -75,6 +77,32 @@ describe("streamProxy", () => {
 			arguments: { value: "hello" },
 			namespace: "dynamic_tools",
 		});
+	});
+
+	it.each(["text", "thinking"] as const)("preserves %s completion markers without inventing them", async (kind) => {
+		for (const itemComplete of [true, false, undefined]) {
+			const body = [
+				{ type: "start" },
+				{ type: `${kind}_start`, contentIndex: 0 },
+				{ type: `${kind}_delta`, contentIndex: 0, delta: "complete" },
+				{ type: `${kind}_end`, contentIndex: 0, itemComplete },
+				{ type: "error", reason: "error", errorMessage: "Network connection lost", usage },
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(body)),
+			);
+			const stream = streamProxy(
+				model,
+				{ messages: [] },
+				{ authToken: "test", proxyUrl: "https://proxy.example.com" },
+			);
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) events.push(event);
+			expect(events.find((event) => event.type === `${kind}_end`)).toMatchObject({ itemComplete });
+		}
 	});
 
 	it("forwards promptCacheKey independently from sessionId", async () => {
