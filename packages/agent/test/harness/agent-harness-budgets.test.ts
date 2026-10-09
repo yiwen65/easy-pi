@@ -82,6 +82,7 @@ function failingTool(): HarnessTool {
 		label: "Fake",
 		description: "d",
 		parameters: Type.Object({ path: Type.String() }),
+		contract: { readOnly: true },
 		execute: async () => {
 			throw new Error("same failure");
 		},

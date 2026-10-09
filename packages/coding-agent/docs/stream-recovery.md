@@ -4,9 +4,9 @@ OpenAI Responses, Azure Responses, and OpenAI Codex responses can recover comple
 
 When a response is interrupted:
 
-1. Save the completed items as an assistant response checkpoint.
+1. Persist each confirmed complete output item while receiving the stream. After interruption, publish those items as an assistant response checkpoint.
 2. Execute complete tool calls using the existing sequential or parallel batch policy, after the stream has ended. Save the checkpoint before admitting tool effects, and await tool results before retrying.
-3. Save the remaining incomplete content and original failure as a separate assistant message. Its usage accounts for the request; the checkpoint has zero usage.
+3. In native sessions, save the remaining incomplete content and original failure as a separate assistant message. Its usage accounts for the request; the checkpoint has zero usage.
 4. If retry is enabled and its budget remains, remove the failure from active context and request another response using the checkpoint and tool results. Failure artifacts remain in the session transcript.
 
 Checkpoints carry `isResponseCheckpoint: true`. They record completed progress, not a successful model response, and do not reset the retry budget. A text-only checkpoint can be continued without adding another user message. Completed reasoning is retained only with a following completed message or tool call; isolated reasoning remains in the failure artifact.
@@ -15,4 +15,39 @@ In the TUI, retry errors appear in the temporary retry status and clear when the
 
 Calls with incomplete status or invalid final JSON are not recovered, even if a partial argument object can be parsed. Cancellation, quota/billing failures, and output-limit truncation do not execute recovery tools. Output-limit truncation retains its existing error-tool-result handling. Tool admission hooks and batch termination continue to apply.
 
-Providers without an explicit trustworthy item-completion marker retain their existing whole-response retry behavior. There is no token-level stream resumption. A model may request the same operation again, and a process can exit after a tool effect but before its result is saved; this mechanism does not guarantee exactly-once effects or recovery from power loss.
+Providers without an explicit trustworthy item-completion marker retain their existing whole-response retry behavior. There is no token-level stream resumption.
+
+## Native task recovery
+
+Native sessions persist accepted task intent, queued inputs, complete output items, tool dispatch intent, individual completed results, retry state, and task status. Initial and queued inputs carry provisioned entry IDs: reopening delivers only missing targets, and cancelled queues remain cancelled. Request acceptance is acknowledged after intent commits. Next-turn context stays queued until the next user turn. These internal records do not appear in the transcript or model context. A fast parallel tool's result is committed immediately; normal message artifacts and recovered results retain assistant call order.
+
+Reopening a running task resumes it after extensions bind. Explicitly cancelled tasks stay paused. Use `/resume-task` or `session.resumeTask()` to continue from committed progress without adding a user message. Completed tasks are not executed again.
+
+A dispatched tool with no committed result has an unknown outcome. Only an unchanged tool declared read-only, idempotent, or without side effects may replay automatically. Unsafe execution failures also pause conservatively. No further normal model request or tool dispatch is admitted while verification is required; diagnostic errors do not masquerade as confirmed tool results.
+
+After verifying external state, resolve a call with either:
+
+- `/reconcile-task <callId> result <verified result>` to supply its observed result;
+- `/reconcile-task <callId> retry` to authorize one new execution.
+
+Then use `/resume-task`. SDK callers can use `session.reconcileTool(callId, { kind: "result", result })` or `{ kind: "retry" }`, followed by `session.resumeTask()`. Verified results must name the original tool and call ID. Reconciliation is rejected while the session's tools are still running.
+
+## Durable Harness
+
+`AgentHarness` consumes the same upstream completion markers and persists checkpoint records before dispatch. Tools run after the response has ended, or after reopening an interrupted attempt. Retry classification and persisted retry budgets apply to continuation.
+
+The reference remote harness service accepts the same `/resume-task` and `/reconcile-task` text commands. It broadcasts a fresh snapshot when recovery pauses and reads catalog names without taking another writer claim.
+
+Unknown effects return `kind: "needs_reconciliation"` with the tool identity and reason. Use `await harness.reconcileTool(callId, resolution)` after verification, then `await harness.resume()`. The same result/retry resolution forms apply.
+
+Timeout and cancellation propagate through a dedicated tool AbortSignal. An uncooperative tool can still produce effects after cancellation; the run remains paused and its writer ownership is retained. Reconciliation and close are rejected until the physical tool exits. `harness.close()` durably pauses accepted work, drains execution, and releases storage ownership; reopening can resume that work.
+
+## Storage guarantees and limits
+
+Native JSONL commits synchronize files before advancing memory, repair torn final records before append, and reject interior corruption or stale writers. Atomic replacements synchronize the file and directory. Task ownership serializes cooperating native drivers.
+
+V4 JSONL repositories require `FileSystem.durableFiles`: an explicit backend capability for exclusive writer claims, synchronized append, atomic synchronized replacement, and release. `NodeExecutionEnv` provides it. Release sessions with `await session.release()` when finished; callers cannot open a second writer until the first has released or its process is confirmed dead.
+
+Invalid ownership metadata or an interrupted claim guard stops automatic recovery. Verify the owner before manually repairing a lock; never remove a live writer's lock. Backends lacking the required synchronization capability fail closed. Multiple hard links to the same session file are unsupported; use an independent copied file instead.
+
+These guarantees concern committed local task state. They cannot make arbitrary Bash commands or external APIs transactional with a local log. If a process exits after an effect but before its result is committed, verification is required rather than assuming success or repeating the effect. Hardware power-loss behavior is not tested by the offline process-crash regressions.

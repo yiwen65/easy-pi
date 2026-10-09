@@ -21,6 +21,9 @@ const RECORD_TYPES = new Set<LaneRecord["type"]>([
 	"operation_finished",
 	"step_attempt",
 	"tool_started",
+	"tool_reconciliation",
+	"tool_reconciled",
+	"assistant_checkpoint",
 	"queue_enqueued",
 	"queue_cancelled",
 	"write_deferred",
@@ -164,6 +167,34 @@ function parseRecordMutation(
 		}
 	}
 	if (type === "operation_finished") requireString(value.runId, "runId");
+	if (type === "tool_reconciliation" || type === "tool_reconciled") {
+		requireString(value.runId, "runId");
+		requireString(value.toolCallId, "toolCallId");
+		requireString(value.resultEntryId, "resultEntryId");
+		if (type === "tool_reconciliation") requireString(value.reason, "reason");
+		if (
+			value.diagnostic !== undefined &&
+			(!isObject(value.diagnostic) ||
+				value.diagnostic.role !== "toolResult" ||
+				value.diagnostic.toolCallId !== value.toolCallId ||
+				typeof value.diagnostic.toolName !== "string" ||
+				!Array.isArray(value.diagnostic.content))
+		)
+			throw new JsonlDecodeError("schema", "has invalid tool diagnostic");
+	}
+	if (type === "assistant_checkpoint") {
+		requireString(value.runId, "runId");
+		requireString(value.resultEntryId, "resultEntryId");
+		if (
+			!Number.isSafeInteger(value.attempt) ||
+			(value.attempt as number) < 1 ||
+			!isObject(value.message) ||
+			value.message.role !== "assistant" ||
+			value.message.isResponseCheckpoint !== true ||
+			!Array.isArray(value.message.content)
+		)
+			throw new JsonlDecodeError("schema", "has invalid assistant checkpoint");
+	}
 	const { kind: _kind, ...recordFields } = value;
 	return {
 		kind: "record",

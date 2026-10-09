@@ -130,6 +130,7 @@ describe("JSONL v4 persistence", () => {
 		const metadata = await session.getMetadata();
 		const malformed = "not json\n";
 		writeFileSync(metadata.path, malformed);
+		await session.release();
 
 		await expect(repository.open(metadata)).rejects.toMatchObject({ code: "invalid_entry" });
 		expect((await repository.list({ cwd: root })).map((listed) => listed.id)).toEqual(["valid"]);
@@ -151,6 +152,7 @@ describe("JSONL v4 persistence", () => {
 			metadata: "invalid",
 		})}\n`;
 		writeFileSync(metadata.path, malformed);
+		await session.release();
 
 		await expect(repository.open(metadata)).rejects.toMatchObject({ code: "invalid_entry" });
 		expect((await repository.list({ cwd: root })).map((listed) => listed.id)).toEqual(["valid"]);
@@ -288,6 +290,7 @@ describe("JSONL v4 persistence", () => {
 			.map((line) => JSON.parse(line));
 		expect(lines.map((line) => line.kind)).toEqual(["header", "entry", "lane", "record", "fact", "fact", "lane"]);
 		expect(lines.slice(1).map((line) => line.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+		await session.release();
 
 		const reopenedRepository = createRepository(root);
 		const reopened = await reopenedRepository.open(metadata);
@@ -330,6 +333,7 @@ describe("JSONL v4 persistence", () => {
 		await source.appendMessage({ role: "user", content: [{ type: "text", text: "two" }], timestamp: 2 });
 		const fork = await repository.fork(await source.getMetadata(), { id: "fork", cwd: root });
 		const metadata = await fork.getMetadata();
+		await fork.release();
 
 		const reopenedRepository = createRepository(root);
 		const reopened = await reopenedRepository.open(metadata);
@@ -338,6 +342,7 @@ describe("JSONL v4 persistence", () => {
 		expect((await reopened.getStats()).messageCount).toBe(3);
 
 		const verificationRepository = createRepository(root);
+		await reopened.release();
 		const verified = await verificationRepository.open(metadata);
 		expect((await verified.getStats()).messageCount).toBe(3);
 	});
@@ -362,6 +367,7 @@ describe("JSONL v4 persistence", () => {
 			.map((line) => JSON.parse(line))
 			.filter((line) => line.kind === "entry");
 		expect(importedEntryLines.map((line) => "lane" in line)).toEqual([false, false, false]);
+		await fork.release();
 
 		const reopenedRepository = createRepository(root);
 		const reopened = await reopenedRepository.open(metadata);
@@ -387,13 +393,10 @@ describe("JSONL v4 persistence", () => {
 		await source.appendMessage({ role: "user", content: [{ type: "text", text: "one" }], timestamp: 1 });
 		await source.appendMessage({ role: "user", content: [{ type: "text", text: "two" }], timestamp: 2 });
 		const sourceMetadata = await source.getMetadata();
-		const appendFile = env.appendFile.bind(env);
-		vi.spyOn(env, "appendFile")
-			.mockImplementationOnce(appendFile)
-			.mockResolvedValueOnce({
-				ok: false,
-				error: new FileError("unknown", "injected staging failure"),
-			});
+		vi.spyOn(env, "writeFile").mockResolvedValueOnce({
+			ok: false,
+			error: new FileError("unknown", "injected staging failure"),
+		});
 
 		await expect(repository.fork(sourceMetadata, { id: "fork", cwd: root })).rejects.toMatchObject({
 			code: "storage",
@@ -431,6 +434,7 @@ describe("JSONL v4 persistence", () => {
 		const firstId = await session.appendCustomEntry("first");
 		const unterminated = readFileSync(metadata.path, "utf8").trimEnd();
 		writeFileSync(metadata.path, unterminated);
+		await session.release();
 
 		const reopenedRepository = createRepository(root);
 		const reopened = await reopenedRepository.open(metadata);
@@ -438,6 +442,7 @@ describe("JSONL v4 persistence", () => {
 		const secondId = await reopened.appendCustomEntry("second");
 
 		const verificationRepository = createRepository(root);
+		await reopened.release();
 		const verified = await verificationRepository.open(metadata);
 		expect((await verified.findEntries({ order: "oldestFirst" })).map((entry) => entry.id)).toEqual([
 			firstId,
@@ -452,6 +457,7 @@ describe("JSONL v4 persistence", () => {
 		const metadata = await session.getMetadata();
 		await session.appendCustomEntry("first");
 		writeFileSync(metadata.path, readFileSync(metadata.path, "utf8").trimEnd());
+		await session.release();
 
 		const env = new NodeExecutionEnv({ cwd: root });
 		vi.spyOn(env, "appendFile").mockResolvedValueOnce({
@@ -477,6 +483,7 @@ describe("JSONL v4 persistence", () => {
 		await session.appendCustomEntry("note", { value: "kept" });
 		const validPrefix = readFileSync(metadata.path, "utf8");
 		appendFileSync(metadata.path, '{"kind":"entry"');
+		await session.release();
 
 		const reopenedRepository = createRepository(root);
 		const reopened = await reopenedRepository.open(metadata);
@@ -505,6 +512,7 @@ describe("JSONL v4 persistence", () => {
 		const lines = readFileSync(metadata.path, "utf8").trimEnd().split("\n");
 		const corrupted = `${lines[0]}\n${lines[1]}\nnot-json\n${lines[2]}\n`;
 		writeFileSync(metadata.path, corrupted);
+		await session.release();
 
 		const reopenedRepository = createRepository(root);
 		await expect(reopenedRepository.open(metadata)).rejects.toMatchObject({ code: "invalid_entry" });
@@ -555,6 +563,7 @@ describe("JSONL v4 persistence", () => {
 			.map((line) => JSON.parse(line));
 		lines[2].parentId = null;
 		writeFileSync(metadata.path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+		await session.release();
 
 		const reopenedRepository = createRepository(root);
 		await expect(reopenedRepository.open(metadata)).rejects.toMatchObject({
@@ -590,6 +599,7 @@ describe("JSONL v4 persistence", () => {
 		const imported = await importedRepository.open(metadata);
 		expect(await imported.getLeafId()).toBeNull();
 		expect((await imported.findEntries()).map((entry) => entry.id)).toEqual(["imported"]);
+		await imported.release();
 
 		appendFileSync(path, `${JSON.stringify({ kind: "lane", seq: 2, lane: "main", leafId: "imported" })}\n`);
 		const movedRepository = createRepository(root);
@@ -725,6 +735,7 @@ describe("JSONL v4 persistence", () => {
 		await session.appendCustomEntry("kept");
 		appendFileSync(metadata.path, '{"kind":"entry"');
 		const original = readFileSync(metadata.path, "utf8");
+		await session.release();
 
 		const env = new NodeExecutionEnv({ cwd: root });
 		const writeFile = env.writeFile.bind(env);
@@ -751,6 +762,7 @@ describe("JSONL v4 persistence", () => {
 		await session.appendCustomEntry("kept");
 		appendFileSync(metadata.path, '{"kind":"entry"');
 		const original = readFileSync(metadata.path, "utf8");
+		await session.release();
 
 		const env = new NodeExecutionEnv({ cwd: root });
 		vi.spyOn(env, "renameFile").mockResolvedValueOnce({

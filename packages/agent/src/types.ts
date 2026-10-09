@@ -239,6 +239,20 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	toolPlanRevision?: number;
 	/** Optional redacted execution observer. Exceptions do not affect the run. */
 	onExecutionEvent?: AgentExecutionObserver;
+	/** Persist a completed output item before exposing it to listeners. Failures stop the run. */
+	onCompletedOutputItem?: (context: {
+		stepId?: string;
+		contentIndex: number;
+		block: AssistantMessage["content"][number];
+		message: AssistantMessage;
+	}) => Promise<void> | void;
+	/** Persist each finalized result in completion order, before listener delivery. */
+	onToolResult?: (
+		message: ToolResultMessage,
+		context: { assistantMessage: AssistantMessage; toolCall: AgentToolCall; terminate: boolean },
+	) => Promise<void> | void;
+	/** Persist dispatch intent after scheduler admission, before the final synchronous gate. */
+	beforeToolDispatch?: (context: ToolAdmissionContext) => Promise<void> | void;
 
 	/** Synchronous final admission check immediately before a provider or tool starts. */
 	admitEffect?: () => boolean;

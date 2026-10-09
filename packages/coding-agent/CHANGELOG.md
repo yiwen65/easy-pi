@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added durable native task recovery with `/resume-task` and `/reconcile-task`; interrupted runs retain confirmed progress and unknown tool effects require verification.
 - Added a live elapsed-time suffix to the `Working...` indicator: it counts in seconds and switches to minutes (`12m 34s`) and hours (`1h 2m 5s`) automatically, counting from the turn start and refreshing once per second.
 - Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
 - Added `backgroundBashCompletionInlineOutput` (`failures` default, `always`, `tail-lines`, `never`) and `backgroundBashCompletionInlineBytes` (default 4096, clamped 256..32768) so completion notices can carry as much or as little output as you want; every notice now also states how to inspect output (`task_output(<id>)`).
@@ -19,6 +20,7 @@
 
 ### Fixed
 
+- Persisted accepted requests before the first response, synchronized JSONL commits, repaired torn tails before append, and rejected stale or concurrent session writers.
 - Rendered model and summarization retry errors as temporary TUI status notices instead of accumulating transcript errors; recovered errors stay hidden during history replay, and terminal failures remain visible.
 - Preserved completed Responses output items across stream interruption and collected complete tool-call results before retrying; recovery checkpoints do not reset the retry budget. See [stream recovery](docs/stream-recovery.md).
 - Fixed model stream failure records disappearing from session history while recovery kept the session working indefinitely; records are retained, terminal failures remain visible, and the run stops when its retry budget is exhausted.

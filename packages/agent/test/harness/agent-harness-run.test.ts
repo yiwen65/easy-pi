@@ -229,7 +229,7 @@ describe("AgentHarness durable run (slice 1)", () => {
 		expect(entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant")).toHaveLength(1);
 	});
 
-	it("does not replay a replay:'never' tool after a crash; the result records the unknown outcome", async () => {
+	it("blocks model reissue after an unknown side effect until explicitly reconciled", async () => {
 		const session = createSession();
 		const crashingTool = fakeTool({
 			replay: "never",
@@ -253,17 +253,28 @@ describe("AgentHarness durable run (slice 1)", () => {
 		);
 		const resumed = await recovered.harness.resume();
 		expect(resumed.ok).toBe(true);
+		expect(resumed.ok && resumed.value.kind).toBe("needs_reconciliation");
+		expect((await recovered.harness.resume()).ok).toBe(true);
 		// Not replayed: the tool still ran exactly once.
 		expect(crashingTool.calls).toBe(1);
 
 		const entries = await session.findEntries({ order: "oldestFirst" });
 		const toolResult = entries.find((entry) => entry.type === "message" && entry.message.role === "toolResult");
-		if (toolResult?.type === "message" && toolResult.message.role === "toolResult") {
-			expect(toolResult.message.isError).toBe(true);
-			expect(JSON.stringify(toolResult.message.content)).toMatch(/unknown|not replay/i);
-		} else {
-			expect.unreachable("tool result entry must exist");
-		}
+		expect(toolResult).toBeUndefined();
+		await recovered.harness.reconcileTool(call.id, {
+			kind: "result",
+			result: {
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: call.name,
+				content: [{ type: "text", text: "verified externally" }],
+				isError: false,
+				timestamp: 1,
+			},
+		});
+		const finished = await recovered.harness.resume();
+		expect(finished.ok && finished.value.kind).toBe("completed");
+		expect(crashingTool.calls).toBe(1);
 	});
 
 	it("re-executes a replay:'safe' tool after a crash with the same result entry id", async () => {

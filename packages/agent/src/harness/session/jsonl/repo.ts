@@ -3,7 +3,7 @@ import { assertJsonSerializable, Session } from "../session.ts";
 import { type ForkOptions, SessionError, type SessionRepo } from "../types.ts";
 import { metadataFromHeader, parseHeader } from "./codec.ts";
 import { fileResult } from "./errors.ts";
-import { JsonlSessionStorage } from "./storage.ts";
+import { claimJsonlWriter, JsonlSessionStorage } from "./storage.ts";
 import type {
 	JsonlSessionCreateOptions,
 	JsonlSessionListOptions,
@@ -96,6 +96,7 @@ export async function loadJsonlSessionStorage(
 	const storage = await JsonlSessionStorage.load(options.fs, metadata.path);
 	const loadedMetadata = await storage.getMetadata();
 	if (loadedMetadata.id !== metadata.id) {
+		await storage.release();
 		throw new SessionError("invalid_entry", `Session id does not match header: ${metadata.id}`);
 	}
 	return storage;
@@ -112,6 +113,7 @@ export class JsonlSessionRepo
 	private readonly fs: JsonlSessionRepoFileSystem;
 	private readonly sessionsRootInput: string;
 	private readonly activeCreateDestinations = new Set<string>();
+	private readonly activeStorages = new Map<string, JsonlSessionStorage>();
 	private rootPromise: Promise<string> | undefined;
 
 	constructor(options: JsonlSessionRepoOptions) {
@@ -123,36 +125,60 @@ export class JsonlSessionRepo
 		const destination = await this.resolveCreateDestination(options);
 		return this.claimCreateDestination(destination, async () => {
 			const { header, path } = await this.prepareCreate(destination, options);
-			return new Session(await JsonlSessionStorage.create(this.fs, path, header));
+			const storage = await JsonlSessionStorage.create(this.fs, path, header);
+			this.activeStorages.set(path, storage);
+			return new Session(storage);
 		});
 	}
 
 	async open(metadata: JsonlSessionMetadata): Promise<Session<JsonlSessionMetadata>> {
-		return new Session(await this.loadStorage(metadata));
+		const storage = await this.loadStorage(metadata);
+		this.activeStorages.set(metadata.path, storage);
+		return new Session(storage);
 	}
 
 	async list(options: JsonlSessionListOptions = {}): Promise<JsonlSessionMetadata[]> {
 		return this.listDirect(options);
 	}
 
+	async inspect(metadata: JsonlSessionMetadata): Promise<{ name?: string }> {
+		return JsonlSessionStorage.inspect(this.fs, metadata.path, metadata.id);
+	}
+
 	async delete(metadata: JsonlSessionMetadata): Promise<void> {
-		fileResult(await this.fs.remove(metadata.path, { force: true }), `Failed to delete session ${metadata.path}`);
+		await this.activeStorages.get(metadata.path)?.release();
+		this.activeStorages.delete(metadata.path);
+		if (!fileResult(await this.fs.exists(metadata.path), `Failed to check session ${metadata.path}`)) return;
+		const writer = await claimJsonlWriter(this.fs, metadata.path);
+		try {
+			fileResult(await this.fs.remove(metadata.path, { force: true }), `Failed to delete session ${metadata.path}`);
+		} finally {
+			fileResult(await writer.release(), `Failed to release deleted session ${metadata.path}`);
+		}
 	}
 
 	async fork(
 		source: JsonlSessionMetadata,
 		options: ForkOptions & JsonlSessionCreateOptions,
 	): Promise<Session<JsonlSessionMetadata>> {
-		const sourceStorage = await this.loadStorage(source);
+		const existing = this.activeStorages.get(source.path);
+		const sourceStorage = existing && !existing.isReleased() ? existing : await this.loadStorage(source);
 		const createOptions = {
 			...options,
 			parentSessionId: options.parentSessionId ?? source.id,
 		};
-		const destination = await this.resolveCreateDestination(createOptions);
-		return this.claimCreateDestination(destination, async () => {
-			const { header, path } = await this.prepareCreate(destination, createOptions);
-			return new Session(await sourceStorage.fork(path, header, options));
-		});
+		try {
+			const destination = await this.resolveCreateDestination(createOptions);
+			await sourceStorage.drain();
+			return await this.claimCreateDestination(destination, async () => {
+				const { header, path } = await this.prepareCreate(destination, createOptions);
+				const storage = await sourceStorage.fork(path, header, options);
+				this.activeStorages.set(path, storage);
+				return new Session(storage);
+			});
+		} finally {
+			if (sourceStorage !== existing) await sourceStorage.release();
+		}
 	}
 
 	private async loadStorage(metadata: JsonlSessionMetadata): Promise<JsonlSessionStorage> {
@@ -181,7 +207,18 @@ export class JsonlSessionRepo
 		}
 		this.activeCreateDestinations.add(key);
 		try {
-			return await operation();
+			const directory = await this.sessionDirectory(destination.cwd);
+			fileResult(await this.fs.createDir(directory, { recursive: true }), "Failed to create session directory");
+			const reservationPath = fileResult(
+				await this.fs.joinPath([directory, `.${destination.id}.creation`]),
+				"Failed to resolve session reservation",
+			);
+			const reservation = await claimJsonlWriter(this.fs, reservationPath);
+			try {
+				return await operation();
+			} finally {
+				fileResult(await reservation.release(), "Failed to release session reservation");
+			}
 		} finally {
 			this.activeCreateDestinations.delete(key);
 		}

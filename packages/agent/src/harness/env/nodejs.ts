@@ -1,12 +1,25 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
+import {
+	closeSync,
+	constants,
+	createReadStream,
+	existsSync,
+	fsyncSync,
+	openSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import {
 	access,
 	appendFile,
 	lstat,
 	mkdir,
 	mkdtemp,
+	open,
 	readdir,
 	readFile,
 	realpath,
@@ -15,10 +28,12 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
+	type DurableFileSystem,
+	type DurableFileWriter,
 	type ExecutionEnv,
 	ExecutionError,
 	err,
@@ -137,6 +152,12 @@ function toFileError(error: unknown, fallbackPath?: string): FileError {
 
 function abortResult<TValue>(signal: AbortSignal | undefined, path?: string): Result<TValue, FileError> | undefined {
 	return signal?.aborted ? err(new FileError("aborted", "aborted", path)) : undefined;
+}
+
+function assertSingleLink(path: string): void {
+	if (existsSync(path) && statSync(path).nlink > 1) {
+		throw new FileError("not_supported", "Persistent files with multiple hard links are unsupported", path);
+	}
 }
 
 function validatePositiveInteger(value: number | undefined, name: string): FileError | undefined {
@@ -307,6 +328,8 @@ export interface NodeExecutionEnvOptions {
 
 export class NodeExecutionEnv implements ExecutionEnv {
 	cwd: string;
+	readonly durableFiles: DurableFileSystem = { claim: (path) => this.claimDurableFile(path) };
+	private readonly durableWriters = new Set<DurableFileWriter>();
 	private shellPath?: string;
 	private shellEnv?: NodeJS.ProcessEnv;
 	private readonly processExecutor: NodeProcessExecutor;
@@ -338,6 +361,165 @@ export class NodeExecutionEnv implements ExecutionEnv {
 
 	async absolutePath(path: string): Promise<Result<string, FileError>> {
 		return ok(resolvePath(this.cwd, path));
+	}
+
+	private async claimDurableFile(path: string): Promise<Result<DurableFileWriter, FileError>> {
+		let resolved = resolvePath(this.cwd, path);
+		let lockPath: string;
+		const token = randomUUID();
+		try {
+			await mkdir(dirname(resolved), { recursive: true });
+			const canonical = existsSync(resolved)
+				? realpathSync(resolved)
+				: join(realpathSync(dirname(resolved)), basename(resolved));
+			resolved = canonical;
+			assertSingleLink(resolved);
+			lockPath = `${canonical}.writer.lock`;
+			// Serialize stale-owner reclamation with all new claims. An interrupted
+			// claim guard remains fail-closed rather than risking two live owners.
+			const guardPath = `${lockPath}.claim`;
+			const guard = openSync(guardPath, "wx", 0o600);
+			try {
+				if (existsSync(lockPath)) {
+					const owner: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+					if (
+						typeof owner !== "object" ||
+						owner === null ||
+						!("pid" in owner) ||
+						typeof owner.pid !== "number" ||
+						!Number.isSafeInteger(owner.pid) ||
+						owner.pid <= 0
+					) {
+						throw new FileError("invalid", "Invalid durable writer owner", lockPath);
+					}
+					let alive = true;
+					try {
+						process.kill(owner.pid, 0);
+					} catch (error) {
+						if (!isNodeError(error) || error.code !== "ESRCH") throw error;
+						alive = false;
+					}
+					if (alive) throw new FileError("permission_denied", "Session already has an active writer", resolved);
+					unlinkSync(lockPath);
+				}
+				const ownerFd = openSync(lockPath, "wx", 0o600);
+				try {
+					writeFileSync(ownerFd, JSON.stringify({ pid: process.pid, token }));
+					fsyncSync(ownerFd);
+				} finally {
+					closeSync(ownerFd);
+				}
+			} finally {
+				closeSync(guard);
+				unlinkSync(guardPath);
+			}
+		} catch (error) {
+			return err(toFileError(error, resolved));
+		}
+		let closed = false;
+		let faulted = false;
+		let closing = false;
+		let tail: Promise<void> = Promise.resolve();
+		let releasePromise: Promise<Result<void, FileError>> | undefined;
+		const enqueue = (operation: () => Promise<Result<void, FileError>>): Promise<Result<void, FileError>> => {
+			if (closing) return Promise.resolve(err(new FileError("invalid", "Durable writer is closing", resolved)));
+			const result = tail.then(operation);
+			tail = result.then(
+				() => undefined,
+				() => undefined,
+			);
+			return result;
+		};
+		const verifyOwner = (): void => {
+			if (closed || faulted) throw new FileError("invalid", "Durable writer is closed or faulted", resolved);
+			assertSingleLink(resolved);
+			const owner: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+			if (typeof owner !== "object" || owner === null || !("token" in owner) || owner.token !== token)
+				throw new FileError("permission_denied", "Durable writer claim was lost", resolved);
+		};
+		const writer: DurableFileWriter = {
+			append: (content) =>
+				enqueue(async () => {
+					try {
+						verifyOwner();
+						const result = await this.appendFile(resolved, content);
+						if (!result.ok) {
+							faulted = true;
+							return result;
+						}
+						const handle = await open(resolved, "r+");
+						try {
+							await handle.sync();
+							assertSingleLink(resolved);
+						} finally {
+							await handle.close();
+						}
+						return ok(undefined);
+					} catch (error) {
+						faulted = true;
+						return err(toFileError(error, resolved));
+					}
+				}),
+			replace: (content, options) =>
+				enqueue(async () => {
+					const temporaryPath = `${resolved}.${token}.tmp`;
+					try {
+						verifyOwner();
+						if (options?.exclusive && (await pathExists(resolved)))
+							throw new FileError("invalid", "Durable destination already exists", resolved);
+						const staged = await this.writeFile(temporaryPath, content);
+						if (!staged.ok) {
+							faulted = true;
+							return staged;
+						}
+						const handle = await open(temporaryPath, "r+");
+						try {
+							await handle.sync();
+						} finally {
+							await handle.close();
+						}
+						verifyOwner();
+						const published = await this.renameFile(temporaryPath, resolved);
+						if (!published.ok) {
+							faulted = true;
+							return published;
+						}
+						const directory = await open(dirname(resolved), "r");
+						try {
+							await directory.sync();
+						} finally {
+							await directory.close();
+						}
+						return ok(undefined);
+					} catch (error) {
+						faulted = true;
+						return err(toFileError(error, resolved));
+					} finally {
+						await rm(temporaryPath, { force: true }).catch(() => undefined);
+					}
+				}),
+			release: () => {
+				closing = true;
+				releasePromise ??= (async () => {
+					await tail;
+					if (closed) return ok(undefined);
+					try {
+						const owner: unknown = JSON.parse(readFileSync(lockPath, "utf8"));
+						if (typeof owner !== "object" || owner === null || !("token" in owner) || owner.token !== token)
+							throw new FileError("permission_denied", "Durable writer claim was lost", resolved);
+						unlinkSync(lockPath);
+						closed = true;
+						this.durableWriters.delete(writer);
+						return ok(undefined);
+					} catch (error) {
+						return err(toFileError(error, resolved));
+					}
+				})();
+				return releasePromise;
+			},
+		};
+		this.durableWriters.add(writer);
+		return ok(writer);
 	}
 
 	async joinPath(parts: string[]): Promise<Result<string, FileError>> {
@@ -658,6 +840,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 					const info = fileInfoFromStats(entryPath, await lstat(entryPath));
 					if (info.ok) infos.push(info.value);
 				} catch (error) {
+					// Lock guards and staged files can disappear between readdir and lstat.
+					if (isNodeError(error) && error.code === "ENOENT") continue;
 					return err(toFileError(error, entryPath));
 				}
 			}
@@ -724,6 +908,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async cleanup(): Promise<void> {
+		for (const writer of this.durableWriters) await writer.release();
 		await this.backgroundTasks.cleanup();
 		await this.processExecutor.cleanup();
 	}

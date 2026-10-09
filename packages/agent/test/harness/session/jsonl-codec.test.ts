@@ -130,6 +130,65 @@ describe("JSONL v4 codec", () => {
 			});
 		});
 
+		it("round trips durable reconciliation and complete-item records", () => {
+			for (const record of [
+				{
+					type: "tool_reconciliation",
+					id: "unknown",
+					seq: 1,
+					lane: "main",
+					timestamp: 1,
+					runId: "run",
+					toolCallId: "call",
+					resultEntryId: "result",
+					reason: "timeout",
+					diagnostic: {
+						role: "toolResult",
+						toolCallId: "call",
+						toolName: "bash",
+						content: [{ type: "text", text: "observed failure" }],
+						details: { exitCode: 7 },
+						isError: true,
+						timestamp: 1,
+					},
+				},
+				{
+					type: "tool_reconciled",
+					id: "verified",
+					seq: 2,
+					lane: "main",
+					timestamp: 2,
+					runId: "run",
+					toolCallId: "call",
+					resultEntryId: "result",
+				},
+				{
+					type: "assistant_checkpoint",
+					id: "checkpoint",
+					seq: 3,
+					lane: "main",
+					timestamp: 3,
+					runId: "run",
+					resultEntryId: "assistant",
+					attempt: 1,
+					message: { role: "assistant", isResponseCheckpoint: true, content: [] },
+				},
+			]) {
+				const mutation = { kind: "record", ...record };
+				expect(parseMutation(JSON.stringify(mutation))).toEqual({ ok: true, value: { kind: "record", record } });
+			}
+		});
+
+		it.each([
+			{ type: "tool_reconciliation", runId: "run", toolCallId: "call" },
+			{ type: "tool_reconciled", runId: "run" },
+			{ type: "assistant_checkpoint", runId: "run", resultEntryId: "assistant", attempt: 0, message: {} },
+		])("rejects incomplete recovery record $type", (record) => {
+			expect(
+				parseMutation(JSON.stringify({ kind: "record", id: "bad", seq: 1, timestamp: 1, lane: "main", ...record })),
+			).toMatchObject({ ok: false });
+		});
+
 		it("round trips a lane line", () => {
 			expectMutationRoundTrip({ kind: "lane", seq: 1, lane: "thread", leafId: "entry-1" });
 		});

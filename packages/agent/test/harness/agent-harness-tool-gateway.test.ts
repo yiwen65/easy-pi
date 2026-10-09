@@ -197,15 +197,15 @@ describe("AgentHarness tool gateway (T-003)", () => {
 		);
 		const result = await harness.prompt("go");
 		expect(result.ok).toBe(true);
+		expect(result.ok && result.value.kind).toBe("needs_reconciliation");
 		expect(tool.calls).toBe(1);
 		const results = (await session.findEntries({ order: "oldestFirst" })).filter(
 			(entry) => entry.type === "message" && entry.message.role === "toolResult",
 		);
-		expect(results).toHaveLength(1);
-		if (results[0]?.type === "message" && results[0].message.role === "toolResult") {
-			expect(results[0].message.isError).toBe(true);
-			expect(JSON.stringify(results[0].message.content)).toContain("disk exploded");
-		}
+		expect(results).toHaveLength(0);
+		expect(await session.findRecords({ type: "tool_reconciliation" })).toMatchObject([
+			{ reason: expect.stringContaining("disk exploded") },
+		]);
 	});
 
 	it.each([true, false])("persists only explicitly safe error details (opt-in=%s)", async (explicit) => {
@@ -213,6 +213,7 @@ describe("AgentHarness tool gateway (T-003)", () => {
 		const details = { exitCode: 7, absent: undefined, nested: { safe: true, absent: undefined } };
 		const cause = new Error("internal cause");
 		const tool = fakeTool({
+			contract: { readOnly: true },
 			execute: async () => {
 				throw explicit
 					? new AgentToolError("public failure", details, { cause })
@@ -246,7 +247,7 @@ describe("AgentHarness tool gateway (T-003)", () => {
 		}
 	});
 
-	it("persists real Bash failure status with replay never", async () => {
+	it("preserves verified real Bash failure status while default replay remains never", async () => {
 		const session = createSession();
 		const env = new NodeExecutionEnv({ cwd: createTempDir() });
 		const bash = createBashTool();
@@ -271,7 +272,26 @@ describe("AgentHarness tool gateway (T-003)", () => {
 			],
 		);
 		try {
-			await harness.prompt("go");
+			const outcome = await harness.prompt("go");
+			expect(outcome.ok && outcome.value.kind).toBe("needs_reconciliation");
+			const diagnostic = (await session.findRecords({ type: "tool_reconciliation" }))[0]?.diagnostic;
+			expect(diagnostic).toMatchObject({
+				content: [{ type: "text", text: "durable-failure\n\nCommand exited with code 7" }],
+				details: { exitCode: 7, terminationReason: "exit", timedOut: false },
+			});
+			expect(
+				(await session.findEntries()).filter(
+					(entry) => entry.type === "message" && entry.message.role === "toolResult",
+				),
+			).toHaveLength(0);
+			if (!diagnostic) throw new Error("Expected durable failure diagnostics");
+			// This exact command only prints and exits; its observed exit status can be supplied explicitly.
+			await harness.reconcileTool("bash-failure", {
+				kind: "result",
+				result: diagnostic,
+			});
+			const resumed = await harness.resume();
+			expect(resumed.ok && resumed.value.kind).toBe("completed");
 			const entry = (await session.findEntries({ order: "oldestFirst" })).find(
 				(entry) => entry.type === "message" && entry.message.role === "toolResult",
 			);
@@ -290,7 +310,7 @@ describe("AgentHarness tool gateway (T-003)", () => {
 		}
 	});
 
-	it("a tool timeout becomes an unknown-outcome result, not a silent failure", async () => {
+	it("a tool timeout stays unresolved and blocks both continuation and live reconciliation", async () => {
 		const session = createSession();
 		const tool = fakeTool({
 			contract: { timeoutMs: 20 },
@@ -305,15 +325,14 @@ describe("AgentHarness tool gateway (T-003)", () => {
 			[tool],
 		);
 		const result = await harness.prompt("go");
-		expect(result.ok && result.value.kind).toBe("completed");
+		expect(result.ok && result.value.kind).toBe("needs_reconciliation");
 		const results = (await session.findEntries({ order: "oldestFirst" })).filter(
 			(entry) => entry.type === "message" && entry.message.role === "toolResult",
 		);
-		expect(results).toHaveLength(1);
-		if (results[0]?.type === "message" && results[0].message.role === "toolResult") {
-			expect(results[0].message.isError).toBe(true);
-			expect(JSON.stringify(results[0].message.content)).toMatch(/timeout|unknown/i);
-		}
+		expect(results).toHaveLength(0);
+		await expect(harness.reconcileTool(call.id, { kind: "retry" })).rejects.toThrow("has not stopped");
+		const resumed = await harness.resume();
+		expect(resumed.ok && resumed.value.kind).toBe("needs_reconciliation");
 	});
 
 	it("approval-required tools fail closed without an approval channel and never execute", async () => {

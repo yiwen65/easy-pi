@@ -53,6 +53,7 @@ function createUsage(multiplier: number): Usage {
 }
 
 async function reopen(root: string, session: Session<JsonlSessionMetadata>): Promise<Session<JsonlSessionMetadata>> {
+	await session.release();
 	return createRepository(root).open(await session.getMetadata());
 }
 
@@ -476,7 +477,7 @@ describe("JSONL v4 per-session storage", () => {
 		expect((await reopen(root, restored)).getEntry("valid")).resolves.toEqual(valid);
 	});
 
-	it("does not advance state or poison the write queue after an append failure", async () => {
+	it("does not advance state and requires reopening after an append failure", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		vi.spyOn(env, "appendFile").mockResolvedValueOnce({
@@ -488,10 +489,12 @@ describe("JSONL v4 per-session storage", () => {
 
 		await expect(session.appendCustomEntry("rejected")).rejects.toMatchObject({ code: "storage" });
 		expect(await session.getLog()).toEqual([]);
-		const committed = await session.appendEntry({ type: "custom", id: "committed", customType: "note" }, "main");
+		await expect(session.appendCustomEntry("blocked")).rejects.toMatchObject({ code: "storage" });
+		await session.release();
+		const reopened = await createRepository(root).open(await session.getMetadata());
+		const committed = await reopened.appendEntry({ type: "custom", id: "committed", customType: "note" }, "main");
 		expect(committed.seq).toBe(1);
 
-		const reopened = await createRepository(root).open(await session.getMetadata());
 		expect(await reopened.getLog()).toEqual([{ kind: "entry", seq: 1, entry: committed }]);
 	});
 });

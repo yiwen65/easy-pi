@@ -12,7 +12,7 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "@earendil-works/pi-ai";
-import { validateToolArguments } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError, validateToolArguments } from "@earendil-works/pi-ai";
 import { fingerprintAssistantTurn, fingerprintToolResult } from "../no-progress.ts";
 import { getDefaultStreamFn } from "../stream-fn.ts";
 import type {
@@ -118,6 +118,7 @@ export type RunOutcome =
 	| { kind: "aborted"; leafId: string; finalEntryId: string; finalMessage: AssistantMessage }
 	| { kind: "failed"; leafId: string; error: OperationError; finalEntryId?: string; finalMessage?: AssistantMessage }
 	| { kind: "paused"; leafId: string }
+	| { kind: "needs_reconciliation"; leafId: string; toolCallId: string; toolName: string; reason: string }
 	| { kind: "suspended"; leafId: string; finalEntryId: string; deferred: DeferredHandle };
 
 export type CompactionOutcome =
@@ -334,6 +335,10 @@ export interface AgentLane {
 	compact(options?: { customInstructions?: string }): Promise<CompactionResult>;
 	navigateTree(targetId: string | null, options?: NavigateOptions): Promise<NavigationResult>;
 	resume(): Promise<ResumeResult>;
+	reconcileTool(
+		toolCallId: string,
+		resolution: { kind: "result"; result: ToolResultMessage } | { kind: "retry" },
+	): Promise<void>;
 	abort(): Promise<AbortResult>;
 	steer(text: string, images?: ImageContent[]): Promise<QueueResult>;
 	steer(message: AgentMessage): Promise<QueueResult>;
@@ -394,6 +399,9 @@ export class AgentHarness implements AgentLane {
 	private operationReady: Promise<void> | undefined;
 	/** Serializes queue consumption and cancellation so they never interleave into corruption. */
 	private queueLock: Promise<void> = Promise.resolve();
+	private readonly unsettledTools = new Set<string>();
+	private reconciling = false;
+	private closePromise: Promise<void> | undefined;
 
 	/** Progress fingerprints observed for the active driver, reset per drive. */
 	private lastFingerprint: string | undefined;
@@ -638,7 +646,7 @@ export class AgentHarness implements AgentLane {
 	async resume(): Promise<ResumeResult> {
 		if (this.closed) throw new HarnessClosed();
 		if (this.driveMode === "manual") throw new HarnessNotImplemented("resume.manual");
-		if (this.driverPromise) {
+		if (this.driverPromise || this.reconciling) {
 			return Result.err(
 				new LaneBusy({
 					lane: "main",
@@ -649,6 +657,7 @@ export class AgentHarness implements AgentLane {
 			);
 		}
 		const reduction = await this.reduceCurrent();
+		if (this.closed) throw new HarnessClosed();
 		const op = reduction.laneState.operation;
 		if (!op) {
 			return Result.err(new NothingToResume({ lane: "main", message: "No suspended operation on lane main" }));
@@ -677,6 +686,7 @@ export class AgentHarness implements AgentLane {
 				runId: op.id,
 			});
 		}
+		if (this.closed) throw new HarnessClosed();
 		const driving =
 			op.kind === "run" ? this.drive() : op.kind === "compaction" ? this.driveCompaction() : this.driveNavigation();
 		this.driverPromise = driving.then(
@@ -703,6 +713,49 @@ export class AgentHarness implements AgentLane {
 		return Result.ok({ runId });
 	}
 
+	/** Explicit operator verification; never infer that an unknown side effect failed. */
+	async reconcileTool(
+		toolCallId: string,
+		resolution: { kind: "result"; result: ToolResultMessage } | { kind: "retry" },
+	): Promise<void> {
+		if (this.closed) throw new HarnessClosed();
+		if (this.driverPromise || this.reconciling || this.unsettledTools.has(toolCallId))
+			throw new Error("Tool execution has not stopped; reconciliation is unsafe");
+		this.reconciling = true;
+		try {
+			const op = (await this.reduceCurrent()).laneState.operation;
+			const call = op?.toolBatch?.calls.find(
+				(candidate) => candidate.toolCall.id === toolCallId && !candidate.resultExists,
+			);
+			if (!op || !call?.started || (call.started.replay !== "never" && !call.reconciliation))
+				throw new Error("No unresolved tool execution to reconcile");
+			if (resolution.kind === "result") {
+				if (
+					resolution.result.toolCallId !== toolCallId ||
+					resolution.result.toolName !== call.toolCall.name ||
+					resolution.result.role !== "toolResult"
+				)
+					throw new Error("Verified result does not match the unresolved tool");
+				await this.appendOwnedEntry({
+					type: "message",
+					id: call.started.resultEntryId,
+					message: stripUndefined(resolution.result) as ToolResultMessage,
+				});
+			} else {
+				await this.durableSession.appendRecord({
+					type: "tool_reconciled",
+					id: this.nextId(),
+					lane: "main",
+					runId: op.id,
+					toolCallId,
+					resultEntryId: call.started.resultEntryId,
+				});
+			}
+		} finally {
+			this.reconciling = false;
+		}
+	}
+
 	async abort(): Promise<AbortResult> {
 		if (this.closed) throw new HarnessClosed();
 		if (!this.activeOperation) {
@@ -719,7 +772,9 @@ export class AgentHarness implements AgentLane {
 		const undelivered = await this.undeliveredQueueItems(runId);
 		if (!this.driverPromise) {
 			await this.cancelUndelivered(runId, [...undelivered.steer, ...undelivered.followUp]);
-			await this.finishRun(runId, "aborted", {});
+			const batch = (await this.reduceCurrent()).laneState.operation?.toolBatch;
+			if (!batch?.calls.some((call) => call.started && !call.resultExists))
+				await this.finishRun(runId, "aborted", {});
 		}
 		return Result.ok({
 			runId,
@@ -1023,6 +1078,32 @@ export class AgentHarness implements AgentLane {
 	}
 	async close(): Promise<void> {
 		this.closed = true;
+		if (this.closePromise) return this.closePromise;
+		const closing = (async () => {
+			if (this.reconciling) throw new Error("Reconciliation is still writing; session ownership was retained");
+			await this.operationReady;
+			const op = (await this.reduceCurrent()).laneState.operation;
+			if (op?.kind === "run" && !op.pausing)
+				await this.durableSession.appendRecord({
+					type: "pause_requested",
+					id: this.nextId(),
+					lane: "main",
+					runId: op.id,
+				});
+			this.activeAbort?.abort();
+			await this.driverPromise;
+			if (this.unsettledTools.size > 0)
+				throw new Error(
+					"Tool execution has not stopped; session ownership was retained. Retry close after the tool exits",
+				);
+			await this.durableSession.release();
+		})();
+		this.closePromise = closing;
+		try {
+			await closing;
+		} finally {
+			this.closePromise = undefined;
+		}
 	}
 
 	// =========================================================================
@@ -1226,6 +1307,25 @@ export class AgentHarness implements AgentLane {
 			// Control safe point: an accepted abort takes effect before any further
 			// model request or tool dispatch. The driver owns queue cancellation so
 			// cancellation and consumption never interleave into a corrupt log.
+			const uncertain = op.toolBatch?.calls.find(
+				(call) =>
+					!call.resultExists &&
+					call.started &&
+					(call.reconciliation || (call.started.replay === "never" && !call.retryAuthorized)),
+			);
+			if (uncertain) {
+				return {
+					kind: "needs_reconciliation",
+					leafId: this.laneLeaf ?? "",
+					toolCallId: uncertain.toolCall.id,
+					toolName: uncertain.toolCall.name,
+					reason: uncertain.reconciliation ?? "Tool was dispatched but its result was not committed",
+				};
+			}
+			if (op.checkpoint) {
+				await this.appendOwnedEntry({ type: "message", id: op.step!.resultEntryId, message: op.checkpoint });
+				continue;
+			}
 			if (op.aborting) {
 				const undelivered = await this.undeliveredQueueItems(op.id);
 				await this.cancelUndelivered(op.id, [...undelivered.steer, ...undelivered.followUp]);
@@ -1262,6 +1362,11 @@ export class AgentHarness implements AgentLane {
 				await this.advanceToolBatch(op.id, batch);
 				continue;
 			}
+			if (op.checkpointFailure)
+				return await this.finishRun(op.id, "failed", {
+					error: { code: "step_failed", message: op.checkpointFailure.errorMessage ?? "Assistant step failed" },
+					finalMessage: op.checkpointFailure,
+				});
 			if (batch && batch.calls.length > 0 && batch.calls.every((call) => call.terminate === true)) {
 				const assistant = await this.durableSession.getEntry(batch.assistantEntryId);
 				if (assistant?.type !== "message" || assistant.message.role !== "assistant") {
@@ -1290,6 +1395,19 @@ export class AgentHarness implements AgentLane {
 				// When it points at an older assistant, the newest assistant has no tool
 				// calls and the run would stop here: steer first, then follow-up.
 				if (!batch || batch.assistantEntryId !== newest.entryId) {
+					const newestEntry = await this.durableSession.getEntry(newest.entryId);
+					if (
+						newestEntry?.type === "message" &&
+						newestEntry.message.role === "assistant" &&
+						newestEntry.message.isResponseCheckpoint
+					) {
+						if (op.pendingSteer.length > 0) {
+							await this.drainQueued(op.pendingSteer, this.steeringMode);
+							continue;
+						}
+						await this.runAssistantStep(op);
+						continue;
+					}
 					if (op.pendingSteer.length > 0) {
 						await this.drainQueued(op.pendingSteer, this.steeringMode);
 						continue;
@@ -1348,6 +1466,7 @@ export class AgentHarness implements AgentLane {
 
 	private async driveCompaction(): Promise<CompactionOutcome> {
 		while (true) {
+			if (this.closed) return { kind: "aborted", leafId: this.laneLeaf ?? "" };
 			const reduction = await this.reduceCurrent();
 			const op = reduction.laneState.operation;
 			if (!op || op.intent.kind !== "compaction" || op.id !== this.activeOperation?.id) {
@@ -1400,6 +1519,7 @@ export class AgentHarness implements AgentLane {
 				this.retryPolicy,
 			);
 			if (!result.ok) {
+				if (this.closed) return { kind: "aborted", leafId: this.laneLeaf ?? "" };
 				if (result.error.code === "aborted") {
 					await this.finishOperation(op.id, "aborted");
 					return { kind: "aborted", leafId: this.laneLeaf ?? "" };
@@ -1436,6 +1556,7 @@ export class AgentHarness implements AgentLane {
 
 	private async driveNavigation(): Promise<NavigationOutcome> {
 		while (true) {
+			if (this.closed) return { kind: "aborted", leafId: this.laneLeaf };
 			const reduction = await this.reduceCurrent();
 			const op = reduction.laneState.operation;
 			if (!op || op.intent.kind !== "navigation" || op.id !== this.activeOperation?.id) {
@@ -1471,6 +1592,7 @@ export class AgentHarness implements AgentLane {
 					retry: this.retryPolicy,
 				});
 				if (!generated.ok) {
+					if (this.closed) return { kind: "aborted", leafId: this.laneLeaf };
 					if (generated.error.code === "aborted") {
 						await this.finishOperation(op.id, "aborted");
 						return { kind: "aborted", leafId: this.laneLeaf ?? "" };
@@ -1569,6 +1691,33 @@ export class AgentHarness implements AgentLane {
 	}
 
 	private async runAssistantStep(op: NonNullable<LaneState["operation"]>): Promise<void> {
+		const previousCheckpoints = await this.durableSession.findRecords({
+			lane: "main",
+			runId: op.id,
+			type: "assistant_checkpoint",
+		});
+		const previous = previousCheckpoints[0];
+		const previousEntry = previous ? await this.durableSession.getEntry(previous.resultEntryId) : undefined;
+		const subsequentAssistants = previousEntry
+			? (await this.durableSession.findEntriesOnBranch({ start: this.laneLeaf ?? undefined })).some(
+					(entry) =>
+						entry.seq > previousEntry.seq &&
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						!entry.message.isResponseCheckpoint,
+				)
+			: false;
+		const retryOffset =
+			!subsequentAssistants &&
+			previousEntry?.type === "message" &&
+			previousEntry.message.role === "assistant" &&
+			previousEntry.message.isResponseCheckpoint
+				? (previous?.retryAttempt ?? previous?.attempt ?? 0)
+				: 0;
+		if (retryOffset > 0 && this.retryPolicy.enabled && retryOffset <= this.retryPolicy.maxRetries) {
+			if (!(await sleepAbortable(this.retryPolicy.baseDelayMs * 2 ** (retryOffset - 1), this.activeAbort?.signal)))
+				return;
+		}
 		// A pending step (attempt committed, result entry missing) retries with the
 		// same provisioned result id; a completed step starts a new attempt series.
 		let attempt = op.step ? op.step.attempts + 1 : 1;
@@ -1583,6 +1732,18 @@ export class AgentHarness implements AgentLane {
 				attempt,
 				resultEntryId,
 			});
+			if (retryOffset > 0 && (!this.retryPolicy.enabled || retryOffset > this.retryPolicy.maxRetries)) {
+				await this.appendOwnedEntry({
+					type: "message",
+					id: resultEntryId,
+					message: {
+						...syntheticAbortedMessage(this.model),
+						stopReason: "error",
+						errorMessage: "Interrupted response retry budget exhausted",
+					},
+				});
+				return;
+			}
 
 			const branch = await this.durableSession.findEntriesOnBranch({
 				start: this.laneLeaf ?? undefined,
@@ -1607,13 +1768,77 @@ export class AgentHarness implements AgentLane {
 					signal: this.activeAbort?.signal,
 				},
 			);
+			const completeItems = new Map<number, AssistantMessage["content"][number]>();
+			let checkpoint: AssistantMessage | undefined;
+			for await (const event of stream) {
+				if (
+					(event.type === "text_end" || event.type === "thinking_end" || event.type === "toolcall_end") &&
+					event.itemComplete === true
+				) {
+					const block = event.type === "toolcall_end" ? event.toolCall : event.partial.content[event.contentIndex];
+					if (!block) continue;
+					completeItems.set(event.contentIndex, structuredClone(block));
+					const content = [...completeItems].sort(([left], [right]) => left - right).map(([, item]) => item);
+					while (content.at(-1)?.type === "thinking") content.pop();
+					if (content.length === 0) continue;
+					checkpoint = {
+						...event.partial,
+						content,
+						usage: syntheticAbortedMessage(this.model).usage,
+						errorMessage: undefined,
+						stopReason: content.some((item) => item.type === "toolCall") ? "toolUse" : "stop",
+						isResponseCheckpoint: true,
+					};
+					await this.durableSession.appendRecord({
+						type: "assistant_checkpoint",
+						id: this.nextId(),
+						lane: "main",
+						runId: op.id,
+						resultEntryId,
+						attempt,
+						retryAttempt: retryOffset + attempt,
+						message: stripUndefined(checkpoint) as AssistantMessage,
+					});
+				}
+			}
 			const message = await stream.result();
+			if (this.closed && this.activeAbort?.signal.aborted) return;
+			if (
+				checkpoint &&
+				isRetryableAssistantError(message) &&
+				!this.activeAbort?.signal.aborted &&
+				!(await this.isAborting(op.id))
+			) {
+				const continuationFailure =
+					!this.retryPolicy.enabled || retryOffset + attempt > this.retryPolicy.maxRetries
+						? (stripUndefined(message) as AssistantMessage)
+						: undefined;
+				if (continuationFailure)
+					await this.durableSession.appendRecord({
+						type: "assistant_checkpoint",
+						id: this.nextId(),
+						lane: "main",
+						runId: op.id,
+						resultEntryId,
+						attempt,
+						retryAttempt: retryOffset + attempt,
+						message: stripUndefined(checkpoint) as AssistantMessage,
+						continuationFailure,
+					});
+				await this.appendOwnedEntry({
+					type: "message",
+					id: resultEntryId,
+					message: stripUndefined(checkpoint) as AssistantMessage,
+				});
+				return;
+			}
 			// Stream-level exceptions propagate without finishing the operation: the
 			// committed attempt prefix stays resumable.
 			if (
 				message.stopReason === "error" &&
+				isRetryableAssistantError(message) &&
 				this.retryPolicy.enabled &&
-				attempt <= this.retryPolicy.maxRetries &&
+				retryOffset + attempt <= this.retryPolicy.maxRetries &&
 				!(await this.isAborting(op.id))
 			) {
 				// Bounded retry: same logical step, new physical attempt; the
@@ -1701,18 +1926,43 @@ export class AgentHarness implements AgentLane {
 
 		const started = call.started;
 		if (started) {
-			if (started.replay === "never") {
-				// Never blindly replay a side-effecting call whose outcome is unknown.
-				await this.appendOwnedEntry({
-					type: "message",
-					id: started.resultEntryId,
-					message: errorToolResult(
-						call.toolCall,
-						"Tool execution was interrupted after dispatch and is not replay-safe; the external outcome is unknown. Verify the external state before retrying.",
-					),
+			const tool = this.tools.find(
+				(candidate) => candidate.name === call.toolCall.name && this.activeToolNames.includes(candidate.name),
+			);
+			let replayProblem: string | undefined;
+			if (!tool || tool.contract?.approval === "required")
+				replayProblem = "The current tool is unavailable or requires approval";
+			else if (!call.retryAuthorized && (tool.replay ?? defaultReplay(tool)) !== "safe")
+				replayProblem = "The current tool no longer guarantees replay safety";
+			else {
+				try {
+					validateToolArguments(tool, { ...call.toolCall, arguments: started.effectiveArgs });
+				} catch (error) {
+					replayProblem = `The persisted arguments no longer satisfy the current tool schema: ${error instanceof Error ? error.message : String(error)}`;
+				}
+			}
+			if (replayProblem) {
+				await this.durableSession.appendRecord({
+					type: "tool_reconciliation",
+					id: this.nextId(),
+					lane: "main",
+					runId,
+					toolCallId: call.toolCall.id,
+					resultEntryId: started.resultEntryId,
+					reason: replayProblem,
 				});
 				return;
 			}
+			if (call.retryAuthorized)
+				await this.durableSession.appendRecord({
+					type: "tool_reconciliation",
+					id: this.nextId(),
+					lane: "main",
+					runId,
+					toolCallId: call.toolCall.id,
+					resultEntryId: started.resultEntryId,
+					reason: "Authorized retry was dispatched; its result is unknown until committed",
+				});
 			await this.executeToolCall(
 				runId,
 				call.toolCall,
@@ -1789,8 +2039,10 @@ export class AgentHarness implements AgentLane {
 		const tool = this.tools.find((candidate) => candidate.name === toolCall.name);
 		if (!tool) throw new HarnessFault(`Tool ${toolCall.name} disappeared during execution`, undefined);
 		const contract = tool.contract;
+		const replaySafe = (tool.replay ?? defaultReplay(tool)) === "safe";
 		// Retry budgets apply only to calls that are safe to repeat.
 		const maxRetries =
+			replaySafe &&
 			contract?.retry &&
 			(contract.idempotent === true || contract.readOnly === true || contract.sideEffects === "none")
 				? contract.retry.maxRetries
@@ -1805,21 +2057,41 @@ export class AgentHarness implements AgentLane {
 				break;
 			} catch (error) {
 				// A HarnessFault models a crash: the result stays uncommitted so resume
-				// can apply the tool's replay policy. Ordinary tool errors are results.
+				// can apply the tool's replay policy. Only replay-safe ordinary failures become results.
 				if (error instanceof HarnessFault) throw error;
 				isError = true;
-				if (error instanceof ToolTimeoutError) {
-					// A timeout is never "not executed": the outcome is unknown.
-					result = {
-						content: [
-							{
-								type: "text",
-								text: `Tool "${toolCall.name}" exceeded its ${contract?.timeoutMs}ms timeout; the outcome is unknown. Verify external state before retrying.`,
-							},
-						],
-						details: {},
-					};
-					break;
+				const diagnostic = stripUndefined({
+					...errorToolResult(toolCall, error instanceof Error ? error.message : String(error)),
+					details: error instanceof AgentToolError ? error.details : {},
+				}) as ToolResultMessage;
+				if (error instanceof ToolTimeoutError || this.activeAbort?.signal.aborted) {
+					await this.durableSession.appendRecord({
+						type: "tool_reconciliation",
+						id: this.nextId(),
+						lane: "main",
+						runId,
+						toolCallId: toolCall.id,
+						resultEntryId,
+						diagnostic,
+						reason:
+							this.closed || this.activeAbort?.signal.aborted
+								? "Tool cancellation was requested; its external outcome requires verification"
+								: `Tool exceeded its ${contract?.timeoutMs}ms timeout; cancellation was requested, but its external outcome requires verification`,
+					});
+					return;
+				}
+				if (!replaySafe) {
+					await this.durableSession.appendRecord({
+						type: "tool_reconciliation",
+						id: this.nextId(),
+						lane: "main",
+						runId,
+						toolCallId: toolCall.id,
+						resultEntryId,
+						diagnostic,
+						reason: `Dispatched tool failed without a replay-safety guarantee; its external outcome requires verification: ${error instanceof Error ? error.message : String(error)}`,
+					});
+					return;
 				}
 				if (attempt <= maxRetries) continue;
 				result = {
@@ -1867,20 +2139,46 @@ export class AgentHarness implements AgentLane {
 		args: Record<string, unknown>,
 		execution: ToolExecutionInfo,
 	): Promise<AgentToolResult<unknown>> {
+		const controller = new AbortController();
+		const parentSignal = this.activeAbort?.signal;
+		const abort = () => controller.abort(parentSignal?.reason);
+		if (parentSignal?.aborted) abort();
+		else parentSignal?.addEventListener("abort", abort, { once: true });
 		const invoke = () =>
 			tool.executeWithInfo
-				? tool.executeWithInfo(toolCallId, args as never, this.activeAbort?.signal, undefined, execution)
-				: tool.execute(toolCallId, args as never, this.activeAbort?.signal, undefined);
+				? tool.executeWithInfo(toolCallId, args as never, controller.signal, undefined, execution)
+				: tool.execute(toolCallId, args as never, controller.signal, undefined);
 		const timeoutMs = tool.contract?.timeoutMs;
-		if (!timeoutMs) {
-			return invoke();
-		}
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		this.unsettledTools.add(toolCallId);
+		const running = Promise.resolve().then(() => {
+			if (controller.signal.aborted || this.closed) throw new ToolTimeoutError();
+			return invoke();
+		});
+		void running.then(
+			() => {
+				this.unsettledTools.delete(toolCallId);
+				parentSignal?.removeEventListener("abort", abort);
+			},
+			() => {
+				this.unsettledTools.delete(toolCallId);
+				parentSignal?.removeEventListener("abort", abort);
+			},
+		);
 		try {
+			const interrupted = new Promise<never>((_, reject) => {
+				if (controller.signal.aborted) reject(new ToolTimeoutError());
+				else controller.signal.addEventListener("abort", () => reject(new ToolTimeoutError()), { once: true });
+			});
 			return await Promise.race([
-				invoke(),
+				running,
+				interrupted,
 				new Promise<never>((_, reject) => {
-					timer = setTimeout(() => reject(new ToolTimeoutError()), timeoutMs);
+					if (!timeoutMs) return;
+					timer = setTimeout(() => {
+						reject(new ToolTimeoutError());
+						controller.abort();
+					}, timeoutMs);
 					timer.unref?.();
 				}),
 			]);

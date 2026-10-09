@@ -652,6 +652,7 @@ export function createSessionBackendConformance(
 			]);
 
 			const metadata = await session.getMetadata();
+			await session.release();
 			const reopened = await repository.open(metadata);
 			strictEqual(await reopened.getName(), undefined);
 			deepStrictEqual(await reopened.getLog(), [
@@ -875,6 +876,7 @@ export function createSessionBackendConformance(
 			strictEqual(listed[0]?.id, metadata.id);
 			strictEqual(listed[0]?.createdAt, metadata.createdAt);
 			strictEqual(listed[0]?.parentSessionId, metadata.parentSessionId);
+			await session.release();
 			deepStrictEqual(await entryIds((await repository.open(metadata)).findEntries()), [entryId]);
 			await rejectsWithCode(repository.create({ id: "one" }), "already_exists");
 		}),

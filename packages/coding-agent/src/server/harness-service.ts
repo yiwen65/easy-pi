@@ -10,12 +10,13 @@ import type {
 	AgentHarness,
 	AgentHarnessOptions,
 	ExecutionEnv,
+	SessionMetadata as HarnessSessionMetadata,
 	Session,
 	SessionRepo,
 	StreamFn,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import type { Api, Model, Models, ThinkingLevel } from "@earendil-works/pi-ai";
+import type { Api, Model, Models, ThinkingLevel, ToolCall } from "@earendil-works/pi-ai";
 import type {
 	ModelMetadata,
 	SessionMetadata,
@@ -40,7 +41,7 @@ import {
 import { createCodingAgentHarness } from "./create-harness.ts";
 
 export interface HarnessPiServerServiceOptions {
-	repo: SessionRepo;
+	repo: Omit<SessionRepo, "list"> & { list(): Promise<HarnessSessionMetadata[]> };
 	models: Models;
 	defaultModel: Model<Api>;
 	/** Provider call seam (defaults to the Agent-level default stream function). */
@@ -65,6 +66,7 @@ interface RuntimeState {
 
 export class HarnessPiServerService implements PiServerService {
 	private readonly options: HarnessPiServerServiceOptions;
+	private readonly liveSessions = new Map<string, { session: Session; runtime: PiSessionRuntime }>();
 
 	constructor(options: HarnessPiServerServiceOptions) {
 		this.options = options;
@@ -74,9 +76,18 @@ export class HarnessPiServerService implements PiServerService {
 		const metas = await this.options.repo.list();
 		return Promise.all(
 			metas.map(async (meta) => {
-				const session = await this.options.repo.open(meta);
-				const name = await session.getName();
-				await release(session);
+				const live = this.liveSessions.get(meta.id);
+				let name: string | undefined;
+				if (live) name = await live.session.getName();
+				else if (this.options.repo.inspect) name = (await this.options.repo.inspect(meta)).name;
+				else {
+					const session = await this.options.repo.open(meta);
+					try {
+						name = await session.getName();
+					} finally {
+						await release(session);
+					}
+				}
 				return {
 					id: meta.id,
 					createdAt: meta.createdAt,
@@ -98,22 +109,36 @@ export class HarnessPiServerService implements PiServerService {
 
 	async createSession(options: ServerCreateSessionOptions): Promise<PiSessionRuntime> {
 		// PiServer assigned this id; the repo must persist it exactly.
-		const session = await this.options.repo.create({ id: options.id });
-		if (options.name) await session.setName(options.name);
-		return this.openRuntime(session, options.cwd ?? this.options.defaultCwd ?? process.cwd(), {
-			...(options.model
-				? { model: { provider: String(options.model.provider), id: String(options.model.id) } }
-				: {}),
-			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel as ThinkingLevel } : {}),
-		});
+		const cwd = options.cwd ?? this.options.defaultCwd ?? process.cwd();
+		const createOptions = { id: options.id, cwd };
+		const session = await this.options.repo.create(createOptions);
+		try {
+			if (options.name) await session.setName(options.name);
+			return await this.openRuntime(session, cwd, {
+				...(options.model
+					? { model: { provider: String(options.model.provider), id: String(options.model.id) } }
+					: {}),
+				...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel as ThinkingLevel } : {}),
+			});
+		} catch (error) {
+			await release(session);
+			throw error;
+		}
 	}
 
 	async openSession(sessionId: string): Promise<PiSessionRuntime> {
+		const live = this.liveSessions.get(sessionId);
+		if (live) return live.runtime;
 		const metas = await this.options.repo.list();
 		const meta = metas.find((candidate) => candidate.id === sessionId);
 		if (!meta) throw new PiServerError("not_found", `Session not found: ${sessionId}`);
 		const session = await this.options.repo.open(meta);
-		return this.openRuntime(session, this.options.defaultCwd ?? process.cwd(), {});
+		try {
+			return await this.openRuntime(session, this.options.defaultCwd ?? process.cwd(), {});
+		} catch (error) {
+			await release(session);
+			throw error;
+		}
 	}
 
 	private async openRuntime(
@@ -146,20 +171,31 @@ export class HarnessPiServerService implements PiServerService {
 			unsubscribe: () => undefined,
 		};
 		state.unsubscribe = harness.events.on("run_end", () => {
-			state.revision += 1;
-			state.updatedAt = Date.now();
-			for (const listener of state.listeners) listener({ type: "snapshot" });
+			notifySnapshot(state);
 		});
+		const metadata = await session.getMetadata();
+		const runtime = new HarnessSessionRuntime(session, state, () => {
+			if (this.liveSessions.get(metadata.id)?.session === session) this.liveSessions.delete(metadata.id);
+		});
+		this.liveSessions.set(metadata.id, { session, runtime });
 		if (suspended.length > 0) {
 			// Crash recovery is the product behavior: reopening a session resumes
 			// its suspended operation; the run_end event broadcasts the snapshot.
 			state.updatedAt = Date.now();
-			void harness.resume().catch(() => {
-				for (const listener of state.listeners) listener({ type: "snapshot" });
-			});
+			const revision = state.revision;
+			const settled = () => {
+				if (state.revision === revision) notifySnapshot(state);
+			};
+			void harness.resume().then(settled, settled);
 		}
-		return new HarnessSessionRuntime(session, state);
+		return runtime;
 	}
+}
+
+function notifySnapshot(state: RuntimeState): void {
+	state.revision += 1;
+	state.updatedAt = Date.now();
+	for (const listener of state.listeners) listener({ type: "snapshot" });
 }
 
 async function release(session: unknown): Promise<void> {
@@ -171,10 +207,12 @@ class HarnessSessionRuntime implements PiSessionRuntime {
 	private readonly session: Session;
 	private readonly state: RuntimeState;
 	private phase: SessionPhase = "idle";
+	private readonly onDispose: () => void;
 
-	constructor(session: Session, state: RuntimeState) {
+	constructor(session: Session, state: RuntimeState, onDispose: () => void) {
 		this.session = session;
 		this.state = state;
+		this.onDispose = onDispose;
 	}
 
 	getPhase(): SessionPhase {
@@ -192,7 +230,7 @@ class HarnessSessionRuntime implements PiSessionRuntime {
 		]);
 		const entries = await this.session.findEntriesOnBranch({ start: leafId ?? undefined, order: "oldestFirst" });
 		const transcript: TranscriptItem[] = [];
-		const toolCalls = new Map<string, import("@earendil-works/pi-ai").ToolCall>();
+		const toolCalls = new Map<string, ToolCall>();
 		for (const entry of entries) {
 			if (entry.type !== "message") continue;
 			const message = entry.message;
@@ -237,10 +275,60 @@ class HarnessSessionRuntime implements PiSessionRuntime {
 	}
 
 	async prompt(input: PromptInput): Promise<void> {
-		const result = await this.state.harness.prompt(input.text);
-		if (!result.ok) throw new PiServerError("busy", result.error.message);
+		if (input.text === "/resume-task" || input.text.startsWith("/reconcile-task")) {
+			const revision = this.state.revision;
+			try {
+				if (input.text === "/resume-task") {
+					const result = await this.state.harness.resume();
+					if (!result.ok) throw new PiServerError("invalid_request", result.error.message);
+				} else await this.reconcile(input.text);
+			} finally {
+				if (this.state.revision === revision) notifySnapshot(this.state);
+			}
+			return;
+		}
+		const revision = this.state.revision;
+		try {
+			const result = await this.state.harness.prompt(input.text);
+			if (!result.ok) throw new PiServerError("busy", result.error.message);
+		} finally {
+			if (this.state.revision === revision) notifySnapshot(this.state);
+		}
 		// A failed run is not a transport error: the terminal error assistant
 		// message is part of the authoritative snapshot the client receives.
+	}
+
+	private async reconcile(text: string): Promise<void> {
+		const command = /^\/reconcile-task\s+(\S+)\s+(retry|result)(?:\s+([\s\S]+))?$/.exec(text);
+		if (!command || (command[2] === "result" && !command[3]) || (command[2] === "retry" && command[3]))
+			throw new PiServerError("invalid_request", "Use /reconcile-task <callId> retry or result <verified text>");
+		const operation = (await this.state.harness.lanes()).find((lane) => lane.name === "main")?.operation;
+		if (!operation || operation.kind !== "run" || operation.status === "running")
+			throw new PiServerError("busy", "Wait for tool execution to stop before reconciliation");
+		const records = await this.session.findRecords({ lane: "main", type: "tool_started", runId: operation.id });
+		const started = records.find((record) => record.toolCallId === command[1]);
+		if (!started || (await this.session.getEntry(started.resultEntryId)))
+			throw new PiServerError("invalid_request", "No unresolved tool execution matches this call");
+		try {
+			await this.state.harness.reconcileTool(
+				started.toolCallId,
+				command[2] === "retry"
+					? { kind: "retry" }
+					: {
+							kind: "result",
+							result: {
+								role: "toolResult",
+								toolCallId: started.toolCallId,
+								toolName: started.toolName,
+								content: [{ type: "text", text: command[3]! }],
+								isError: false,
+								timestamp: Date.now(),
+							},
+						},
+			);
+		} catch (error) {
+			throw new PiServerError("invalid_request", error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	async steer(input: SteerInput): Promise<void> {
@@ -271,8 +359,15 @@ class HarnessSessionRuntime implements PiSessionRuntime {
 	async dispose(): Promise<void> {
 		this.state.unsubscribe();
 		this.state.listeners.clear();
-		await this.state.harness.close();
-		await release(this.session);
+		try {
+			await this.state.harness.close();
+		} finally {
+			try {
+				await release(this.session);
+			} finally {
+				this.onDispose();
+			}
+		}
 	}
 }
 

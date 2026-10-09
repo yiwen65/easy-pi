@@ -262,7 +262,23 @@ export interface FileInfo {
  * Operation methods must never throw or reject. All filesystem failures, including unexpected backend failures, must be
  * encoded in the returned {@link Result}. Implementations must preserve this invariant.
  */
+export interface DurableFileWriter {
+	/** Resolve only after the appended bytes are synced to durable storage. */
+	append(content: string): Promise<Result<void, FileError>>;
+	/** Sync the complete replacement, publish atomically, then sync the containing directory. */
+	replace(content: string, options?: { exclusive?: boolean }): Promise<Result<void, FileError>>;
+	/** Release exclusive ownership. Further writes must fail. */
+	release(): Promise<Result<void, FileError>>;
+}
+
+export interface DurableFileSystem {
+	/** Acquire exclusive ownership until release; a second live owner must be rejected. */
+	claim(path: string): Promise<Result<DurableFileWriter, FileError>>;
+}
+
 export interface FileSystem {
+	/** Explicit durability and writer-ownership capability required by persistent JSONL sessions. */
+	readonly durableFiles?: DurableFileSystem;
 	/** Current working directory for relative paths. */
 	cwd: string;
 

@@ -4,10 +4,12 @@
 
 ### Breaking Changes
 
+- JSONL session filesystems must provide `durableFiles` for synchronized commits and exclusive writers. Release session ownership with `Session.release()` before reopening. Unknown tool outcomes now pause as `needs_reconciliation` until explicitly resolved.
 - Changed `prepareNextTurn` and `prepareNextTurnWithContext` to run only after `shouldStopAfterTurn` and queued-message checks determine that the agent loop will start another assistant turn. They no longer run after final or terminating turns; move end-of-run work to `agent_end` handling.
 
 ### Fixed
 
+- Persisted complete stream items and individual parallel tool results before further effects; added tool-batch recovery and explicit reconciliation, and cancelled timed-out tools without treating unknown outcomes as completed failures.
 - Fixed proxy thinking completion snapshots to update the accumulated thinking text.
 - Preserved confirmed completed output items after retryable model stream failures, collected completed tool-call results before recovery, and allowed continuation from interrupted text checkpoints without replaying incomplete calls.
 

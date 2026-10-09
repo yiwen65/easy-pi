@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -34,6 +35,7 @@ import type {
 	Model,
 	ProviderHeaders,
 	TextContent,
+	ToolResultMessage,
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import {
@@ -125,6 +127,7 @@ import {
 	buildSessionContext,
 	CURRENT_SESSION_VERSION,
 	getLatestCompactionEntry,
+	reclaimSessionAppendLock,
 	type SessionHeader,
 } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -132,6 +135,7 @@ import { buildSkillPromptExpansion } from "./skill-invocations.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import { TaskRecoveryJournal, type TaskRecoveryState } from "./task-recovery.ts";
 import { BACKGROUND_TASK_TOOL_NAMES, createBackgroundTaskToolDefinitions } from "./tools/background-tasks.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions, createBashToolDefinition } from "./tools/index.ts";
@@ -342,6 +346,10 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
+	private readonly _taskRecovery: TaskRecoveryJournal;
+	private _recoveringToolBatch = false;
+	private readonly _taskInputIds = new WeakMap<object, string>();
+	private readonly _queuedTaskInputIds = new Set<string>();
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -437,6 +445,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
+		this._taskRecovery = new TaskRecoveryJournal(this.sessionManager);
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
@@ -455,6 +464,7 @@ export class AgentSession {
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
+		this._installTaskRecoveryHooks();
 		this._installAgentNextTurnRefresh();
 		this._installBackgroundTaskNotificationTransform();
 
@@ -479,6 +489,7 @@ export class AgentSession {
 		this._hfHost?.syncFromEntries(branchEntries);
 		const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
 		this.agent.state.messages = restoredProjection ?? buildSessionContext(branchEntries).messages;
+		this._restoreTaskQueues();
 	}
 
 	private _restoreSessionMessages(): void {
@@ -622,6 +633,36 @@ export class AgentSession {
 				isError: hookResult?.isError ?? isError,
 				usage: hookResult?.usage,
 			};
+		};
+	}
+
+	private _installTaskRecoveryHooks(): void {
+		const previousStop = this.agent.shouldStopAfterTurn;
+		this.agent.shouldStopAfterTurn = async (context, signal) =>
+			this._taskRecovery.state?.status === "needs_reconciliation" ||
+			(await previousStop?.(context, signal)) === true;
+		const previousItem = this.agent.onCompletedOutputItem;
+		this.agent.onCompletedOutputItem = async (context) => {
+			this._taskRecovery.completeItem(context.contentIndex, context.block, context.message);
+			await previousItem?.(context);
+		};
+		const previousDispatch = this.agent.beforeToolDispatch;
+		this.agent.beforeToolDispatch = async (context) => {
+			if (this._taskRecovery.state?.status === "needs_reconciliation")
+				throw new Error("Task requires reconciliation before further tool dispatch");
+			await previousDispatch?.(context);
+			const contract = context.tool.contract;
+			this._taskRecovery.dispatch(
+				context.toolCall,
+				context.args,
+				contract?.readOnly === true || contract?.idempotent === true || contract?.sideEffects === "none",
+				JSON.stringify({ name: context.tool.name, parameters: context.tool.parameters, contract }),
+			);
+		};
+		const previousResult = this.agent.onToolResult;
+		this.agent.onToolResult = async (message, context) => {
+			this._taskRecovery.result(message, context.toolCall, context.terminate, message.isError);
+			await previousResult?.(message, context);
 		};
 	}
 
@@ -911,6 +952,38 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "message_start") {
+			const id = this._taskInputIds.get(event.message);
+			const group = id ? this._taskRecovery.state?.queued.find((group) => group.entryIds.includes(id)) : undefined;
+			for (const queuedId of group?.entryIds ?? []) this._queuedTaskInputIds.delete(queuedId);
+		}
+		if (event.type === "turn_end" && this._recoveringToolBatch) {
+			const branch = this.sessionManager.getBranch();
+			const assistantId = this._taskRecovery.state?.step?.assistantEntryId;
+			const index = branch.findIndex((entry) => entry.id === assistantId);
+			const existing = new Set(
+				branch
+					.slice(index + 1)
+					.flatMap((entry) =>
+						entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
+					),
+			);
+			const unknown = new Set(this._taskRecovery.unknownTools.map((tool) => tool.call.id));
+			for (const result of event.toolResults)
+				if (!existing.has(result.toolCallId) && !unknown.has(result.toolCallId))
+					this.sessionManager.appendMessage(result);
+			this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
+			this._recoveringToolBatch = false;
+		}
+		if (
+			event.type === "message_start" &&
+			event.message.role === "assistant" &&
+			event.message.stopReason !== "error" &&
+			event.message.stopReason !== "aborted" &&
+			!event.message.isResponseCheckpoint
+		) {
+			this._taskRecovery.beginStep(event.message);
+		}
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -950,10 +1023,15 @@ export class AgentSession {
 
 		// Emit to extensions first (message_end handlers may transform the message)
 		await this._emitExtensionEvent(event);
+		if (event.type === "message_end" && event.message.role === "toolResult") {
+			const toolCallId = event.message.toolCallId;
+			const tool = this._taskRecovery.state?.tools.find((tool) => tool.call.id === toolCallId);
+			if (tool?.result) this._taskRecovery.result(event.message, tool.call, tool.terminate === true, false);
+		}
 
 		// Canonical persistence BEFORE notifying subscribers: the durable session
 		// entry is the authority; a throwing or slow listener must not prevent it.
-		if (event.type === "message_end") {
+		if (event.type === "message_end" && !(this._recoveringToolBatch && event.message.role === "toolResult")) {
 			let appendedEntryId: string | undefined;
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
@@ -963,17 +1041,25 @@ export class AgentSession {
 					event.message.content,
 					event.message.display,
 					event.message.details,
+					this._taskInputIds.get(event.message),
 				);
+			} else if (
+				event.message.role === "toolResult" &&
+				this._taskRecovery.unknownTools.map((tool) => tool.call.id).includes(event.message.toolCallId)
+			) {
+				this.sessionManager.appendCustomEntry("pi-tool-interruption", { message: event.message });
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				appendedEntryId = this.sessionManager.appendMessage(event.message);
+				appendedEntryId = this.sessionManager.appendMessage(event.message, this._taskInputIds.get(event.message));
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			if (appendedEntryId) this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
+			if (appendedEntryId && event.message.role === "assistant")
+				this._taskRecovery.commitAssistant(event.message, appendedEntryId);
 		}
 
 		// Notify all listeners
@@ -1001,6 +1087,9 @@ export class AgentSession {
 							: {}),
 					});
 					this._retryAttempt = 0;
+					this._taskRecovery.update((state) => {
+						state.retryAttempt = 0;
+					});
 				}
 			}
 		}
@@ -1401,12 +1490,265 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	get taskRecovery(): TaskRecoveryState | undefined {
+		return this._taskRecovery.state;
+	}
+
+	private _restoreTaskQueues(): void {
+		const branchIds = new Set(this.sessionManager.getBranch().map((entry) => entry.id));
+		for (const group of this._taskRecovery.state?.queued ?? []) {
+			if (group.cancelled) continue;
+			const pending = group.messages.flatMap((message, index) => {
+				const id = group.entryIds[index];
+				if (this.sessionManager.getEntry(id) && !branchIds.has(id))
+					throw new Error("Queued input belongs to another branch");
+				if (branchIds.has(id) || this._queuedTaskInputIds.has(id)) return [];
+				this._taskInputIds.set(message, id);
+				this._queuedTaskInputIds.add(id);
+				return [message];
+			});
+			if (pending.length === 0) continue;
+			if (group.kind === "steer") {
+				this.agent.steer(pending);
+				if (group.label) this._steeringMessages.push(group.label);
+			} else if (group.kind === "followUp") {
+				this.agent.followUp(pending);
+				if (group.label) this._followUpMessages.push(group.label);
+			} else
+				for (const message of pending) {
+					if (message.role !== "custom") throw new Error("Invalid next-turn context record");
+					this._pendingNextTurnMessages.push(message);
+				}
+		}
+	}
+
+	private _finishTaskRecovery(failed = false): void {
+		const unknown = new Set(this._taskRecovery.unknownTools.map((tool) => tool.call.id));
+		if (unknown.size > 0)
+			this.agent.state.messages = this.agent.state.messages.filter(
+				(message) => message.role !== "toolResult" || !unknown.has(message.toolCallId),
+			);
+		const last = this.agent.state.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "assistant");
+		this._taskRecovery.update((state) => {
+			if (this._taskRecovery.unknownTools.length > 0) state.status = "needs_reconciliation";
+			else if (failed && state.status !== "cancelled") state.status = "interrupted";
+			else if (state.status !== "cancelled")
+				state.status =
+					last?.role === "assistant" && last.stopReason === "error"
+						? "interrupted"
+						: last?.role === "assistant" && last.stopReason === "aborted"
+							? "cancelled"
+							: "completed";
+		});
+	}
+
+	/** Resolve an unknown effect only after inspecting external state. Does not resume automatically. */
+	reconcileTool(
+		toolCallId: string,
+		resolution: { kind: "retry" } | { kind: "result"; result: ToolResultMessage },
+	): void {
+		if (!this.isIdle) throw new Error("Wait for running tools to settle before reconciliation");
+		this._taskRecovery.acquire();
+		try {
+			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
+			this._taskRecovery.update((state) => {
+				const tool = state.tools.find(
+					(tool) => tool.call.id === toolCallId && tool.dispatched && !tool.result && !tool.safe,
+				);
+				if (!tool) throw new Error(`No unknown tool call ${toolCallId}`);
+				if (resolution.kind === "retry") tool.dispatched = false;
+				else {
+					if (resolution.result.toolCallId !== toolCallId || resolution.result.toolName !== tool.call.name)
+						throw new Error("Reconciled result does not match the tool call");
+					tool.result = resolution.result;
+				}
+				state.status = state.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result)
+					? "needs_reconciliation"
+					: "interrupted";
+			});
+		} finally {
+			this._taskRecovery.release();
+		}
+	}
+
+	/** Resume a durable native task without adding a user message or replaying committed effects. */
+	async resumeTask(): Promise<void> {
+		if (this._disposed) throw new Error("This session cannot resume tasks");
+		if (!this.isIdle || this.isCompacting) throw new Error("Wait for the current session operation before recovery");
+		const initialTask = this._taskRecovery.state;
+		if (!initialTask || initialTask.status === "completed") return;
+		let task: TaskRecoveryState = initialTask;
+		this._taskRecovery.acquire();
+		this._isAgentRunActive = true;
+		let failed = false;
+		try {
+			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
+			if (this._taskRecovery.unknownTools.length > 0) {
+				this._taskRecovery.update((state) => {
+					state.status = "needs_reconciliation";
+				});
+				throw new Error(
+					`Unknown tool effects: ${this._taskRecovery.unknownTools.map((tool) => tool.call.id).join(", ")}. Verify external state, then use /reconcile-task <callId> result <verified result> or retry.`,
+				);
+			}
+			this._retryAttempt = task.retryAttempt;
+			this._taskRecovery.update((state) => {
+				state.status = "running";
+			});
+			this._systemPromptOverride = task.systemPrompt;
+			this.agent.state.systemPrompt = task.systemPrompt ?? this._baseSystemPrompt;
+			this._restoreTaskQueues();
+			let branch = this.sessionManager.getBranch();
+			const taskIndex =
+				task.sourceLeafId === null ? -1 : branch.findIndex((entry) => entry.id === task.sourceLeafId);
+			if (task.sourceLeafId !== null && taskIndex < 0)
+				throw new Error("Task recovery anchor is missing from this branch");
+			const branchIds = new Set(branch.map((entry) => entry.id));
+			for (const [index, message] of task.prompt.entries()) {
+				const id = task.promptEntryIds[index];
+				if (this.sessionManager.getEntry(id) && !branchIds.has(id))
+					throw new Error("Accepted input belongs to another branch");
+				if (branchIds.has(id)) continue;
+				this._taskInputIds.set(message, id);
+				await this._handleAgentEvent({ type: "message_end", message });
+			}
+			branch = this.sessionManager.getBranch();
+			const stepIndex =
+				task.step?.sourceLeafId === null ? -1 : branch.findIndex((entry) => entry.id === task.step?.sourceLeafId);
+			if (task.step && task.step.sourceLeafId !== null && stepIndex < 0)
+				throw new Error("Task step anchor is missing from this branch");
+			let assistantEntry = task.step
+				? branch
+						.slice(stepIndex + 1)
+						.find(
+							(entry) =>
+								entry.type === "message" &&
+								entry.message.role === "assistant" &&
+								entry.message.stopReason !== "error" &&
+								entry.message.stopReason !== "aborted",
+						)
+				: undefined;
+			if (!assistantEntry && task.step?.message && task.step.recoverable !== false && task.step.items.length > 0) {
+				const items = [...task.step.items].sort((a, b) => a.index - b.index);
+				while (items.at(-1)?.block.type === "thinking") items.pop();
+				if (items.length > 0) {
+					const checkpoint: AssistantMessage = {
+						...task.step.message,
+						content: items.map((item) => item.block),
+						isResponseCheckpoint: true,
+						stopReason: items.some((item) => item.block.type === "toolCall") ? "toolUse" : "stop",
+						errorMessage: undefined,
+						responseId: undefined,
+						rawStopReason: undefined,
+						deferred: undefined,
+						diagnostics: undefined,
+						endTurn: undefined,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					};
+					await this._handleAgentEvent({ type: "message_end", message: checkpoint });
+					const id = this._taskRecovery.state?.step?.assistantEntryId;
+					assistantEntry = id ? this.sessionManager.getEntry(id) : undefined;
+				}
+			}
+			this._restoreSessionMessages();
+			// Failure artifacts stay in history; they are not the continuation anchor.
+			while (this.agent.state.messages.at(-1)?.role === "assistant") {
+				const last = this.agent.state.messages.at(-1);
+				if (last?.role !== "assistant" || (last.stopReason !== "error" && last.stopReason !== "aborted")) break;
+				this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+			}
+			task = this._taskRecovery.state ?? task;
+			if (assistantEntry?.type === "message" && assistantEntry.message.role === "assistant") {
+				const assistant = this.agent.state.messages
+					.slice()
+					.reverse()
+					.find((message) => message.role === "assistant");
+				if (!assistant || assistant.role !== "assistant")
+					throw new Error("Recovery assistant is missing from the active branch");
+				const calls = assistant.content.filter((block) => block.type === "toolCall");
+				if (calls.length === 0 && !assistant.isResponseCheckpoint) return;
+				const results = task.tools.flatMap((tool) => (tool.result ? [tool.result] : []));
+				for (const result of results) {
+					if (
+						!this.agent.state.messages.some(
+							(message) => message.role === "toolResult" && message.toolCallId === result.toolCallId,
+						)
+					) {
+						this.agent.state.messages.push(result);
+					}
+				}
+				if (
+					calls.length > 0 &&
+					calls.every((call) =>
+						task.tools.some((tool) => tool.call.id === call.id && tool.result && tool.terminate),
+					)
+				) {
+					this._recoveringToolBatch = true;
+					await this._handleAgentEvent({
+						type: "turn_end",
+						message: assistant,
+						toolResults: calls.flatMap((call) => results.filter((result) => result.toolCallId === call.id)),
+					});
+					return;
+				}
+				if (calls.length > 0) {
+					this._recoveringToolBatch = true;
+					await this.agent.resumeToolCalls(assistant, results);
+				} else await this.agent.continue();
+			} else {
+				await this.agent.continue();
+			}
+			while (await this._handlePostAgentRun()) await this.agent.continue();
+		} catch (error) {
+			failed = true;
+			throw error;
+		} finally {
+			this._recoveringToolBatch = false;
+			try {
+				try {
+					this._finishTaskRecovery(failed);
+				} finally {
+					this._taskRecovery.release();
+				}
+			} finally {
+				this._systemPromptOverride = undefined;
+				await this._emitAgentSettled();
+			}
+		}
+	}
+
+	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[], onAccepted?: () => void): Promise<void> {
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
+		if (this._taskRecovery.unknownTools.length > 0)
+			throw new Error("Task has unknown tool effects. Use /reconcile-task before submitting another prompt.");
+		this._taskRecovery.acquire();
 		this._isAgentRunActive = true;
+		let started = false;
+		let failed = false;
 		try {
+			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
+			const prompts = Array.isArray(messages) ? messages : [messages];
+			const ids = prompts.map((message) => {
+				const id = this._taskInputIds.get(message) ?? randomUUID();
+				this._taskInputIds.set(message, id);
+				return id;
+			});
+			this._taskRecovery.start(prompts, this._systemPromptOverride, ids);
+			this._restoreTaskQueues();
+			started = true;
+			onAccepted?.();
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
@@ -1415,14 +1757,33 @@ export class AgentSession {
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 				await this.agent.continue();
 			}
+		} catch (error) {
+			failed = true;
+			throw error;
 		} finally {
-			this._systemPromptOverride = undefined;
-			this._flushPendingBashMessages();
-			await this._emitAgentSettled();
+			try {
+				try {
+					if (started) {
+						this._finishTaskRecovery(failed);
+						if (this._taskRecovery.state?.status === "needs_reconciliation")
+							this._extensionUIContext?.notify(
+								`Task paused: verify ${this._taskRecovery.unknownTools.map((tool) => `${tool.call.name} (${tool.call.id})`).join(", ")}, then use /reconcile-task and /resume-task.`,
+								"warning",
+							);
+					}
+				} finally {
+					this._taskRecovery.release();
+				}
+				this._flushPendingBashMessages();
+			} finally {
+				this._systemPromptOverride = undefined;
+				await this._emitAgentSettled();
+			}
 		}
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
+		if (this._taskRecovery.unknownTools.length > 0) return false;
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
@@ -1475,10 +1836,50 @@ export class AgentSession {
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
+		if (options?.expandPromptTemplates !== false && text.trim() === "/resume-task") {
+			try {
+				await this.resumeTask();
+				options?.preflightResult?.(true);
+			} catch (error) {
+				options?.preflightResult?.(false);
+				throw error;
+			}
+			return;
+		}
+		if (options?.expandPromptTemplates !== false && text.startsWith("/reconcile-task ")) {
+			try {
+				const match = /^\/reconcile-task\s+(\S+)\s+(retry|result)(?:\s+([\s\S]+))?$/.exec(text);
+				if (!match) throw new Error("Usage: /reconcile-task <callId> retry | result <verified result>");
+				const tool = this._taskRecovery.unknownTools.find((tool) => tool.call.id === match[1]);
+				if (!tool) throw new Error(`No unknown tool call ${match[1]}`);
+				this.reconcileTool(
+					match[1],
+					match[2] === "retry"
+						? { kind: "retry" }
+						: {
+								kind: "result",
+								result: {
+									role: "toolResult",
+									toolCallId: tool.call.id,
+									toolName: tool.call.name,
+									content: [{ type: "text", text: match[3] ?? "" }],
+									isError: false,
+									timestamp: Date.now(),
+								},
+							},
+				);
+				options?.preflightResult?.(true);
+			} catch (error) {
+				options?.preflightResult?.(false);
+				throw error;
+			}
+			return;
+		}
 		const promptGeneration = this._lifecycleGeneration;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
+		let acceptedNextTurnMessages: CustomMessage[] = [];
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
@@ -1587,10 +1988,11 @@ export class AgentSession {
 			}
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this._pendingNextTurnMessages) {
-				messages.push(msg);
+			acceptedNextTurnMessages = [...this._pendingNextTurnMessages];
+			for (const msg of acceptedNextTurnMessages) {
+				const id = this._taskInputIds.get(msg);
+				if (!id || !this.sessionManager.getEntry(id)) messages.push(msg);
 			}
-			this._pendingNextTurnMessages = [];
 
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(
@@ -1635,8 +2037,18 @@ export class AgentSession {
 			throw new Error("AgentSession was replaced while preparing the prompt");
 		}
 
-		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
+		let accepted = false;
+		try {
+			await this._runAgentPrompt(messages, () => {
+				accepted = true;
+				const consumed = new Set(acceptedNextTurnMessages);
+				this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !consumed.has(message));
+				preflightResult?.(true);
+			});
+		} catch (error) {
+			if (!accepted) preflightResult?.(false);
+			throw error;
+		}
 	}
 
 	/**
@@ -1729,8 +2141,6 @@ export class AgentSession {
 		skillMessages: SkillPromptMessage[] = [],
 	): Promise<void> {
 		const queueText = text || skillMessages.map((message) => `/skill:${message.details.name}`).join(" ");
-		this._steeringMessages.push(queueText);
-		this._emitQueueUpdate();
 		const messages: AgentMessage[] = [...skillMessages];
 		if (text || images?.length || messages.length === 0) {
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -1739,7 +2149,14 @@ export class AgentSession {
 			}
 			messages.push({ role: "user", content, timestamp: Date.now() });
 		}
+		const ids = this._taskRecovery.queue("steer", messages, queueText);
+		messages.forEach((message, index) => {
+			this._taskInputIds.set(message, ids[index]);
+			this._queuedTaskInputIds.add(ids[index]);
+		});
 		this.agent.steer(messages);
+		this._steeringMessages.push(queueText);
+		this._emitQueueUpdate();
 	}
 
 	/**
@@ -1751,8 +2168,6 @@ export class AgentSession {
 		skillMessages: SkillPromptMessage[] = [],
 	): Promise<void> {
 		const queueText = text || skillMessages.map((message) => `/skill:${message.details.name}`).join(" ");
-		this._followUpMessages.push(queueText);
-		this._emitQueueUpdate();
 		const messages: AgentMessage[] = [...skillMessages];
 		if (text || images?.length || messages.length === 0) {
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -1761,7 +2176,14 @@ export class AgentSession {
 			}
 			messages.push({ role: "user", content, timestamp: Date.now() });
 		}
+		const ids = this._taskRecovery.queue("followUp", messages, queueText);
+		messages.forEach((message, index) => {
+			this._taskInputIds.set(message, ids[index]);
+			this._queuedTaskInputIds.add(ids[index]);
+		});
 		this.agent.followUp(messages);
+		this._followUpMessages.push(queueText);
+		this._emitQueueUpdate();
 	}
 
 	/**
@@ -1805,8 +2227,14 @@ export class AgentSession {
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
+			const ids = this._taskRecovery.queue("nextTurn", [appMessage]);
+			this._taskInputIds.set(appMessage, ids[0]);
+			this._queuedTaskInputIds.add(ids[0]);
 			this._pendingNextTurnMessages.push(appMessage);
 		} else if (this.isStreaming && options?.triggerTurn !== false) {
+			const ids = this._taskRecovery.queue(options?.deliverAs === "followUp" ? "followUp" : "steer", [appMessage]);
+			this._taskInputIds.set(appMessage, ids[0]);
+			this._queuedTaskInputIds.add(ids[0]);
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
@@ -1873,6 +2301,13 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
+		const ids = new Set(
+			this._taskRecovery.state?.queued
+				.filter((group) => group.kind !== "nextTurn")
+				.flatMap((group) => group.entryIds.filter((id) => this._queuedTaskInputIds.has(id))),
+		);
+		this._taskRecovery.cancelQueued(ids);
+		for (const id of ids) this._queuedTaskInputIds.delete(id);
 		const steering = [...this._steeringMessages];
 		const followUp = [...this._followUpMessages];
 		this._steeringMessages = [];
@@ -1905,6 +2340,10 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		if (!this.isIdle)
+			this._taskRecovery.update((state) => {
+				state.status = "cancelled";
+			});
 		this.abortRetry();
 		this.agent.abort();
 		await this.waitForIdle();
@@ -2704,6 +3143,14 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		if (this._taskRecovery.state?.status === "running") {
+			try {
+				await this.resumeTask();
+			} catch (error) {
+				if (this.taskRecovery?.status !== "needs_reconciliation") throw error;
+				this._extensionUIContext?.notify(error instanceof Error ? error.message : String(error), "warning");
+			}
+		}
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -3223,6 +3670,9 @@ export class AgentSession {
 		}
 
 		this._retryAttempt++;
+		this._taskRecovery.update((state) => {
+			state.retryAttempt = this._retryAttempt;
+		});
 		const exponent = Math.min(this._retryAttempt - 1, 30);
 		const exponentialDelayMs = settings.baseDelayMs * 2 ** exponent;
 		const delayMs = Math.min(exponentialDelayMs, Math.max(settings.baseDelayMs, 30_000));

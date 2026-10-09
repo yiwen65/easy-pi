@@ -69,6 +69,8 @@ export interface ToolBatchState {
 		toolIndex: number;
 		toolCall: AgentToolCall;
 		started?: ToolStartedRecord;
+		retryAuthorized?: boolean;
+		reconciliation?: string;
 		resultExists: boolean;
 		terminate?: boolean;
 	}[];
@@ -92,6 +94,8 @@ export interface LaneState {
 			compactionReason?: "manual" | "threshold" | "overflow";
 		};
 		toolBatch: ToolBatchState | null;
+		checkpoint: AssistantMessage | null;
+		checkpointFailure: AssistantMessage | null;
 		missingInitialMessages: ProvisionedEntry[];
 		pendingSteer: ProvisionedEntry[];
 		pendingFollowUp: ProvisionedEntry[];
@@ -358,6 +362,31 @@ export function validateRecordLog(input: RecordLogSlice): void {
 			case "tool_started":
 				validateToolStart(record, entriesById, toolInvocations);
 				break;
+			case "tool_reconciliation":
+			case "tool_reconciled":
+				if (
+					!records.some(
+						(started) =>
+							started.type === "tool_started" &&
+							started.runId === record.runId &&
+							started.toolCallId === record.toolCallId &&
+							started.resultEntryId === record.resultEntryId &&
+							started.seq < record.seq,
+					)
+				)
+					corrupt("tool_call_mismatch", `Reconciliation ${record.id} has no matching dispatched tool`);
+				break;
+			case "assistant_checkpoint": {
+				const attempt = latestAttempt.get(record.runId)?.record;
+				if (
+					attempt?.step !== "assistant" ||
+					attempt.resultEntryId !== record.resultEntryId ||
+					attempt.attempt !== record.attempt ||
+					record.message.isResponseCheckpoint !== true
+				)
+					corrupt("inconsistent_step", `Checkpoint ${record.id} does not match an assistant attempt`);
+				break;
+			}
 			case "queue_enqueued":
 				if (
 					record.queue !== "nextRun" &&
@@ -486,10 +515,21 @@ function deriveToolBatch(
 				entry.message.toolCallId === toolCall.id,
 		);
 		const result = startedResult ?? blockedResult;
+		const reconciliation = records
+			.filter(
+				(record) =>
+					(record.type === "tool_reconciliation" || record.type === "tool_reconciled") &&
+					record.runId === operationId &&
+					record.toolCallId === toolCall.id &&
+					record.resultEntryId === started?.resultEntryId,
+			)
+			.at(-1);
 		return {
 			toolIndex,
 			toolCall: clone(toolCall),
 			...(started ? { started: clone(started) } : {}),
+			...(reconciliation?.type === "tool_reconciled" ? { retryAuthorized: true } : {}),
+			...(reconciliation?.type === "tool_reconciliation" ? { reconciliation: reconciliation.reason } : {}),
 			resultExists: result !== undefined,
 			...(result?.type === "message" && result.terminate === true ? { terminate: true } : {}),
 		};
@@ -601,6 +641,25 @@ export function reduceLaneState(input: LaneReductionInput): LaneReductionResult 
 	);
 
 	const newestOwnEntry = ownEntries.at(-1);
+	const latestCheckpoint = operationRecords.filter((record) => record.type === "assistant_checkpoint").at(-1);
+	const pendingCheckpoint =
+		step?.kind === "assistant"
+			? operationRecords
+					.filter((record) => record.type === "assistant_checkpoint")
+					.filter((record) => record.resultEntryId === step.resultEntryId && record.attempt === step.attempts)
+					.at(-1)
+			: undefined;
+	const checkpointFailure =
+		latestCheckpoint?.continuationFailure &&
+		entriesById.has(latestCheckpoint.resultEntryId) &&
+		!ownEntries.some(
+			(entry) =>
+				entry.seq > entriesById.get(latestCheckpoint.resultEntryId)!.seq &&
+				entry.type === "message" &&
+				entry.message.role === "assistant",
+		)
+			? latestCheckpoint.continuationFailure
+			: null;
 	const newestOwn = deriveNewestOwn(newestOwnEntry);
 	const deferred =
 		newestOwnEntry?.type === "message" &&
@@ -659,6 +718,8 @@ export function reduceLaneState(input: LaneReductionInput): LaneReductionResult 
 				pausing,
 				step,
 				toolBatch: deriveToolBatch(started.id, operationRecords, ownEntries, entriesById, deferredWriteIds),
+				checkpoint: clone(pendingCheckpoint?.message ?? null),
+				checkpointFailure: clone(checkpointFailure),
 				missingInitialMessages,
 				pendingSteer,
 				pendingFollowUp,

@@ -1,4 +1,4 @@
-import type { StopReason, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, StopReason, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import "../messages.ts";
 import type { AgentMessage } from "../../types.ts";
 import type { Session } from "./session.ts";
@@ -173,6 +173,34 @@ export interface ToolStartedRecord extends RecordBase {
 	replay: "never" | "safe";
 }
 
+export interface ToolReconciliationRecord extends RecordBase {
+	type: "tool_reconciliation";
+	runId: string;
+	toolCallId: string;
+	resultEntryId: string;
+	reason: string;
+	/** Observed failure data only: this does not confirm completion or authorize another dispatch. */
+	diagnostic?: ToolResultMessage;
+}
+
+export interface ToolReconciledRecord extends RecordBase {
+	type: "tool_reconciled";
+	runId: string;
+	toolCallId: string;
+	resultEntryId: string;
+}
+
+/** Complete output items, accepted before the stream has terminated. Never dispatch tools from this record. */
+export interface AssistantCheckpointRecord extends RecordBase {
+	type: "assistant_checkpoint";
+	runId: string;
+	resultEntryId: string;
+	attempt: number;
+	message: AssistantMessage;
+	continuationFailure?: AssistantMessage;
+	retryAttempt?: number;
+}
+
 export type QueueEnqueuedRecord = RecordBase &
 	(
 		| {
@@ -222,6 +250,9 @@ export type LaneRecord =
 	| OperationFinishedRecord
 	| StepAttemptRecord
 	| ToolStartedRecord
+	| ToolReconciliationRecord
+	| ToolReconciledRecord
+	| AssistantCheckpointRecord
 	| QueueEnqueuedRecord
 	| QueueCancelledRecord
 	| WriteDeferredRecord
@@ -304,6 +335,8 @@ export interface LogOptions {
 }
 
 export interface SessionStorage<TMetadata extends SessionMetadata = SessionMetadata> {
+	/** Drain accepted writes and release any exclusive backend writer claim. */
+	release?(): Promise<void>;
 	getMetadata(): Promise<TMetadata>;
 
 	// Lanes
@@ -382,6 +415,8 @@ export interface SessionRepo<
 	create(options: TCreateOptions): Promise<Session<TMetadata>>;
 	/** Opens the session for writing and acquires any backend writer claim. */
 	open(metadata: TMetadata): Promise<Session<TMetadata>>;
+	/** Read catalog details without acquiring a writer claim or repairing the durable log. */
+	inspect?(metadata: TMetadata): Promise<{ name?: string }>;
 	/** Lists session metadata without opening sessions or acquiring writer claims. */
 	list(options?: TListOptions): Promise<TMetadata[]>;
 	delete(metadata: TMetadata): Promise<void>;

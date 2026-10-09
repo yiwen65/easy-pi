@@ -1,4 +1,5 @@
 import type {
+	AssistantMessage,
 	Context,
 	ImageContent,
 	Message,
@@ -6,12 +7,14 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	ThinkingBudgets,
+	ToolResultMessage,
 	Transport,
 } from "@earendil-works/pi-ai";
 import {
 	buildProviderContext as buildProviderContextFromAgentContext,
 	runAgentLoop,
 	runAgentLoopContinue,
+	runAgentLoopResumeTools,
 } from "./agent-loop.ts";
 import { RunScope } from "./run-scope.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
@@ -124,6 +127,9 @@ export interface AgentOptions {
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	onProviderContext?: (model: Model<any>, context: Context) => void;
 	onExecutionEvent?: AgentLoopConfig["onExecutionEvent"];
+	onCompletedOutputItem?: AgentLoopConfig["onCompletedOutputItem"];
+	onToolResult?: AgentLoopConfig["onToolResult"];
+	beforeToolDispatch?: AgentLoopConfig["beforeToolDispatch"];
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	promptCacheKey?: string;
@@ -197,6 +203,9 @@ export class Agent {
 	public onResponse?: SimpleStreamOptions["onResponse"];
 	public onProviderContext?: (model: Model<any>, context: Context) => void;
 	public onExecutionEvent?: AgentLoopConfig["onExecutionEvent"];
+	public onCompletedOutputItem?: AgentLoopConfig["onCompletedOutputItem"];
+	public onToolResult?: AgentLoopConfig["onToolResult"];
+	public beforeToolDispatch?: AgentLoopConfig["beforeToolDispatch"];
 	public beforeToolCall?: (
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
@@ -248,6 +257,9 @@ export class Agent {
 		this.onResponse = runtimeOptions.onResponse;
 		this.onProviderContext = runtimeOptions.onProviderContext;
 		this.onExecutionEvent = runtimeOptions.onExecutionEvent;
+		this.onCompletedOutputItem = runtimeOptions.onCompletedOutputItem;
+		this.onToolResult = runtimeOptions.onToolResult;
+		this.beforeToolDispatch = runtimeOptions.beforeToolDispatch;
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.admitToolCall = runtimeOptions.admitToolCall;
@@ -433,6 +445,53 @@ export class Agent {
 		await this.runContinuation();
 	}
 
+	/** Resume an already committed tool batch. The host must resolve unknown effects first. */
+	async resumeToolCalls(assistant: AssistantMessage, completedResults: ToolResultMessage[]): Promise<void> {
+		if (this.activeRun) throw new Error("Agent is already processing.");
+		const index = this._state.messages.indexOf(assistant);
+		if (index < 0) throw new Error("Recovery assistant is not in the transcript");
+		if (this._state.messages.slice(index + 1).some((message) => message.role !== "toolResult")) {
+			throw new Error("Recovery assistant has subsequent conversation messages");
+		}
+		const calls = assistant.content.filter((block) => block.type === "toolCall");
+		if (
+			calls.length === 0 ||
+			new Set(calls.map((call) => call.id)).size !== calls.length ||
+			assistant.stopReason === "error" ||
+			assistant.stopReason === "aborted" ||
+			assistant.stopReason === "length"
+		)
+			throw new Error("Invalid recovery assistant");
+		const completed = new Map(completedResults.map((result) => [result.toolCallId, result]));
+		if (
+			completed.size !== completedResults.length ||
+			completedResults.some(
+				(result) => !calls.some((call) => call.id === result.toolCallId && call.name === result.toolName),
+			) ||
+			this._state.messages
+				.slice(index + 1)
+				.some((message) => message.role === "toolResult" && !completed.has(message.toolCallId))
+		)
+			throw new Error("Invalid recovered tool results");
+		this._state.messages = [...this._state.messages.slice(0, index + 1), ...completedResults];
+		await this.runWithLifecycle(async (signal) => {
+			await runAgentLoopResumeTools(
+				this.createContextSnapshot(),
+				assistant,
+				completedResults,
+				this.createLoopConfig(),
+				async (event) => {
+					if (event.type === "turn_end" && event.message === assistant) {
+						this._state.messages = [...this._state.messages.slice(0, index + 1), ...event.toolResults];
+					}
+					await this.processEvents(event);
+				},
+				signal,
+				this.streamFunction,
+			);
+		});
+	}
+
 	private normalizePromptInput(
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
@@ -531,6 +590,9 @@ export class Agent {
 			getSystemPrompt: () => this._state.systemPrompt,
 			onProviderContext: this.onProviderContext,
 			onExecutionEvent: this.onExecutionEvent,
+			onCompletedOutputItem: this.onCompletedOutputItem,
+			onToolResult: this.onToolResult,
+			beforeToolDispatch: this.beforeToolDispatch,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
