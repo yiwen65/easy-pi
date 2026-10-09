@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import { type AuthEvent, type AuthPrompt, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
 import type {
 	AutocompleteItem,
@@ -617,6 +617,9 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	private failedAttempt:
+		| { assistant: AssistantMessageComponent; tools: ToolExecutionComponent[]; errorMessage: string }
+		| undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -895,6 +898,7 @@ export class InteractiveMode {
 
 	/** Clear transcript content and stop the Grok live-row scroll timers first. */
 	private clearChatContainer(): void {
+		this.failedAttempt = undefined;
 		for (const child of this.chatContainer.children) {
 			if (
 				child instanceof GrokThinkingTurnGroupComponent ||
@@ -3474,6 +3478,7 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
+				this.failedAttempt = undefined;
 				this.pendingTools.clear();
 				this.startGrokTurnTiming();
 				if (this.settingsManager.getShowTerminalProgress()) {
@@ -3568,6 +3573,9 @@ export class InteractiveMode {
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
+					// Decide terminal visibility on agent_end; a retryable failure must
+					// never briefly become a permanent regular-terminal scrollback row.
+					if (this.streamingMessage.stopReason === "error") this.streamingComponent.setErrorVisible(false);
 					if (this.streamingMessage.stopReason === "aborted") {
 						const retryAttempt = this.session.retryAttempt;
 						errorMessage =
@@ -3585,9 +3593,22 @@ export class InteractiveMode {
 						if (!errorMessage) {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
 						}
+						if (this.streamingMessage.stopReason === "error") {
+							this.failedAttempt = {
+								assistant: this.streamingComponent,
+								tools: [...this.pendingTools.values()],
+								errorMessage,
+							};
+						}
 						for (const [, component] of this.pendingTools.entries()) {
 							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
+								content: [
+									{
+										type: "text",
+										text:
+											this.streamingMessage.stopReason === "error" ? "Response interrupted" : errorMessage,
+									},
+								],
 								isError: true,
 							});
 						}
@@ -3669,6 +3690,16 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 				if (!event.willRetry) {
+					const failedAttempt = this.failedAttempt;
+					if (failedAttempt) {
+						failedAttempt.assistant.setErrorVisible(true);
+						for (const component of failedAttempt.tools) {
+							component.updateResult({
+								content: [{ type: "text", text: failedAttempt.errorMessage }],
+								isError: true,
+							});
+						}
+					}
 					this.completeTurnGroups();
 					const duration = this.finishGrokTurnTiming();
 					if (duration !== undefined) {
@@ -3763,13 +3794,21 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_start": {
+				this.failedAttempt?.assistant.setErrorVisible(false);
+				for (const component of this.failedAttempt?.tools ?? []) {
+					component.updateResult({
+						content: [{ type: "text", text: "Response interrupted" }],
+						isError: true,
+					});
+				}
+				this.failedAttempt = undefined;
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
 					this.session.abortRetry();
 				};
 				this.showStatusIndicator(
-					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
+					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs, event.errorMessage),
 				);
 				this.ui.requestRender();
 				break;
@@ -3784,6 +3823,14 @@ export class InteractiveMode {
 				this.clearStatusIndicator("retry");
 				// Show error only on final failure (success shows normal response)
 				if (!event.success) {
+					this.failedAttempt?.assistant.setErrorVisible(false);
+					for (const component of this.failedAttempt?.tools ?? []) {
+						component.updateResult({
+							content: [{ type: "text", text: "Response interrupted" }],
+							isError: true,
+						});
+					}
+					this.failedAttempt = undefined;
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 				}
 				this.ui.requestRender();
@@ -3791,9 +3838,8 @@ export class InteractiveMode {
 			}
 
 			case "summarization_retry_scheduled": {
-				this.showError(event.errorMessage);
 				this.showStatusIndicator(
-					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
+					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs, event.errorMessage),
 				);
 				this.ui.requestRender();
 				break;
@@ -3942,7 +3988,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
+	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean; hideError?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
 				this.flushPendingSkillMentions();
@@ -4022,6 +4068,7 @@ export class InteractiveMode {
 			case "assistant": {
 				this.flushPendingSkillMentions();
 				const assistantComponent = this.createAssistantMessageComponent(message);
+				if (options?.hideError) assistantComponent.setErrorVisible(false);
 				this.chatContainer.addChild(assistantComponent);
 				if (assistantComponent instanceof GrokAssistantMessageComponent) {
 					this.updateTurnThinking(assistantComponent);
@@ -4049,6 +4096,19 @@ export class InteractiveMode {
 		this.pendingSkillMentions = [];
 		this.pendingSkillMentionsPopulateHistory = false;
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+		const retriedFailures = new Set<AssistantMessage>();
+		let previousFailure: AssistantMessage | undefined;
+		for (const item of items) {
+			if (isCustomSessionEntry(item)) {
+				if (item.customType === TURN_DURATION_ENTRY_TYPE) previousFailure = undefined;
+			} else if (!isCompactionCostNotice(item)) {
+				if (item.role === "user") previousFailure = undefined;
+				if (item.role === "assistant") {
+					if (previousFailure) retriedFailures.add(previousFailure);
+					previousFailure = isRetryableAssistantError(item) ? item : undefined;
+				}
+			}
+		}
 		// Cache-miss notices are not persisted; re-derive them from the full entry
 		// list and re-inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
@@ -4075,7 +4135,8 @@ export class InteractiveMode {
 			const message = item;
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.addMessageToChat(message);
+				if (retriedFailures.has(message)) this.addMessageToChat(message, { hideError: true });
+				else this.addMessageToChat(message);
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -4092,7 +4153,9 @@ export class InteractiveMode {
 										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 										: "Operation aborted";
 							} else {
-								errorMessage = message.errorMessage || "Error";
+								errorMessage = retriedFailures.has(message)
+									? "Response interrupted"
+									: message.errorMessage || "Error";
 							}
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 						} else {

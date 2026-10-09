@@ -21,6 +21,7 @@ export class AssistantMessageComponent extends Container {
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
+	private errorVisible = true;
 
 	constructor(
 		message?: AssistantMessage,
@@ -59,6 +60,13 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
+	}
+
+	/** Hide a retried error notice while retaining the original partial content. */
+	setErrorVisible(visible: boolean): void {
+		if (this.errorVisible === visible) return;
+		this.errorVisible = visible;
+		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
 	/**
@@ -204,7 +212,7 @@ export class AssistantMessageComponent extends Container {
 						: "Operation aborted";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
-			} else if (message.stopReason === "error") {
+			} else if (message.stopReason === "error" && this.errorVisible) {
 				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));

@@ -19,8 +19,9 @@
 
 ### Fixed
 
+- Rendered model and summarization retry errors as temporary TUI status notices instead of accumulating transcript errors; recovered errors stay hidden during history replay, and terminal failures remain visible.
 - Preserved completed Responses output items across stream interruption and collected complete tool-call results before retrying; recovery checkpoints do not reset the retry budget. See [stream recovery](docs/stream-recovery.md).
-- Fixed model stream failures disappearing from the transcript and session history while recovery kept the session working indefinitely; failures remain visible and the run stops when its retry budget is exhausted.
+- Fixed model stream failure records disappearing from session history while recovery kept the session working indefinitely; records are retained, terminal failures remain visible, and the run stops when its retry budget is exhausted.
 - Excluded failed and aborted assistant output from compaction token accounting and summary preparation while retaining it in session history, preventing partial failed responses from blocking recovery with false context-budget errors.
 - `Ctrl+X` now copies the editor's input text when the editor has content (paste markers expanded, no composer frame or soft-wrap breaks), and keeps copying the last agent message when the editor is empty; previously the only way to copy typed input was a mouse-selection screen copy that pulled in composer borders, split soft-wrapped lines, and dropped input lines scrolled out of the editor window.
 - Background bash tasks are no longer capped by wall clock by default: long tasks keep running until they finish or are stopped, `backgroundBashTaskTimeoutSeconds` is now an opt-in hard cap (`0`/unset = no cap), and an explicit `timeout` still caps only that task.

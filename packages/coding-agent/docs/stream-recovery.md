@@ -11,6 +11,8 @@ When a response is interrupted:
 
 Checkpoints carry `isResponseCheckpoint: true`. They record completed progress, not a successful model response, and do not reset the retry budget. A text-only checkpoint can be continued without adding another user message. Completed reasoning is retained only with a following completed message or tool call; isolated reasoning remains in the failure artifact.
 
+In the TUI, retry errors appear in the temporary retry status and clear when the next attempt starts or retry ends. Partial content remains visible, and a terminal failure is shown once. Replaying history hides retryable error notices superseded by a later assistant response in the same user turn. Diagnostic failure records remain in the session file and JSON events.
+
 Calls with incomplete status or invalid final JSON are not recovered, even if a partial argument object can be parsed. Cancellation, quota/billing failures, and output-limit truncation do not execute recovery tools. Output-limit truncation retains its existing error-tool-result handling. Tool admission hooks and batch termination continue to apply.
 
 Providers without an explicit trustworthy item-completion marker retain their existing whole-response retry behavior. There is no token-level stream resumption. A model may request the same operation again, and a process can exit after a tool effect but before its result is saved; this mechanism does not guarantee exactly-once effects or recovery from power loss.
