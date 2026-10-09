@@ -173,23 +173,31 @@ describe("AgentSession retry", () => {
 			"network failures",
 			"fetch failed (ECONNRESET: Client network socket disconnected before secure TLS connection was established)",
 		],
+		["peer-closed streams", "terminated (UND_ERR_SOCKET: other side closed)"],
+		["DNS failures", "getaddrinfo EAI_AGAIN api.example.test"],
 		["provider overloads", "Codex error: Our servers are currently overloaded. Please try again later."],
 		["5xx server failures", "503 service unavailable"],
-	])("keeps retrying %s past maxRetries and omits them from session history", async (_label, errorMessage) => {
+	])("bounds %s and persists every failed attempt", async (_label, errorMessage) => {
 		const created = await createSession({ failCount: 5, maxRetries: 2, errorMessage });
-		const retryEvents: Array<{ attempt: number; unlimited?: true }> = [];
+		const retryAttempts: number[] = [];
 		created.session.subscribe((event) => {
-			if (event.type === "auto_retry_start") retryEvents.push(event);
+			if (event.type === "auto_retry_start") retryAttempts.push(event.attempt);
 		});
 
 		await created.session.prompt("Test");
 
-		expect(created.getCallCount()).toBe(6);
-		expect(retryEvents.map((event) => event.attempt)).toEqual([1, 2, 3, 4, 5]);
-		expect(retryEvents.every((event) => event.unlimited)).toBe(true);
-		expect(
-			created.session.messages.some((message) => message.role === "assistant" && message.stopReason === "error"),
-		).toBe(false);
+		expect(created.getCallCount()).toBe(3);
+		expect(retryAttempts).toEqual([1, 2]);
+		const failures = created.session.sessionManager
+			.getEntries()
+			.flatMap((entry) =>
+				entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error"
+					? [entry.message.errorMessage]
+					: [],
+			);
+		expect(failures).toEqual([errorMessage, errorMessage, errorMessage]);
+		expect(created.session.isIdle).toBe(true);
+		expect(created.session.agent.state.isStreaming).toBe(false);
 	});
 
 	it("prompt waits for retry completion even when assistant message_end handling is delayed", async () => {

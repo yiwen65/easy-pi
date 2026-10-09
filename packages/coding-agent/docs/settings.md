@@ -161,13 +161,15 @@ Easy Pi does not use the official Pi update feed. Automatic version checks remai
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
-| `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts for bounded transient failures |
-| `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
+| `retry.maxRetries` | number | `10` | Maximum agent-level retries for every retryable failure; excludes the initial call |
+| `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff, capped at 30s or the base delay when larger |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
 | `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
 
-Network transport failures (for example DNS, connection, socket, and fetch timeouts), provider-overload errors, and all 5xx server failures ignore `retry.maxRetries` and continue retrying until the service recovers or the operation is cancelled. Their backoff is capped at 30 seconds, and interactive mode shows one updating status line instead of appending each transient error to the transcript. These availability failures are never written to session history, even when automatic retry is disabled.
+Network transport failures (for example DNS, connection, socket, and fetch timeouts), provider-overload errors, 5xx server failures, and other retryable errors share the same `retry.maxRetries` budget. The default allows 10 retries after the initial call, for at most 11 calls in one consecutive failure sequence. A successful response resets the budget for the next model call. Set `retry.maxRetries` to `0`, or disable `retry.enabled`, to prevent automatic retries.
+
+Failures remain visible in the transcript and are saved to session history, including when retries are disabled. Failed attempts are removed from the active model context before retrying. When the budget is exhausted, the current run stops with a final error; the session is retained so you can submit another prompt. Cancellation and quota/billing failures are not retried. This budget is not a total request-duration deadline; header/body idle timeouts still apply separately.
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs`, the request fails immediately with an informative error instead of waiting silently. Set it to `0` to disable the limit.
 
@@ -177,7 +179,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 {
   "retry": {
     "enabled": true,
-    "maxRetries": 3,
+    "maxRetries": 10,
     "baseDelayMs": 2000,
     "provider": {
       "timeoutMs": 3600000,
@@ -343,7 +345,7 @@ See [packages.md](packages.md) for package management details.
   },
   "retry": {
     "enabled": true,
-    "maxRetries": 3
+    "maxRetries": 10
   },
   "enabledModels": ["claude-*", "gpt-4o"],
   "warnings": {

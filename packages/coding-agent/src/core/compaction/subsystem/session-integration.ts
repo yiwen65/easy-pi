@@ -36,6 +36,11 @@ const MIN_CALIBRATION_PROVIDER_TOKENS = 1_000;
 /** Measured providers tokenize CJK and digit-dense text 1.7-2.4x denser than chars/4. */
 const MAX_ESTIMATE_CALIBRATION = 4;
 
+/** Failed assistant output stays in history but is never replayed to the provider. */
+function isCompactionVisibleMessage(message: AgentMessage): boolean {
+	return message.role !== "assistant" || (message.stopReason !== "error" && message.stopReason !== "aborted");
+}
+
 /**
  * Most recent provider measurement of a prompt, paired with the local estimate of the same prefix.
  * `usage.input` excludes cache reads and writes for every supported provider, so the measured prompt
@@ -230,7 +235,9 @@ export class HfCompactionHost {
 	}
 
 	private activeMessages(entries = this.branchEntries): AgentMessage[] {
-		return buildSessionContext(entries).messages;
+		// Filter before calibration, token budgets, and compactor preparation rather
+		// than relying on the provider adapter's later failed-message filtering.
+		return buildSessionContext(entries).messages.filter(isCompactionVisibleMessage);
 	}
 
 	private latestCheckpoint(entries = this.branchEntries) {
@@ -283,7 +290,7 @@ export class HfCompactionHost {
 			checkpointIndex >= 0 &&
 			input.branchEntries
 				.slice(checkpointIndex + 1)
-				.some((entry) => sessionEntryToContextMessages(entry).length > 0);
+				.some((entry) => sessionEntryToContextMessages(entry).some(isCompactionVisibleMessage));
 		const sameProviderContextAsLastCompaction =
 			checkpoint !== undefined &&
 			!hasVisibleTail &&
@@ -384,8 +391,12 @@ export class HfCompactionHost {
 		const checkpoint = this.latestCheckpoint();
 		if (!checkpoint?.replacementHistory) return undefined;
 		const checkpointIndex = this.branchEntries.findIndex((entry) => entry.id === checkpoint.id);
-		const tailMessages = this.branchEntries.slice(checkpointIndex + 1).flatMap(sessionEntryToContextMessages);
-		const messages = [...checkpoint.replacementHistory, ...tailMessages];
+		const checkpointMessages = checkpoint.replacementHistory.filter(isCompactionVisibleMessage);
+		const tailMessages = this.branchEntries
+			.slice(checkpointIndex + 1)
+			.flatMap(sessionEntryToContextMessages)
+			.filter(isCompactionVisibleMessage);
+		const messages = [...checkpointMessages, ...tailMessages];
 		const systemPrompt = this.getSystemPrompt();
 		const calibration = this.estimateCalibration(messages);
 		const stats = tokenStats({
@@ -400,12 +411,12 @@ export class HfCompactionHost {
 		return {
 			mode: this.config.mode,
 			checkpointEntryId: checkpoint.id,
-			replacementMessageCount: checkpoint.replacementHistory.length,
+			replacementMessageCount: checkpointMessages.length,
 			tailMessageCount: tailMessages.length,
 			toolsTokenEstimate: stats.tools,
 			tokenStats: stats,
 			estimateCalibration: calibration,
-			checkpointMessages: structuredClone(checkpoint.replacementHistory),
+			checkpointMessages: structuredClone(checkpointMessages),
 			...(this.latestProviderContext ? { providerContext: { ...this.latestProviderContext } } : {}),
 			...(options.includeSystemPrompt ? { systemPrompt: { text: systemPrompt, tokens: stats.system } } : {}),
 		};

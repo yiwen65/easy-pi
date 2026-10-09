@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - Renamed `GoogleThinkingLevel` to `GoogleApiThinkingLevel` and added `ResolvedGoogleThinkingLevel` for normalized adapter levels.
+- `retryAssistantCall()` now applies `RetryPolicy.maxRetries` to every retryable failure, including network interruptions and provider availability errors. Removed `isUnlimitedRetryAssistantError()` and the `unlimited` parameter of `RetryCallbacks.onRetryScheduled`; use `isRetryableAssistantError()` with an explicit retry budget.
 
 ### Added
 

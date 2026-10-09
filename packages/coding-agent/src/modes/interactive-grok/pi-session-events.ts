@@ -94,7 +94,6 @@ export type PiSessionUiEvent =
 			maxAttempts: number;
 			delayMs: number;
 			errorMessage: string;
-			unlimited?: true;
 	  }
 	| {
 			sequence: number;
@@ -112,7 +111,6 @@ export type PiSessionUiEvent =
 			maxAttempts: number;
 			delayMs: number;
 			errorMessage: string;
-			unlimited?: true;
 	  }
 	| {
 			sequence: number;
@@ -226,7 +224,6 @@ export function mapAgentSessionEvent(event: AgentSessionEvent, sequence: number)
 				maxAttempts: event.maxAttempts,
 				delayMs: event.delayMs,
 				errorMessage: event.errorMessage,
-				...(event.unlimited ? { unlimited: true as const } : {}),
 			};
 		case "auto_retry_end":
 			return {
@@ -246,7 +243,6 @@ export function mapAgentSessionEvent(event: AgentSessionEvent, sequence: number)
 				maxAttempts: event.maxAttempts,
 				delayMs: event.delayMs,
 				errorMessage: event.errorMessage,
-				...(event.unlimited ? { unlimited: true as const } : {}),
 			};
 		case "summarization_retry_attempt_start":
 			return event.source === "compaction"

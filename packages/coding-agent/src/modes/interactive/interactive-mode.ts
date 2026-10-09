@@ -8,14 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
-import {
-	type AssistantMessage,
-	type ImageContent,
-	isUnlimitedRetryAssistantError,
-	type Message,
-	type Model,
-	type Usage,
-} from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -3583,28 +3576,20 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					const suppressUnlimitedRetryError =
-						this.session.autoRetryEnabled && isUnlimitedRetryAssistantError(this.streamingMessage);
-					if (suppressUnlimitedRetryError) {
-						this.chatContainer.removeChild(this.streamingComponent);
-					} else {
-						this.streamingComponent.updateContent(this.streamingMessage, false);
-						if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
-							this.updateTurnThinking(this.streamingComponent);
-						}
+					this.streamingComponent.updateContent(this.streamingMessage, false);
+					if (this.streamingComponent instanceof GrokAssistantMessageComponent) {
+						this.updateTurnThinking(this.streamingComponent);
 					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						if (!suppressUnlimitedRetryError) {
-							if (!errorMessage) {
-								errorMessage = this.streamingMessage.errorMessage || "Error";
-							}
-							for (const [, component] of this.pendingTools.entries()) {
-								component.updateResult({
-									content: [{ type: "text", text: errorMessage }],
-									isError: true,
-								});
-							}
+						if (!errorMessage) {
+							errorMessage = this.streamingMessage.errorMessage || "Error";
+						}
+						for (const [, component] of this.pendingTools.entries()) {
+							component.updateResult({
+								content: [{ type: "text", text: errorMessage }],
+								isError: true,
+							});
 						}
 						this.pendingTools.clear();
 					} else {
@@ -3784,7 +3769,7 @@ export class InteractiveMode {
 					this.session.abortRetry();
 				};
 				this.showStatusIndicator(
-					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs, event.unlimited),
+					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
 				);
 				this.ui.requestRender();
 				break;
@@ -3806,9 +3791,9 @@ export class InteractiveMode {
 			}
 
 			case "summarization_retry_scheduled": {
-				if (!event.unlimited) this.showError(event.errorMessage);
+				this.showError(event.errorMessage);
 				this.showStatusIndicator(
-					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs, event.unlimited),
+					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
 				);
 				this.ui.requestRender();
 				break;

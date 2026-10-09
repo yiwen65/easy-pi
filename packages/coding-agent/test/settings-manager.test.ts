@@ -319,6 +319,35 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("retry settings", () => {
+		it("defaults to ten retries without writing an override", () => {
+			const manager = SettingsManager.inMemory();
+
+			expect(manager.getRetrySettings()).toEqual({ enabled: true, maxRetries: 10, baseDelayMs: 2000 });
+			expect(manager.getGlobalSettings().retry).toBeUndefined();
+		});
+
+		it("preserves disabled retry and an explicit zero budget", () => {
+			const manager = SettingsManager.inMemory({ retry: { enabled: false, maxRetries: 0, baseDelayMs: 1 } });
+
+			expect(manager.getRetrySettings()).toEqual({ enabled: false, maxRetries: 0, baseDelayMs: 1 });
+		});
+
+		it("merges project retry budgets with the remaining global policy", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ retry: { enabled: true, maxRetries: 6, baseDelayMs: 25 } }),
+			);
+			writeFileSync(
+				join(projectDir, CONFIG_DIR_NAME, "settings.json"),
+				JSON.stringify({ retry: { maxRetries: 2 } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getRetrySettings()).toEqual({ enabled: true, maxRetries: 2, baseDelayMs: 25 });
+		});
+	});
+
 	describe("httpIdleTimeoutMs", () => {
 		it("should default to 5 minutes", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

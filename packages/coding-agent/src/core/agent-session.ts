@@ -43,7 +43,6 @@ import {
 	isContextOverflow,
 	isRecoverableLength,
 	isRetryableAssistantError,
-	isUnlimitedRetryAssistantError,
 	modelsAreEqual,
 	type RetryCallbacks,
 	resetApiProviders,
@@ -173,7 +172,6 @@ export type AgentSessionEvent =
 			maxAttempts: number;
 			delayMs: number;
 			errorMessage: string;
-			unlimited?: true;
 	  }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| {
@@ -182,7 +180,6 @@ export type AgentSessionEvent =
 			maxAttempts: number;
 			delayMs: number;
 			errorMessage: string;
-			unlimited?: true;
 	  }
 	| { type: "summarization_retry_attempt_start"; source: "branchSummary" }
 	| {
@@ -386,7 +383,6 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
-	private _boundedRetryAttempt = 0;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -973,12 +969,7 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				// Availability failures are operational state, not conversation history.
-				const isUnlimitedRetryFailure =
-					event.message.role === "assistant" && isUnlimitedRetryAssistantError(event.message);
-				if (!isUnlimitedRetryFailure) {
-					appendedEntryId = this.sessionManager.appendMessage(event.message);
-				}
+				appendedEntryId = this.sessionManager.appendMessage(event.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -998,16 +989,18 @@ export class AgentSession {
 					this._overflowRecoveryAttempted = false;
 				}
 
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
+				// Finish the retry sequence immediately on success or cancellation.
+				// Successful tool-call responses reset the budget before the next LLM call.
 				if (!assistantMsg.isResponseCheckpoint && assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
 					this._emit({
 						type: "auto_retry_end",
-						success: true,
+						success: assistantMsg.stopReason !== "aborted",
 						attempt: this._retryAttempt,
+						...(assistantMsg.stopReason === "aborted"
+							? { finalError: assistantMsg.errorMessage || "Operation aborted" }
+							: {}),
 					});
 					this._retryAttempt = 0;
-					this._boundedRetryAttempt = 0;
 				}
 			}
 		}
@@ -1021,10 +1014,7 @@ export class AgentSession {
 			const message = event.messages[i];
 			if (message.role === "assistant") {
 				const assistantMessage = message as AssistantMessage;
-				return (
-					this._isRetryableError(assistantMessage) &&
-					(isUnlimitedRetryAssistantError(assistantMessage) || this._boundedRetryAttempt < settings.maxRetries)
-				);
+				return this._isRetryableError(assistantMessage) && this._retryAttempt < settings.maxRetries;
 			}
 		}
 		return false;
@@ -1439,7 +1429,8 @@ export class AgentSession {
 			return false;
 		}
 
-		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
+		const retryable = this._isRetryableError(msg);
+		if (retryable && (await this._prepareRetry(msg))) {
 			return true;
 		}
 
@@ -1447,12 +1438,15 @@ export class AgentSession {
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
-				attempt: isUnlimitedRetryAssistantError(msg) ? this._retryAttempt : this._boundedRetryAttempt,
+				attempt: this._retryAttempt,
 				finalError: msg.errorMessage,
 			});
 			this._retryAttempt = 0;
-			this._boundedRetryAttempt = 0;
 		}
+
+		// Exhaustion, disabled retry, or cancelled backoff ends this run. Keep queued
+		// input pending rather than bypassing the failed call's retry budget.
+		if (retryable) return false;
 
 		// Overflow recovery must compact before the immediate retry can start. Normal
 		// threshold maintenance is deferred to the next real provider request by the
@@ -3193,14 +3187,13 @@ export class AgentSession {
 		source: { source: "branchSummary" } | { source: "compaction"; reason: "manual" | "threshold" | "overflow" },
 	): RetryCallbacks {
 		return {
-			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage, unlimited) => {
+			onRetryScheduled: (attempt, maxAttempts, delayMs, errorMessage) => {
 				this._emit({
 					type: "summarization_retry_scheduled",
 					attempt,
 					maxAttempts,
 					delayMs,
 					errorMessage,
-					...(unlimited ? { unlimited: true as const } : {}),
 				});
 			},
 			onRetryAttemptStart: () => {
@@ -3225,48 +3218,37 @@ export class AgentSession {
 			return false;
 		}
 
-		const unlimited = isUnlimitedRetryAssistantError(message);
-		this._retryAttempt++;
-		if (!unlimited) this._boundedRetryAttempt++;
-
-		if (this._boundedRetryAttempt > settings.maxRetries) {
-			// Preserve the completed attempt count so post-run handling can emit the final failure.
-			this._retryAttempt--;
-			this._boundedRetryAttempt--;
+		if (this._retryAttempt >= settings.maxRetries) {
 			return false;
 		}
 
-		const reportedAttempt = unlimited ? this._retryAttempt : this._boundedRetryAttempt;
-		const exponent = unlimited ? Math.min(this._retryAttempt - 1, 30) : this._boundedRetryAttempt - 1;
+		this._retryAttempt++;
+		const exponent = Math.min(this._retryAttempt - 1, 30);
 		const exponentialDelayMs = settings.baseDelayMs * 2 ** exponent;
-		const delayMs = unlimited
-			? Math.min(exponentialDelayMs, Math.max(settings.baseDelayMs, 30_000))
-			: exponentialDelayMs;
+		const delayMs = Math.min(exponentialDelayMs, Math.max(settings.baseDelayMs, 30_000));
 
+		this._retryAbortController = new AbortController();
 		this._emit({
 			type: "auto_retry_start",
-			attempt: reportedAttempt,
+			attempt: this._retryAttempt,
 			maxAttempts: settings.maxRetries,
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
-			...(unlimited ? { unlimited: true as const } : {}),
 		});
 
-		// Remove the failed attempt from agent context. Bounded failures remain in session history.
+		// Remove the failed attempt from active context only; all failures remain in session history.
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 			this.agent.state.messages = messages.slice(0, -1);
 		}
 
 		// Wait with exponential backoff (abortable)
-		this._retryAbortController = new AbortController();
 		try {
 			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
 			this._retryAttempt = 0;
-			this._boundedRetryAttempt = 0;
 			this._emit({
 				type: "auto_retry_end",
 				success: false,

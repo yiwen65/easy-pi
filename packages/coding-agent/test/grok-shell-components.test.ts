@@ -529,13 +529,13 @@ describe("Grok shell components", () => {
 				contextPercent: 42,
 				session: createStubSession({ modelId: "long-model-name" }),
 			});
-			const retry = new RetryStatusIndicator(ui, 1, 3, 60_000, true);
+			const retry = new RetryStatusIndicator(ui, 1, 3, 60_000);
 			const compaction = new CompactionStatusIndicator(ui, "overflow");
 			ui.setLayoutRoot(view.fullscreenRoot);
 			ui.start();
 			try {
 				for (const [component, label] of [
-					[retry, "Service unavailable"],
+					[retry, "Retrying"],
 					[compaction, "Context overflow"],
 					[new StubComponent(["", "Critical error", "retry or compact to recover", ""]), "Critical error"],
 				] as const) {
@@ -584,14 +584,14 @@ describe("Grok shell components", () => {
 			const message = `Inspecting ${"repository path and dependency graph ".repeat(10)}LAST_STATUS_WORD`;
 			// setWorkingMessage updates the same native WorkingStatusIndicator message.
 			working.setMessage(message);
-			const retry = new RetryStatusIndicator(ui, 1, 3, 60_000, true);
+			const retry = new RetryStatusIndicator(ui, 1, 3, 60_000);
 			const compaction = new CompactionStatusIndicator(ui, "overflow");
 			ui.setLayoutRoot(view.fullscreenRoot);
 			ui.start();
 			try {
 				for (const [component, label] of [
 					[working, "Inspecting"],
-					[retry, "Service unavailable"],
+					[retry, "Retrying"],
 					[compaction, "Context overflow"],
 					[
 						new StubComponent([

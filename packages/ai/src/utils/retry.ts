@@ -60,16 +60,6 @@ const NETWORK_PROVIDER_ERROR_PATTERNS = [
 ] as const;
 
 const NETWORK_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern(NETWORK_PROVIDER_ERROR_PATTERNS);
-const UNLIMITED_RETRY_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
-	"overloaded",
-	HTTP_SERVER_ERROR_PATTERN,
-	"service.?unavailable",
-	"server.?error",
-	"internal.?error",
-	"bad gateway",
-	"gateway timeout",
-]);
-
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// Generic provider load, HTTP status, and server-side transient failures.
 	"overloaded",
@@ -104,16 +94,15 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 ]);
 
 /**
- * Retry policy: bounded transient-error attempts plus unlimited recovery for network
- * failures and provider availability errors with exponential backoff (`baseDelayMs * 2^(attempt-1)`). Matches `settings.retry`
- * (`enabled`, `maxRetries`, `baseDelayMs`) in coding-agent; kept here so the classifier
- * and the policy-driven retry loop live together and stay reusable by other callers.
+ * Retry policy: bounded transient-error attempts with capped exponential backoff.
+ * Matches `settings.retry` (`enabled`, `maxRetries`, `baseDelayMs`) in coding-agent;
+ * kept here so the classifier and policy-driven retry loop stay reusable by other callers.
  */
 export interface RetryPolicy {
 	enabled: boolean;
-	/** Max bounded retry attempts. The initial call never counts as a retry. */
+	/** Max retry attempts shared by all retryable errors. The initial call never counts as a retry. */
 	maxRetries: number;
-	/** Base delay in ms. Per-attempt delay is `baseDelayMs * 2^(attempt-1)` before jitter. */
+	/** Base delay in ms. Exponential backoff is capped at 30 seconds, or this delay when larger. */
 	baseDelayMs: number;
 }
 
@@ -125,7 +114,6 @@ export interface RetryCallbacks {
 		maxAttempts: number,
 		delayMs: number,
 		errorMessage: string,
-		unlimited: boolean,
 	) => void | Promise<void>;
 	/** Emitted after the backoff sleep, immediately before the retried call starts. */
 	onRetryAttemptStart?: () => void | Promise<void>;
@@ -167,9 +155,9 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *   too, so callers do not need to care when cancellation happened.
  * - A non-retryable error (per {@link isRetryableAssistantError}, including quota/
  *   billing exhaustion) is returned immediately so deterministic errors fail fast.
- * - Network transport failures and provider availability errors retry until recovery or
- *   cancellation. Other transient failures retry up to `maxRetries` times. Backoff for unlimited retries
- *   is capped at 30 seconds (or `baseDelayMs` when larger) to avoid numeric overflow.
+ * - All transient failures, including network transport and provider availability errors,
+ *   share a budget of `maxRetries` retries. Exponential backoff is capped at 30 seconds
+ *   (or `baseDelayMs` when larger), and its exponent is capped to avoid numeric overflow.
  * - Emits `onRetryScheduled` before each sleep, `onRetryAttemptStart` after each sleep
  *   before the retried call starts, and `onRetryFinished` once at the end.
  *
@@ -186,7 +174,6 @@ export async function retryAssistantCall(
 	const maxAttempts = retryEnabled ? policy.maxRetries : 0;
 
 	let attempt = 0;
-	let boundedAttempt = 0;
 	let lastRetry: { attempt: number; errorMessage: string } | undefined;
 	for (;;) {
 		const response = await produce();
@@ -204,24 +191,19 @@ export async function retryAssistantCall(
 		}
 
 		const retryable = isRetryableAssistantError(response);
-		const unlimited = isUnlimitedRetryAssistantError(response);
 
-		// Non-retryable, or bounded retry budget exhausted: return the final error message.
-		if (!retryEnabled || !retryable || (!unlimited && boundedAttempt >= maxAttempts)) {
+		// Non-retryable, or retry budget exhausted: return the final error message.
+		if (!retryEnabled || !retryable || attempt >= maxAttempts) {
 			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, response.errorMessage);
 			return response;
 		}
 
 		attempt++;
-		if (!unlimited) boundedAttempt++;
-		const reportedAttempt = unlimited ? attempt : boundedAttempt;
-		lastRetry = { attempt: reportedAttempt, errorMessage: response.errorMessage || "Unknown error" };
-		const exponent = unlimited ? Math.min(attempt - 1, 30) : boundedAttempt - 1;
+		lastRetry = { attempt, errorMessage: response.errorMessage || "Unknown error" };
+		const exponent = Math.min(attempt - 1, 30);
 		const exponentialDelayMs = policy!.baseDelayMs * 2 ** exponent;
-		const delayMs = unlimited
-			? Math.min(exponentialDelayMs, Math.max(policy!.baseDelayMs, 30_000))
-			: exponentialDelayMs;
-		await callbacks?.onRetryScheduled?.(reportedAttempt, maxAttempts, delayMs, lastRetry.errorMessage, unlimited);
+		const delayMs = Math.min(exponentialDelayMs, Math.max(policy!.baseDelayMs, 30_000));
+		await callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, lastRetry.errorMessage);
 
 		// Normalize aborts during retry backoff to the same AssistantMessage shape as
 		// provider stream aborts, so callers do not need to care when cancellation happened.
@@ -260,15 +242,5 @@ export function isNetworkAssistantError(message: AssistantMessage): boolean {
 		message.stopReason === "error" &&
 		typeof message.errorMessage === "string" &&
 		NETWORK_PROVIDER_ERROR_PATTERN.test(message.errorMessage)
-	);
-}
-
-/** True when a transient failure should retry until recovery or cancellation. */
-export function isUnlimitedRetryAssistantError(message: AssistantMessage): boolean {
-	const errorMessage = message.errorMessage;
-	return (
-		typeof errorMessage === "string" &&
-		isRetryableAssistantError(message) &&
-		(isNetworkAssistantError(message) || UNLIMITED_RETRY_PROVIDER_ERROR_PATTERN.test(errorMessage))
 	);
 }

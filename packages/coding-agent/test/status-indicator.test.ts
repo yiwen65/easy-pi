@@ -1,6 +1,6 @@
 import type { TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { WorkingStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
+import { RetryStatusIndicator, WorkingStatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -87,5 +87,27 @@ describe("WorkingStatusIndicator", () => {
 		vi.advanceTimersByTime(120_000);
 		expect(requestRender).not.toHaveBeenCalled();
 		expect(indicatorLine(indicator)).toContain("Working... 5s");
+	});
+});
+
+describe("RetryStatusIndicator", () => {
+	beforeAll(() => initTheme("dark"));
+	afterEach(() => vi.useRealTimers());
+
+	test("renders the finite budget throughout the retry countdown and stops on disposal", () => {
+		vi.useFakeTimers();
+		const { ui, requestRender } = createFakeTui();
+		const indicator = new RetryStatusIndicator(ui, 3, 10, 3_000);
+		try {
+			expect(stripAnsi(indicator.render(120).join("\n"))).toContain("Retrying (3/10) in 3s");
+			vi.advanceTimersByTime(1_000);
+			expect(stripAnsi(indicator.render(120).join("\n"))).toContain("Retrying (3/10) in 2s");
+			indicator.dispose();
+			requestRender.mockClear();
+			vi.advanceTimersByTime(10_000);
+			expect(requestRender).not.toHaveBeenCalled();
+		} finally {
+			indicator.dispose();
+		}
 	});
 });

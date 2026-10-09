@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import { mapAgentSessionEvent, type PiSessionUiEvent } from "../src/modes/interactive-grok/pi-session-events.ts";
 import { PiSessionPort, type PiSessionRuntimeHost } from "../src/modes/interactive-grok/pi-session-port.ts";
-import { createHarness, type Harness } from "./suite/harness.ts";
+import { createHarness as createSuiteHarness, type Harness, type HarnessOptions } from "./suite/harness.ts";
+
+function createHarness(options: HarnessOptions = {}): Promise<Harness> {
+	return createSuiteHarness({ ...options, hfCompaction: { mode: "off" } });
+}
 
 function createRuntimeHost(getSession: () => AgentSession): PiSessionRuntimeHost {
 	return {
@@ -176,6 +180,89 @@ describe("PiSessionPort", () => {
 			errorMessage: undefined,
 		});
 		port.dispose();
+	});
+
+	it("delivers socket exhaustion, visible failures, and settled lifecycle with a finite budget", async () => {
+		const harness = await createHarness({ settings: { retry: { maxRetries: 1, baseDelayMs: 0 } } });
+		harnesses.push(harness);
+		const errorMessage = "terminated (UND_ERR_SOCKET: other side closed)";
+		const failure = fauxAssistantMessage("partial answer", { stopReason: "error", errorMessage });
+		harness.setResponses([failure, failure, fauxAssistantMessage("must not run")]);
+		const port = new PiSessionPort(createRuntimeHost(() => harness.session));
+		const events: PiSessionUiEvent[] = [];
+		port.subscribe((event) => events.push(event));
+		try {
+			await port.prompt("retry");
+
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(events.filter((event) => event.kind === "retry")).toEqual([
+				expect.objectContaining({
+					kind: "retry",
+					phase: "start",
+					attempt: 1,
+					maxAttempts: 1,
+					errorMessage,
+				}),
+				expect.objectContaining({
+					kind: "retry",
+					phase: "end",
+					attempt: 1,
+					success: false,
+					finalError: errorMessage,
+				}),
+			]);
+			expect(
+				events.filter((event) => event.kind === "agent" && event.phase === "end").map((event) => event.willRetry),
+			).toEqual([true, false]);
+			expect(
+				events.filter(
+					(event) =>
+						event.kind === "message" &&
+						event.phase === "end" &&
+						event.message.role === "assistant" &&
+						event.message.stopReason === "error",
+				),
+			).toHaveLength(2);
+			expect(events.at(-1)).toMatchObject({ kind: "agent", phase: "settled" });
+			expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index));
+			expect(port.hydrate().isStreaming).toBe(false);
+			expect(port.hydrate().isRetrying).toBe(false);
+			expect(
+				harness.sessionManager
+					.buildTranscriptEntries()
+					.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							entry.message.stopReason === "error",
+					),
+			).toHaveLength(2);
+		} finally {
+			port.dispose();
+		}
+	});
+
+	it("maps summarization scheduling without an unlimited field", () => {
+		expect(
+			mapAgentSessionEvent(
+				{
+					type: "summarization_retry_scheduled",
+					attempt: 2,
+					maxAttempts: 10,
+					delayMs: 30_000,
+					errorMessage: "503 service unavailable",
+				},
+				42,
+			),
+		).toEqual({
+			sequence: 42,
+			kind: "summarization-retry",
+			phase: "scheduled",
+			attempt: 2,
+			maxAttempts: 10,
+			delayMs: 30_000,
+			errorMessage: "503 service unavailable",
+		});
 	});
 
 	it("hydrates the active context without mutating session persistence", async () => {
