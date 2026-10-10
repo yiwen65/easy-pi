@@ -794,6 +794,7 @@ export class AgentSession {
 	 * act on the result without waiting for the next user message. No-op for other delivery modes.
 	 */
 	private _wakeForBackgroundTaskCompletion(): void {
+		if (this._disposed || this._taskRecovery.state?.status === "cancelled") return;
 		if (this.settingsManager.getBackgroundBashCompletionDelivery() !== "wake") return;
 		if (!this.isIdle) return;
 		this._backgroundTaskNotifications
@@ -1922,6 +1923,21 @@ export class AgentSession {
 			if (await this._checkCompaction(msg)) {
 				return true;
 			}
+		}
+
+		// A task can finish after the final provider boundary, while the response is still
+		// streaming. Queue its notice before deciding whether this run has a continuation.
+		if (
+			!this._disposed &&
+			msg.stopReason !== "aborted" &&
+			msg.stopReason !== "error" &&
+			msg.stopReason !== "length" &&
+			this._taskRecovery.state?.status !== "cancelled" &&
+			this.settingsManager.getBackgroundBashCompletionDelivery() === "wake"
+		) {
+			await this._backgroundTaskNotifications.drain((message) =>
+				this.sendCustomMessage(message, { triggerTurn: true, deliverAs: "followUp" }),
+			);
 		}
 
 		// The agent loop drains both queues before emitting agent_end. Any messages

@@ -81,10 +81,13 @@ async function createHarness(
 	return harness;
 }
 
-async function startSilentTask(harness: Harness, id = "noop"): Promise<string> {
+async function startSilentTask(harness: Harness, id = "noop", exitCode = 0): Promise<string> {
 	const manager = harness.session.backgroundTasks;
 	if (!manager) throw new Error("background task manager unavailable");
-	const started = await manager.start(`echo bg-${id}`, { cwd: harness.dir, env: { ...process.env } });
+	const started = await manager.start(`echo bg-${id}; exit ${exitCode}`, {
+		cwd: harness.dir,
+		env: { ...process.env },
+	});
 	if (!started.ok) throw new Error(started.error.message);
 	const settled = await manager.wait(started.value.id, 10_000);
 	if (!settled.ok) throw new Error("wait failed");
@@ -98,6 +101,102 @@ function notificationMessages(messages: AgentMessage[] | undefined): AgentMessag
 }
 
 describe("background task session events", () => {
+	it.each(["success", "failure"])("wakes once for a %s completed inside the final model request", async (outcome) => {
+		const harness = await createHarness({ settings: { backgroundBashCompletionDelivery: "wake" } });
+		harness.faux.setResponses([
+			async () => {
+				await startSilentTask(harness, outcome, outcome === "failure" ? 7 : 0);
+				return fauxAssistantMessage("started");
+			},
+			fauxAssistantMessage("consumed"),
+		]);
+		await harness.session.prompt("start work");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.session.pendingBackgroundTaskNotificationCount).toBe(0);
+		const notices = harness.session.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom_message" && entry.customType === BACKGROUND_TASK_NOTIFICATION_TYPE);
+		expect(notices).toHaveLength(1);
+		expect(harness.session.backgroundTasks?.list({ activeOnly: false })[0]?.status).toBe(
+			outcome === "failure" ? "failed" : "succeeded",
+		);
+	});
+
+	it("keeps completion pending when the current run was explicitly cancelled", async () => {
+		const harness = await createHarness({ settings: { backgroundBashCompletionDelivery: "wake" } });
+		harness.faux.setResponses([
+			async () => {
+				const aborting = harness.session.abort();
+				await startSilentTask(harness, "cancelled");
+				void aborting;
+				return fauxAssistantMessage("cancelled");
+			},
+			fauxAssistantMessage("must not wake"),
+		]);
+		await harness.session.prompt("start work");
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.pendingBackgroundTaskNotificationCount).toBe(1);
+		expect(harness.session.isIdle).toBe(true);
+	});
+
+	it("does not wake for a task finishing after an explicitly cancelled run is idle", async () => {
+		const harness = await createHarness({ settings: { backgroundBashCompletionDelivery: "wake" } });
+		harness.faux.setResponses([
+			() => {
+				void harness.session.abort();
+				return fauxAssistantMessage("cancelled");
+			},
+			fauxAssistantMessage("must not wake"),
+		]);
+		await harness.session.prompt("start work");
+		await startSilentTask(harness, "after-cancel");
+		expect(harness.session.isIdle).toBe(true);
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.pendingBackgroundTaskNotificationCount).toBe(1);
+	});
+
+	it("coalesces completions from the final request into one continuation", async () => {
+		const harness = await createHarness({ settings: { backgroundBashCompletionDelivery: "wake" } });
+		harness.faux.setResponses([
+			async () => {
+				await startSilentTask(harness, "first");
+				await startSilentTask(harness, "second", 7);
+				return fauxAssistantMessage("started both");
+			},
+			fauxAssistantMessage("consumed both"),
+		]);
+		await harness.session.prompt("start work");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.session.pendingBackgroundTaskNotificationCount).toBe(0);
+		const notices = harness.session.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom_message" && entry.customType === BACKGROUND_TASK_NOTIFICATION_TYPE);
+		expect(notices).toHaveLength(1);
+		expect(JSON.stringify(notices[0])).toContain("Background tasks finished: 2");
+	});
+
+	it("does not continue after wait_for already consumed the completion", async () => {
+		const harness = await createHarness({ settings: { backgroundBashCompletionDelivery: "wake" } });
+		harness.faux.setResponses([
+			async () => {
+				const taskId = await startSilentTask(harness, "waited");
+				const waitFor = harness.session.getToolDefinition("wait_for");
+				if (!waitFor) throw new Error("wait_for unavailable");
+				await waitFor.execute(
+					"consume",
+					{ task_id: taskId },
+					undefined,
+					undefined,
+					harness.session.extensionRunner.createContext(),
+				);
+				return fauxAssistantMessage("consumed by wait_for");
+			},
+		]);
+		await harness.session.prompt("start work");
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.pendingBackgroundTaskNotificationCount).toBe(0);
+	});
+
 	it("emits started/completed to session listeners and extensions", async () => {
 		const extensionEvents: string[] = [];
 		const harness = await createHarness({

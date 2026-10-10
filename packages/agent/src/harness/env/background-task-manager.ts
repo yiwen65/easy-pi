@@ -95,6 +95,8 @@ interface ManagedTask {
 	logBytes: number;
 	timeoutId?: ReturnType<typeof setTimeout>;
 	stopGraceId?: ReturnType<typeof setTimeout>;
+	/** The group leader exited, but descendants still need the termination grace period. */
+	pendingExit?: { exitCode: number | null; signal: string | null; error: string | undefined };
 	stopRequested: boolean;
 	timedOut: boolean;
 	/** When the next stall notice is due; 0 while stall notices are disabled. */
@@ -164,15 +166,6 @@ export class BackgroundTaskManager {
 		if (!this.accepting) {
 			return err(new ExecutionError("aborted", "Background task manager is shutting down"));
 		}
-		if (this.maxTasks > 0 && this.list().length >= this.maxTasks) {
-			return err(
-				new ExecutionError(
-					"limit_reached",
-					`Refusing to start: ${this.list().length} background tasks are already running (limit ${this.maxTasks}). ` +
-						"Wait for one to finish, or stop one with task_stop.",
-				),
-			);
-		}
 		try {
 			await access(options.cwd, constants.F_OK);
 		} catch (error) {
@@ -183,6 +176,18 @@ export class BackgroundTaskManager {
 		if (!shell.ok) return shell;
 		if (!this.accepting) {
 			return err(new ExecutionError("aborted", "Background task manager is shutting down"));
+		}
+		// Keep admission and registration in the same synchronous section: concurrent callers
+		// must count tasks registered while cwd/shell validation was awaiting.
+		const activeTasks = this.list().length;
+		if (this.maxTasks > 0 && activeTasks >= this.maxTasks) {
+			return err(
+				new ExecutionError(
+					"limit_reached",
+					`Refusing to start: ${activeTasks} background tasks are already running (limit ${this.maxTasks}). ` +
+						"Wait for one to finish, or stop one with task_stop.",
+				),
+			);
 		}
 		const managed = this.createTask(command, options.cwd, false, options.timeoutMs);
 		let child: ChildProcess;
@@ -517,9 +522,8 @@ export class BackgroundTaskManager {
 	 * the newest output and `totalBytes` still counts everything the process produced.
 	 */
 	private writeLog(managed: ManagedTask, chunk: Buffer): void {
-		if (!managed.logStream) return;
+		if (!managed.logStream || managed.record.logTruncated) return;
 		if (this.maxLogBytes > 0 && managed.logBytes + chunk.byteLength > this.maxLogBytes) {
-			if (managed.record.logTruncated) return;
 			managed.record.logTruncated = true;
 			managed.logStream.write(LOG_TRUNCATION_MARKER);
 			return;
@@ -538,6 +542,10 @@ export class BackgroundTaskManager {
 			managed.stopGraceId = undefined;
 			if (isTerminalTaskStatus(managed.record.status)) return;
 			if (managed.record.pid !== undefined) killNodeProcessTree(managed.record.pid);
+			if (managed.pendingExit) {
+				const { exitCode, signal, error } = managed.pendingExit;
+				this.finalize(managed, exitCode, signal, error);
+			}
 		}, this.stopGraceMs);
 	}
 
@@ -559,6 +567,19 @@ export class BackgroundTaskManager {
 		error: string | undefined,
 	): void {
 		if (isTerminalTaskStatus(managed.record.status)) return;
+		if (managed.stopGraceId && process.platform !== "win32" && managed.record.pid !== undefined) {
+			try {
+				// Observing the shell's exit does not establish that its process group stopped.
+				process.kill(-managed.record.pid, 0);
+				managed.pendingExit = { exitCode, signal, error };
+				return;
+			} catch (cause) {
+				if ((cause as NodeJS.ErrnoException).code !== "ESRCH") {
+					managed.pendingExit = { exitCode, signal, error };
+					return;
+				}
+			}
+		}
 		if (managed.timeoutId) clearTimeout(managed.timeoutId);
 		if (managed.stopGraceId) clearTimeout(managed.stopGraceId);
 		managed.record.status = managed.stopRequested
