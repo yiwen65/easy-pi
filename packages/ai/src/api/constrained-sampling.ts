@@ -127,7 +127,20 @@ export function makeStrictJsonSchema(schema: Tool["parameters"]): Record<string,
 }
 
 export function getJsonSchemaToolParameters(tool: Tool, strict: boolean | undefined): Tool["parameters"] {
-	return (strict === true ? makeStrictJsonSchema(tool.parameters) : tool.parameters) as Tool["parameters"];
+	if (strict === true) return makeStrictJsonSchema(tool.parameters) as Tool["parameters"];
+
+	const schema = tool.parameters as JsonSchemaObject;
+	// Object unions already exclude non-objects, but some providers require an explicit root type.
+	// Keep branch constraints intact rather than flattening their properties and required fields.
+	if (
+		schema.type === undefined &&
+		Array.isArray(schema.anyOf) &&
+		schema.anyOf.length > 0 &&
+		schema.anyOf.every((variant) => isJsonSchemaObject(variant) && variant.type === "object")
+	) {
+		return { ...tool.parameters, type: "object" } as Tool["parameters"];
+	}
+	return tool.parameters;
 }
 
 export interface GrammarConstrainedSampling {
