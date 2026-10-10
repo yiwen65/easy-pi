@@ -492,3 +492,11 @@
 - Prevention: 生命周期修复工单先附当前context构造与实际计时器证据；发现的独立缺陷单独归因，本次实际修复是canonical祖先撤权传播，不是新增no-TTL。
 - Verified by: `general/full-access-lifetime-worker/report.md`与冻结源hash复核；old-timestamp矩阵、完整SDK81/core85及独立安装C349/C350通过。
 
+## Task recovery 退役截图——关闭恢复资格，不能伪造执行结果
+
+- Wrong approach: 已移除的 `computer.capture` 因缺失结果永久留在 suspended task，并将完整旧任务记录反复放入 provider 请求。
+- Why it failed: 观察结果缺失被当作不可重复的外部写入；临时尾部消息破坏请求前缀，搬到 system 又混入用户与工具数据。
+- Correct approach: 仅在组件确实未安装且未完成调用全部为已派发截图时，持久化 cancelled + retirement，保留缺失结果与原始审计，拒绝旧任务恢复；真实写入仍保留未知结果保护。其他恢复事实在历史中追加一次，不写入 system。
+- Prevention: 区分移除与禁用，覆盖混合写入、重载、迁移重入、提交后提示写入失败，以及连续请求前缀。
+- Verified by: 2026-10-11 目标 session 副本迁移，135239136 原始字节保持一致、未知活跃调用 1→0、未伪造结果；13 个离线测试文件、214 个测试通过，根 check 通过。
+

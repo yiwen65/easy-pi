@@ -91,18 +91,25 @@ describe("suspended recovery prompt cache continuity", () => {
 			const after = convertResponsesMessages(model, contexts[index], new Set(["openai-codex"]));
 			expect(after.slice(0, before.length)).toEqual(before);
 		}
-		expect(contexts[0].systemPrompt).toContain("Previous tasks are paused");
-		expect(contexts[0].systemPrompt).toContain(pendingCall.id);
-		expect(JSON.stringify(contexts[0].messages)).not.toContain(pendingCall.id);
-		expect(JSON.stringify(contexts[0].messages)).not.toContain("Previous tasks are paused");
+		expect(contexts[0].systemPrompt).toBe("Fixed request policy.");
+		expect(JSON.stringify(contexts[0].messages)).toContain(pendingCall.id);
+		expect(JSON.stringify(contexts[0].messages)).toContain("Previous tasks are paused");
+		expect(
+			harness.session.messages.filter((m) => m.role === "custom" && m.customType === "task-recovery-context"),
+		).toHaveLength(1);
 		expect(harness.session.suspendedTaskRecovery[0].state.tools[0].result).toBeUndefined();
 		const reopened = await fixture(harness.sessionManager);
 		reopened.harness.setResponses([fauxAssistantMessage("continued after reopening")]);
 		await reopened.harness.session.prompt("another independent task");
 		expect(preservesProviderContextPrefix(contexts[2], reopened.contexts[0])).toBe(true);
+		expect(
+			reopened.harness.session.messages.filter(
+				(m) => m.role === "custom" && m.customType === "task-recovery-context",
+			),
+		).toHaveLength(1);
 	});
 
-	it("updates recovery facts after verified reconciliation and then preserves subsequent prefixes", async () => {
+	it("keeps reconciliation in appended tool history without rewriting the system or request prefix", async () => {
 		const { harness, contexts } = await fixture();
 		harness.setResponses([
 			fauxAssistantMessage([{ type: "toolCall", id: "evidence", name: "inspect", arguments: {} }], {
@@ -131,11 +138,11 @@ describe("suspended recovery prompt cache continuity", () => {
 		]);
 		await harness.session.prompt("inspect and reconcile the old operation");
 		expect(contexts).toHaveLength(4);
-		expect(contexts[0].systemPrompt).toContain("Previous tasks are paused");
-		expect(contexts[0].systemPrompt).toBe(contexts[1].systemPrompt);
-		expect(contexts[2].systemPrompt).toContain("external state confirms completion");
-		expect(contexts[2].systemPrompt).not.toBe(contexts[1].systemPrompt);
-		expect(preservesProviderContextPrefix(contexts[2], contexts[3])).toBe(true);
+		expect(contexts[0].systemPrompt).toBe("Fixed request policy.");
+		expect(JSON.stringify(contexts[2].messages)).toContain("external state confirms completion");
+		for (let index = 1; index < contexts.length; index++) {
+			expect(preservesProviderContextPrefix(contexts[index - 1], contexts[index])).toBe(true);
+		}
 		expect(harness.session.suspendedTaskRecovery[0].state.tools[0].result?.isError).toBe(false);
 	});
 });

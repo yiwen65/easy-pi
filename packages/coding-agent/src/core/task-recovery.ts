@@ -33,6 +33,8 @@ export interface TaskRecoveryState {
 	version: 2;
 	id: string;
 	status: "running" | "interrupted" | "cancelled" | "needs_reconciliation" | "completed";
+	/** A removed observation cannot be resumed; its missing result remains in the audit history. */
+	retirement?: "computer_capture_tool_removed";
 	sourceLeafId: string | null;
 	prompt: AgentMessage[];
 	promptEntryIds: string[];
@@ -66,6 +68,24 @@ type StoredTaskRecoveryState = Omit<TaskRecoveryState, "version" | "promptEntryI
 	promptEntryIds?: string[];
 	queued?: TaskRecoveryState["queued"];
 };
+
+function isUnfinishedComputerCaptureTask(state: Pick<TaskRecoveryState, "tools">): boolean {
+	const unfinished = state.tools.filter((tool) => !tool.result);
+	return (
+		unfinished.length > 0 &&
+		unfinished.every((tool) => {
+			const request = tool.call.arguments.request;
+			return (
+				tool.dispatched &&
+				tool.call.name === "computer" &&
+				request !== null &&
+				typeof request === "object" &&
+				"op" in request &&
+				request.op === "capture"
+			);
+		})
+	);
+}
 
 /** Branch-scoped execution facts. These entries never become model messages. */
 export class TaskRecoveryJournal {
@@ -187,6 +207,14 @@ export class TaskRecoveryJournal {
 		// Older drivers saved confirmed Bash failures as diagnostic-only entries.
 		// Recover that recorded outcome without changing the file or replaying Bash.
 		for (const task of [restored, ...(restored.suspendedTasks ?? []).map((task) => task.state)]) {
+			if (
+				task.retirement !== undefined &&
+				(task.retirement !== "computer_capture_tool_removed" ||
+					task.status !== "cancelled" ||
+					!isUnfinishedComputerCaptureTask(task))
+			) {
+				throw new Error("Invalid task retirement record");
+			}
 			const sourceLeafId = task.step ? task.step.sourceLeafId : task.sourceLeafId;
 			const anchorIndex = sourceLeafId === null ? -1 : branch.findIndex((entry) => entry.id === sourceLeafId);
 			if (sourceLeafId !== null && anchorIndex < 0) continue;
@@ -224,7 +252,8 @@ export class TaskRecoveryJournal {
 		const branchIds = new Set(this.manager.getBranch().map((entry) => entry.id));
 		const previous = this.state;
 		const suspendedTasks = previous?.suspendedTasks ?? [];
-		const suspending = previous?.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result);
+		const suspending =
+			!previous?.retirement && previous?.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result);
 		if (previous && suspending) {
 			const { suspendedTasks: _suspended, ...paused } = previous;
 			const leafId = this.manager.getLeafId();
@@ -261,21 +290,71 @@ export class TaskRecoveryJournal {
 	}
 
 	get suspendedTasks(): SuspendedTaskRecovery[] {
-		return this.state?.suspendedTasks ?? [];
+		return this.state?.suspendedTasks?.filter((task) => !task.state.retirement) ?? [];
 	}
 
 	get allUnknownTools(): RecoveryTool[] {
-		return [this.state, ...this.suspendedTasks.map((task) => task.state)].flatMap(
-			(state) => state?.tools.filter((tool) => tool.dispatched && !tool.safe && !tool.result) ?? [],
+		return [this.state, ...this.suspendedTasks.map((task) => task.state)].flatMap((state) =>
+			!state?.retirement ? (state?.tools.filter((tool) => tool.dispatched && !tool.safe && !tool.result) ?? []) : [],
 		);
+	}
+
+	/** Narrow migration for the removed capture component, never for unavailable write tools. */
+	retireRemovedComputerCaptures(installedTools: ReadonlySet<string>): void {
+		if (installedTools.has("computer")) return;
+		const initial = this.state;
+		if (!initial) return;
+		const notices = new Set(
+			this.manager.getBranch().flatMap((entry) => {
+				if (entry.type !== "custom_message" || entry.customType !== "task-retirement") return [];
+				const details = entry.details as { taskId?: string } | undefined;
+				return details?.taskId ? [details.taskId] : [];
+			}),
+		);
+		const candidates = [initial, ...(initial.suspendedTasks ?? []).map((task) => task.state)].filter(
+			(task) => task.retirement || isUnfinishedComputerCaptureTask(task),
+		);
+		if (candidates.every((task) => task.retirement && notices.has(task.id))) return;
+		const owned = this.lockPath !== undefined;
+		if (!owned) this.acquire();
+		try {
+			const state = this.state;
+			if (!state) return;
+			const retired = [state, ...(state.suspendedTasks ?? []).map((task) => task.state)].filter(
+				(task) => task.retirement || isUnfinishedComputerCaptureTask(task),
+			);
+			let changed = false;
+			for (const task of retired) {
+				if (task.retirement) continue;
+				task.retirement = "computer_capture_tool_removed";
+				task.status = "cancelled";
+				for (const group of task.queued) group.cancelled = true;
+				changed = true;
+			}
+			if (changed) this.save(state);
+			for (const task of retired) {
+				if (notices.has(task.id)) continue;
+				const toolCallIds = task.tools.filter((tool) => !tool.result).map((tool) => tool.call.id);
+				this.manager.appendCustomMessageEntry(
+					"task-retirement",
+					`Historical task ${task.id} was interrupted. Its computer capture calls (${toolCallIds.join(", ")}) have no recorded observation. The computer tool has been removed, so recovery of this task is closed. No successful result is claimed. Continue the current request without resuming this historical task.`,
+					false,
+					{ taskId: task.id, reason: task.retirement, toolCallIds },
+				);
+			}
+		} finally {
+			if (!owned) this.release();
+		}
 	}
 
 	/** Caller owns the driver; archived updates must also work when the active task completed. */
 	reconcile(toolCallId: string, resolution: { kind: "retry" } | { kind: "result"; result: ToolResultMessage }): void {
 		const active = this.state;
 		if (!active) throw new Error(`No unknown tool call ${toolCallId}`);
-		const matches = [active, ...(active.suspendedTasks ?? []).map((task) => task.state)].filter((state) =>
-			state.tools.some((tool) => tool.call.id === toolCallId && tool.dispatched && !tool.result && !tool.safe),
+		const matches = [active, ...(active.suspendedTasks ?? []).map((task) => task.state)].filter(
+			(state) =>
+				!state.retirement &&
+				state.tools.some((tool) => tool.call.id === toolCallId && tool.dispatched && !tool.result && !tool.safe),
 		);
 		if (matches.length !== 1) throw new Error(`No unique unknown tool call ${toolCallId}`);
 		const state = matches[0];
@@ -337,6 +416,8 @@ export class TaskRecoveryJournal {
 
 	/** Explicit recovery switches branches; subsequent work remains in the session tree. */
 	activateSuspended(taskId: string): void {
+		if (this.state?.suspendedTasks?.find((task) => task.state.id === taskId)?.state.retirement)
+			throw new Error(`Task ${taskId} was retired because its capture tool was removed`);
 		const suspended = this.suspendedTasks;
 		const task = suspended.find((task) => task.state.id === taskId);
 		if (!task) throw new Error(`No suspended task ${taskId}`);
@@ -491,7 +572,10 @@ export class TaskRecoveryJournal {
 	}
 
 	get unknownTools(): RecoveryTool[] {
-		return this.state?.tools.filter((tool) => tool.dispatched && !tool.safe && !tool.result) ?? [];
+		const state = this.state;
+		return !state?.retirement
+			? (state?.tools.filter((tool) => tool.dispatched && !tool.safe && !tool.result) ?? [])
+			: [];
 	}
 
 	/** One native task driver owns this session until all its tool promises settle. */
