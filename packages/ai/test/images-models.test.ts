@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { InMemoryCredentialStore } from "../src/auth/credential-store.ts";
 import type { AuthContext } from "../src/auth/types.ts";
 import { createImagesModels, createImagesProvider, type ImagesProvider } from "../src/images-models.ts";
 import { builtinImagesModels } from "../src/providers/all.ts";
@@ -102,6 +103,59 @@ describe("ImagesModels", () => {
 
 		await models.generateImages(model, context, { apiKey: "explicit" });
 		expect(calls[1].options?.apiKey).toBe("explicit");
+	});
+
+	it("persists rotated OAuth credentials through the shared resolver after image auth cancellation", async () => {
+		const credentials = new InMemoryCredentialStore();
+		await credentials.modify("p1", async () => ({
+			type: "oauth",
+			access: "old",
+			refresh: "old-refresh",
+			expires: 0,
+		}));
+		let markStarted: (() => void) | undefined;
+		let finishRefresh: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			finishRefresh = resolve;
+		});
+		let refreshSignal: AbortSignal | undefined;
+		const models = createImagesModels({ credentials, authContext: fakeAuthContext({}) });
+		models.setProvider(
+			createImagesProvider({
+				id: "p1",
+				auth: {
+					oauth: {
+						name: "Test OAuth",
+						login: async () => {
+							throw new Error("not used");
+						},
+						refresh: async (credential, signal) => {
+							refreshSignal = signal;
+							markStarted?.();
+							await blocked;
+							return { ...credential, access: "new", refresh: "rotated", expires: Date.now() + 60 * 60_000 };
+						},
+						toAuth: async (credential) => ({ apiKey: credential.access }),
+					},
+				},
+				models: [testImageModel("p1", "model-a")],
+				api: { generateImages: async (model) => okResult(model) },
+			}),
+		);
+		const controller = new AbortController();
+		const auth = models.getAuth("p1", { signal: controller.signal });
+		await started;
+		controller.abort();
+		await expect(auth).rejects.toMatchObject({ name: "AbortError" });
+		expect(refreshSignal?.aborted).toBe(false);
+		finishRefresh?.();
+		await vi.waitFor(async () => {
+			const stored = await credentials.read("p1");
+			expect(stored?.type === "oauth" && stored.refresh === "rotated").toBe(true);
+		});
 	});
 
 	it("merges provider-resolved env into image options", async () => {

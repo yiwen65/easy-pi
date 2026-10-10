@@ -255,7 +255,7 @@ describe("ModelRuntime auth options", () => {
 		});
 	});
 
-	it("forwards cancellation to extension OAuth refresh", async () => {
+	it("persists a started extension OAuth refresh despite request cancellation", async () => {
 		const credentials = AuthStorage.inMemory({
 			"extension-oauth": {
 				type: "oauth",
@@ -265,6 +265,14 @@ describe("ModelRuntime auth options", () => {
 			},
 		});
 		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+		let markStarted: (() => void) | undefined;
+		let finishRefresh: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			finishRefresh = resolve;
+		});
 		let refreshSignal: AbortSignal | undefined;
 		runtime.registerProvider("extension-oauth", {
 			name: "Extension OAuth",
@@ -275,7 +283,9 @@ describe("ModelRuntime auth options", () => {
 				login: async () => ({ access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
 				refreshToken: async (credential, signal) => {
 					refreshSignal = signal;
-					return { ...credential, expires: Date.now() + 60_000 };
+					markStarted?.();
+					await blocked;
+					return { ...credential, access: "new", refresh: "rotated", expires: Date.now() + 60 * 60_000 };
 				},
 				getApiKey: (credential) => credential.access,
 			},
@@ -283,12 +293,17 @@ describe("ModelRuntime auth options", () => {
 		});
 		const controller = new AbortController();
 
-		await runtime.getAuth("extension-oauth", { signal: controller.signal });
+		const auth = runtime.getAuth("extension-oauth", { signal: controller.signal });
+		await started;
 		expect(refreshSignal).toBeInstanceOf(AbortSignal);
 		const reason = new Error("cancelled");
 		controller.abort(reason);
-		expect(refreshSignal?.aborted).toBe(true);
-		expect(refreshSignal?.reason).toBe(reason);
+		await expect(auth).rejects.toBe(reason);
+		expect(refreshSignal?.aborted).toBe(false);
+		finishRefresh?.();
+		// This read queues behind the locked refresh and observes its persisted result.
+		const stored = await credentials.read("extension-oauth");
+		expect(stored?.type === "oauth" && stored.refresh === "rotated").toBe(true);
 	});
 
 	it("does not fabricate an API key method for an extension OAuth-only provider", async () => {
