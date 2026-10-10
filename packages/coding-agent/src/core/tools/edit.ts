@@ -1,4 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { AgentToolError } from "@earendil-works/pi-agent-core";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
@@ -323,59 +324,70 @@ export function createEditToolDefinition(
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
-			const { path, edits } = validateEditInput(input);
-			const absolutePath = resolveToCwd(path, cwd);
+			let writeStarted = false;
+			try {
+				const { path, edits } = validateEditInput(input);
+				const absolutePath = resolveToCwd(path, cwd);
 
-			return withFileMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
-				const throwIfAborted = (): void => {
-					if (signal?.aborted) throw new Error("Operation aborted");
-				};
+				return await withFileMutationQueue(absolutePath, async () => {
+					// Do not reject from an abort event listener here: that would release the
+					// mutation queue while an in-flight filesystem operation may still finish.
+					// Checking signal.aborted after each await observes the same aborts while
+					// keeping the queue locked until the current operation has settled.
+					const throwIfAborted = (): void => {
+						if (signal?.aborted) throw new Error("Operation aborted");
+					};
 
-				throwIfAborted();
-
-				// Check if file exists.
-				try {
-					await ops.access(absolutePath);
-				} catch (error: unknown) {
 					throwIfAborted();
-					const errorMessage =
-						error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
-					throw new Error(`Could not edit file: ${path}. ${errorMessage}.`);
-				}
-				throwIfAborted();
 
-				// Read the file.
-				const buffer = await ops.readFile(absolutePath);
-				const rawContent = buffer.toString("utf-8");
-				throwIfAborted();
+					// Check if file exists.
+					try {
+						await ops.access(absolutePath);
+					} catch (error: unknown) {
+						throwIfAborted();
+						const errorMessage =
+							error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
+						throw new Error(`Could not edit file: ${path}. ${errorMessage}.`);
+					}
+					throwIfAborted();
 
-				// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-				const { bom, text: content } = stripBom(rawContent);
-				const originalEnding = detectLineEnding(content);
-				const normalizedContent = normalizeToLF(content);
-				const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
-				throwIfAborted();
+					// Read the file.
+					const buffer = await ops.readFile(absolutePath);
+					const rawContent = buffer.toString("utf-8");
+					throwIfAborted();
 
-				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-				await ops.writeFile(absolutePath, finalContent);
-				throwIfAborted();
+					// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+					const { bom, text: content } = stripBom(rawContent);
+					const originalEnding = detectLineEnding(content);
+					const normalizedContent = normalizeToLF(content);
+					const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+					throwIfAborted();
 
-				const diffResult = generateDiffString(baseContent, newContent);
-				const patch = generateUnifiedPatch(path, baseContent, newContent);
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
-						},
-					],
-					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
-				};
-			});
+					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+					writeStarted = true;
+					await ops.writeFile(absolutePath, finalContent);
+					throwIfAborted();
+
+					const diffResult = generateDiffString(baseContent, newContent);
+					const patch = generateUnifiedPatch(path, baseContent, newContent);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
+							},
+						],
+						details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+					};
+				});
+			} catch (error) {
+				// Validation/read failures cannot have changed the target. Once a write
+				// starts, its outcome remains uncertain unless it completes successfully.
+				if (writeStarted) throw error;
+				throw new AgentToolError(error instanceof Error ? error.message : String(error), {
+					executionOutcome: "not_started",
+				});
+			}
 		},
 		renderCall(args, theme, context) {
 			const component = getEditCallRenderComponent(context.state, context.lastComponent);

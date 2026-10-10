@@ -472,8 +472,14 @@ export class TaskRecoveryJournal {
 	result(message: ToolResultMessage, call: AgentToolCall, terminate: boolean, uncertain: boolean): void {
 		this.update((state) => {
 			const old = state.tools.find((tool) => tool.call.id === call.id);
+			const notStarted =
+				message.details !== null &&
+				typeof message.details === "object" &&
+				"executionOutcome" in message.details &&
+				message.details.executionOutcome === "not_started";
 			if (
 				uncertain &&
+				!notStarted &&
 				!hasConfirmedBashExit(message.toolName, message.details) &&
 				old?.dispatched &&
 				!old.safe &&

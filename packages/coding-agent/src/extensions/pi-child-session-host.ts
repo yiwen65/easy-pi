@@ -176,15 +176,12 @@ export function createPiChildSessionHost(options: {
 				});
 				if (fork?.length) manager.appendCompactionCheckpoint(fork, 0);
 				if (request.storage.kind === "file") {
-					// Pi normally defers file creation until the first assistant message. A team
-					// must also retain children interrupted before that point. Materialize via
-					// public entries and reopen, so future appends use Pi's persisted state.
+					// SessionManager already durably creates the header and identity entries.
+					// Sync the existing file; exclusive creation would fail before child startup.
 					const file = manager.getSessionFile()!;
-					const handle = await open(file, "wx", 0o600);
+					const handle = await open(file, "r+");
 					try {
-						await handle.writeFile(
-							`${[manager.getHeader(), ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
-						);
+						await handle.chmod(0o600);
 						await handle.sync();
 					} finally {
 						await handle.close();
