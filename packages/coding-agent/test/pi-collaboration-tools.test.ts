@@ -11,6 +11,7 @@ import {
 	fauxToolCall,
 	InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
+import { COLLABORATION_LIMITS } from "@easy-pi/subagent/collaboration-contract";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
 import type { ChildSessionPermissions } from "@easy-pi/subagent/session-host";
@@ -992,7 +993,7 @@ test("cold explicit followup retains the delegated ceiling and child history wit
 
 test("oversized final output retains full native text and a bounded explicitly truncated invalid result", async () => {
 	const f = await fixture();
-	const long = "界".repeat(4000);
+	const long = "界".repeat(COLLABORATION_LIMITS.maxResultBytes);
 	let root = 0;
 	f.faux.setResponses(
 		Array.from({ length: 6 }, () => (context: Context) => {
@@ -1005,7 +1006,7 @@ test("oversized final output retains full native text and a bounded explicitly t
 	await f.session.prompt("initial delegation");
 	await f.controller.settled();
 	const record = f.controller.inspect(f.identity, "worker");
-	expect(Buffer.byteLength(record.result!, "utf8")).toBeLessThanOrEqual(8192);
+	expect(Buffer.byteLength(record.result!, "utf8")).toBeLessThanOrEqual(COLLABORATION_LIMITS.maxResultBytes);
 	expect(record.result).toContain("Preview truncated");
 	expect(record.resultValidation?.contract).toBe("invalid");
 	expect(JSON.stringify(SessionManager.open(record.sessionPath!).buildSessionContext().messages)).toContain(long);

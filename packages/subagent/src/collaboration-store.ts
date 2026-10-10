@@ -47,7 +47,9 @@ const MessageSchema = Type.Object(
 		status: Type.Optional(
 			Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("interrupted")]),
 		),
-		text: Type.String({ maxLength: COLLABORATION_LIMITS.maxTaskCharacters }),
+		text: Type.String({
+			maxLength: Math.max(COLLABORATION_LIMITS.maxTaskCharacters, COLLABORATION_LIMITS.maxResultBytes),
+		}),
 		delegation: Type.Optional(DelegationSchema),
 		parent: Type.Optional(Type.String()),
 		contextUse: Type.Optional(Type.Union([Type.Literal("initial"), Type.Literal("existing")])),
@@ -73,7 +75,7 @@ const AgentSchema = Type.Object(
 		completionPending: Type.Optional(Type.Boolean()),
 		taskMessage: Type.Optional(MessageSchema),
 		sessionFile: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9._-]+\\.jsonl$" })),
-		result: Type.Optional(Type.String({ maxLength: COLLABORATION_LIMITS.maxMessageBytes })),
+		result: Type.Optional(Type.String({ maxLength: COLLABORATION_LIMITS.maxResultBytes })),
 		delegation: Type.Optional(DelegationSchema),
 		contextBytes: Type.Optional(Type.Integer({ minimum: 0 })),
 		usage: Type.Optional(
@@ -154,7 +156,8 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 			![message.from, message.to].every((path) => path === "/root" || paths.has(path)) ||
 			(message.kind === "task"
 				? [...message.text].length > COLLABORATION_LIMITS.maxTaskCharacters
-				: Buffer.byteLength(message.text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
+				: Buffer.byteLength(message.text, "utf8") >
+					(message.kind === "result" ? COLLABORATION_LIMITS.maxResultBytes : COLLABORATION_LIMITS.maxMessageBytes))
 		)
 			throw new CollaborationError("storage_error", "Invalid mailbox message");
 		if (message.delegation) validateDelegation(message.delegation);
@@ -704,7 +707,7 @@ export class CollaborationStore {
 			Buffer.byteLength(JSON.stringify({ ...metadata, ...(result ? { result: resultMetadata } : {}) })) >
 				COLLABORATION_HISTORY_LIMITS.maxTurnMetadataBytes ||
 			(delegation && Buffer.byteLength(JSON.stringify(delegation)) > COLLABORATION_LIMITS.maxDelegationBytes) ||
-			(result && Buffer.byteLength(result.preview) > COLLABORATION_LIMITS.maxMessageBytes)
+			(result && Buffer.byteLength(result.preview) > COLLABORATION_LIMITS.maxResultBytes)
 		)
 			throw new CollaborationError("storage_error", "Turn exceeds history budget");
 	}

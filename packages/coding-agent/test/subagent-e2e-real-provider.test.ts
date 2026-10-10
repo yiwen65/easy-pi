@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { COLLABORATION_LIMITS } from "@easy-pi/subagent/collaboration-contract";
 import { afterEach, describe, expect, test } from "vitest";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { createRealCliFixture, until } from "./subagent-e2e-harness.ts";
@@ -36,6 +37,63 @@ function unknownTransitions(entries: SessionEntry[]) {
 }
 
 describe.skipIf(!RUN)("real CLI subagent contracts", () => {
+	test("long Chinese delivery survives parent notification, result lookup, close and zero-inference reopening", async () => {
+		const f = await fixture();
+		const cli = await f.launch();
+		const report = Array.from(
+			{ length: 96 },
+			(_, index) =>
+				`检查项${String(index).padStart(3, "0")}：资源释放已验证，历史结果完整保留，未执行自动重试，剩余风险须明确记录。`,
+		).join("\n");
+		expect(report.length).toBeGreaterThan(2048);
+		expect(Buffer.byteLength(report)).toBeGreaterThan(8192);
+		await writeFile(join(f.cwd, "report.txt"), report);
+		await cli.prompt(
+			`Execute exactly this report transport test, with sequential tool calls: ${wire("spawn_agent", { task_name: "long-report", task: { objective: "Read report.txt with the read tool. Call deliver_result exactly once with summary equal to the complete file text, preserving every line and character, and outcome succeeded. This is a verbatim transport test: do not summarize, shorten, add commentary or artifact references. Do nothing else." }, relationship: "verify", context: "isolated", tools: ["read"] })}; wait_agent {"target":"long-report","timeout_ms":180000}; after terminal completion, get_agent_result {"target":"long-report"}; close_agent {"target":"long-report"}; finish with one short acknowledgement. Do not batch query/close with a wait, and do not query or close while the child is still pending or running.`,
+		);
+		const agent = cli.snapshot().agents[0];
+		expect(agent.status).toBe("closed");
+		expect(agent.model).toMatchObject({ id: f.config.modelId, thinkingLevel: f.config.thinkingLevel });
+		expect(agent.resultValidation).toMatchObject({ contract: "valid", outcome: "succeeded" });
+		expect(JSON.parse(agent.result!).summary).toBe(report);
+		const turn = cli.turns()[0];
+		expect(turn.result).toMatchObject({ preview: agent.result, truncated: false });
+		const entries = await cli.rootEntries();
+		const resultTool = entries
+			.filter(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolName === "get_agent_result",
+			)
+			.at(-1);
+		if (resultTool?.type !== "message" || resultTool.message.role !== "toolResult")
+			throw new Error("Missing retained-result tool response");
+		expect(resultTool.message.details).toMatchObject({
+			state: "found",
+			result: { preview: agent.result, truncated: false },
+		});
+		expect(
+			entries.some(
+				(entry) =>
+					entry.type === "custom_message" &&
+					(entry.details as { kind?: string; text?: string } | undefined)?.kind === "result" &&
+					(entry.details as { text: string }).text === agent.result,
+			),
+		).toBe(true);
+		expect(unknownTransitions(entries)).toHaveLength(0);
+		expect(calls(await cli.childEntries(agent), "deliver_result")).toHaveLength(1);
+		await cli.close();
+		const resumed = await f.launch(cli.state.sessionFile);
+		await resumed.command({ type: "prompt", message: "/agents" });
+		expect(resumed.events.some((event) => event.type === "agent_start")).toBe(false);
+		expect(resumed.snapshot().agents[0].result).toBe(agent.result);
+		await resumed.close();
+		console.log(
+			`[real-contract] complete Chinese report retained: ${report.length} characters, ${Buffer.byteLength(report)} UTF-8 bytes`,
+		);
+	}, 300_000);
+
 	test("live root tool revocation denies a child's formerly advertised write before any filesystem effect", async () => {
 		const f = await fixture();
 		const extension = join(f.cwd, "narrow.ts");
@@ -167,7 +225,7 @@ describe.skipIf(!RUN)("real CLI subagent contracts", () => {
 			expect(agent.status).toBe("closed");
 			expect(agent.model).toMatchObject({ id: f.config.modelId, thinkingLevel: f.config.thinkingLevel });
 			expect(agent.resultValidation?.contract).toBe("valid");
-			expect(Buffer.byteLength(agent.result!)).toBeLessThanOrEqual(8192);
+			expect(Buffer.byteLength(agent.result!)).toBeLessThanOrEqual(COLLABORATION_LIMITS.maxResultBytes);
 			expect(agent.tools).toEqual([]);
 		}
 		const isolated = agents.find((agent) => agent.path === "/root/isolated")!;

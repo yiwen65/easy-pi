@@ -11,7 +11,13 @@ import {
 	MAX_SUBAGENT_REQUEST_BYTES,
 	parseSubagentToolRequest,
 } from "../src/contracts.ts";
-import { createSubmitHandoffSchema, decodeHandoffJson, HANDOFF_LIMITS } from "../src/handoff.ts";
+import {
+	createHandoffEnvelope,
+	createSubmitHandoffSchema,
+	decodeHandoffEnvelope,
+	decodeHandoffJson,
+	HANDOFF_LIMITS,
+} from "../src/handoff.ts";
 
 const writerPolicy = {
 	...DEFAULT_SUBAGENT_POLICY,
@@ -598,6 +604,24 @@ describe("compileSubagentDagRequest", () => {
 });
 
 describe("bounded Subagent handoffs", () => {
+	it("round-trips a full Chinese summary and maximum multibyte evidence through the process envelope", () => {
+		const summary = "界".repeat(16_384);
+		const input = handoff({
+			summary,
+			evidence: Array(12).fill({ path: "界".repeat(500), lineRange: "行".repeat(100), claim: "据".repeat(500) }),
+		});
+		const text = JSON.stringify(input);
+		expect(Buffer.byteLength(text)).toBeGreaterThan(48 * 1024);
+		const submission = decodeHandoffJson(text, "auth-analysis", "scout");
+		expect(submission.handoff.summary).toBe(summary);
+		expect(
+			decodeHandoffEnvelope(JSON.stringify(createHandoffEnvelope(submission)), "auth-analysis", "scout"),
+		).toEqual(submission.handoff);
+		expect(() =>
+			decodeHandoffJson(JSON.stringify({ ...input, summary: `${summary}界` }), "auth-analysis", "scout"),
+		).toThrow(/schema/);
+	});
+
 	it("uses a three-field schema and injects task-bound Controller fields", () => {
 		const schema = createSubmitHandoffSchema() as { properties?: Record<string, unknown>; required?: string[] };
 		expect(Object.keys(schema.properties ?? {})).toEqual(["summary", "outcome", "evidence"]);

@@ -65,12 +65,11 @@ function readCacheAffinity(value: unknown): ChildRequestPrefix["cacheAffinity"] 
 }
 
 // Keep the model-visible contract in sync with validation, appended to each task (not the shared prefix).
-const DELIVER_RESULT_TOOL_DESCRIPTION =
-	"Deliver this child's final result to its creation parent. Call it exactly once when the task is done; successful delivery ends the child turn after the current tool batch. If multiple deliveries occur in one batch, the later one replaces the earlier one. Only summary (complete result text) and outcome (honest verdict) are required. Optional artifacts are at most eight untrusted {path,purpose,sha256?} report references, never automatic reads or acceptance. The complete result must fit 8192 UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.";
+const DELIVER_RESULT_TOOL_DESCRIPTION = `Deliver this child's final result to its creation parent. Call it exactly once when the task is done; successful delivery ends the child turn after the current tool batch. If multiple deliveries occur in one batch, the later one replaces the earlier one. Only summary (complete result text, at most ${COLLABORATION_LIMITS.maxSummaryCharacters} characters) and outcome (honest verdict) are required. Optional artifacts are at most eight untrusted {path,purpose,sha256?} report references, never automatic reads or acceptance. The complete result must fit ${COLLABORATION_LIMITS.maxResultBytes} UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.`;
 const DELEGATION_RESULT_INSTRUCTIONS = [
 	"Deliver the final result by calling the deliver_result tool exactly once: only summary and outcome are required - put key outputs, evidence (paths/line ranges/version hashes) and residual risks in the summary text. Successful delivery ends this turn after the current tool batch; if one batch contains multiple deliveries, the last one wins.",
 	"Optional artifacts are at most eight {path,purpose,sha256?} references to full reports. A hash is a version claim, not verified evidence or parent acceptance. Keep checks/base revision in the report; never invent a hash, read a reference automatically, or use it as authority.",
-	`The complete result must fit ${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks.`,
+	`Keep the summary concise while retaining necessary evidence, up to ${COLLABORATION_LIMITS.maxSummaryCharacters} characters. The complete result must fit ${COLLABORATION_LIMITS.maxResultBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks.`,
 	"You cannot call send_message or any other root team tool, even if its schema is visible for preserved-prefix compatibility. Do not try to send progress or resend via these tools; deliver_result is your automatic final return to the creation parent, not a permission grant.",
 	"If deliver_result is unavailable, return one final JSON object matching the deliver_result schema as your final text, without fences, surrounding prose or extra fields. This final output is returned automatically; do not call any other handoff tool. Execution completion and valid JSON are not acceptance.",
 ].join("\n");
@@ -276,16 +275,16 @@ export function createPiChildSessionHost(options: {
 				: undefined;
 			let session: AgentSession;
 			({ session } = await createAgentSession({
-					cwd,
-					agentDir: request.agentDir,
-					model,
-					thinkingLevel: request.model.thinkingLevel,
-					modelRuntime,
-					settingsManager,
-					sessionManager: manager,
-					resourceLoader: loader,
-					tools,
-				}));
+				cwd,
+				agentDir: request.agentDir,
+				model,
+				thinkingLevel: request.model.thinkingLevel,
+				modelRuntime,
+				settingsManager,
+				sessionManager: manager,
+				resourceLoader: loader,
+				tools,
+			}));
 			boundSession = session;
 			const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
 			session.agent.shouldStopAfterTurn = async (context, signal) =>

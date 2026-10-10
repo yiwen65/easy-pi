@@ -91,7 +91,7 @@ Children are asked to deliver one JSON object by calling the child-side `deliver
 {"summary":"Checked src/parser.ts:1-40; observed finding and test result; remaining risk: untested cases","outcome":"partial"}
 ```
 
-Only `summary` and `outcome` are required. Optional `artifacts` contain at most eight `{path,purpose,sha256?}` report references; other extra fields are rejected. `summary` must be a nonblank string with schema `maxLength: 2048` and should contain the complete result, including key outputs, observed evidence (paths/line ranges/version hashes), checks actually run, and residual risks. The complete result must fit 8192 UTF-8 bytes. Curated input references are objects, but result evidence belongs in the `summary` text, not a separate `evidence` field. Cite only observed evidence; report unperformed checks and uncertainty honestly.
+Only `summary` and `outcome` are required. Optional `artifacts` contain at most eight `{path,purpose,sha256?}` report references; other extra fields are rejected. `summary` must be a nonblank string with schema `maxLength: 16384` and should contain the complete result, including key outputs, observed evidence (paths/line ranges/version hashes), checks actually run, and residual risks. Keep it concise without omitting necessary evidence. The complete serialized result, including JSON escaping and artifact references, must fit 64 KiB of UTF-8. Curated input references are objects, but result evidence belongs in the `summary` text, not a separate `evidence` field. Cite only observed evidence; report unperformed checks and uncertainty honestly.
 
 Each initial task and explicit followup appends these output instructions after the assignment, without modifying the inherited request prefix; the validator's `DelegationResultSchema` travels as the input schema of the child's `deliver_result` protocol tool rather than as serialized schema text. A successful `deliver_result` ends the child turn after every already-admitted call in that tool batch settles, so it does not trigger another model request; invalid delivery arguments remain a model-visible tool error that can be corrected on the next turn. This is model guidance plus post-execution validation, not provider-enforced structured output or a guarantee that every model will comply.
 
@@ -105,7 +105,7 @@ The source implementation registers `get_agent_result` and `list_agent_turns` an
 extends `wait_agent` with a target selector. Existing running sessions are not
 hot-switched; source tests are not proof that an installed build has these tools.
 `deliver_result` accepts required `summary` and `outcome` plus optional bounded
-`artifacts` references, with unchanged 2048-character/8192-byte limits. References
+`artifacts` references, with a 16,384-character summary limit and 64 KiB complete-result limit. References
 are untrusted claims, not file reads, permission grants or acceptance.
 
 When a result seems missing, query retained work instead of starting inference to
@@ -165,13 +165,13 @@ is exhausted, not that legacy history is complete. Empty pages must not emit a
 nonadvancing cursor. Page metadata may reflect later completion/ack of existing turns;
 the cursor fixes membership, not an immutable historical snapshot.
 
-Query previews fit 8192 UTF-8 bytes; truncation preserves Unicode boundaries and
+Query previews fit 64 KiB of UTF-8; truncation preserves Unicode boundaries and
 includes any truncation marker in that budget. `truncated: false` is a proven full
 result, `true` is a shortened result, and `null` means legacy completeness is unknown.
 `source` identifies native history with a turn-level locator and, when proven, an
 exact native entry ID; missing/memory-only sources are `unavailable`. A path/entry
 reference is not an implicit read or authority grant. Whole result responses fit
-64 KiB (including JSON escaping of invalid raw output); whole pages fit 64 KiB and may return fewer than the requested count to fit.
+512 KiB (including up to sixfold JSON escaping of invalid raw output); whole pages fit 64 KiB and may return fewer than the requested count to fit.
 Do not silently drop fields: reject an individually unrepresentable record with
 `storage_error`. Task previews are capped at 256 Unicode characters with a separate
 `task_truncated` marker. Unknown legacy task text is empty with partial coverage,
@@ -245,10 +245,10 @@ with `storage_error` rather than selecting an arbitrary result.
 
 Retention is a same-team cap of **4096 retained turns**, including failed startup
 and closed-agent turns. No automatic deletion/pruning on ack, close or recovery.
-Each retained turn has at most 256 KiB encoded delegation, 8192 result-preview bytes
+Each retained turn has at most 256 KiB encoded delegation, 64 KiB of result-preview bytes
 and 8192 encoded metadata bytes (remaining identity/time/source fields). Artifact
 references stay in the original preview instead of being duplicated in ledger metadata. Thus the
-logical payload ceiling is 1088 MiB/team, excluding SQLite/index overhead and native
+logical payload ceiling is 1312 MiB/team, excluding SQLite/index overhead and native
 session files; it is not a physical disk quota. Admission at capacity rejects before
 persistence/loading/provider work with `limit_reached / turn_history_full` and a
 new-root-session hint. Reads, completion/ack and control of already-admitted work
@@ -259,8 +259,8 @@ control/query access for already-admitted work.
 
 An artifact is `{path, purpose, sha256?}`: nonblank path <=2048 characters, nonblank
 purpose <=256, optional lowercase 64-hex SHA256, at most eight refs; path/purpose
-cannot contain NUL. All refs count against the complete result's unchanged
-8192-byte budget. Queries derive validated refs from the retained preview without
+cannot contain NUL. All refs count against the complete result's
+64 KiB budget. Queries derive validated refs from the retained preview without
 reading the paths. They never trigger execution or acceptance; tests/checks/base
 revision remain in the referenced report and are parent-verified. Missing/changed
 reports are unavailable evidence, not a reason to restart inference automatically.
@@ -299,7 +299,7 @@ Local Luna/Codex/SSE header-isolation experiments supported `session-id` as a fa
 | `close_agent` | Retire a settled descendant: keep its record, session file and last result for audit while releasing its team slot and native session, and return the previous status. Pending/running children must be interrupted first and descendants closed leaf-first; root, self and other branches are rejected. Idempotent on already-closed agents; closed names are never reused. |
 | `deliver_result` | Child-side protocol tool whose input schema is the `DelegationResultSchema`. Captures the structured final result during the turn; a later call replaces the delivered result and an oversized call is rejected with a compact-and-redeliver hint. It is never bound at the root. |
 
-Pending inboxes are capped at 64 messages, including reserved completion slots. Individual text is capped at 8192 UTF-8 bytes. A completed turn and its parent result notification are committed together. Large results carry an explicit truncated preview; complete output remains in the child history. Completion notifications include terminal status. A rejected startup releases its completion reservation after cleanup and retains an inspectable failed/interrupted record; it does not emit a normal completion notification or retry inference.
+Pending inboxes are capped at 64 messages, including reserved completion slots. Ordinary passive text is capped at 8192 UTF-8 bytes; automatic result notifications and retained previews use a separate 64 KiB budget. Every valid structured delivery fits that preview budget and reaches the parent in full. Oversized fallback output carries an explicit truncated preview; complete output remains in the child history. A completed turn and its parent result notification are committed together. Completion notifications include terminal status. A rejected startup releases its completion reservation after cleanup and retains an inspectable failed/interrupted record; it does not emit a normal completion notification or retry inference.
 
 Closed agents are auditable, not erased: their record, native session file and last result remain inspectable, while the team slot and native session are released. A closed name is never reused — respawning it is rejected as a duplicate and the rejection names the offending agent. `send_message` to a closed agent fails as an unknown receiving agent and `followup_task` reports it busy. Closing is idempotent on already-closed agents and returns the previous status; disposal runs outside the control queue, so closing never blocks message, interrupt or completion commits. Each root team retains at most 2048 child-agent records, including closed agents; when full, `spawn_agent` rejects with `team_history_full` before persistence. Start a new root session for more children; closing does not delete records or make names reusable.
 

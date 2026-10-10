@@ -358,9 +358,9 @@ describe("staged result reliability contract", () => {
 		expect(COLLABORATION_LIMITS.maxRetainedAgents).toBe(2048);
 		const maxTurnBytes =
 			COLLABORATION_LIMITS.maxDelegationBytes +
-			COLLABORATION_LIMITS.maxMessageBytes +
+			COLLABORATION_LIMITS.maxResultBytes +
 			COLLABORATION_HISTORY_LIMITS.maxTurnMetadataBytes;
-		expect(maxTurnBytes * COLLABORATION_HISTORY_LIMITS.maxRetainedTurns).toBe(1088 * 1024 * 1024);
+		expect(maxTurnBytes * COLLABORATION_HISTORY_LIMITS.maxRetainedTurns).toBe(1312 * 1024 * 1024);
 	});
 
 	test("retention and unavailable-history diagnostics are fixed safe hints", () => {
@@ -398,7 +398,7 @@ describe("delegation result validation", () => {
 	test("still rejects non-JSON, oversized and non-completed results", () => {
 		expect(validateDelegationResult("no object here", "completed").contract).toBe("invalid");
 		expect(validateDelegationResult(valid, "failed").contract).toBe("not_completed");
-		expect(validateDelegationResult("x".repeat(COLLABORATION_LIMITS.maxMessageBytes + 1), "completed").contract).toBe(
+		expect(validateDelegationResult("x".repeat(COLLABORATION_LIMITS.maxResultBytes + 1), "completed").contract).toBe(
 			"invalid",
 		);
 	});
@@ -448,9 +448,13 @@ describe("bounded report references", () => {
 			[{ ...ref, purpose: "bad\0purpose" }],
 		])
 			expect(() => parseDelegationResult({ ...base, artifacts })).toThrow(CollaborationError);
-		const large = { ...base, artifacts: Array(8).fill({ path: "界".repeat(400), purpose: "Full report" }) };
-		expect(Buffer.byteLength(JSON.stringify(large))).toBeGreaterThan(8192);
-		expect(() => parseDelegationResult(large)).toThrow(/8192-byte/);
+		const large = {
+			...base,
+			summary: "界".repeat(16_384),
+			artifacts: Array(8).fill({ path: "界".repeat(2048), purpose: "Full report" }),
+		};
+		expect(Buffer.byteLength(JSON.stringify(large))).toBeGreaterThan(COLLABORATION_LIMITS.maxResultBytes);
+		expect(() => parseDelegationResult(large)).toThrow(/65536-byte/);
 		expect(validateDelegationResult(JSON.stringify(large), "completed").contract).toBe("invalid");
 		const legal = { ...base, artifacts: Array(8).fill({ path: "界".repeat(100), purpose: "Full report" }) };
 		expect(parseDelegationResult(legal)).toEqual(legal);
@@ -462,6 +466,27 @@ describe("structured delivery and close contract", () => {
 		summary: "Done",
 		outcome: "succeeded" as const,
 	};
+
+	test("accepts complete Chinese summaries at 16,384 characters and rejects one more", () => {
+		const summary = "界".repeat(16_384);
+		const result = { ...validResult, summary };
+		expect(parseDelegationResult(result)).toEqual(result);
+		expect(parseDelegationResultText(JSON.stringify(result))).toEqual(result);
+		expect(() => parseDelegationResult({ ...result, summary: `${summary}界` })).toThrow(/Invalid delegation result/);
+	});
+
+	test("measures JSON escaping at the exact result byte boundary", () => {
+		const overhead = Buffer.byteLength(JSON.stringify({ ...validResult, summary: "" }));
+		const remaining = 64 * 1024 - overhead;
+		const summary = "\u0001".repeat(Math.floor(remaining / 6)) + "x".repeat(remaining % 6);
+		const result = { ...validResult, summary };
+		const text = JSON.stringify(result);
+		expect(Buffer.byteLength(text)).toBe(64 * 1024);
+		expect(parseDelegationResult(result)).toEqual(result);
+		expect(parseDelegationResultText(text)).toEqual(result);
+		expect(() => parseDelegationResult({ ...result, summary: `${summary}x` })).toThrow(/65536-byte/);
+		expect(() => parseDelegationResultText(`${text} `)).toThrow(/65536-byte/);
+	});
 
 	test("parseDelegationResult validates fields and detaches the input", () => {
 		const input = { ...validResult };

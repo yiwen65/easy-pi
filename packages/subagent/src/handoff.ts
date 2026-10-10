@@ -18,9 +18,9 @@ import {
 } from "./types.ts";
 
 export const HANDOFF_LIMITS = {
-	maxJsonBytes: 48 * 1024,
-	maxEnvelopeBytes: 64 * 1024,
-	summaryChars: 2_048,
+	maxJsonBytes: 128 * 1024,
+	maxEnvelopeBytes: 160 * 1024,
+	summaryChars: 16_384,
 	evidenceItems: 12,
 	changedPaths: 64,
 	pathChars: 500,

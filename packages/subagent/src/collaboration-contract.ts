@@ -9,6 +9,8 @@ export const COLLABORATION_LIMITS = Object.freeze({
 	maxRetainedAgents: 2048, // Closed records remain auditable; exhaustion must reject before persistence.
 	maxDepth: 4,
 	maxMessageBytes: 8 * 1024,
+	maxSummaryCharacters: 16_384,
+	maxResultBytes: 64 * 1024,
 	maxTaskCharacters: 40_000,
 	maxDelegationBytes: 256 * 1024,
 	maxPendingMessages: 64,
@@ -579,7 +581,8 @@ export const COLLABORATION_HISTORY_LIMITS = Object.freeze({
 	maxPageSize: 20,
 	maxTurnMetadataBytes: 8192,
 	maxArtifacts: 8,
-	maxResultResponseBytes: 64 * 1024,
+	// Raw fallback text can expand sixfold when JSON-escaped, plus query metadata.
+	maxResultResponseBytes: 512 * 1024,
 	maxPageResponseBytes: 64 * 1024,
 	maxTaskPreviewCharacters: 256,
 });
@@ -602,7 +605,7 @@ export const DelegationResultSchema = Type.Object(
 	{
 		summary: Type.String({
 			minLength: 1,
-			maxLength: 2048,
+			maxLength: COLLABORATION_LIMITS.maxSummaryCharacters,
 			pattern: "\\S",
 			description:
 				"The complete result in free text: what was done, key outputs/artifacts, evidence with paths/lines/hashes, checks actually performed, and residual risks.",
@@ -625,10 +628,10 @@ export function parseDelegationResult(value: unknown): DelegationResult {
 		throw new CollaborationError("invalid_arguments", "Invalid delegation result fields");
 	if (value.artifacts?.some((artifact) => artifact.path.includes("\0") || artifact.purpose.includes("\0")))
 		throw new CollaborationError("invalid_arguments", "Invalid artifact reference");
-	if (Buffer.byteLength(JSON.stringify(value), "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
+	if (Buffer.byteLength(JSON.stringify(value), "utf8") > COLLABORATION_LIMITS.maxResultBytes)
 		throw new CollaborationError(
 			"invalid_arguments",
-			"Result exceeds the 8192-byte budget; compact it and deliver again",
+			`Result exceeds the ${COLLABORATION_LIMITS.maxResultBytes}-byte budget; compact it and deliver again`,
 		);
 	return structuredClone(value);
 }
@@ -670,8 +673,11 @@ function extractResultJson(text: string): string {
 
 /** Read the same bounded tolerated wire forms without repairing or executing anything. */
 export function parseDelegationResultText(text: string): DelegationResult {
-	if (Buffer.byteLength(text, "utf8") > COLLABORATION_LIMITS.maxMessageBytes)
-		throw new CollaborationError("invalid_arguments", "Result exceeds the 8192-byte budget");
+	if (Buffer.byteLength(text, "utf8") > COLLABORATION_LIMITS.maxResultBytes)
+		throw new CollaborationError(
+			"invalid_arguments",
+			`Result exceeds the ${COLLABORATION_LIMITS.maxResultBytes}-byte budget`,
+		);
 	return parseDelegationResult(JSON.parse(extractResultJson(text)) as unknown);
 }
 

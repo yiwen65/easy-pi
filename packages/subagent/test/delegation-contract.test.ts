@@ -70,9 +70,13 @@ describe("explicit delegation contract", () => {
 				contract: "invalid",
 			});
 		}
-		// The byte budget still applies to the complete result text.
+		// Reports beyond the old 2,048-character/8 KiB limits are now valid.
 		expect(
 			validateDelegationResult(JSON.stringify({ ...valid, summary: "界".repeat(4000) }), "completed"),
+		).toMatchObject({ contract: "valid" });
+		// JSON escaping still counts against the complete result byte budget.
+		expect(
+			validateDelegationResult(JSON.stringify({ ...valid, summary: `x${"\u0001".repeat(12_000)}` }), "completed"),
 		).toMatchObject({ contract: "invalid" });
 	});
 	test("validates output format without certifying claims or discarding text", () => {

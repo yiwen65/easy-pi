@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, test, vi } from "vitest";
-import { COLLABORATION_LIMITS, CollaborationError } from "../src/collaboration-contract.ts";
+import {
+	COLLABORATION_HISTORY_LIMITS,
+	COLLABORATION_LIMITS,
+	CollaborationError,
+} from "../src/collaboration-contract.ts";
 import { CollaborationController } from "../src/collaboration-controller.ts";
 import { CollaborationStore } from "../src/collaboration-store.ts";
 import type { ChildSessionHost, ChildSessionIdentity, ChildTurnResult } from "../src/session-host.ts";
@@ -1075,11 +1079,11 @@ test("turn capacity rejection is before persistence/loading and does not poison 
 test("Unicode preview fits byte budget including marker and preserves native turn-only source", async () => {
 	const f = fixture(true);
 	await f.controller.spawn(caller, "a", "task", model);
-	f.finishes.get("/root/a")?.({ status: "completed", text: "🙂界".repeat(3000) });
+	f.finishes.get("/root/a")?.({ status: "completed", text: "🙂界".repeat(COLLABORATION_LIMITS.maxResultBytes) });
 	await f.controller.settled();
 	const current = f.store.read().agents[0];
 	const turn = f.store.getTurn(current.path, { turn_id: current.turnId })!;
-	expect(Buffer.byteLength(turn.result!.preview)).toBeLessThanOrEqual(8192);
+	expect(Buffer.byteLength(turn.result!.preview)).toBeLessThanOrEqual(COLLABORATION_LIMITS.maxResultBytes);
 	expect(turn.result!.preview).not.toContain("�");
 	expect(turn.result!.truncated).toBe(true);
 	expect(turn.result!.source).toEqual({
@@ -1307,12 +1311,18 @@ test("result selectors reject wrong target/task/passive IDs, child/foreign calle
 test("escaped raw result fits complete response budget; failed startup is no_result", async () => {
 	const f = fixture();
 	const receipt = await f.controller.spawnTurn(caller, "a", "a", model);
-	const output = "\u0001".repeat(8192);
+	const output = "\u0001".repeat(COLLABORATION_LIMITS.maxResultBytes);
 	f.finishes.get("/root/a")?.({ status: "completed", text: output });
 	await f.controller.settled();
 	const result = f.controller.getAgentResult(caller, { target: "a", turn_id: receipt.turn_id });
 	expect(result).toMatchObject({ state: "found", result: { preview: output, truncated: false } });
-	expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(65536);
+	expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+		COLLABORATION_HISTORY_LIMITS.maxResultResponseBytes,
+	);
+	expect(await f.controller.waitForTurn(caller, { target: "a", turn_id: receipt.turn_id })).toMatchObject({
+		reason: "terminal",
+		result: { state: "found", result: { preview: output, truncated: false } },
+	});
 	f.host.create = async () => {
 		throw new Error("startup failed");
 	};

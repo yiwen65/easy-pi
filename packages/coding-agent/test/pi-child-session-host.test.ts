@@ -581,7 +581,7 @@ test("initial and cold followup requests carry the deliver_result contract witho
 		expect(text).toContain("residual risks in the summary text");
 		expect(text).toContain("You cannot call send_message or any other root team tool");
 		expect(text).toContain("deliver_result is your automatic final return to the creation parent");
-		expect(text).toContain(`${COLLABORATION_LIMITS.maxMessageBytes} UTF-8 bytes`);
+		expect(text).toContain(`${COLLABORATION_LIMITS.maxResultBytes} UTF-8 bytes`);
 		expect(context.systemPrompt).not.toContain("Final result JSON Schema:");
 	}
 	expect(JSON.stringify(requests[1].messages)).toContain("This follow-up retains your existing child history");
@@ -674,6 +674,62 @@ test("an invalid deliver_result can be corrected on the next provider turn", asy
 	});
 });
 
+test("a full Chinese result reaches the parent and remains complete after acknowledgement and cold reopening", async () => {
+	const f = await fixture();
+	const caller = { rootSessionId: "long-delivery", agentPath: "/root" };
+	const assignment = validateDelegation({
+		task: { objective: "Deliver a complete report" },
+		context: "isolated",
+		tools: [],
+	});
+	const path = join(f.root, "long-delivery", "registry.sqlite");
+	const make = () => {
+		const store = new CollaborationStore({ path, cwd: f.cwd, rootSessionId: caller.rootSessionId });
+		const controller = new CollaborationController({ store, host: f.host, agentDir: f.root, getPermissions: full });
+		cleanups.push(() => controller.shutdown());
+		return { store, controller };
+	};
+	const delivered = { summary: "界".repeat(16_384), outcome: "succeeded" as const };
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall(DELIVER_RESULT_TOOL_NAME, delivered), { stopReason: "toolUse" }),
+	]);
+	const first = make();
+	const receipt = await first.controller.spawnTurn(
+		caller,
+		"worker",
+		assignment.task.objective,
+		{ provider: f.faux.provider.id, id: f.faux.getModel().id, thinkingLevel: "off" },
+		[],
+		undefined,
+		{ delegation: assignment, tools: [] },
+	);
+	await first.controller.settled();
+	const text = JSON.stringify(delivered);
+	expect(Buffer.byteLength(text)).toBeGreaterThan(8192);
+	expect(first.store.read().agents[0]).toMatchObject({
+		status: "completed",
+		result: text,
+		resultValidation: { contract: "valid" },
+	});
+	const notification = first.controller.pending(caller)[0];
+	expect(notification.text).toBe(text);
+	expect(await first.controller.waitForTurn(caller, { target: "worker", turn_id: receipt.turn_id })).toMatchObject({
+		reason: "terminal",
+		result: { result: { preview: text, truncated: false } },
+	});
+	await first.controller.acknowledge(caller, [notification.id]);
+	await first.controller.close(caller, "worker");
+	await first.controller.shutdown();
+	const second = make();
+	expect(second.controller.getAgentResult(caller, { target: "worker", message_id: notification.id })).toMatchObject({
+		state: "found",
+		turn: { delivery: { state: "acknowledged" } },
+		result: { preview: text, truncated: false },
+	});
+	expect(f.faux.state.callCount).toBe(1);
+	expect(second.controller.list(caller)[0].loaded).toBe(false);
+});
+
 test("a delivery batch finishes its other tools and keeps the last delivered result", async () => {
 	const f = await fixture();
 	const child = await f.create("multi-delivery", full);
@@ -748,13 +804,13 @@ test("artifact delivery is retained/queryable without automatically reading repo
 	expect(before).toBe(1);
 });
 
-test("oversized multibyte artifact delivery can be compacted without relaxing the byte budget", async () => {
+test("oversized multibyte artifact delivery can be compacted within the expanded byte budget", async () => {
 	const f = await fixture();
 	const child = await f.create("artifact-budget", full);
 	const oversized = {
-		summary: "报告",
+		summary: "界".repeat(16_384),
 		outcome: "partial",
-		artifacts: Array(8).fill({ path: "界".repeat(400), purpose: "Full report" }),
+		artifacts: Array(8).fill({ path: "界".repeat(2048), purpose: "Full report" }),
 	};
 	const valid = { summary: "Compact report", outcome: "partial", artifacts: [] };
 	f.faux.setResponses([
@@ -766,7 +822,7 @@ test("oversized multibyte artifact delivery can be compacted without relaxing th
 		text: JSON.stringify(valid),
 	});
 	expect(f.faux.state.callCount).toBe(2);
-	expect(JSON.stringify(child.session.context())).toContain("8192-byte budget");
+	expect(JSON.stringify(child.session.context())).toContain(`${COLLABORATION_LIMITS.maxResultBytes}-byte budget`);
 });
 
 test("a failed extension startup rejects the host instead of silently continuing without its hooks", async () => {

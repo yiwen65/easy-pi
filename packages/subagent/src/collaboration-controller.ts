@@ -890,10 +890,10 @@ export class CollaborationController {
 			if (current.status !== "interrupted") current.status = result.status;
 			// The complete answer remains in the native session. Truncation is explicit.
 			const suffix = "\n[Preview truncated; inspect child session for complete output.]";
-			const truncated = Buffer.byteLength(result.text) > COLLABORATION_LIMITS.maxMessageBytes;
+			const truncated = Buffer.byteLength(result.text) > COLLABORATION_LIMITS.maxResultBytes;
 			current.result = result.text;
 			if (truncated) {
-				const budget = COLLABORATION_LIMITS.maxMessageBytes - Buffer.byteLength(suffix);
+				const budget = COLLABORATION_LIMITS.maxResultBytes - Buffer.byteLength(suffix);
 				let bytes = 0;
 				const characters: string[] = [];
 				for (const character of result.text) {
