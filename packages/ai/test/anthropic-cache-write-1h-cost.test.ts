@@ -17,6 +17,7 @@ function createFakeAnthropicClient(response: Response): Anthropic {
 
 function eventsWithCacheCreation(
 	cacheCreation: Record<string, number> | undefined,
+	deltaUsage: Record<string, unknown> = {},
 ): Array<{ event: string; data: string }> {
 	const startUsage: Record<string, unknown> = {
 		input_tokens: 100,
@@ -49,6 +50,7 @@ function eventsWithCacheCreation(
 					output_tokens: 5,
 					cache_read_input_tokens: 0,
 					cache_creation_input_tokens: 1_000_000,
+					...deltaUsage,
 				},
 			}),
 		},
@@ -71,6 +73,71 @@ describe("Anthropic 1h cache write cost", () => {
 		expect(result.usage.cacheWrite1h).toBe(400_000);
 		// 600k * 6.25/Mtok + 400k * 10/Mtok = 3.75 + 4.0 = 7.75
 		expect(result.usage.cost.cacheWrite).toBeCloseTo(7.75, 10);
+	});
+
+	it("prices mixed 1h and 5m writes reported only in a Vercel message_delta", async () => {
+		const model = getModel("vercel-ai-gateway", "anthropic/claude-haiku-4.5");
+		const response = createSseResponse(
+			eventsWithCacheCreation(undefined, {
+				input_tokens: 3,
+				output_tokens: 4,
+				cache_read_input_tokens: 17,
+				cache_creation: { ephemeral_5m_input_tokens: 600_000, ephemeral_1h_input_tokens: 400_000 },
+				output_tokens_details: { thinking_tokens: 2 },
+			}),
+		);
+		const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Hi" }]);
+		expect(result.usage).toMatchObject({ input: 3, output: 4, cacheRead: 17, cacheWrite: 1_000_000, reasoning: 2 });
+		expect(result.usage.totalTokens).toBe(1_000_024);
+		expect(result.usage.cacheWrite1h).toBe(400_000);
+		expect(result.usage.cost.cacheWrite).toBeCloseTo(
+			(600_000 * model.cost.cacheWrite + 400_000 * model.cost.input * 2) / 1_000_000,
+			10,
+		);
+		expect(result.usage.cost.input).toBeCloseTo((3 * model.cost.input) / 1_000_000, 10);
+		expect(result.usage.cost.output).toBeCloseTo((4 * model.cost.output) / 1_000_000, 10);
+		expect(result.usage.cost.cacheRead).toBeCloseTo((17 * model.cost.cacheRead) / 1_000_000, 10);
+	});
+
+	it.each([
+		{ label: "null", cacheCreation: null },
+		{ label: "missing 1h count", cacheCreation: { ephemeral_5m_input_tokens: 600_000 } },
+	])("preserves the message_start 1h count when the delta breakdown is $label", async ({ cacheCreation }) => {
+		const model = getModel("anthropic", "claude-opus-4-8");
+		const response = createSseResponse(
+			eventsWithCacheCreation(
+				{ ephemeral_5m_input_tokens: 600_000, ephemeral_1h_input_tokens: 400_000 },
+				{ cache_creation: cacheCreation },
+			),
+		);
+		const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.usage.cacheWrite).toBe(1_000_000);
+		expect(result.usage.cacheWrite1h).toBe(400_000);
+		expect(result.usage.totalTokens).toBe(1_000_105);
+		expect(result.usage.cost.cacheWrite).toBeCloseTo(7.75, 10);
+	});
+
+	it("replaces the message_start 1h count when the delta explicitly reports zero", async () => {
+		const model = getModel("anthropic", "claude-opus-4-8");
+		const response = createSseResponse(
+			eventsWithCacheCreation(
+				{ ephemeral_5m_input_tokens: 600_000, ephemeral_1h_input_tokens: 400_000 },
+				{ cache_creation: { ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 0 } },
+			),
+		);
+		const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.usage.cacheWrite).toBe(1_000_000);
+		expect(result.usage.cacheWrite1h).toBe(0);
+		expect(result.usage.totalTokens).toBe(1_000_105);
+		expect(result.usage.cost.cacheWrite).toBeCloseTo(6.25, 10);
 	});
 
 	it("falls back to the 5m rate when no breakdown is reported", async () => {
