@@ -11,7 +11,7 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { AssistantMessageEvent, Context, Model } from "../src/types.ts";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
@@ -207,6 +207,73 @@ describe("openai-codex streaming", () => {
 
 		expect(sawTextDelta).toBe(true);
 		expect(sawDone).toBe(true);
+	});
+
+	describe("SSE EOF", () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+
+		it.each(["completed", "incomplete"] as const)("processes an unterminated %s terminal event", async (status) => {
+			const sse = buildSSEPayload({ status, endTurn: false }).trimEnd();
+			const stream = streamOpenAICodexResponses(
+				model,
+				{ messages: [] },
+				{
+					apiKey: mockToken(),
+					transport: "sse",
+					fetch: async () => new Response(sse, { headers: { "content-type": "text/event-stream" } }),
+				},
+			);
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) events.push(event);
+			const result = await stream.result();
+
+			expect(result.stopReason).toBe(status === "completed" ? "stop" : "length");
+			expect(result.content[0]).toMatchObject({ type: "text", text: "Hello" });
+			expect(result.endTurn).toBe(false);
+			expect(result.usage.totalTokens).toBe(8);
+			expect(events.filter((event) => event.type === "done")).toHaveLength(1);
+			expect(events.some((event) => event.type === "error")).toBe(false);
+		});
+
+		it("retains a completed residual item when EOF arrives before the terminal event", async () => {
+			const frames = buildSSEPayload({ status: "completed" }).trimEnd().split("\n\n");
+			frames.pop();
+			const stream = streamOpenAICodexResponses(
+				model,
+				{ messages: [] },
+				{
+					apiKey: mockToken(),
+					transport: "sse",
+					fetch: async () => new Response(frames.join("\n\n")),
+				},
+			);
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) events.push(event);
+			const result = await stream.result();
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("stream ended before a terminal response event");
+			expect(events.find((event) => event.type === "text_end")).toMatchObject({
+				content: "Hello",
+				itemComplete: true,
+			});
+			expect(result.content[0]).toMatchObject({
+				type: "text",
+				text: "Hello",
+				textSignature: JSON.stringify({ v: 1, id: "msg_1" }),
+			});
+		});
 	});
 
 	it("completes after response.completed even when the SSE body stays open", async () => {
