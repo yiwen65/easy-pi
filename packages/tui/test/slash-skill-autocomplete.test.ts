@@ -68,6 +68,89 @@ describe("slash skill autocomplete", () => {
 		}
 	});
 
+	it("preserves leading whitespace, command arguments, and trailing skill lookup", async () => {
+		const argumentPrefixes: string[] = [];
+		const provider = new CombinedAutocompleteProvider(
+			[
+				...commands,
+				{
+					name: "load-skills",
+					getArgumentCompletions: (prefix) => {
+						argumentPrefixes.push(prefix);
+						return [{ value: "alpha", label: "alpha" }];
+					},
+				},
+			],
+			"/tmp",
+		);
+		for (const before of [" ", "  ", "\t", " \t"]) {
+			const line = `${before}/mod suffix`;
+			const cursorCol = before.length + "/mod".length;
+			const result = await provider.getSuggestions([line], 0, cursorCol, { signal: new AbortController().signal });
+			assert.ok(result);
+			assert.strictEqual(result.prefix, "/mod");
+			assert.deepStrictEqual(
+				result.items.map((item) => item.value),
+				["model"],
+			);
+			const applied = provider.applyCompletion([line], 0, cursorCol, result.items[0]!, result.prefix);
+			assert.strictEqual(applied.lines[0], `${before}/model  suffix`);
+			assert.strictEqual(applied.cursorCol, `${before}/model `.length);
+			assert.strictEqual(provider.shouldTriggerFileCompletion([`${before}/mod`], 0, before.length + 4), false);
+
+			const argumentLine = `${before}/load-skills a`;
+			const argumentsResult = await getSuggestions(provider, argumentLine);
+			assert.ok(argumentsResult);
+			assert.strictEqual(argumentsResult.prefix, "a");
+			const argumentApplied = provider.applyCompletion(
+				[argumentLine],
+				0,
+				argumentLine.length,
+				argumentsResult.items[0]!,
+				argumentsResult.prefix,
+			);
+			assert.strictEqual(argumentApplied.lines[0], `${before}/load-skills alpha`);
+			assert.strictEqual(argumentApplied.cursorCol, argumentApplied.lines[0]!.length);
+
+			const trailing = await getSuggestions(provider, `${before}/load-skills a /`);
+			assert.strictEqual(trailing?.prefix, "/");
+			assert.ok(trailing?.items.every((item) => item.value.startsWith("skill:")));
+		}
+		assert.deepStrictEqual(argumentPrefixes, ["a", "a", "a", "a"]);
+	});
+
+	it("completes indented commands via Tab and their arguments without submitting", async () => {
+		for (const before of ["  ", "\t"]) {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider(
+					[{ name: "model", getArgumentCompletions: () => [{ value: "local", label: "local" }] }],
+					"/tmp",
+				),
+			);
+			let submitted: string | undefined;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+			editor.setText(`${before}/mod`);
+			const indentation = editor.getText().slice(0, -4);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\t");
+			assert.strictEqual(editor.getText(), `${indentation}/model `);
+			editor.handleInput("l");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\r");
+			assert.strictEqual(editor.getText(), `${indentation}/model local`);
+			assert.strictEqual(submitted, undefined);
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: editor.getText().length });
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, "/model local");
+		}
+	});
+
 	it("renders selected skills as colored atomic mentions while submitting backend invocations", async () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
 		editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, "/tmp"));
