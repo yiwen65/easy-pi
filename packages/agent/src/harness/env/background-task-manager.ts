@@ -279,23 +279,36 @@ export class BackgroundTaskManager {
 	async wait(
 		id: string,
 		timeoutMs: number,
+		signal?: AbortSignal,
 	): Promise<Result<{ task: BackgroundTaskRecord; timedOut: boolean }, ExecutionError>> {
 		const managed = this.tasks.get(id);
 		if (!managed) return err(new ExecutionError("not_found", `Unknown background task: ${id}`));
+		if (signal?.aborted) return err(new ExecutionError("aborted", "Wait aborted"));
 		if (isTerminalTaskStatus(managed.record.status)) {
 			return ok({ task: { ...managed.record }, timedOut: false });
 		}
 		return new Promise((resolve) => {
-			const timer = setTimeout(() => {
+			const cleanup = (): void => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
 				const index = managed.waiters.indexOf(onTerminal);
 				if (index >= 0) managed.waiters.splice(index, 1);
+			};
+			const timer = setTimeout(() => {
+				cleanup();
 				resolve(ok({ task: { ...managed.record }, timedOut: true }));
 			}, timeoutMs);
 			const onTerminal = (): void => {
-				clearTimeout(timer);
+				cleanup();
 				resolve(ok({ task: { ...managed.record }, timedOut: false }));
 			};
+			const onAbort = (): void => {
+				cleanup();
+				resolve(err(new ExecutionError("aborted", "Wait aborted")));
+			};
 			managed.waiters.push(onTerminal);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
 		});
 	}
 

@@ -1,6 +1,7 @@
 import { chmod, lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { AgentToolError } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import {
 	COLLABORATION_LIMITS,
@@ -216,7 +217,16 @@ export function createPiChildSessionHost(options: {
 										parameters: DelegationResultSchema,
 										executionMode: "sequential",
 										async execute(_toolCallId, input) {
-											const parsed = parseDelegationResult(input);
+											let parsed: DelegationResult;
+											try {
+												parsed = parseDelegationResult(input);
+											} catch (error) {
+												throw new AgentToolError(
+													error instanceof Error ? error.message : String(error),
+													{},
+													{ executionOutcome: "not_started" },
+												);
+											}
 											delivered = parsed;
 											return {
 												content: [{ type: "text", text: JSON.stringify({ delivered: true }) }],

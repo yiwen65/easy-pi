@@ -88,10 +88,18 @@ export interface BashToolOptions<TContext extends ExecutionToolContext = Executi
 function validateTimeout(timeout: number | undefined): void {
 	if (timeout === undefined) return;
 	if (!Number.isFinite(timeout) || timeout <= 0) {
-		throw new Error("Invalid timeout: must be a finite number of seconds");
+		throw new AgentToolError(
+			"Invalid timeout: must be a finite number of seconds",
+			{},
+			{ executionOutcome: "not_started" },
+		);
 	}
 	if (timeout > MAX_TIMEOUT_SECONDS) {
-		throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
+		throw new AgentToolError(
+			`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`,
+			{},
+			{ executionOutcome: "not_started" },
+		);
 	}
 }
 
@@ -114,7 +122,10 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 		parameters: bashSchema,
 		replay: "never",
 		async execute(_toolCallId, { command, cwd, timeout, run_in_background }, signal, onUpdate, context) {
-			if (!command.trim()) throw new ExecutionToolError("INVALID_INPUT", "command must not be empty.");
+			if (!command.trim())
+				throw new ExecutionToolError("INVALID_INPUT", "command must not be empty.", undefined, undefined, {
+					executionOutcome: "not_started",
+				});
 			validateTimeout(timeout);
 			const { env } = context;
 			const backgroundTasks = env.backgroundTasks;
@@ -123,6 +134,9 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				throw new ExecutionToolError(
 					"INVALID_INPUT",
 					`timeout exceeds the ${maxForegroundTimeoutSeconds}s foreground maximum; use run_in_background for longer commands.`,
+					undefined,
+					undefined,
+					{ executionOutcome: "not_started" },
 				);
 			}
 			let executionCwd = cwd ?? env.cwd;

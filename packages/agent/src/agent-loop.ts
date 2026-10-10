@@ -14,6 +14,7 @@ import {
 import { fingerprintAssistantTurn, fingerprintToolResult, NO_PROGRESS_REPEAT_LIMIT } from "./no-progress.ts";
 import { createStepSnapshot } from "./step-snapshot.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
+import { getToolErrorOutcome } from "./tool-outcome.ts";
 import { cloneToolSchema } from "./tool-schema.ts";
 import type {
 	AgentContext,
@@ -25,6 +26,7 @@ import type {
 	AgentToolResult,
 	PrepareNextTurnContext,
 	StreamFn,
+	ToolExecutionOutcome,
 } from "./types.ts";
 import { AgentToolError } from "./types.ts";
 
@@ -708,6 +710,7 @@ async function failToolCallsFromTruncatedMessage(
 				`Tool call "${toolCall.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`,
 			),
 			isError: true,
+			executionOutcome: "not_started",
 		};
 		const toolResultMessage = await persistToolResult(finalized, assistantMessage, config);
 		await emitToolExecutionEnd(finalized, emit);
@@ -771,6 +774,7 @@ async function executeToolCallsSequential(
 				toolCall,
 				result: preparation.result,
 				isError: preparation.isError,
+				executionOutcome: "not_started",
 			};
 		} else {
 			const executed = await executePreparedToolCall(
@@ -837,6 +841,7 @@ async function executeToolCallsParallel(
 				toolCall,
 				result: preparation.result,
 				isError: preparation.isError,
+				executionOutcome: "not_started",
 			} satisfies FinalizedToolCallOutcome;
 			await persistToolResult(finalized, assistantMessage, config);
 			await emitToolExecutionEnd(finalized, emit);
@@ -915,12 +920,14 @@ type ImmediateToolCallOutcome = {
 type ExecutedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
+	executionOutcome: ToolExecutionOutcome;
 };
 
 type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
 	isError: boolean;
+	executionOutcome: ToolExecutionOutcome;
 	message?: ToolResultMessage;
 };
 
@@ -1105,6 +1112,7 @@ async function executePreparedToolCall(
 			return {
 				result: createErrorToolResult(reason),
 				isError: true,
+				executionOutcome: "not_started",
 			};
 		}
 		reportExecutionObserver(onExecutionEvent, {
@@ -1158,6 +1166,7 @@ async function executePreparedToolCall(
 		return {
 			result: createErrorToolResult("Operation aborted"),
 			isError: true,
+			executionOutcome: "not_started",
 		};
 	}
 	if (executionScheduler) {
@@ -1205,6 +1214,7 @@ async function executePreparedToolCall(
 		return {
 			result: createErrorToolResult("Operation aborted"),
 			isError: true,
+			executionOutcome: "not_started",
 		};
 	}
 
@@ -1253,7 +1263,7 @@ async function executePreparedToolCall(
 			outcome: "succeeded",
 			durationMs: monotonicNow() - executionStartedAt,
 		});
-		return { result, isError: false };
+		return { result, isError: false, executionOutcome: "confirmed" };
 	} catch (error) {
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
@@ -1274,6 +1284,7 @@ async function executePreparedToolCall(
 				error instanceof AgentToolError ? error.details : undefined,
 			),
 			isError: true,
+			executionOutcome: getToolErrorOutcome(error, prepared.toolCall.name, prepared.args),
 		};
 	} finally {
 		acceptingUpdates = false;
@@ -1325,6 +1336,7 @@ async function finalizeExecutedToolCall(
 		toolCall: prepared.toolCall,
 		result,
 		isError,
+		executionOutcome: executed.executionOutcome,
 	};
 }
 
@@ -1401,6 +1413,7 @@ async function persistToolResult(
 		assistantMessage,
 		toolCall: finalized.toolCall,
 		terminate: finalized.result.terminate === true,
+		executionOutcome: finalized.executionOutcome,
 	});
 	finalized.message = message;
 	return message;

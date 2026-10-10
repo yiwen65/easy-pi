@@ -188,6 +188,11 @@ export class CollaborationError extends Error {
 	}
 }
 
+/** A rejection at an admission guard before this call has changed team state. */
+export class CollaborationAdmissionError extends CollaborationError {
+	readonly executionOutcome = "not_started" as const;
+}
+
 /** Detail values are tool-name shaped; anything else is dropped, never formatted. */
 const SAFE_DETAIL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 

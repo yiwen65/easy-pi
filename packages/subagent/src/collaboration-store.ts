@@ -8,6 +8,7 @@ import { Value } from "typebox/value";
 import {
 	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
+	CollaborationAdmissionError,
 	CollaborationArtifactsSchema,
 	CollaborationError,
 	type CollaborationHistoryCoverage,
@@ -521,7 +522,7 @@ export class CollaborationStore {
 	/** Admission must call this before persistence so exhaustion does not poison the controller. */
 	assertTurnCapacity(): void {
 		if (this.countTurns() >= COLLABORATION_HISTORY_LIMITS.maxRetainedTurns)
-			throw new CollaborationError("limit_reached", "Retained turn history is full", "turn_history_full");
+			throw new CollaborationAdmissionError("limit_reached", "Retained turn history is full", "turn_history_full");
 	}
 
 	countTurns(target?: string): number {

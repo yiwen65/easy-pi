@@ -150,6 +150,7 @@ export * from "./search/index.ts";
 export * from "./step-snapshot.ts";
 // Stream defaults
 export { setDefaultStreamFn } from "./stream-fn.ts";
+export * from "./tool-outcome.ts";
 export * from "./tool-plan.ts";
 // Types
 export * from "./types.ts";

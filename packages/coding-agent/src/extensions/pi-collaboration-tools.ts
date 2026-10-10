@@ -1,7 +1,9 @@
 import { type FileHandle, open } from "node:fs/promises";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { AgentToolError } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
+	CollaborationAdmissionError,
 	CollaborationError,
 	type CollaborationMessage,
 	type CollaborationResults,
@@ -232,7 +234,11 @@ export function registerPiCollaborationTools(options: {
 			description: descriptions[name],
 			parameters: CollaborationSchemas[name],
 			executionMode: "sequential",
+			contract: ["get_agent_result", "list_agent_turns", "list_agents", "wait_agent"].includes(name)
+				? { readOnly: true }
+				: undefined,
 			async execute(_id, input, signal, _update, ctx) {
+				let effectMayHaveStarted = false;
 				try {
 					if (identity.agentPath !== "/root")
 						throw new CollaborationError("forbidden", "Only /root may use team tools", "nested_delegation");
@@ -333,6 +339,7 @@ export function registerPiCollaborationTools(options: {
 									);
 							} else if (delegation.context.mode === "curated")
 								fork = await prepareCuratedCollaborationContext(session, delegation.context, signal);
+							effectMayHaveStarted = true;
 							result = await controller.spawnTurn(
 								identity,
 								args.task_name,
@@ -346,6 +353,7 @@ export function registerPiCollaborationTools(options: {
 						}
 						case "send_message": {
 							const args = parseCollaborationArguments(name, input);
+							effectMayHaveStarted = true;
 							result = {
 								message_id: await controller.send(identity, args.target, args.message, signal),
 								status: "accepted",
@@ -383,6 +391,7 @@ export function registerPiCollaborationTools(options: {
 									offending,
 									available,
 								);
+							effectMayHaveStarted = true;
 							result = await controller.followupTurn(identity, args.target, args.task.objective, signal, {
 								delegation,
 								tools,
@@ -407,11 +416,13 @@ export function registerPiCollaborationTools(options: {
 						}
 						case "interrupt_agent": {
 							const args = parseCollaborationArguments(name, input);
+							effectMayHaveStarted = true;
 							result = { previous_status: await controller.interrupt(identity, args.target) };
 							break;
 						}
 						case "close_agent": {
 							const args = parseCollaborationArguments(name, input);
+							effectMayHaveStarted = true;
 							result = { previous_status: await controller.close(identity, args.target) };
 							break;
 						}
@@ -424,7 +435,16 @@ export function registerPiCollaborationTools(options: {
 					return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
 				} catch (error) {
 					// Do not echo provider, extension, filesystem, or credential-bearing errors.
-					throw new Error(`Collaboration tool failed: ${formatCollaborationError(error)}`);
+					throw new AgentToolError(
+						`Collaboration tool failed: ${formatCollaborationError(error)}`,
+						{},
+						{
+							executionOutcome:
+								!effectMayHaveStarted || error instanceof CollaborationAdmissionError
+									? "not_started"
+									: undefined,
+						},
+					);
 				}
 			},
 		});

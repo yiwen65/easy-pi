@@ -249,7 +249,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/** Persist each finalized result in completion order, before listener delivery. */
 	onToolResult?: (
 		message: ToolResultMessage,
-		context: { assistantMessage: AssistantMessage; toolCall: AgentToolCall; terminate: boolean },
+		context: {
+			assistantMessage: AssistantMessage;
+			toolCall: AgentToolCall;
+			terminate: boolean;
+			/** Execution certainty before presentation hooks; independent of isError. */
+			executionOutcome: ToolExecutionOutcome;
+		},
 	) => Promise<void> | void;
 	/** Persist dispatch intent after scheduler admission, before the final synchronous gate. */
 	beforeToolDispatch?: (context: ToolAdmissionContext) => Promise<void> | void;
@@ -441,14 +447,23 @@ export interface AgentToolResult<T> {
 	terminate?: boolean;
 }
 
-/** Explicitly opt in to preserving safe structured details on a failed tool call. */
+export type ToolExecutionOutcome = "not_started" | "confirmed" | "unknown";
+
+export interface AgentToolErrorOptions extends ErrorOptions {
+	/** Set only at a throw site that can prove the operation did not start or its result is known. */
+	executionOutcome?: Exclude<ToolExecutionOutcome, "unknown">;
+}
+
+/** Preserve public failure details and, when proven, the execution outcome. */
 export class AgentToolError<TDetails = unknown> extends Error {
 	readonly details: TDetails;
+	readonly executionOutcome: ToolExecutionOutcome;
 
-	constructor(message: string, details: TDetails, options?: ErrorOptions) {
+	constructor(message: string, details: TDetails, options?: AgentToolErrorOptions) {
 		super(message, options);
 		this.name = "AgentToolError";
 		this.details = details;
+		this.executionOutcome = options?.executionOutcome ?? "unknown";
 	}
 }
 

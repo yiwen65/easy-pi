@@ -384,9 +384,11 @@ export function createEditToolDefinition(
 				// Validation/read failures cannot have changed the target. Once a write
 				// starts, its outcome remains uncertain unless it completes successfully.
 				if (writeStarted) throw error;
-				throw new AgentToolError(error instanceof Error ? error.message : String(error), {
-					executionOutcome: "not_started",
-				});
+				throw new AgentToolError(
+					error instanceof Error ? error.message : String(error),
+					{ executionOutcome: "not_started" },
+					{ executionOutcome: "not_started" },
+				);
 			}
 		},
 		renderCall(args, theme, context) {

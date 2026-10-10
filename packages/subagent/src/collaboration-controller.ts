@@ -6,6 +6,7 @@ import {
 	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
 	COLLABORATION_TEAM_TOOL_NAMES,
+	CollaborationAdmissionError,
 	type CollaborationArguments,
 	CollaborationError,
 	type CollaborationMessage,
@@ -108,7 +109,7 @@ export class CollaborationController {
 		this.assertCaller(caller);
 		const path = resolveAgentPath(caller.agentPath, target);
 		const record = this.store.read().agents.find((agent) => agent.path === path);
-		if (!record) throw new CollaborationError("unknown_agent", "Unknown child agent");
+		if (!record) throw new CollaborationAdmissionError("unknown_agent", "Unknown child agent");
 		return record;
 	}
 
@@ -391,7 +392,7 @@ export class CollaborationController {
 			if (signal?.aborted) throw new CollaborationError("interrupted", "Spawn was cancelled before admission");
 			this.assertCaller(caller);
 			if (caller.agentPath !== "/root")
-				throw new CollaborationError("forbidden", "Only /root may create agents", "nested_delegation");
+				throw new CollaborationAdmissionError("forbidden", "Only /root may create agents", "nested_delegation");
 			const requestedTools = delegation?.capabilities.tools;
 			if (requestedTools && requestedTools !== "inherit") {
 				const teamTools = requestedTools.filter((name) => COLLABORATION_TEAM_TOOL_NAMES.has(name));
@@ -406,12 +407,12 @@ export class CollaborationController {
 			const snapshot = this.store.read();
 			const path = childAgentPath(caller.agentPath, taskName);
 			if (snapshot.agents.some((agent) => agent.path === path))
-				throw new CollaborationError("busy", "Agent name already exists", undefined, [taskName]);
+				throw new CollaborationAdmissionError("busy", "Agent name already exists", undefined, [taskName]);
 			// Closed records are retained for audit but free their team slot; names are never reused.
 			if (snapshot.agents.filter((agent) => agent.status !== "closed").length >= COLLABORATION_LIMITS.maxAgents - 1)
-				throw new CollaborationError("limit_reached", "Team agent limit reached", "team_agents_full");
+				throw new CollaborationAdmissionError("limit_reached", "Team agent limit reached", "team_agents_full");
 			if (snapshot.agents.length >= COLLABORATION_LIMITS.maxRetainedAgents)
-				throw new CollaborationError(
+				throw new CollaborationAdmissionError(
 					"limit_reached",
 					"Team retained-agent history limit reached",
 					"team_history_full",
@@ -477,7 +478,7 @@ export class CollaborationController {
 			this.assertReady();
 			if (signal?.aborted) throw new CollaborationError("interrupted", "Followup was cancelled before admission");
 			if (caller.agentPath !== "/root")
-				throw new CollaborationError("forbidden", "Only /root may direct agents", "nested_delegation");
+				throw new CollaborationAdmissionError("forbidden", "Only /root may direct agents", "nested_delegation");
 			const requestedTools = delegation?.capabilities.tools;
 			if (requestedTools && requestedTools !== "inherit") {
 				const teamTools = requestedTools.filter((name) => COLLABORATION_TEAM_TOOL_NAMES.has(name));
@@ -496,7 +497,7 @@ export class CollaborationController {
 				record.status === "pending" ||
 				record.status === "closed"
 			)
-				throw new CollaborationError("busy", "Agent cannot accept a follow-up now");
+				throw new CollaborationAdmissionError("busy", "Agent cannot accept a follow-up now");
 			this.store.assertTurnCapacity();
 			this.checkCapacity();
 			this.checkMailboxCapacity(this.store.read(), record.parent);
@@ -539,7 +540,7 @@ export class CollaborationController {
 		const pending = (snapshot.messages ?? []).filter((message) => message.to === target).length;
 		const reserved = snapshot.agents.filter((agent) => agent.parent === target && agent.completionPending).length;
 		if (pending + reserved >= COLLABORATION_LIMITS.maxPendingMessages)
-			throw new CollaborationError(
+			throw new CollaborationAdmissionError(
 				"limit_reached",
 				"Mailbox is full, including reserved completion notifications",
 				"mailbox_full",
@@ -556,7 +557,7 @@ export class CollaborationController {
 			const path = resolveAgentPath(caller.agentPath, target);
 			const snapshot = this.store.read();
 			if (path !== "/root" && !snapshot.agents.some((agent) => agent.path === path && agent.status !== "closed"))
-				throw new CollaborationError("unknown_agent", "Unknown receiving agent");
+				throw new CollaborationAdmissionError("unknown_agent", "Unknown receiving agent");
 			this.checkMailboxCapacity(snapshot, path);
 			const message: CollaborationMessage = {
 				id: randomUUID(),
@@ -676,7 +677,7 @@ export class CollaborationController {
 
 	private checkCapacity(): void {
 		if (new Set([...this.active.keys(), ...this.loading.keys()]).size >= COLLABORATION_LIMITS.maxActiveSessions - 1)
-			throw new CollaborationError("limit_reached", "Team execution limit reached", "execution_slots_full");
+			throw new CollaborationAdmissionError("limit_reached", "Team execution limit reached", "execution_slots_full");
 	}
 
 	/** A reserved turn owns capacity until startup settles, even if its host ignores cancellation. */
@@ -931,7 +932,7 @@ export class CollaborationController {
 			this.assertReady();
 			const record = this.target(caller, target);
 			if (record.path === caller.agentPath)
-				throw new CollaborationError("forbidden", "An agent cannot interrupt itself");
+				throw new CollaborationAdmissionError("forbidden", "An agent cannot interrupt itself");
 			const loading = this.loading.get(record.path);
 			if (loading) {
 				this.update(record.path, (current) => {
@@ -960,9 +961,9 @@ export class CollaborationController {
 			this.assertReady();
 			const record = this.target(caller, target);
 			if (record.path === caller.agentPath)
-				throw new CollaborationError("forbidden", "An agent cannot close itself");
+				throw new CollaborationAdmissionError("forbidden", "An agent cannot close itself");
 			if (!record.path.startsWith(`${caller.agentPath}/`))
-				throw new CollaborationError("forbidden", "Agents can only close their own descendants");
+				throw new CollaborationAdmissionError("forbidden", "Agents can only close their own descendants");
 			const session = this.sessions.get(record.path);
 			if (record.status === "closed") return { path: record.path, previous: record.status, session };
 			if (
@@ -971,12 +972,12 @@ export class CollaborationController {
 				this.active.has(record.path) ||
 				this.loading.has(record.path)
 			)
-				throw new CollaborationError("busy", "Interrupt a running child before closing it");
+				throw new CollaborationAdmissionError("busy", "Interrupt a running child before closing it");
 			const openDescendants = this.store
 				.read()
 				.agents.filter((agent) => agent.path.startsWith(`${record.path}/`) && agent.status !== "closed");
 			if (openDescendants.length)
-				throw new CollaborationError("busy", "Close descendants before closing this agent");
+				throw new CollaborationAdmissionError("busy", "Close descendants before closing this agent");
 			assertAgentTransition(record.status, "closed");
 			this.update(record.path, (current) => {
 				current.status = "closed";

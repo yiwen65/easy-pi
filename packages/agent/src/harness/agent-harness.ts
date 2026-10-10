@@ -15,6 +15,7 @@ import type {
 import { isRetryableAssistantError, validateToolArguments } from "@earendil-works/pi-ai";
 import { fingerprintAssistantTurn, fingerprintToolResult } from "../no-progress.ts";
 import { getDefaultStreamFn } from "../stream-fn.ts";
+import { getToolErrorOutcome } from "../tool-outcome.ts";
 import type {
 	AgentMessage,
 	AgentTool,
@@ -50,7 +51,6 @@ import type {
 import { buildSessionContext } from "./session/index.ts";
 import { formatSkillInvocation } from "./skills.ts";
 import type { TelemetryContext } from "./telemetry.ts";
-import { hasConfirmedBashExit } from "./tools/bash-outcome.ts";
 import type { AgentHarnessResources, PromptTemplate, Skill } from "./types.ts";
 
 export class LaneBusy extends TaggedError("LaneBusy")<{
@@ -2065,9 +2065,12 @@ export class AgentHarness implements AgentLane {
 					...errorToolResult(toolCall, error instanceof Error ? error.message : String(error)),
 					details: error instanceof AgentToolError ? error.details : {},
 				}) as ToolResultMessage;
-				const confirmedExit =
-					hasConfirmedBashExit(toolCall.name, diagnostic.details) && diagnostic.details.command === args.command;
-				if (!confirmedExit && (error instanceof ToolTimeoutError || this.activeAbort?.signal.aborted)) {
+				const outcomeKnown = getToolErrorOutcome(error, toolCall.name, args) !== "unknown";
+				if (
+					!outcomeKnown &&
+					contract?.readOnly !== true &&
+					(error instanceof ToolTimeoutError || this.activeAbort?.signal.aborted)
+				) {
 					await this.durableSession.appendRecord({
 						type: "tool_reconciliation",
 						id: this.nextId(),
@@ -2083,7 +2086,7 @@ export class AgentHarness implements AgentLane {
 					});
 					return;
 				}
-				if (!replaySafe && !confirmedExit) {
+				if (!replaySafe && !outcomeKnown) {
 					await this.durableSession.appendRecord({
 						type: "tool_reconciliation",
 						id: this.nextId(),
@@ -2096,7 +2099,9 @@ export class AgentHarness implements AgentLane {
 					});
 					return;
 				}
-				if (attempt <= maxRetries) continue;
+				// Do not overlap a retry with a timed-out physical invocation or retry user cancellation.
+				if (!(error instanceof ToolTimeoutError) && !this.activeAbort?.signal.aborted && attempt <= maxRetries)
+					continue;
 				result = {
 					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
 					details: error instanceof AgentToolError ? error.details : {},

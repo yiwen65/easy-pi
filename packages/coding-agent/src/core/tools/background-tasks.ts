@@ -28,6 +28,7 @@ export function createBackgroundTaskToolDefinitions(
 		description: waitFor.description,
 		parameters: waitFor.parameters,
 		executionMode: waitFor.executionMode,
+		contract: waitFor.contract,
 		execute: async (toolCallId, params, signal, onUpdate) => {
 			const result = await waitFor.execute(toolCallId, params as never, signal, onUpdate, { env });
 			const details = result.details as { task?: { id?: string }; timedOut?: boolean } | undefined;
@@ -46,6 +47,7 @@ export function createBackgroundTaskToolDefinitions(
 		description: tool.description,
 		parameters: tool.parameters,
 		executionMode: tool.executionMode,
+		contract: tool.contract,
 		execute: (toolCallId, params, signal, onUpdate) =>
 			tool.execute(toolCallId, params as never, signal, onUpdate, { env }),
 	}));

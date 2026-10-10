@@ -694,7 +694,12 @@ export class AgentSession {
 		};
 		const previousResult = this.agent.onToolResult;
 		this.agent.onToolResult = async (message, context) => {
-			this._taskRecovery.result(message, context.toolCall, context.terminate, message.isError);
+			this._taskRecovery.result(
+				message,
+				context.toolCall,
+				context.terminate,
+				context.executionOutcome === "unknown",
+			);
 			await previousResult?.(message, context);
 		};
 	}

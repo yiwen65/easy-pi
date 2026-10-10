@@ -41,6 +41,7 @@ export interface BackgroundTaskManagerLike {
 	wait(
 		id: string,
 		timeoutMs: number,
+		signal?: AbortSignal,
 	): Promise<Result<{ task: BackgroundTaskRecord; timedOut: boolean }, ExecutionError>>;
 	readOutput(id: string, maxBytes?: number): Result<BackgroundTaskOutput, ExecutionError>;
 	onStart(listener: (task: BackgroundTaskRecord) => void): () => void;

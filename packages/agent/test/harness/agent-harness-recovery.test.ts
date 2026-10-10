@@ -56,6 +56,37 @@ function finalStream() {
 }
 
 describe("durable atomic recovery", () => {
+	it("cancelling a read-only observation aborts the run without requiring effect reconciliation", async () => {
+		const session = new Session(new InMemorySessionStorage({ id: "readonly-cancel", createdAt: 1 }));
+		let entered!: () => void;
+		const ready = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let requests = 0;
+		const { harness: driver } = await harness(session, () => {
+			requests++;
+			const stream = createAssistantMessageEventStream();
+			stream.end({ ...message("toolUse"), content: [call] });
+			return stream;
+		}, [
+			tool(
+				async (_id, _args, signal) =>
+					new Promise((_resolve, reject) => {
+						signal?.addEventListener("abort", () => reject(new Error("observation cancelled")), { once: true });
+						entered();
+					}),
+				{ readOnly: true },
+			),
+		]);
+		const running = driver.prompt("observe");
+		await ready;
+		await driver.abort();
+		const outcome = await running;
+		expect(outcome.ok && outcome.value.kind).toBe("aborted");
+		expect(requests).toBe(1);
+		expect(await session.findRecords({ type: "tool_reconciliation" })).toHaveLength(0);
+		await driver.close();
+	});
 	it("commits a non-replay-safe Bash exit error and continues without executing it twice", async () => {
 		const session = new Session(new InMemorySessionStorage({ id: "bash-exit", createdAt: 1 }));
 		let effects = 0;

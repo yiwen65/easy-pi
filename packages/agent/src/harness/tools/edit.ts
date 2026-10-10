@@ -1,4 +1,5 @@
 import { type Static, Type } from "typebox";
+import { AgentToolError } from "../../types.ts";
 import type { AgentHarnessTool, FileError } from "../types.ts";
 import {
 	applyEditsToNormalizedContent,
@@ -98,41 +99,54 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 		parameters: editSchema,
 		prepareArguments: prepareEditArguments,
 		async execute(_toolCallId, input, signal, _onUpdate, { env }) {
-			const { path, edits } = validateEditInput(input);
-			const absolutePath = await resolveToolPath(env, path, signal);
-			return withFileMutationQueue(env, absolutePath, async () => {
-				if (signal?.aborted) throw new Error("Operation aborted");
-				const info = await env.fileInfo(absolutePath, signal);
-				if (!info.ok) throw editAccessError(path, info.error);
-				if (info.value.kind !== "file" && info.value.kind !== "symlink") {
-					throw new Error(`Could not edit file: ${path}. Path is not a file.`);
-				}
+			let writeStarted = false;
+			try {
+				const { path, edits } = validateEditInput(input);
+				const absolutePath = await resolveToolPath(env, path, signal);
+				return await withFileMutationQueue(env, absolutePath, async () => {
+					if (signal?.aborted) throw new Error("Operation aborted");
+					const info = await env.fileInfo(absolutePath, signal);
+					if (!info.ok) throw editAccessError(path, info.error);
+					if (info.value.kind !== "file" && info.value.kind !== "symlink") {
+						throw new Error(`Could not edit file: ${path}. Path is not a file.`);
+					}
 
-				const readResult = await env.readTextFile(absolutePath, signal);
-				if (!readResult.ok) throw editAccessError(path, readResult.error);
-				if (signal?.aborted) throw new Error("Operation aborted");
+					const readResult = await env.readTextFile(absolutePath, signal);
+					if (!readResult.ok) throw editAccessError(path, readResult.error);
+					if (signal?.aborted) throw new Error("Operation aborted");
 
-				const { bom, text: content } = stripBom(readResult.value);
-				const originalEnding = detectLineEnding(content);
-				const normalizedContent = normalizeToLF(content);
-				const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
-				if (signal?.aborted) throw new Error("Operation aborted");
+					const { bom, text: content } = stripBom(readResult.value);
+					const originalEnding = detectLineEnding(content);
+					const normalizedContent = normalizeToLF(content);
+					const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+					if (signal?.aborted) throw new Error("Operation aborted");
 
-				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-				const writeResult = await env.writeFile(absolutePath, finalContent, signal);
-				if (!writeResult.ok) throw editAccessError(path, writeResult.error);
-				if (signal?.aborted) throw new Error("Operation aborted");
+					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+					writeStarted = true;
+					const writeResult = await env.writeFile(absolutePath, finalContent, signal);
+					if (!writeResult.ok) throw editAccessError(path, writeResult.error);
+					if (signal?.aborted) throw new Error("Operation aborted");
 
-				const diffResult = generateDiffString(baseContent, newContent);
-				return {
-					content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${path}.` }],
-					details: {
-						diff: diffResult.diff,
-						patch: generateUnifiedPatch(path, baseContent, newContent),
-						firstChangedLine: diffResult.firstChangedLine,
+					const diffResult = generateDiffString(baseContent, newContent);
+					return {
+						content: [{ type: "text", text: `Successfully replaced ${edits.length} block(s) in ${path}.` }],
+						details: {
+							diff: diffResult.diff,
+							patch: generateUnifiedPatch(path, baseContent, newContent),
+							firstChangedLine: diffResult.firstChangedLine,
+						},
+					};
+				});
+			} catch (error) {
+				if (writeStarted) throw error;
+				throw new AgentToolError(
+					error instanceof Error ? error.message : String(error),
+					{},
+					{
+						executionOutcome: "not_started",
 					},
-				};
-			});
+				);
+			}
 		},
 	};
 }

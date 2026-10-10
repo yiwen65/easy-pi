@@ -146,6 +146,22 @@ async function fixture(
 const tool = (name: string, args: Record<string, unknown>) =>
 	fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 
+test("a collaboration persistence failure remains unknown and never starts or repeats a child", async () => {
+	let children = 0;
+	const f = await fixture(undefined, [], () => children++);
+	vi.spyOn(f.store, "commit").mockImplementationOnce(() => {
+		throw new Error("synthetic uncertain persistence");
+	});
+	f.faux.setResponses([tool("spawn_agent", spawnArgs("worker", "one task")), fauxAssistantMessage("inspect")]);
+	await f.session.prompt("spawn");
+	expect(children).toBe(0);
+	expect(f.session.suspendedTaskRecovery).toMatchObject([
+		{ state: { status: "needs_reconciliation", tools: [{ dispatched: true, safe: false }] } },
+	]);
+	expect(f.session.suspendedTaskRecovery[0].state.tools[0].result).toBeUndefined();
+	await expect(f.controller.settled()).rejects.toThrow("Failed to persist");
+});
+
 test("all six tools execute through native root/child sessions, wait sees completion, idle send does not run", async () => {
 	const f = await fixture();
 	let rootTurn = 0;

@@ -1,3 +1,5 @@
+import { AgentToolError, type AgentToolErrorOptions } from "../../types.ts";
+
 export type ExecutionToolErrorCode =
 	| "INVALID_INPUT"
 	| "NOT_FOUND"
@@ -11,13 +13,17 @@ export type ExecutionToolErrorCode =
 	| "ABORTED";
 
 /** Stable errors from execution tools and their optional path policy. */
-export class ExecutionToolError<TDetails = unknown> extends Error {
+export class ExecutionToolError<TDetails = unknown> extends AgentToolError<TDetails | undefined> {
 	readonly code: ExecutionToolErrorCode;
-	readonly details?: TDetails;
-	constructor(code: ExecutionToolErrorCode, message: string, details?: TDetails, cause?: Error) {
-		super(`${code}\n\n${message}`, cause === undefined ? undefined : { cause });
+	constructor(
+		code: ExecutionToolErrorCode,
+		message: string,
+		details?: TDetails,
+		cause?: Error,
+		options?: AgentToolErrorOptions,
+	) {
+		super(`${code}\n\n${message}`, details, { ...options, ...(cause ? { cause } : {}) });
 		this.name = "ExecutionToolError";
 		this.code = code;
-		this.details = details;
 	}
 }

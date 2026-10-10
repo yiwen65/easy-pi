@@ -116,6 +116,7 @@ export function createTaskListTool<TContext extends ExecutionToolContext = Execu
 		description:
 			"List background bash tasks started with run_in_background or promoted from a timed-out foreground command. By default only active tasks are shown; pass active_only=false to include finished ones. Active rows include `silent=` (time since the task last produced output).",
 		parameters: taskListSchema,
+		contract: { readOnly: true },
 		replay: "safe",
 		async execute(_toolCallId, { active_only }, _signal, _onUpdate, context) {
 			const manager = requireManager(context);
@@ -141,6 +142,7 @@ export function createTaskOutputTool<TContext extends ExecutionToolContext = Exe
 		label: "task_output",
 		description: `Non-blocking snapshot of a background bash task's output: the most recent ${MAX_OUTPUT_PREVIEW_BYTES / 1024}KB at most, plus the output_path of the full log for paged reading with the read tool. Never waits for the task.`,
 		parameters: taskOutputSchema,
+		contract: { readOnly: true },
 		replay: "safe",
 		async execute(_toolCallId, { task_id, max_bytes }, _signal, _onUpdate, context) {
 			const manager = requireManager(context);
@@ -214,12 +216,13 @@ export function createWaitForTool<TContext extends ExecutionToolContext = Execut
 		label: "wait_for",
 		description: `Block until a background bash task reaches a terminal state or the timeout elapses (max ${MAX_WAIT_TIMEOUT_SECONDS}s). Returns the task snapshot either way; a timeout does not stop the task.`,
 		parameters: waitForSchema,
-		replay: "never",
+		contract: { readOnly: true },
+		replay: "safe",
 		async execute(_toolCallId, { task_id, timeout }, signal, _onUpdate, context) {
 			const manager = requireManager(context);
 			if (signal?.aborted) throw new ExecutionToolError("ABORTED", "Wait aborted");
 			const timeoutSeconds = Math.min(Math.max(1, timeout ?? MAX_WAIT_TIMEOUT_SECONDS), MAX_WAIT_TIMEOUT_SECONDS);
-			const result = await manager.wait(task_id, timeoutSeconds * 1000);
+			const result = await manager.wait(task_id, timeoutSeconds * 1000, signal);
 			if (signal?.aborted) throw new ExecutionToolError("ABORTED", "Wait aborted");
 			if (!result.ok) throw notFound(task_id);
 			const { task, timedOut } = result.value;
