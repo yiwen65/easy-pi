@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stream as streamMistral } from "../src/api/mistral-conversations.ts";
 import { getModel } from "../src/compat.ts";
 import type { Context, FetchFunction, ProviderResponse } from "../src/types.ts";
@@ -232,7 +232,7 @@ describe("Mistral HTTP transport", () => {
 		]);
 	});
 
-	it("parses native thinking, text, tool calls, and cached-token usage", async () => {
+	it("parses native thinking, text, fragmented tool calls, and cached-token usage", async () => {
 		const model = getModel("mistral", "mistral-large-latest");
 		const context: Context = {
 			messages: [{ role: "user", content: "hello", timestamp: 1 }],
@@ -289,9 +289,8 @@ describe("Mistral HTTP transport", () => {
 						delta: {
 							tool_calls: [
 								{
-									id: "abc123456",
 									index: 0,
-									function: { name: "lookup", arguments: '"pi"}' },
+									function: { name: "", arguments: '"pi"}' },
 								},
 							],
 						},
@@ -318,6 +317,128 @@ describe("Mistral HTTP transport", () => {
 			{ type: "toolCall", id: "abc123456", name: "lookup", arguments: { query: "pi" } },
 		]);
 		expect(message.usage).toMatchObject({ input: 7, output: 4, cacheRead: 3, cacheWrite: 0, totalTokens: 14 });
+	});
+
+	it("keeps interleaved indexed tool calls separate and preserves their first IDs and names", async () => {
+		const model = getModel("mistral", "mistral-large-latest");
+		const context: Context = { messages: [] };
+		const fetch: FetchFunction = async () =>
+			createSseResponse([
+				{
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{ index: 0, id: "abc123456", function: { name: "lookup", arguments: '{"query":' } },
+									{ index: 1, id: "def123456", function: { name: "count", arguments: '{"limit":' } },
+								],
+							},
+						},
+					],
+				},
+				{
+					choices: [
+						{
+							finish_reason: "tool_calls",
+							delta: {
+								tool_calls: [
+									{ index: 1, function: { name: "", arguments: "2}" } },
+									{ index: 0, id: "changedid", function: { name: "changed_name", arguments: '"pi"}' } },
+								],
+							},
+						},
+					],
+				},
+			]);
+		const response = streamMistral(model, context, { apiKey: "test", fetch });
+		const toolEvents: Array<{ type: string; contentIndex: number }> = [];
+		for await (const event of response) {
+			if (event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end") {
+				toolEvents.push({ type: event.type, contentIndex: event.contentIndex });
+			}
+		}
+		const message = await response.result();
+
+		expect(message.content).toEqual([
+			{ type: "toolCall", id: "abc123456", name: "lookup", arguments: { query: "pi" } },
+			{ type: "toolCall", id: "def123456", name: "count", arguments: { limit: 2 } },
+		]);
+		expect(toolEvents.filter((event) => event.type === "toolcall_start").map((event) => event.contentIndex)).toEqual([
+			0, 1,
+		]);
+		expect(toolEvents.filter((event) => event.type === "toolcall_delta").map((event) => event.contentIndex)).toEqual([
+			0, 1, 1, 0,
+		]);
+		expect(toolEvents.filter((event) => event.type === "toolcall_end").map((event) => event.contentIndex)).toEqual([
+			0, 1,
+		]);
+	});
+
+	it("uses IDs to merge tool fragments when indexes are absent", async () => {
+		const model = getModel("mistral", "mistral-large-latest");
+		const fetch: FetchFunction = async () =>
+			createSseResponse([
+				{
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{ id: "abc123456", function: { name: "lookup", arguments: '{"query":' } },
+									{ id: "def123456", function: { name: "count", arguments: '{"limit":' } },
+								],
+							},
+						},
+					],
+				},
+				{
+					choices: [
+						{
+							finish_reason: "tool_calls",
+							delta: {
+								tool_calls: [
+									{ id: "def123456", function: { name: "", arguments: "2}" } },
+									{ id: "abc123456", function: { name: "", arguments: '"pi"}' } },
+								],
+							},
+						},
+					],
+				},
+			]);
+
+		const message = await streamMistral(model, { messages: [] }, { apiKey: "test", fetch }).result();
+
+		expect(message.content).toEqual([
+			{ type: "toolCall", id: "abc123456", name: "lookup", arguments: { query: "pi" } },
+			{ type: "toolCall", id: "def123456", name: "count", arguments: { limit: 2 } },
+		]);
+	});
+
+	it.each([undefined, "null"])("merges anonymous tool fragments without indexes (ID: %s)", async (id) => {
+		const model = getModel("mistral", "mistral-large-latest");
+		const fetch: FetchFunction = async () =>
+			createSseResponse([
+				{ choices: [{ delta: { tool_calls: [{ id, function: { name: "lookup", arguments: '{"query":' } }] } }] },
+				{
+					choices: [
+						{
+							finish_reason: "tool_calls",
+							delta: { tool_calls: [{ id, function: { name: "", arguments: '"pi"}' } }] },
+						},
+					],
+				},
+			]);
+
+		const message = await streamMistral(model, { messages: [] }, { apiKey: "test", fetch }).result();
+
+		expect(message.stopReason).toBe("toolUse");
+		expect(message.content).toEqual([
+			{
+				type: "toolCall",
+				id: expect.stringMatching(/^[a-zA-Z0-9]{9}$/),
+				name: "lookup",
+				arguments: { query: "pi" },
+			},
+		]);
 	});
 
 	it("parses SSE and UTF-8 sequences split across transport chunks", async () => {
@@ -389,27 +510,218 @@ describe("Mistral HTTP transport", () => {
 		expect(message.stopReason).toBe("aborted");
 	});
 
-	it("applies the request timeout while waiting for an SSE chunk", async () => {
-		const model = getModel("mistral", "mistral-large-latest");
-		const context: Context = {
-			messages: [{ role: "user", content: "hello", timestamp: 1 }],
-		};
-		const fetch: FetchFunction = async () =>
-			new Response(
-				new ReadableStream({
-					start() {},
-				}),
-				{ headers: { "content-type": "text/event-stream" } },
-			);
+	describe("response header deadline", () => {
+		let headerTimeoutSignal: AbortSignal;
 
-		const message = await streamMistral(model, context, {
-			apiKey: "test",
-			fetch,
-			timeoutMs: 5,
-		}).result();
+		beforeEach(() => {
+			vi.useFakeTimers();
+			vi.spyOn(AbortSignal, "timeout").mockImplementation((timeoutMs) => {
+				const controller = new AbortController();
+				headerTimeoutSignal = controller.signal;
+				vi.spyOn(headerTimeoutSignal, "addEventListener");
+				vi.spyOn(headerTimeoutSignal, "removeEventListener");
+				setTimeout(() => controller.abort(new DOMException("The operation timed out", "TimeoutError")), timeoutMs);
+				return headerTimeoutSignal;
+			});
+		});
 
-		expect(message.stopReason).toBe("error");
-		expect(message.errorMessage).toMatch(/timeout/i);
+		afterEach(() => {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+		});
+
+		it("times out stalled response headers with a provider diagnostic and cleans up listeners", async () => {
+			const model = getModel("mistral", "mistral-large-latest");
+			const fetch: FetchFunction = (_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+				});
+			const result = streamMistral(model, { messages: [] }, { apiKey: "test", fetch, timeoutMs: 20 }).result();
+
+			await vi.advanceTimersByTimeAsync(20);
+			const message = await result;
+
+			expect(message.stopReason).toBe("error");
+			expect(message.errorMessage).toBe("Mistral response headers timed out after 20ms");
+			expect(headerTimeoutSignal.removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+		});
+
+		it.each([false, true])(
+			"keeps a signal-bound active body past the deadline (caller signal: %s)",
+			async (withCaller) => {
+				const model = getModel("mistral", "mistral-large-latest");
+				const caller = withCaller ? new AbortController() : undefined;
+				let fetchSignal: AbortSignal | null | undefined;
+				const fetchAborted = vi.fn();
+				const encoder = new TextEncoder();
+				const fetch: FetchFunction = async (_input, init) => {
+					fetchSignal = init?.signal;
+					let timer: ReturnType<typeof setTimeout>;
+					let onAbort: () => void;
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								onAbort = () => {
+									fetchAborted();
+									clearTimeout(timer);
+									controller.error(fetchSignal?.reason);
+								};
+								fetchSignal?.addEventListener("abort", onAbort, { once: true });
+								if (fetchSignal?.aborted) {
+									onAbort();
+									return;
+								}
+								let count = 0;
+								const send = () => {
+									if (count++ < 5) {
+										controller.enqueue(
+											encoder.encode(
+												`data: ${JSON.stringify({ choices: [{ delta: { content: "x" } }] })}\n\n`,
+											),
+										);
+										timer = setTimeout(send, 10);
+									} else {
+										fetchSignal?.removeEventListener("abort", onAbort);
+										controller.enqueue(encoder.encode(`data: ${JSON.stringify(createTerminalEvent())}\n\n`));
+										controller.close();
+									}
+								};
+								timer = setTimeout(send, 10);
+							},
+							cancel() {
+								clearTimeout(timer);
+								fetchSignal?.removeEventListener("abort", onAbort);
+							},
+						}),
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				};
+				const result = streamMistral(
+					model,
+					{ messages: [] },
+					{
+						apiKey: "test",
+						fetch,
+						signal: caller?.signal,
+						timeoutMs: 20,
+					},
+				).result();
+
+				await vi.advanceTimersByTimeAsync(60);
+				const message = await result;
+
+				expect(headerTimeoutSignal.aborted).toBe(true);
+				expect(fetchSignal?.aborted).toBe(false);
+				expect(fetchAborted).not.toHaveBeenCalled();
+				expect(message.stopReason).toBe("stop");
+				expect(message.content).toEqual([{ type: "text", text: "xxxxx" }]);
+				expect(headerTimeoutSignal.removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+			},
+		);
+
+		it("cancels while awaiting headers without misclassifying caller abort as timeout", async () => {
+			const model = getModel("mistral", "mistral-large-latest");
+			const caller = new AbortController();
+			vi.spyOn(caller.signal, "removeEventListener");
+			const fetch: FetchFunction = (_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+				});
+			const result = streamMistral(
+				model,
+				{ messages: [] },
+				{
+					apiKey: "test",
+					fetch,
+					signal: caller.signal,
+					timeoutMs: 20,
+				},
+			).result();
+
+			await vi.advanceTimersByTimeAsync(0);
+			caller.abort(new Error("Caller cancelled headers"));
+			const message = await result;
+
+			expect(message.stopReason).toBe("aborted");
+			expect(message.errorMessage).toBe("Caller cancelled headers");
+			expect(headerTimeoutSignal.removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+			expect(caller.signal.removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+		});
+
+		it("passes an already aborted caller signal to fetch", async () => {
+			const model = getModel("mistral", "mistral-large-latest");
+			const caller = new AbortController();
+			caller.abort(new Error("Already cancelled"));
+			const fetch: FetchFunction = async (_input, init) => {
+				expect(init?.signal?.aborted).toBe(true);
+				throw init?.signal?.reason;
+			};
+
+			const message = await streamMistral(
+				model,
+				{ messages: [] },
+				{
+					apiKey: "test",
+					fetch,
+					signal: caller.signal,
+					timeoutMs: 20,
+				},
+			).result();
+
+			expect(message.stopReason).toBe("aborted");
+			expect(message.errorMessage).toBe("Already cancelled");
+			expect(headerTimeoutSignal.addEventListener).not.toHaveBeenCalled();
+		});
+
+		it("cancels a blocked reader after headers and removes caller listeners", async () => {
+			const model = getModel("mistral", "mistral-large-latest");
+			const caller = new AbortController();
+			vi.spyOn(caller.signal, "addEventListener");
+			vi.spyOn(caller.signal, "removeEventListener");
+			const cancel = vi.fn();
+			const body = new ReadableStream<Uint8Array>({ cancel });
+			const fetch: FetchFunction = async () => new Response(body);
+			const result = streamMistral(
+				model,
+				{ messages: [] },
+				{
+					apiKey: "test",
+					fetch,
+					signal: caller.signal,
+					timeoutMs: 20,
+				},
+			).result();
+
+			await vi.advanceTimersByTimeAsync(30);
+			expect(body.locked).toBe(true);
+			caller.abort(new Error("Caller cancelled body"));
+			const message = await result;
+
+			expect(message.stopReason).toBe("aborted");
+			expect(message.errorMessage).toBe("Caller cancelled body");
+			expect(cancel).toHaveBeenCalledOnce();
+			expect(body.locked).toBe(false);
+			expect(caller.signal.addEventListener).toHaveBeenCalledTimes(2);
+			expect(caller.signal.removeEventListener).toHaveBeenCalledTimes(2);
+		});
+
+		it("preserves transport body idle timeouts after the header deadline", async () => {
+			const model = getModel("mistral", "mistral-large-latest");
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					setTimeout(() => controller.error(new Error("Mistral transport body idle timeout")), 40);
+				},
+			});
+			const fetch: FetchFunction = async () => new Response(body);
+			const result = streamMistral(model, { messages: [] }, { apiKey: "test", fetch, timeoutMs: 20 }).result();
+
+			await vi.advanceTimersByTimeAsync(40);
+			const message = await result;
+
+			expect(message.stopReason).toBe("error");
+			expect(message.errorMessage).toBe("Mistral transport body idle timeout");
+			expect(body.locked).toBe(false);
+		});
 	});
 
 	it("preserves HTTP status and response bodies in errors", async () => {

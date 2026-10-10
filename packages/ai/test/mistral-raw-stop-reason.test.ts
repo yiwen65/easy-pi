@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { stream as streamMistral } from "../src/api/mistral-conversations.ts";
 import { getModel } from "../src/compat.ts";
 import type { Context, FetchFunction } from "../src/types.ts";
+import { isRetryableAssistantError, retryAssistantCall } from "../src/utils/retry.ts";
 
 const model = getModel("mistral", "devstral-medium-latest");
 const context: Context = {
@@ -45,7 +46,8 @@ describe("Mistral raw stop reasons", () => {
 
 		expect(message.stopReason).toBe("error");
 		expect(message.rawStopReason).toBe("error");
-		expect(message.errorMessage).toBe("Provider stopped with: error");
+		expect(message.errorMessage).toBe("Provider stopped with: error (server error)");
+		expect(isRetryableAssistantError(message)).toBe(true);
 	});
 
 	it("treats unknown Mistral finish reasons as provider error stops", async () => {
@@ -57,5 +59,39 @@ describe("Mistral raw stop reasons", () => {
 		expect(message.stopReason).toBe("error");
 		expect(message.rawStopReason).toBe("unmapped_error");
 		expect(message.errorMessage).toBe("Provider stopped with: unmapped_error");
+		expect(isRetryableAssistantError(message)).toBe(false);
+	});
+
+	it("retries transient Mistral stops through the bounded outer policy", async () => {
+		let attempts = 0;
+		const message = await retryAssistantCall(
+			() => {
+				attempts++;
+				return streamMistral(model, context, { apiKey: "test", fetch: createFetch("error") }).result();
+			},
+			{ enabled: true, maxRetries: 2, baseDelayMs: 0 },
+			undefined,
+		);
+
+		expect(attempts).toBe(3);
+		expect(message.stopReason).toBe("error");
+		expect(message.rawStopReason).toBe("error");
+	});
+
+	it("completes when the next outer retry succeeds", async () => {
+		let attempts = 0;
+		const message = await retryAssistantCall(
+			() =>
+				streamMistral(model, context, {
+					apiKey: "test",
+					fetch: createFetch(attempts++ === 0 ? "error" : "stop"),
+				}).result(),
+			{ enabled: true, maxRetries: 2, baseDelayMs: 0 },
+			undefined,
+		);
+
+		expect(attempts).toBe(2);
+		expect(message.stopReason).toBe("stop");
+		expect(message.rawStopReason).toBe("stop");
 	});
 });
