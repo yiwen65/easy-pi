@@ -18,6 +18,8 @@ const openAIResponsesEarlyEofMessage = "OpenAI Responses stream ended before a t
 const wrappedDnsLookupError =
 	"The pending stream has been canceled (caused by: getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com)";
 const terminatedSocketError = "terminated (UND_ERR_SOCKET: other side closed)";
+const pendingStreamCanceledMessage = "The pending stream has been canceled";
+const serverBusyMessage = "Codex error: Our servers are currently busy. Please try again later.";
 
 describe("provider retry classification", () => {
 	it("matches explicit provider retry guidance", () => {
@@ -74,6 +76,50 @@ describe("provider retry classification", () => {
 		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
 		expect(isRetryableAssistantError(message)).toBe(true);
 		expect(isNetworkAssistantError(message)).toBe(true);
+	});
+
+	it.each([pendingStreamCanceledMessage, `${pendingStreamCanceledMessage} (caused by: socket closed)`])(
+		"classifies HTTP/2 pending stream cancellation as retryable and network: %s",
+		(errorMessage) => {
+			const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			expect(isRetryableAssistantError(message)).toBe(true);
+			expect(isNetworkAssistantError(message)).toBe(true);
+		},
+	);
+
+	it.each(["server_busy", serverBusyMessage])(
+		"classifies server-busy errors as transient, not network: %s",
+		(errorMessage) => {
+			const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			expect(isRetryableAssistantError(message)).toBe(true);
+			expect(isNetworkAssistantError(message)).toBe(false);
+		},
+	);
+
+	it.each([
+		"server_busy: insufficient_quota",
+		`${serverBusyMessage} billing limit exceeded`,
+		`${pendingStreamCanceledMessage}: quota exceeded`,
+		"server_busy: GoUsageLimitError",
+		"servers are currently busy: FreeUsageLimitError",
+	])("keeps quota/billing precedence over new transient wording: %s", (errorMessage) => {
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(message)).toBe(false);
+	});
+
+	it.each([pendingStreamCanceledMessage, "server_busy", serverBusyMessage])(
+		"does not classify user-aborted transient errors as retryable or network: %s",
+		(errorMessage) => {
+			const message = fauxAssistantMessage("", { stopReason: "aborted", errorMessage });
+			expect(isRetryableAssistantError(message)).toBe(false);
+			expect(isNetworkAssistantError(message)).toBe(false);
+		},
+	);
+
+	it.each(["busy", "server busy", "servers busy"])("does not broaden server-busy matching: %s", (errorMessage) => {
+		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(message)).toBe(false);
+		expect(isNetworkAssistantError(message)).toBe(false);
 	});
 
 	it("matches OpenAI Responses streams that end before terminal events", () => {
@@ -190,6 +236,9 @@ describe("retryAssistantCall", () => {
 		"fetch failed: connect timeout",
 		"503 service unavailable",
 		"Codex error: Our servers are currently overloaded. Please try again later.",
+		pendingStreamCanceledMessage,
+		"server_busy",
+		serverBusyMessage,
 	])("bounds retryable failures by maxRetries: %s", async (errorMessage) => {
 		const failure = fauxAssistantMessage("", { stopReason: "error", errorMessage });
 		let calls = 0;
@@ -206,8 +255,10 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, errorMessage);
 	});
 
-	it("shares one budget across socket, provider, rate-limit, and DNS failures", async () => {
-		const errors = [terminatedSocketError, "503 service unavailable", "429 too many requests", wrappedDnsLookupError];
+	it.each([
+		{ errors: [terminatedSocketError, "503 service unavailable", "429 too many requests", wrappedDnsLookupError] },
+		{ errors: [terminatedSocketError, serverBusyMessage, pendingStreamCanceledMessage, wrappedDnsLookupError] },
+	])("shares one budget across mixed transient failures: %j", async ({ errors }) => {
 		const failures = errors.map((errorMessage) => fauxAssistantMessage("", { stopReason: "error", errorMessage }));
 		let calls = 0;
 		const produce = vi.fn(async () => failures[calls++] ?? fauxAssistantMessage("past budget"));
@@ -327,29 +378,32 @@ describe("retryAssistantCall", () => {
 		expect(onRetryFinished).not.toHaveBeenCalled();
 	});
 
-	it.each([terminatedSocketError, "503 service unavailable", "429 too many requests"])(
-		"caps exponential backoff at 30 seconds for ten retries: %s",
-		async (errorMessage) => {
-			vi.useFakeTimers();
-			try {
-				const failure = fauxAssistantMessage("", { stopReason: "error", errorMessage });
-				const produce = vi.fn(async () => failure);
-				const policy: RetryPolicy = { enabled: true, maxRetries: 10, baseDelayMs: 2_000 };
-				const onRetryScheduled = vi.fn();
-				const pending = retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
-				await vi.runAllTimersAsync();
-				const res = await pending;
+	it.each([
+		terminatedSocketError,
+		"503 service unavailable",
+		"429 too many requests",
+		pendingStreamCanceledMessage,
+		serverBusyMessage,
+	])("caps exponential backoff at 30 seconds for ten retries: %s", async (errorMessage) => {
+		vi.useFakeTimers();
+		try {
+			const failure = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			const produce = vi.fn(async () => failure);
+			const policy: RetryPolicy = { enabled: true, maxRetries: 10, baseDelayMs: 2_000 };
+			const onRetryScheduled = vi.fn();
+			const pending = retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
+			await vi.runAllTimersAsync();
+			const res = await pending;
 
-				expect(res).toBe(failure);
-				expect(produce).toHaveBeenCalledTimes(11);
-				expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([
-					2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000,
-				]);
-			} finally {
-				vi.useRealTimers();
-			}
-		},
-	);
+			expect(res).toBe(failure);
+			expect(produce).toHaveBeenCalledTimes(11);
+			expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([
+				2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000,
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	it("does not lower an explicit base delay above 30 seconds", async () => {
 		vi.useFakeTimers();
@@ -421,30 +475,33 @@ describe("retryAssistantCall", () => {
 		]);
 	});
 
-	it.each(["terminated", terminatedSocketError])("cancels backoff without another call: %s", async (errorMessage) => {
-		vi.useFakeTimers();
-		try {
-			const controller = new AbortController();
-			const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage }));
-			const policy: RetryPolicy = { enabled: true, maxRetries: 5, baseDelayMs: 10_000 };
-			const onRetryAttemptStart = vi.fn();
-			const onRetryFinished = vi.fn();
-			const pending = retryAssistantCall(produce, policy, controller.signal, {
-				onRetryAttemptStart,
-				onRetryFinished,
-			});
-			await vi.advanceTimersByTimeAsync(1_000);
-			controller.abort();
-			const res = await pending;
+	it.each(["terminated", terminatedSocketError, pendingStreamCanceledMessage, serverBusyMessage])(
+		"cancels backoff without another call: %s",
+		async (errorMessage) => {
+			vi.useFakeTimers();
+			try {
+				const controller = new AbortController();
+				const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage }));
+				const policy: RetryPolicy = { enabled: true, maxRetries: 5, baseDelayMs: 10_000 };
+				const onRetryAttemptStart = vi.fn();
+				const onRetryFinished = vi.fn();
+				const pending = retryAssistantCall(produce, policy, controller.signal, {
+					onRetryAttemptStart,
+					onRetryFinished,
+				});
+				await vi.advanceTimersByTimeAsync(1_000);
+				controller.abort();
+				const res = await pending;
 
-			expect(res.stopReason).toBe("aborted");
-			expect(res.errorMessage).toBeUndefined();
-			expect(produce).toHaveBeenCalledTimes(1);
-			expect(onRetryAttemptStart).not.toHaveBeenCalled();
-			expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, errorMessage);
-			expect(vi.getTimerCount()).toBe(0);
-		} finally {
-			vi.useRealTimers();
-		}
-	});
+				expect(res.stopReason).toBe("aborted");
+				expect(res.errorMessage).toBeUndefined();
+				expect(produce).toHaveBeenCalledTimes(1);
+				expect(onRetryAttemptStart).not.toHaveBeenCalled();
+				expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, errorMessage);
+				expect(vi.getTimerCount()).toBe(0);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
 });

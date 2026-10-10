@@ -1,6 +1,9 @@
 import type { AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Agent } from "../src/agent.ts";
 import { type ProxyAssistantMessageEvent, streamProxy } from "../src/proxy.ts";
+import type { AgentTool } from "../src/types.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "gpt-5.4",
@@ -29,6 +32,75 @@ afterEach(() => {
 });
 
 describe("streamProxy", () => {
+	it.each([
+		{ itemComplete: true, abortAfterEnd: false, expectedExecutions: 1 },
+		{ itemComplete: false, abortAfterEnd: false, expectedExecutions: 0 },
+		{ itemComplete: undefined, abortAfterEnd: false, expectedExecutions: 0 },
+		{ itemComplete: true, abortAfterEnd: true, expectedExecutions: 0 },
+	])(
+		"retains completed items after EOF without executing incomplete or cancelled calls: $itemComplete/$abortAfterEnd",
+		async ({ itemComplete, abortAfterEnd, expectedExecutions }) => {
+			const execute = vi.fn(async () => ({
+				content: [{ type: "text" as const, text: "lookup result" }],
+				details: {},
+			}));
+			const tool: AgentTool = {
+				name: "lookup",
+				label: "Lookup",
+				description: "Look up a value",
+				parameters: Type.Object({}),
+				execute,
+			};
+			const events: ProxyAssistantMessageEvent[] = [
+				{ type: "start" },
+				{ type: "toolcall_start", contentIndex: 0, id: "call-eof", toolName: "lookup" },
+				{
+					type: "toolcall_end",
+					contentIndex: 0,
+					itemComplete,
+					toolCall: { type: "toolCall", id: "call-eof", name: "lookup", arguments: {} },
+				},
+			];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""))),
+			);
+			const agent = new Agent({
+				initialState: { model, tools: [tool] },
+				streamFn: (requestModel, context, options) =>
+					streamProxy(requestModel, context, {
+						authToken: "test",
+						proxyUrl: "https://proxy.example.com",
+						signal: options?.signal,
+					}),
+			});
+			agent.subscribe((event) => {
+				if (
+					abortAfterEnd &&
+					event.type === "message_update" &&
+					event.assistantMessageEvent.type === "toolcall_end"
+				) {
+					agent.abort();
+				}
+			});
+
+			await agent.prompt("look up the value");
+
+			expect(execute).toHaveBeenCalledTimes(expectedExecutions);
+			const checkpoints = agent.state.messages.filter(
+				(message) => message.role === "assistant" && message.isResponseCheckpoint,
+			);
+			expect(checkpoints).toHaveLength(expectedExecutions);
+			const results = agent.state.messages.filter((message) => message.role === "toolResult");
+			expect(results).toHaveLength(expectedExecutions);
+			if (expectedExecutions) {
+				expect(results[0]).toMatchObject({ toolCallId: "call-eof", isError: false });
+			}
+			const lastAssistant = agent.state.messages.filter((message) => message.role === "assistant").at(-1);
+			expect(lastAssistant?.stopReason).toBe(abortAfterEnd ? "aborted" : "error");
+		},
+	);
+
 	it.each(["\n\n", "\n", ""])("settles after a done event with trailing %j", async (trailing) => {
 		const start = `data: ${JSON.stringify({ type: "start" })}\n\n`;
 		const done = `data: ${JSON.stringify({ type: "done", reason: "stop", usage })}`;

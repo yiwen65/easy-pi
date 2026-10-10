@@ -56,13 +56,20 @@ const NETWORK_PROVIDER_ERROR_PATTERNS = [
 	"ended without",
 	"stream ended before message_stop",
 	"stream ended before a terminal response event",
+	// Proxy EOF must use the same completed-item recovery path as a direct transport drop.
+	"connection closed by proxy server before the response completed",
 	"http2 request did not get a response",
+	// Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
+	// sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
+	"pending stream has been canceled",
 ] as const;
 
 const NETWORK_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern(NETWORK_PROVIDER_ERROR_PATTERNS);
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// Generic provider load, HTTP status, and server-side transient failures.
 	"overloaded",
+	"server_busy",
+	"servers are currently busy",
 	"rate.?limit",
 	"too many requests",
 	"429",
