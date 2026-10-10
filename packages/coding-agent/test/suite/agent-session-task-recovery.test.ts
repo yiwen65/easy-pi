@@ -234,8 +234,8 @@ describe("native durable task recovery", () => {
 						message.content.some((block) => block.type === "toolCall" && block.id === "effect"),
 				),
 			).toBe(false);
-			expect(JSON.stringify(context.messages)).toContain("Previous tasks are paused");
-			expect(JSON.stringify(context.messages)).toContain('"taskId"');
+			expect(context.systemPrompt).toContain("Previous tasks are paused");
+			expect(context.systemPrompt).toContain('"taskId"');
 			expect(JSON.stringify(context.messages)).not.toContain("orphan-signature");
 			return stream(model, context, options);
 		};
