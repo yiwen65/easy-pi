@@ -1,10 +1,18 @@
 import { Buffer } from "node:buffer";
+import * as fs from "node:fs";
+import { finished } from "node:stream/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "../../src/core/tools/truncate.ts";
 import { createHarness, type Harness } from "./harness.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof fs>();
+	return { ...actual, createWriteStream: vi.fn(actual.createWriteStream) };
+});
 
 function getEntryTypes(harness: Harness): string[] {
 	return harness.sessionManager.getEntries().map((entry) => entry.type);
@@ -30,10 +38,14 @@ function createControlledBashOperations(invocations: ControlledBashInvocation[])
 
 describe("AgentSession bash and persistence characterization", () => {
 	const harnesses: Harness[] = [];
+	const outputFiles: string[] = [];
 
 	afterEach(() => {
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
+		}
+		for (const path of outputFiles.splice(0)) {
+			fs.rmSync(path, { force: true });
 		}
 	});
 
@@ -348,5 +360,227 @@ describe("AgentSession bash and persistence characterization", () => {
 			{ id: "bash-1", delta: "hello " },
 			{ id: "bash-1", delta: "world" },
 		]);
+	});
+
+	describe("escape sequences split across output chunks", () => {
+		async function runChunks(chunks: Array<string | Buffer>, beforeExit?: (streamed: string) => void, abort = false) {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const deltas: string[] = [];
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, options) => {
+					for (const chunk of chunks) {
+						options.onData(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+					}
+					beforeExit?.(deltas.join(""));
+					if (abort) {
+						harness.session.abortBash();
+						throw new Error("aborted");
+					}
+					return { exitCode: 0 };
+				},
+			};
+			const result = await harness.session.executeBash("custom", (delta) => deltas.push(delta), { operations });
+			if (result.fullOutputPath) {
+				outputFiles.push(result.fullOutputPath);
+			}
+			const recorded = harness.session.messages.at(-1);
+			const persisted = harness.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message")
+				.at(-1);
+			expect(recorded?.role).toBe("bashExecution");
+			expect(recorded?.role === "bashExecution" ? recorded.output : undefined).toBe(result.output);
+			expect(
+				persisted?.type === "message" && persisted.message.role === "bashExecution"
+					? persisted.message.output
+					: undefined,
+			).toBe(result.output);
+			expect(
+				harness
+					.eventsOfType("bash_execution_update")
+					.map((event) => event.delta)
+					.join(""),
+			).toBe(deltas.join(""));
+			expect(harness.session.isBashRunning).toBe(false);
+			return { result, streamed: deltas.join("") };
+		}
+
+		it.each([
+			{
+				name: "CSI reset inside parameters",
+				chunks: ["\x1b[31mERROR: file.py:1\x1b[0", "m\n"],
+				expected: "ERROR: file.py:1\n",
+			},
+			{
+				name: "CSI immediately after ESC",
+				chunks: ["before\x1b", "[32mafter\n"],
+				expected: "beforeafter\n",
+			},
+			{
+				name: "C1 CSI inside parameters",
+				chunks: ["before\x9b3", "2mafter\n"],
+				expected: "beforeafter\n",
+			},
+			{
+				name: "DEC private modes inside parameters",
+				chunks: ["a\x1b[?104", "9lb\x1b[?47", "h"],
+				expected: "ab",
+			},
+			{
+				name: "OSC before BEL",
+				chunks: ["a\x1b]0;window ", "title\x07b\n"],
+				expected: "ab\n",
+			},
+			{
+				name: "OSC inside ESC-backslash terminator",
+				chunks: ["a\x1b]0;window ", "title\x1b", "\\b\n"],
+				expected: "ab\n",
+			},
+			{
+				name: "OSC before C1 terminator",
+				chunks: ["a\x1b]0;window ", "title\x9cb\n"],
+				expected: "ab\n",
+			},
+			{
+				name: "CSI mixed with binary controls and CRLF",
+				chunks: ["a\x00\t\r\n\x1b[3", "1mb\ufff9\r\n"],
+				expected: "a\t\nb\n",
+			},
+		])("strips $name as a whole", async ({ chunks, expected }) => {
+			const { result, streamed } = await runChunks(chunks);
+			expect(result.output).toBe(expected);
+			expect(streamed).toBe(expected);
+			expect(result.exitCode).toBe(0);
+			expect(result.cancelled).toBe(false);
+			expect(result.truncated).toBe(false);
+		});
+
+		it("decodes UTF-8 split across chunks without replacement characters", async () => {
+			const bytes = Buffer.from("é🙂");
+			const { result, streamed } = await runChunks(Array.from(bytes, (byte) => Buffer.from([byte])));
+			expect(result.output).toBe("é🙂");
+			expect(streamed).toBe("é🙂");
+		});
+
+		it("flushes incomplete UTF-8 at successful EOF", async () => {
+			const { result, streamed } = await runChunks(["ok", Buffer.from("é").subarray(0, 1)]);
+			expect(result.output).toBe("ok\uFFFD");
+			expect(streamed).toBe("ok\uFFFD");
+		});
+
+		it("flushes an unfinished ANSI suffix through the existing sanitizer at EOF", async () => {
+			const { result, streamed } = await runChunks(["ok\x1b["]);
+			expect(result.output).toBe("ok[");
+			expect(streamed).toBe("ok[");
+		});
+
+		it("does not hold back output behind a long unterminated OSC", async () => {
+			const long = "x".repeat(300);
+			const { result, streamed } = await runChunks([`\x1b]${long}`], (beforeExit) => {
+				expect(beforeExit).toBe(`]${long}`);
+			});
+			expect(result.output).toBe(`]${long}`);
+			expect(streamed).toBe(`]${long}`);
+		});
+
+		it("flushes incomplete UTF-8 and preserves sanitized partial output on abort", async () => {
+			const { result, streamed } = await runChunks(
+				["partial \x1b[31mred\x1b[0", "m", Buffer.from("é").subarray(0, 1)],
+				undefined,
+				true,
+			);
+			expect(result.output).toBe("partial red\uFFFD");
+			expect(streamed).toBe("partial red\uFFFD");
+			expect(result.cancelled).toBe(true);
+			expect(result.exitCode).toBeUndefined();
+		});
+
+		it.each([
+			{
+				name: "rolling buffer eviction and byte truncation",
+				chunks: [
+					`\x1b[31mfirst:${"a".repeat(DEFAULT_MAX_BYTES)}\n\x1b[0`,
+					`mmiddle:${"b".repeat(DEFAULT_MAX_BYTES)}\n`,
+					"\x1b]0;title",
+					`\x07tail:${"é".repeat(DEFAULT_MAX_BYTES)}\n`,
+				],
+				expected: `first:${"a".repeat(DEFAULT_MAX_BYTES)}\nmiddle:${"b".repeat(DEFAULT_MAX_BYTES)}\ntail:${"é".repeat(DEFAULT_MAX_BYTES)}\n`,
+				abort: false,
+			},
+			{
+				name: "EOF decoder flush crossing the byte threshold",
+				chunks: ["a".repeat(DEFAULT_MAX_BYTES - 1), Buffer.from("é").subarray(0, 1)],
+				expected: `${"a".repeat(DEFAULT_MAX_BYTES - 1)}\uFFFD`,
+				abort: false,
+			},
+			{
+				name: "line truncation after EOF decoder flush",
+				chunks: ["line\n".repeat(DEFAULT_MAX_LINES + 1), Buffer.from("é").subarray(0, 1)],
+				expected: `${"line\n".repeat(DEFAULT_MAX_LINES + 1)}\uFFFD`,
+				abort: false,
+			},
+			{
+				name: "abort after large partial output",
+				chunks: [`\x1b[31m${"a".repeat(DEFAULT_MAX_BYTES + 1)}\x1b[0`, "m", Buffer.from("é").subarray(0, 1)],
+				expected: `${"a".repeat(DEFAULT_MAX_BYTES + 1)}\uFFFD`,
+				abort: true,
+			},
+		])("preserves full sanitized tempfile output during $name", async ({ chunks, expected, abort }) => {
+			const { result, streamed } = await runChunks(chunks, undefined, abort);
+			expect(streamed).toBe(expected);
+			expect(result.output).toBe(truncateTail(expected).content);
+			expect(result.truncated).toBe(true);
+			expect(result.cancelled).toBe(abort);
+			expect(result.exitCode).toBe(abort ? undefined : 0);
+			expect(result.fullOutputPath).toBeDefined();
+			const path = result.fullOutputPath!;
+			await expect.poll(() => (fs.existsSync(path) ? fs.readFileSync(path, "utf8") : undefined)).toBe(expected);
+		});
+
+		it("preserves the raw-byte tempfile threshold for ANSI-only trailing chunks", async () => {
+			const expected = "a".repeat(DEFAULT_MAX_BYTES);
+			const { result, streamed } = await runChunks([expected, "\x1b[31m"]);
+			expect(result.output).toBe(expected);
+			expect(streamed).toBe(expected);
+			expect(result.truncated).toBe(false);
+			expect(result.fullOutputPath).toBeDefined();
+			const path = result.fullOutputPath!;
+			await expect.poll(() => (fs.existsSync(path) ? fs.readFileSync(path, "utf8") : undefined)).toBe(expected);
+		});
+
+		it("ends the existing tempfile stream and rethrows non-abort operation errors", async () => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const createStream = vi.mocked(fs.createWriteStream);
+			createStream.mockClear();
+			const error = new Error("custom operation failed");
+			const partial = "a".repeat(DEFAULT_MAX_BYTES + 1);
+			const deltas: string[] = [];
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, options) => {
+					options.onData(Buffer.from(partial));
+					options.onData(Buffer.from("\x1b["));
+					options.onData(Buffer.from("é").subarray(0, 1));
+					throw error;
+				},
+			};
+			try {
+				await expect(
+					harness.session.executeBash("custom", (delta) => deltas.push(delta), { operations }),
+				).rejects.toBe(error);
+				expect(createStream).toHaveBeenCalledTimes(1);
+				const stream = createStream.mock.results[0].value as fs.WriteStream;
+				outputFiles.push(String(stream.path));
+				expect(stream.writableEnded).toBe(true);
+				await finished(stream);
+				expect(fs.readFileSync(stream.path, "utf8")).toBe(partial);
+				expect(deltas.join("")).toBe(partial);
+				expect(harness.session.messages.some((message) => message.role === "bashExecution")).toBe(false);
+				expect(harness.session.isBashRunning).toBe(false);
+			} finally {
+				createStream.mockClear();
+			}
+		});
 	});
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripAnsi } from "../src/utils/ansi.ts";
+import { splitIncompleteAnsiSuffix, stripAnsi } from "../src/utils/ansi.ts";
 
 function referenceAnsiRegex(): RegExp {
 	const ST = "(?:\\u0007|\\u001B\\u005C|\\u009C)";
@@ -106,5 +106,66 @@ describe("stripAnsi", () => {
 	it("strips common ANSI sequences used in tool output", () => {
 		const input = "a\x1b[31mred\x1b[0m\x1b]8;;https://example.com\x07link\x1b]8;;\x07z";
 		expect(stripAnsi(input)).toBe("aredlinkz");
+	});
+
+	it("strips complete DEC private mode set/reset sequences", () => {
+		expect(stripAnsi("a\x1b[?1049lb\x1b[?47hc\x9b?1047ld")).toBe("abcd");
+	});
+});
+
+describe("splitIncompleteAnsiSuffix", () => {
+	it.each([
+		{ value: "plain", complete: "plain", pending: "" },
+		{ value: "a\x1b[31mred\x1b[0m", complete: "a\x1b[31mred\x1b[0m", pending: "" },
+		{ value: "a\x1b]title\x07", complete: "a\x1b]title\x07", pending: "" },
+		{ value: "a\x1b", complete: "a", pending: "\x1b" },
+		{ value: "a\x1b[0", complete: "a", pending: "\x1b[0" },
+		{ value: "a\x9b31", complete: "a", pending: "\x9b31" },
+		{ value: "a\x1b[?1049", complete: "a", pending: "\x1b[?1049" },
+		{ value: "a\x1b]0;title\x1b", complete: "a", pending: "\x1b]0;title\x1b" },
+	])("splits $value without losing text", ({ value, complete, pending }) => {
+		expect(splitIncompleteAnsiSuffix(value)).toEqual({ complete, pending });
+	});
+
+	it("sanitizes supported sequences at every possible chunk boundary", () => {
+		for (const sequence of [
+			"\x1b[38;2;1;2;3m",
+			"\x1b[38:2:1:2:3m",
+			"\x9b31m",
+			"\x1b[?1049l",
+			"\x1bc",
+			"\x1b]0;title\x07",
+			"\x1b]0;title\x1b\\",
+			"\x1b]0;title\x9c",
+		]) {
+			for (let index = 0; index <= sequence.length; index++) {
+				const first = splitIncompleteAnsiSuffix(`before${sequence.slice(0, index)}`);
+				const second = splitIncompleteAnsiSuffix(`${first.pending}${sequence.slice(index)}after`);
+				expect(stripAnsi(first.complete) + stripAnsi(second.complete) + stripAnsi(second.pending)).toBe(
+					"beforeafter",
+				);
+			}
+		}
+	});
+
+	it("holds at most 256 code units and releases a longer unterminated OSC", () => {
+		const pending = `\x1b]${"x".repeat(254)}`;
+		expect(splitIncompleteAnsiSuffix(`before${pending}`)).toEqual({ complete: "before", pending });
+		const longer = `${pending}x`;
+		expect(splitIncompleteAnsiSuffix(`before${longer}`)).toEqual({ complete: `before${longer}`, pending: "" });
+	});
+
+	it("keeps pending state bounded across repeated unterminated chunks", () => {
+		let pending = "";
+		let complete = "";
+		const chunks = ["\x1b]", ...Array.from({ length: 100 }, () => "x".repeat(32))];
+		for (const chunk of chunks) {
+			const split = splitIncompleteAnsiSuffix(pending + chunk);
+			pending = split.pending;
+			complete += split.complete;
+			expect(pending.length).toBeLessThanOrEqual(256);
+		}
+		expect(complete + pending).toBe(chunks.join(""));
+		expect(complete.length).toBeGreaterThan(256);
 	});
 });
