@@ -21,7 +21,7 @@ export function registerPiCollaborationRoot(
 	let startupError: string | undefined;
 	let panelOpen = false;
 	let stopped = false;
-	const start = (ctx: ExtensionContext, recoverInterruptedOwner = false) => {
+	const start = (ctx: ExtensionContext) => {
 		if (controller || stopped) return;
 		const session = getNativeSession(ctx.sessionManager);
 		const identity = { rootSessionId: session.sessionId, agentPath: "/root" };
@@ -29,7 +29,9 @@ export function registerPiCollaborationRoot(
 			path: session.sessionFile ? join(agentDir, "teams", session.sessionId, "registry.sqlite") : ":memory:",
 			rootSessionId: session.sessionId,
 			cwd: ctx.cwd,
-			recoverInterruptedOwner,
+			// A verified dead owner needs reconciliation, not a manual availability gate.
+			// Store acquisition still rejects live owners and never replays interrupted work.
+			recoverInterruptedOwner: true,
 		});
 		try {
 			const settings = session.settingsManager;
@@ -82,16 +84,25 @@ export function registerPiCollaborationRoot(
 			throw error;
 		}
 	};
-	pi.on("session_start", (_event, ctx) => {
+	const tryStart = (ctx: ExtensionContext) => {
 		try {
 			start(ctx);
 		} catch (error) {
 			startupError = error instanceof CollaborationError ? error.code : "storage_error";
+		}
+	};
+	pi.on("session_start", (_event, ctx) => {
+		tryStart(ctx);
+		if (startupError) {
 			ctx.ui.notify(
-				`Native agents unavailable: ${startupError}. Inspect retained team; /agents recover explicitly recovers a dead owner without replay.`,
+				`Native agents unavailable: ${startupError}. ${startupError === "busy" ? "Another live process owns this team; it will be retried before your next turn or /agents." : "Inspect retained team; /agents retries initialization without replay."}`,
 				"warning",
 			);
 		}
+	});
+	pi.on("before_agent_start", (_event, ctx) => {
+		// The process which blocked startup may have exited since this root was opened.
+		if (!controller && startupError === "busy") tryStart(ctx);
 	});
 	pi.on("session_shutdown", async () => {
 		stopped = true;
@@ -100,19 +111,14 @@ export function registerPiCollaborationRoot(
 	});
 	pi.registerCommand("agents", {
 		description:
-			"Inspect native agent sessions and retained turns; explicitly message, follow up or interrupt; recover a dead owner with /agents recover",
+			"Inspect native agent sessions and retained turns; explicitly message, follow up or interrupt; retry team initialization without replay",
 		handler: async (args, ctx) => {
 			if (stopped) return;
-			if (args.trim() === "recover" && !controller) {
-				try {
-					start(ctx, true);
-				} catch (error) {
-					startupError = error instanceof CollaborationError ? error.code : "storage_error";
-				}
-			} else if (args.trim() && args.trim() !== "recover") {
+			if (args.trim() && args.trim() !== "recover") {
 				ctx.ui.notify("Usage: /agents or /agents recover. Recovery never resumes tasks.", "info");
 				return;
 			}
+			if (!controller) tryStart(ctx);
 			if (!monitor) {
 				const remedy =
 					startupError === "interrupted"
