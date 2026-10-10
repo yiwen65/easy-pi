@@ -410,3 +410,85 @@
 - Correct approach: 用 `ps -o etime=`(两类系统都有)并解析 `[[dd-]hh:]mm:ss`;win32 直接返回 undefined 走降级路径。
 - Prevention: 任何 ps 关键字用法先在本机 `ps -o <kw>=` 验证再写进代码;POSIX 与 BSD 的 ps 关键字集差异大。
 - Verified by: 2026-09-13 collaboration-store PID 复用防护;etime 版本测试 37/37(含复用/存活/迁移三用例)通过。
+
+## Computer UniFFI 离线生成——目标平台 fetch 不覆盖无过滤的 metadata
+
+- Wrong approach: 只执行 `cargo fetch --locked --target aarch64-apple-darwin`，在 SDK 编译和目标 metadata 通过后就认为绑定生成的离线缓存齐全。
+- Why it failed: UniFFI/UBRN 内部 `MetadataCommand::new().exec()` 不过滤平台，会读取锁中的其他平台依赖；生成检查因缺 `aes 0.8.4` 尝试联网，被 offline 正确阻止。
+- Recognition signal: SDK release 已通过，失败停在生成器的 `error running cargo metadata` / `attempting to make an HTTP request, but --offline was specified`，而非 stale generated files 或 ABI mismatch。
+- Correct approach: 在已批准依赖范围的受控副本中执行 `cargo fetch --locked` 补齐同一锁的全平台缓存；校验锁 hash 不变，再恢复 offline 重跑原生成命令。不要升级依赖或开放在线生成。
+- Prevention: 离线生成前单独运行无 `--filter-platform` 的 `cargo metadata --locked --offline --format-version 1`；同时确认生成器和临时 N-API workspace 各自有锁，不能用 SDK 锁代替。
+- Verified by: 2026-09-18 Computer P02；`bindings-check.log` exit 1，补齐缓存后 `cargo-metadata-all` 与原命令 `bindings-check-retry` exit 0；Cua Cargo.lock hash 未变、Python/TS 生成结果与固定源码一致，未加载原生库。
+
+## Computer macOS TCC——先核对实际授权条目，避免重复重启诊断
+
+- Wrong approach: 用户报告已勾选权限后，先要求重启并重复getter，尚未核对勾选项是否当前TCC责任宿主的调试bundle。
+- Why it failed: 用户后来确认此前勾选的是另一项；前台重启不能替代对实际责任身份授权。后台进程年龄、磁盘签名有效或日志里的private-entitlement warning都不足以证明权限失败原因。
+- Correct approach: 用本次行动进程的tccd请求定位责任app，再核对显示名、bundle ID和路径。requesting Node PID与responsible宿主PID是不同角色；有界捕获后按requesting PID/msgID和(tccd PID, activityIdentifier)关联完整context/subject/Allowed/reply族，只落盘自己的记录。仅按日志正文含PID过滤会漏掉Allowed行，不能据getter补造完整准入。
+- Prevention: 同名release/debug app并存时，在再次要求重启前核对具体条目；逐行动进程验证精确requester binary/UID、responsible bundle/path和两服务Allowed链。更正授权后重新getter，不复用旧进程资格或要求不同角色PID相同，不杀宿主/重置TCC/改签名。
+- Verified by: 2026-09-18 P02用户更正条目后getter与live通过；P03 `p03-recovery`暴露错误同PID条件及漏Allowed，`p03-tcc`保存trace先红后绿、26证据/8父协议测试通过，三个live行动进程各自完整准入通过。
+
+## Computer UniFFI 终态通知——foreign waker 可能同步阻塞并重入
+
+- Wrong approach: 公开 `ComputerOperation::terminal()` 直接等待 core watch channel，以普通 Tokio/noop waker 测试推断跨语言通知不会阻塞。
+- Why it failed: 固定 N-API bridge 在发送 JS continuation 后同步 `rx.recv()`；core `finish()` 通知时仍持有 gate/state 锁，JS 同步 cancel 或再次 poll 又需要这些锁，形成循环等待。
+- Correct approach: 公开 future 等待独立 native proof monitor 的 JoinHandle，只有原生 waker 接入 core channel；monitor 只持有 proof state，不拥有 producer/facade，不改变终态或 lease 规则。
+- Prevention: 跨语言并发回归应同时挂起 result/terminal，用 barrier 阻塞 foreign wake，再从另一线程执行同步取消和重新 poll；另测丢弃订阅不取消 producer、不跳过 cleanup drain。不要只增加超时或强杀解锁。
+- Verified by: 2026-09-18 `p03-offline-repair/regression-paired-wake-before` exit101、同回归修复后0，SDK14/14与全部50项定向Rust测试通过；证明局部锁循环修复，未把它当作原GUI挂起的已验证修复或原生终态证明。
+
+## Computer macOS GUI 准入——TCC 与 fixture 可见不证明 console 已解锁
+
+- Wrong approach: TCC两项Allowed、fixture isVisible/activeSpace及主线程ack通过后，连续做只读AX拒绝诊断，最后才检查console锁屏状态。
+- Why it failed: 这些检查并不测量console lock；本轮六次observe失败后，metadata明确CGSSessionScreenIsLocked=true。尚无解锁对照，不能称锁屏是AXApplication/self根或全部AX拒绝的唯一原因。
+- Correct approach: 创建fixture/SDK/TCC/owner前先查有界session metadata；known locked或不可用local console拒绝并等待人工处理。缺失private lock key不等于已解锁，原有TCC/Stop/exact-window gate仍必要。
+- Prevention: 无法排除锁屏时先处理环境门禁，不修改AX根分类/complete/tokens让测试通过，不自动解锁；失败需独立核对native terminal、close/destroy与实际退出，不从counter0推断终态。
+- Verified by: 2026-09-18 `p04/console-state`明确locked；console-gate6/6，`locked-console-admission`在零children前拒绝、C9不变；`blocked-verification.json`核对六次自然失败及零表单输入。
+
+## Computer macOS 进程组清理——先证明是否已退出，再决定是否发信号
+
+- Wrong approach: 保留Child作为PID锚后，仍在每次close先发SIGKILL，再检查根进程与组内成员是否已退出。
+- Why it failed: 本机私有fixture已自然退出、WNOWAIT仍能取终态且组内无live成员时，killpg返回EPERM，初稿把已收敛误判为cleanup失败并隔离。
+- Correct approach: 仅在“根进程waitable exit且组内无live成员”不能同时成立时发信号；保留unreaped Child直到组收敛后才reap。不把任意EPERM当成功，也不把仅root exit当全部子进程退出。
+- Prevention: 同测自然退出的空组、已退出root+仍活grandchild、外部提前reap后禁止发信号；group proof不能推广为setsid逃逸helper或完整profile writer终态。
+- Verified by: 2026-09-19 `p04-browser/process-first`与exact diagnostic均exit101，诊断exited=true/errno1/live=false；修复后process11/11、五轮10/10、platform28/SDK41/core66全0。仅私有测试进程，无Chrome/GUI资格。
+
+## Computer macOS 临时 CfT——独立 HOME/profile 不隔离系统加密钥匙串
+
+- Wrong approach: 给固定CfT创建私有HOME和空白profile后，就认为导航不再依赖个人钥匙串。
+- Why it failed: Page.navigate已发出网络请求却20秒无响应；自有browser stack停在SecItemAdd→makeLoginAuthUI→AuthorizationCopyRights。匹配版本的OSCrypt默认仍选择系统KeychainV2。
+- Correct approach: 对不重用的临时测试profile固定启用该版本提供的`--use-mock-keychain`，使用内存FakeKeychainV2，不点击授权弹窗或访问个人keychain；不能据此承诺持久凭据/加密，也不禁用TLS或sandbox。
+- Prevention: 无登录临时browser准备必须审计OSCrypt provider而非仅user-data-dir；导航停顿先区分CDP是否收到、网络是否开始及exact自有进程等待点，不扩大超时或盲重放。
+- Verified by: 2026-09-19 `p04-browser/navigation-network-live-1`等待栈与matching153源码；launcher参数回归before101/afterpass，固定flag后HTTP200/导航返回、对照sample无原授权等待，最终`form-fixed-live-1`八步/Press及clean close通过。
+
+## Computer typed browser producer——public ActionResult 不能替代内部执行记录
+
+- Wrong approach: 新controlled DOM producer仅返回合法typed `ActionResult` JSON，忽略canonical dispatch还要求内部`ActionExecutionRecord`。
+- Why it failed: legacy adapter不识别public `dom` route，publish_action_result因此在真实Fill之后拒绝；字段已经改变，但plan只能返回prefix0/unknown。纯序列化测试与fake host没经过这个接缝。
+- Correct approach: 实际producer附加DOM/background内部记录；只有真实固定函数readback才提供确认依据，Press保持Unverifiable并另做plan后置观察，不绕过canonical发布或补造旧成功。
+- Prevention: 新typed执行通路同时测试producer→internal record/legacy fallback→public projection，不只测试JSON可反序列化；真实独立effect oracle必须与返回prefix/unknown对照。
+- Verified by: 2026-09-19 `keychain-form-live-1`只改变Name后unknown/C32；canonical seam回归before101/afterpass，`form-fixed-live-1`真实8/8＋Press、精确10事件/六terminal/两自然exit0/C33，platform59/SDK45通过。
+
+## Computer macOS image catalog——完整观察必须正确表示 zombie 和读取间退出
+
+- Wrong approach: `proc_listpids`列出PID后，以`PROC_PIDTBSDINFO(arg=0)`读取所有成员，认为变化总能靠短暂重读消除；路径读取失败又一律当不可恢复错误。
+- Why it failed: arg=0不查询已退出但未reap的zombie，其PID仍在目录中，等待不能解决；live身份读取后进程也可退出，使随后的`proc_pidpath`返回ESRCH。
+- Correct approach: BSD信息查询使用非零arg，保留经过PID/UID/start证明的zombie条目；路径读取的实际ESRCH只标记catalog不完整，允许既有预算内重新读取。其他错误仍拒绝，完整双catalog一致后才能过滤，绝不把读取失败当空集。
+- Prevention: 用私有Child+WNOWAIT维持zombie，用cat/EOF barrier制造身份与路径读取间退出；两种情况分别回归，不增加超时或跳过未知PID。
+- Verified by: P05十次zombie前/中/后对照，两项native回归before101→after0；held-zombie真实prepare/close通过，最终13browser/十AppKit及platform70/SDK45/core69通过。旧D65/D70/D83缺少低层分支证据，未声称唯一历史根因。
+
+## Computer 补丁资格——git apply成功退出不证明嵌套目录实际应用
+
+- Wrong approach: 在主仓库内的未初始化scratch目录直接`git apply --check`及apply，以退出0当应用成功；新增文件diff还缺少Git的new-file头。
+- Why it failed: Git按外层仓库相对cwd跳过所有补丁路径，verbose明确输出Skipped；独立Git根后才暴露新增文件被误解为dev/null来源。
+- Correct approach: 私有验证目录先建立独立Git根，新增文件保留`new file mode`元数据；apply后逐文件比较预期hash，再reverse并比较原hash及新增文件消失。
+- Prevention: 补丁资格必须检查应用后的实际字节，不能只检查exit0；失败副本和原patch保留，不在已资格源树试应用。
+- Verified by: P05 `final-patch-capture`字节断言拒绝静默跳过，`final-patch-verify-fixed`拒绝dev/null，补齐头后`final-patch-verify-complete`九文件正反应用/hash全部通过。
+
+## Computer Full Access TTL——先追实际上下文构造，不能只看配置和getter
+
+- Wrong approach: 看到entry的3600/600秒配置与`computer_authority_live()`调用`is_expired()`，就把已冻结候选描述为仍有人工授权过期。
+- Why it failed: `bind_computer_session`早已对unrestricted/no-manifest上下文把实际timers设为None；配置字段与共用getter不证明该分支会到期。
+- Correct approach: 沿创建入口、具体context字段、canonical admission/commit和maintenance调用链核实；用旧timestamp矩阵区分Computer Full Access与普通/manifest会话，不制造TTL失败基线。
+- Prevention: 生命周期修复工单先附当前context构造与实际计时器证据；发现的独立缺陷单独归因，本次实际修复是canonical祖先撤权传播，不是新增no-TTL。
+- Verified by: `general/full-access-lifetime-worker/report.md`与冻结源hash复核；old-timestamp矩阵、完整SDK81/core85及独立安装C349/C350通过。
+
