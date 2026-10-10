@@ -3,7 +3,7 @@
 - Created: 2026-10-10
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户「审查并优化 easy-pi tui 性能」
 
 <!-- task-doc-section:background-goal -->
@@ -89,9 +89,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-003 — 复核、全局检查与交付
+### [x] T-003 — 复核、全局检查与交付
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 验证正确性与资源，报告局限并提交。
 - Inputs and prerequisites: T-002 候选。
@@ -104,9 +104,9 @@
   - 全部要求有真实验证证据，未验证范围清楚。
 - Verification method:
   - task_document validate + 定向测试 + npm run check + git diff。
-- Validation evidence: 独立 read-only 审查无可行动问题；432 TUI 定向测试通过，新增测试强化精确文本比较后重跑 3/3 通过；tsgo --noEmit、Bi​​ome 两文件、shrinkwrap、install-lock、browser-smoke 通过；全局 Biome 1532 files No fixes applied；npm run check 两次在 pinned-deps 失败，独立 check:ts-imports 在同批 untracked 参考材料的 .js imports 失败。检查结果与最终 diff 已复核，尚未提交。
-- Blocker: None. 用户已授权干净工作树正常检查/提交hook后推送easy-pi/main；不移动原诊断材料。
-- Unblock condition: None. 发布过程中若HEAD漂移、检查或非fast-forward推送失败，停止/重新验证，不force push，不覆盖他人修改。
+- Validation evidence: 独立审查与最终440定向测试通过；原目录全局检查失败已记录。发布于HEAD e2296e848的真实detached干净工作树重新执行完整npm run check（1540 files No fixes applied）及440定向测试，全部通过；通过显式Git pre-commit wrapper执行跟踪的.husky/pre-commit脚本，正常hook再次全绿。仅五个owned文件提交为60537b4126e890b3bb01f62c6a24f8d9234211db，并从隔离工作树fast-forward推送easy-pi/main；ls-remote确认该hash。原分支有未推送的他人提交e78d8c5e1，保护检查停止整合，没有暂存或覆盖原工作区文件。
+- Blocker: None. 本轮优化已提交和发布；原工作区同步因他人未推送提交而有意保留，诊断材料原位不动。
+- Unblock condition: None. 原分支后续同步须由其未推送提交的所有者协调，不能为清理本任务而重写其历史。
 
 ### [x] T-004 — 长历史滚动锚点测量
 
@@ -194,12 +194,15 @@
 - 2026-10-10: 用户要求push，并明确选择“干净工作树提交并推送”至配置上游easy-pi/main。T-003恢复in_progress；仅包含两个src、两个test和此计划，不移动诊断材料或提交LEARNS.md等他人文件。
 - 2026-10-10: 发布前fetch观察到其他会话已推进HEAD/上游至e2296e848；原TUI差分仍在且index为空。查明实际core.hooksPath未设置、.git/hooks仅sample，没有已安装pre-commit；此前只读了跟踪的.husky/pre-commit而未核验安装，关于原目录hook会运行的表述是推断，不是实测。临时工作树将显式启用该跟踪脚本作为正常Git pre-commit，不能用配置缺失跳过检查。
 - 2026-10-10: 用独立Git fixture验证“先stage匹配目标commit的owned路径再ff-only merge”保留其他dirty/untracked文件且不会留下owned staged差分；实际整合仍须检查HEAD和文件hash。
+- 2026-10-10: 创建detached worktree /tmp/easy-pi-tui-push-Sdgk4Q，基于e2296e848，仅复制五个owned文件及本地生成数据/依赖输入。完整check和440定向测试通过；显式启用/tmp中的pre-commit wrapper委托跟踪脚本，正常Git提交hook通过，形成60537b412（五个文件，无依赖、LEARNS或材料）。
+- 2026-10-10: 整合guard发现原分支已推进至未发布的e78d8c5e1，检查在git add之前停止。fetch确认上游仍为e2296e848，因此不把另一会话的未发布提交带入本次推送、不改写其历史；原工作区未暂存或清理。
+- 2026-10-10: 隔离工作树执行git push easy-pi HEAD:refs/heads/main，远端e2296e848→60537b412成功；ls-remote refs/heads/main确认60537b4126e890b3bb01f62c6a24f8d9234211db。T-003 done；此文档随后补写已观察到的发布回执，不把文档提交本身尚未发生的发布当作证据。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: T-001、T-002、T-004、T-005 已完成；最小锚点优化在实际消息/完整renderNow和代表性单UI生命周期验证通过，440定向测试、差分、独立审查及隔离完整check通过。多UIburst的内存峰值风险保留，不宣称全部产品场景验证。T-003提交按用户选择暂停，原目录检查仍有他人材料阻断。
+- Result: passed
+- Evidence: T-001至T-005均完成，任务文档validator通过。优化/440定向测试/独立审查/完整检查通过；正常Git pre-commit通过，代码提交60537b4126e890b3bb01f62c6a24f8d9234211db已推送easy-pi/main并由ls-remote确认。多UIburst内存峰值和真实TTY测量限制不因发布而消失；原工作区因其他会话未推送提交而保持原样。
 - Limitations: 没有真实设置事件/OS终端paint端到端测量，也没有实际用户会话、Grok业务布局、Bun、其他OS或真实API验证。不能推断全局TUI加速或全部内存场景无回归；多UIburst的RSS增量未被代表性单UI复现，但仍是残余风险。
 
 ### Performance contract
