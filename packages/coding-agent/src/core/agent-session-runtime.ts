@@ -11,6 +11,11 @@ import type {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
+import {
+	appendSessionCacheAffinity,
+	recordedCacheAffinityId,
+	resolveSessionCacheAffinityId,
+} from "./session-cache-affinity.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager } from "./session-manager.ts";
 
@@ -37,6 +42,12 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	agentDir: string;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * Provider cache lineage this session must join, inherited by `/clone` and `/fork` from the
+	 * branched parent and by `/resume` from the stored session file. Factories must forward it to
+	 * createAgentSession; omitting it keeps the session's own id as its cache identity.
+	 */
+	cacheAffinityId?: string;
 	projectTrustContext?: ProjectTrustContext;
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
@@ -220,11 +231,15 @@ export class AgentSessionRuntime {
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
+		// A resumed session keeps its own id, but a replaced in-process session must still join the
+		// lineage stored with the file instead of forking a fresh cache partition.
+		const cacheAffinityId = recordedCacheAffinityId(sessionManager);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		await this.replace({
 			cwd: sessionManager.getCwd(),
 			agentDir: this.services.agentDir,
 			sessionManager,
+			cacheAffinityId,
 			sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
 			projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
 		});
@@ -293,6 +308,9 @@ export class AgentSessionRuntime {
 			selectedText = extractUserMessageText(selectedEntry.message.content);
 		}
 
+		// The branched session duplicates this session's provider prefix, so it joins the same
+		// cache lineage; identity, request ids and transport stay independent.
+		const cacheAffinityId = resolveSessionCacheAffinityId(this.session.sessionManager);
 		const previousSessionFile = this.session.sessionFile;
 		if (this.session.sessionManager.isPersisted()) {
 			const currentSessionFile = this.session.sessionFile;
@@ -301,6 +319,7 @@ export class AgentSessionRuntime {
 			}
 			const sessionDir = this.session.sessionManager.getSessionDir();
 			if (!targetLeafId) {
+				// No duplicated prefix: a fresh branch keeps its own cache identity.
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
 				await this.teardownCurrent("fork", sessionManager.getSessionFile());
@@ -324,11 +343,13 @@ export class AgentSessionRuntime {
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
 			}
+			appendSessionCacheAffinity(sessionManager, cacheAffinityId);
 			await this.teardownCurrent("fork", sessionManager.getSessionFile());
 			await this.replace({
 				cwd: sessionManager.getCwd(),
 				agentDir: this.services.agentDir,
 				sessionManager,
+				cacheAffinityId,
 				sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 			});
 			await this.finishSessionReplacement(options?.withSession);
@@ -346,6 +367,7 @@ export class AgentSessionRuntime {
 			cwd: this.cwd,
 			agentDir: this.services.agentDir,
 			sessionManager,
+			cacheAffinityId,
 			sessionStartEvent: { type: "session_start", reason: "fork", previousSessionFile },
 		});
 		await this.finishSessionReplacement(options?.withSession);

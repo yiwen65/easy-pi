@@ -8,6 +8,7 @@
 
 ### Added
 
+- `/clone` and `/fork` branches now join the parent session's provider prompt-cache lineage: the branched session keeps its own session, request and file identity but reuses the provider cache key and Codex cache affinity of the session it duplicates, so the first request after branching can still read the already-cached prefix. The lineage is stored in the session file (`epi-session-cache-affinity`), survives `/resume`, repeated forks and restarts, and is dropped when a session falls back to a different model. Codex cache-affine requests use SSE.
 - Added durable native task recovery with `/resume-task` and `/reconcile-task`; interrupted runs retain confirmed progress and unknown tool effects require verification.
 - Added a live elapsed-time suffix to the `Working...` indicator: it counts in seconds and switches to minutes (`12m 34s`) and hours (`1h 2m 5s`) automatically, counting from the turn start and refreshing once per second.
 - Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.

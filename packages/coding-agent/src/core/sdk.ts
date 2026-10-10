@@ -92,6 +92,15 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/**
+	 * Provider cache lineage to join, for sessions that duplicate another session's prefix
+	 * (`/clone`, `/fork`, `/resume`). Sets the provider routing key and Codex cache affinity
+	 * through the shared lineage id while session, request and transport identity stay this
+	 * session's own. Omitted means the session's own id is its cache identity. The caller is
+	 * responsible for verifying that the request prefix still matches the lineage; a session that
+	 * had to fall back to another model keeps its own identity instead.
+	 */
+	cacheAffinityId?: string;
 }
 
 /** Result from createAgentSession */
@@ -317,6 +326,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
+	// Inherited cache lineage: route this session's requests to the provider cache partition the
+	// duplicated prefix was cached in. Session, request and native transport identity stay this
+	// session's own; Codex forces SSE because cache-affine requests must not share WebSocket state.
+	const cacheAffinityId = options.cacheAffinityId;
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -379,6 +393,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	});
+	if (cacheAffinityId && !modelFallbackMessage) {
+		agent.promptCacheKey = cacheAffinityId;
+		agent.cacheAffinityId = cacheAffinityId;
+		agent.transport = model?.api === "openai-codex-responses" ? "sse" : settingsManager.getTransport();
+	}
 
 	// Restore messages if session has existing data
 	if (hasExistingSession) {

@@ -50,6 +50,7 @@ import { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
+import { recordedCacheAffinityId } from "./core/session-cache-affinity.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -731,6 +732,7 @@ export async function main(args: string[], options?: MainOptions) {
 		agentDir,
 		sessionManager,
 		sessionStartEvent,
+		cacheAffinityId,
 		projectTrustContext,
 	}) => {
 		const isInitialRuntime = sessionStartEvent === undefined;
@@ -834,6 +836,9 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
+			// The branched lineage arrives with the replacement; opening an already-forked session
+			// (for example after a restart) restores it from the session file.
+			cacheAffinityId: cacheAffinityId ?? recordedCacheAffinityId(sessionManager),
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,

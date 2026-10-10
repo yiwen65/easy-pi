@@ -572,6 +572,12 @@ export interface SessionStartEvent {
 	reason: "startup" | "reload" | "new" | "resume" | "fork";
 	/** Previously active session file. Present for "new", "resume", and "fork". */
 	previousSessionFile?: string;
+	/**
+	 * Provider cache lineage the session joined, carried over from a parent branch "fork".
+	 * A cache-routing label for provider partition affinity, never a session, request or
+	 * transport identity. Omitted when the session keeps its own id as its cache identity.
+	 */
+	cacheAffinityId?: string;
 }
 
 /** Fired when the current session metadata changes. */

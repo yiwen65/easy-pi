@@ -55,6 +55,8 @@ export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
+	/** Provider cache lineage to join; see CreateAgentSessionOptions.cacheAffinityId. */
+	cacheAffinityId?: string;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -218,6 +220,7 @@ export async function createAgentSessionFromServices(
 		noTools: options.noTools,
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
+		cacheAffinityId: options.cacheAffinityId,
 		backgroundBash: options.backgroundBash,
 	});
 }
