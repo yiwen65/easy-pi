@@ -35,6 +35,7 @@
   - `packages/tui` (`node:test`): `node --test test/specific.test.ts`
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider.
+- For real-model tests, default to `gpt-6.1-sol` with `medium` reasoning effort for both root and subagents. A model or effort explicitly specified by the user overrides only that field; otherwise do not inherit a different model or effort from runtime settings or existing test defaults.
 - Real provider APIs, keys, and paid tokens are off-limits by default. They may be used only when the task genuinely needs them AND the user has explicitly approved that use. Approved real-API usage must:
   - be gated behind an explicit opt-in env flag (e.g. `PI_REAL_MODEL_EVAL=1`) so it never runs in CI or default suites (pattern: `packages/coding-agent/test/compaction-subsystem/eval/real-model-eval.test.ts`);
   - run targeted files only, never the full suite;
