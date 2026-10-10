@@ -172,6 +172,13 @@ function finalizeTruncatedResult(
  * check to avoid running the RGI_Emoji regex unnecessarily.
  */
 function graphemeWidth(segment: string): number {
+	// Segmentation has already isolated this cluster. Only a single printable
+	// ASCII code unit can bypass Unicode classification (not e.g. "e\u0301").
+	if (segment.length === 1) {
+		const code = segment.charCodeAt(0);
+		if (code >= 0x20 && code <= 0x7e) return 1;
+	}
+
 	if (segment === "\t") {
 		return 3;
 	}
@@ -276,10 +283,15 @@ export function visibleWidth(str: string): number {
 		clean = stripped;
 	}
 
-	// Calculate width
+	// Styled ASCII and expanded tabs no longer need grapheme segmentation once
+	// escape sequences are stripped. Controls and mixed Unicode keep the full path.
 	let width = 0;
-	for (const { segment } of graphemeSegmenter.segment(clean)) {
-		width += graphemeWidth(segment);
+	if (isPrintableAscii(clean)) {
+		width = clean.length;
+	} else {
+		for (const { segment } of graphemeSegmenter.segment(clean)) {
+			width += graphemeWidth(segment);
+		}
 	}
 
 	// Cache result

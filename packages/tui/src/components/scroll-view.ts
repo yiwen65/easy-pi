@@ -223,9 +223,24 @@ export class ScrollView extends Container {
 							.sort((a, b) => b.start - a.start),
 					];
 					let restored = false;
+					let survivors: Map<Component, ScrollViewContentRange> | undefined;
 					for (const neighbour of neighbours) {
-						const survivor = ranges.find((range) => range.component === neighbour.component && range.height > 0);
-						if (!survivor) continue;
+						const survivor = survivors
+							? survivors.get(neighbour.component)
+							: ranges.find((range) => range.component === neighbour.component && range.height > 0);
+						if (!survivor) {
+							// Rebuilt history can discard many old neighbours. Index once after
+							// a miss, but avoid an index for a cheap first-neighbour hit.
+							if (!survivors) {
+								survivors = new Map();
+								for (const range of ranges) {
+									if (range.height > 0 && !survivors.has(range.component)) {
+										survivors.set(range.component, range);
+									}
+								}
+							}
+							continue;
+						}
 						this.currentScrollTop = survivor.start;
 						restored = true;
 						break;
@@ -240,7 +255,9 @@ export class ScrollView extends Container {
 							)
 							.sort((a, b) => b.depth - a.depth);
 						for (const parent of parents) {
-							const survivor = ranges.find((range) => range.component === parent.component && range.height > 0);
+							const survivor = survivors
+								? survivors.get(parent.component)
+								: ranges.find((range) => range.component === parent.component && range.height > 0);
 							if (!survivor) continue;
 							this.currentScrollTop =
 								survivor.start + Math.min(this.currentScrollTop - parent.start, survivor.height - 1);
