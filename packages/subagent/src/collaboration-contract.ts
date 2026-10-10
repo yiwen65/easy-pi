@@ -69,7 +69,7 @@ const ERROR_REASONS = {
 	},
 	loaded_sessions_full: {
 		code: "limit_reached",
-		hint: "No idle persisted child session can be unloaded. Wait for active turns or startup cleanup before loading another.",
+		hint: "No idle persisted child session can be unloaded. Wait for active turns, background tasks or startup cleanup before loading another.",
 	},
 	model_unavailable: {
 		code: "invalid_arguments",

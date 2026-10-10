@@ -47,11 +47,12 @@ afterEach(async () => {
 	while (fixtures.length > 0) {
 		const fixture = fixtures.pop()!;
 		try {
-			fixture.session.dispose();
-		} catch {
-			// best effort
+			await fixture.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			const report = await fixture.session.shutdown();
+			expect(report.complete).toBe(true);
+		} finally {
+			rmSync(fixture.cwd, { recursive: true, force: true });
 		}
-		rmSync(fixture.cwd, { recursive: true, force: true });
 	}
 });
 
@@ -79,6 +80,7 @@ async function realSession(): Promise<SessionFixture> {
 		agentDir,
 		modelRuntime,
 		model,
+		thinkingLevel: "low",
 		settingsManager,
 		sessionManager: SessionManager.create(cwd, join(cwd, "root")),
 		resourceLoader,
@@ -133,6 +135,16 @@ function lastAssistantText(messages: AgentMessage[]): string {
 	return "";
 }
 
+function spawnProbe(task_name: string, objective: string): string {
+	return JSON.stringify({
+		task_name,
+		task: { objective },
+		relationship: "verify",
+		context: "isolated",
+		tools: "inherit",
+	});
+}
+
 describe.skipIf(!RUN)("subagents with a real provider", () => {
 	it(
 		"root delegates via spawn_agent, the child runs real inference, and wait_agent receives its result",
@@ -140,10 +152,10 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 			const { session } = await realSession();
 			await session.prompt(
 				"请严格按步骤执行。注意:这不是两个问题,而是一个连续流程;在拿到子代理结果之前不要输出任何答复文本。\n" +
-					'1. 调用 spawn_agent:task_name="researcher";delegation.version=1;' +
-					'delegation.task={"relationship":"continue","objective":"Reply with the single word PONG via deliver_result, then stop.","scope":"trivial real-provider probe","material":[],"deliverables":["the word PONG via deliver_result"],"acceptance":["result is PONG"]};' +
-					'delegation.context={"mode":"isolated"};delegation.capabilities={"tools":"inherit"}。\n' +
-					"2. 在同一回合内立即调用 wait_agent(timeout_ms=60000)等待它的完成通知;这期间不要回复我。\n" +
+					"1. 调用 spawn_agent，参数: " +
+					spawnProbe("researcher", "Reply with the single word PONG via deliver_result, then stop.") +
+					"。\n" +
+					'2. 在同一回合内立即调用 wait_agent(target="researcher", timeout_ms=60000)等待它的完成;这期间不要回复我。\n' +
 					"3. 只有拿到 wait_agent 返回的结果后,才用一句中文告诉我结果内容。",
 			);
 
@@ -166,7 +178,7 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 			for (const message of messages) {
 				const stop = (message as { stopReason?: string }).stopReason;
 				if (stop === "error") {
-					console.log("[real-subagent] error message:", JSON.stringify(message).slice(0, 800));
+					console.log("[real-subagent] assistant error; inspect the isolated session locally");
 				}
 			}
 			console.log(
@@ -203,13 +215,12 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 			const { session } = await realSession();
 			await session.prompt(
 				"请严格按步骤执行:\n" +
-					'1. 调用 spawn_agent:task_name="researcher";delegation.version=1;' +
-					'delegation.task={"relationship":"continue","objective":"Reply with the single word PONG via deliver_result, then stop.","scope":"trivial probe","material":[],"deliverables":["PONG"],"acceptance":["result is PONG"]};' +
-					'delegation.context={"mode":"isolated"};delegation.capabilities={"tools":"inherit"}。\n' +
-					"2. 调用 wait_agent 等待完成。\n" +
-					'3. 调用 followup_task:target="researcher";task={"relationship":"continue","objective":"Reply with the single word PONG2 via deliver_result.","scope":"trivial probe","material":[],"deliverables":["PONG2"],"acceptance":["result is PONG2"]};' +
-					'context="existing";capabilities={"tools":"inherit"}。\n' +
-					"4. 再次调用 wait_agent 等待第二个结果,然后用一句中文告诉我两个结果。",
+					"1. 调用 spawn_agent，参数: " +
+					spawnProbe("researcher", "Reply with the single word PONG via deliver_result, then stop.") +
+					"。\n" +
+					'2. 调用 wait_agent(target="researcher") 等待完成。\n' +
+					'3. 调用 followup_task: {"target":"researcher","task":{"objective":"Reply with the single word PONG2 via deliver_result."},"tools":"inherit"}。\n' +
+					'4. 再次调用 wait_agent(target="researcher") 等待第二个结果,然后用一句中文告诉我两个结果。',
 			);
 
 			const messages = session.agent.state.messages;
@@ -228,10 +239,13 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 			const { session } = await realSession();
 			await session.prompt(
 				"请严格按步骤执行:\n" +
-					'1. 调用 spawn_agent:task_name="sleeper";delegation.version=1;' +
-					'delegation.task={"relationship":"continue","objective":"用 bash 前台运行命令 sleep 120(把 timeout 参数设为 120),命令完成后用 deliver_result 报告。","scope":"interrupt probe","material":[],"deliverables":["report"],"acceptance":["report delivered"]};' +
-					'delegation.context={"mode":"isolated"};delegation.capabilities={"tools":"inherit"}。\n' +
-					"2. 调用 wait_agent,把 timeout_ms 设为 3000(只是短暂观察,不会取消子代理)。\n" +
+					"1. 调用 spawn_agent，参数: " +
+					spawnProbe(
+						"sleeper",
+						"用 bash 前台运行命令 sleep 120(把 timeout 参数设为 120),命令完成后用 deliver_result 报告。",
+					) +
+					"。\n" +
+					'2. 调用 wait_agent(target="sleeper", timeout_ms=10000)短暂观察，不取消子代理。\n' +
 					'3. 无论观察结果如何,调用 interrupt_agent,target="sleeper"。\n' +
 					"4. 调用 list_agents,然后用一句中文告诉我 sleeper 的状态。",
 			);
@@ -252,10 +266,10 @@ describe.skipIf(!RUN)("subagents with a real provider", () => {
 			const { session } = await realSession();
 			await session.prompt(
 				"请严格按步骤执行:\n" +
-					'1. 调用 spawn_agent:task_name="researcher";delegation.version=1;' +
-					'delegation.task={"relationship":"continue","objective":"Reply with the single word PONG via deliver_result, then stop.","scope":"trivial probe","material":[],"deliverables":["PONG"],"acceptance":["result is PONG"]};' +
-					'delegation.context={"mode":"isolated"};delegation.capabilities={"tools":"inherit"}。\n' +
-					"2. 调用 wait_agent 等待完成。\n" +
+					"1. 调用 spawn_agent，参数: " +
+					spawnProbe("researcher", "Reply with the single word PONG via deliver_result, then stop.") +
+					"。\n" +
+					'2. 调用 wait_agent(target="researcher") 等待完成。\n' +
 					'3. 调用 close_agent,target="researcher"。\n' +
 					"4. 调用 list_agents,用一句中文告诉我结果。",
 			);

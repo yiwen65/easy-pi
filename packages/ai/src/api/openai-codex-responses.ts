@@ -940,7 +940,10 @@ export function closeOpenAICodexWebSocketSessions(sessionId?: string): void {
 	websocketSessionCache.clear();
 }
 
-registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
+registerSessionResourceCleanup((sessionId) => {
+	closeOpenAICodexWebSocketSessions(sessionId);
+	resetOpenAICodexWebSocketDebugStats(sessionId);
+});
 
 function isWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
 	return sessionId ? websocketSseFallbackSessions.has(sessionId) : false;

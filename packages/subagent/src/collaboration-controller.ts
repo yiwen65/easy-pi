@@ -741,7 +741,11 @@ export class CollaborationController {
 		// Only persisted idle sessions can be evicted. Memory-only sessions are bounded by maxAgents.
 		if (this.store.directory && this.sessions.size >= COLLABORATION_LIMITS.maxActiveSessions - 1) {
 			const idle = [...this.sessions].find(
-				([path, session]) => !this.active.has(path) && !this.loading.has(path) && session.sessionFile,
+				([path, session]) =>
+					!this.active.has(path) &&
+					!this.loading.has(path) &&
+					session.sessionFile &&
+					(session.canUnload?.() ?? true),
 			);
 			if (!idle)
 				throw new CollaborationError(
@@ -1016,11 +1020,16 @@ export class CollaborationController {
 			const aborts = await aborting;
 			await Promise.all([...this.active.values()]);
 			const disposals = await Promise.allSettled([...this.sessions.values()].map((session) => session.dispose()));
+			if (disposals.some((result) => result.status === "rejected")) {
+				// Failed disposal does not prove resources were released. Keep this live owner and
+				// its session references instead of allowing another controller to acquire the team.
+				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");
+			}
 			this.sessions.clear();
 			this.authorityObservers.clear();
 			this.liveTools.clear();
 			this.store.close();
-			if ([...aborts, ...disposals].some((result) => result.status === "rejected")) {
+			if (aborts.some((result) => result.status === "rejected")) {
 				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");
 			}
 		});

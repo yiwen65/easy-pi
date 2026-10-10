@@ -40,6 +40,12 @@ import { collaborationToolSchemas } from "./pi-collaboration-context.ts";
 
 const IDENTITY_ENTRY = "epi-collaboration-identity";
 
+async function shutdownChildSession(session: AgentSession): Promise<void> {
+	const report = await session.shutdown();
+	if (!report.complete)
+		throw new CollaborationError("interrupted", "Child resource cleanup is incomplete; inspect its retained session");
+}
+
 function readCacheAffinity(value: unknown): ChildRequestPrefix["cacheAffinity"] {
 	if (value === undefined) return undefined;
 	const data =
@@ -191,7 +197,11 @@ export function createPiChildSessionHost(options: {
 				}
 			}
 			request.signal?.throwIfAborted();
-			const settingsManager = SettingsManager.inMemory(structuredClone(options.settings));
+			const settingsManager = SettingsManager.inMemory({
+				...structuredClone(options.settings),
+				// Only the controller may start a child turn. Background results await an explicit followup.
+				backgroundBashCompletionDelivery: "nextRequest",
+			});
 			let boundSession: AgentSession | undefined;
 			// Protocol delivery capture: set by the deliver_result tool during a turn, read at turn end.
 			let delivered: DelegationResult | undefined;
@@ -304,7 +314,7 @@ export function createPiChildSessionHost(options: {
 				try {
 					await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 				} finally {
-					await session.shutdown();
+					await shutdownChildSession(session);
 				}
 				throw error;
 			}
@@ -353,6 +363,8 @@ export function createPiChildSessionHost(options: {
 				sessionFile: session.sessionFile,
 				context: (): AgentMessage[] => structuredClone(manager.buildSessionContext().messages),
 				forkContext: (selection) => preparePiCollaborationFork(manager, selection),
+				canUnload: () =>
+					!closed && !active && session.isIdle && !session.backgroundTasks?.list({ activeOnly: true }).length,
 				run(text, task) {
 					validateCollaborationTask(text);
 					if (
@@ -455,7 +467,7 @@ export function createPiChildSessionHost(options: {
 							try {
 								stopObserving?.();
 							} finally {
-								await session.shutdown();
+								await shutdownChildSession(session);
 							}
 						}
 					});

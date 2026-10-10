@@ -65,6 +65,8 @@ export interface ChildSession {
 	context(): AgentMessage[];
 	/** N may only count complete turns whose original boundaries remain available. */
 	forkContext(selection: ForkSelection): AgentMessage[];
+	/** False while native work still owns resources, even after the delegated turn ended. */
+	canUnload?(): boolean;
 	run(text: string, task?: CollaborationMessage): Promise<ChildTurnResult>;
 	abort(): Promise<void>;
 	dispose(): Promise<void>;
