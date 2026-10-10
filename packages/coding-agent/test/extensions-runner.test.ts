@@ -592,6 +592,117 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("user_bash routing (#9068)", () => {
+		async function createBashRunner(handlerBody: string) {
+			const firstPath = path.join(extensionsDir, "first.ts");
+			const laterPath = path.join(extensionsDir, "later.ts");
+			fs.writeFileSync(
+				firstPath,
+				`export default function(pi) {
+				pi.on("user_bash", async () => { ${handlerBody} });
+			}`,
+			);
+			fs.writeFileSync(
+				laterPath,
+				`export default function(pi) {
+				pi.on("user_bash", async () => undefined);
+			}`,
+			);
+			const result = await loadExtensions([firstPath, laterPath], tempDir);
+			expect(result.errors).toEqual([]);
+			expect(result.extensions).toHaveLength(2);
+			const sameExtension = vi.fn(async () => undefined);
+			const nextExtension = vi.fn(async () => undefined);
+			result.extensions[0].handlers.get("user_bash")!.push(sameExtension);
+			result.extensions[1].handlers.set("user_bash", [nextExtension]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+			return { runner, errors, sameExtension, nextExtension, firstPath };
+		}
+
+		const event = { type: "user_bash" as const, command: "pwd", excludeFromContext: false, cwd: "test-cwd" };
+
+		it.each([
+			["an Error", 'throw new Error("Routing failed");', "Routing failed"],
+			["a string", 'throw "Routing failed";', "Routing failed"],
+		])("reports and rethrows %s without calling later handlers", async (_description, body, message) => {
+			const { runner, errors, sameExtension, nextExtension, firstPath } = await createBashRunner(body);
+			await expect(runner.emitUserBash(event)).rejects.toEqual(
+				body.includes("new Error") ? expect.objectContaining({ message }) : message,
+			);
+			expect(errors).toMatchObject([{ extensionPath: firstPath, event: "user_bash", error: message }]);
+			expect(sameExtension).not.toHaveBeenCalled();
+			expect(nextExtension).not.toHaveBeenCalled();
+		});
+
+		it.each([
+			["null", "null"],
+			["false", "false"],
+			["zero", "0"],
+			["an empty string", '""'],
+			["a string", '"handled"'],
+			["an empty object", "{}"],
+			["null operations", "{ operations: null }"],
+			["operations without exec", "{ operations: {} }"],
+			["a non-function exec", "{ operations: { exec: true } }"],
+			["a null result", "{ result: null }"],
+			["an incomplete result", '{ result: { output: "handled" } }'],
+			["a missing exitCode", '{ result: { output: "handled", cancelled: false, truncated: false } }'],
+			["a non-string output", "{ result: { output: 1, exitCode: 0, cancelled: false, truncated: false } }"],
+			["a null exitCode", '{ result: { output: "handled", exitCode: null, cancelled: false, truncated: false } }'],
+			["a non-boolean cancelled", '{ result: { output: "handled", exitCode: 0, cancelled: 0, truncated: false } }'],
+			["a non-boolean truncated", '{ result: { output: "handled", exitCode: 0, cancelled: false, truncated: 0 } }'],
+			[
+				"a non-string fullOutputPath",
+				'{ result: { output: "handled", exitCode: 0, cancelled: false, truncated: false, fullOutputPath: null } }',
+			],
+			[
+				"operations and a result",
+				'{ operations: { exec: async () => ({ exitCode: 0 }) }, result: { output: "handled", exitCode: 0, cancelled: false, truncated: false } }',
+			],
+		])("rejects %s without calling later handlers", async (_description, value) => {
+			const { runner, errors, sameExtension, nextExtension, firstPath } = await createBashRunner(`return ${value};`);
+			await expect(runner.emitUserBash(event)).rejects.toThrow("Invalid user_bash handler result");
+			expect(errors).toMatchObject([
+				{
+					extensionPath: firstPath,
+					event: "user_bash",
+					error: expect.stringContaining("Invalid user_bash handler result"),
+				},
+			]);
+			expect(sameExtension).not.toHaveBeenCalled();
+			expect(nextExtension).not.toHaveBeenCalled();
+		});
+
+		it("continues through every handler when all return undefined", async () => {
+			const { runner, errors, sameExtension, nextExtension } = await createBashRunner("return undefined;");
+			await expect(runner.emitUserBash(event)).resolves.toBeUndefined();
+			expect(sameExtension).toHaveBeenCalledOnce();
+			expect(nextExtension).toHaveBeenCalledOnce();
+			expect(errors).toEqual([]);
+		});
+
+		it.each([
+			["operations", "{ operations: { exec: async () => ({ exitCode: 0 }) } }"],
+			["a completed result", '{ result: { output: "handled", exitCode: 0, cancelled: false, truncated: false } }'],
+			["a cancelled result", '{ result: { output: "", exitCode: undefined, cancelled: true, truncated: false } }'],
+			[
+				"a truncated result",
+				'{ result: { output: "handled", exitCode: 1, cancelled: false, truncated: true, fullOutputPath: "test-output" } }',
+			],
+		])("accepts %s and stops handler propagation", async (_description, value) => {
+			const { runner, errors, sameExtension, nextExtension } = await createBashRunner(`return ${value};`);
+			const result = await runner.emitUserBash(event);
+			expect(result).toBeDefined();
+			if (result?.operations) expect(result.operations.exec).toEqual(expect.any(Function));
+			else expect(result?.result).toMatchObject({ output: expect.any(String), cancelled: expect.any(Boolean) });
+			expect(sameExtension).not.toHaveBeenCalled();
+			expect(nextExtension).not.toHaveBeenCalled();
+			expect(errors).toEqual([]);
+		});
+	});
+
 	describe("message and entry renderers", () => {
 		it("gets Markdown transformers in extension load order", async () => {
 			const extCode = `
