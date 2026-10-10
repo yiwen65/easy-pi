@@ -837,8 +837,16 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager,
 			sessionStartEvent,
 			// The branched lineage arrives with the replacement; opening an already-forked session
-			// (for example after a restart) restores it from the session file.
-			cacheAffinityId: cacheAffinityId ?? recordedCacheAffinityId(sessionManager),
+			// (for example after a restart) restores it from the session file when it was cached
+			// under the model this session resolved.
+			cacheAffinityId:
+				cacheAffinityId ??
+				recordedCacheAffinityId(
+					sessionManager,
+					sessionOptions.model
+						? { provider: sessionOptions.model.provider, id: sessionOptions.model.id }
+						: undefined,
+				),
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,

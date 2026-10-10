@@ -119,16 +119,93 @@ test("the record is written once and survives reopening", async () => {
 	const cwd = await tempDir("persist");
 	const manager = SessionManager.create(cwd, join(cwd, "sessions"));
 	await flushSession(manager);
-	appendSessionCacheAffinity(manager, "lineage-a");
-	appendSessionCacheAffinity(manager, "lineage-b");
+	const model = { provider: "codex-faux", id: "faux-1" };
+	expect(appendSessionCacheAffinity(manager, "lineage-a", model)).toBe(true);
+	expect(appendSessionCacheAffinity(manager, "lineage-b", model)).toBe(false);
 	const file = manager.getSessionFile()!;
 	const hints = (await readFile(file, "utf8"))
 		.trim()
 		.split("\n")
-		.map((line) => JSON.parse(line) as { customType?: string; data?: { affinityId?: string } })
+		.map((line) => JSON.parse(line) as { customType?: string; data?: unknown })
 		.filter((entry) => entry.customType === SESSION_CACHE_AFFINITY_ENTRY);
-	expect(hints).toEqual([expect.objectContaining({ data: { version: 1, affinityId: "lineage-a" } })]);
-	expect(recordedCacheAffinityId(SessionManager.open(file, join(cwd, "sessions")))).toBe("lineage-a");
+	expect(hints).toEqual([
+		expect.objectContaining({ data: { version: 1, affinityId: "lineage-a", boundModel: model } }),
+	]);
+	const reopened = SessionManager.open(file, join(cwd, "sessions"));
+	expect(recordedCacheAffinityId(reopened)).toBe("lineage-a");
+	expect(recordedCacheAffinityId(reopened, model)).toBe("lineage-a");
+});
+
+test("a lineage bound to another model is skipped", async () => {
+	const cwd = await tempDir("bound");
+	const dir = join(cwd, "sessions");
+	const parentFile = join(dir, "parent.jsonl");
+	await mkdir(dir, { recursive: true });
+	await writeFile(
+		parentFile,
+		`${JSON.stringify({ type: "session", version: 1, id: "parent", timestamp: "t", cwd })}\n`,
+	);
+	await writeFile(
+		join(dir, "child.jsonl"),
+		`${[
+			JSON.stringify({ type: "session", version: 1, id: "child", timestamp: "t", cwd, parentSession: parentFile }),
+			JSON.stringify({
+				type: "custom",
+				customType: SESSION_CACHE_AFFINITY_ENTRY,
+				data: { version: 1, affinityId: "lineage-codex", boundModel: { provider: "openai-codex", id: "gpt-5" } },
+				id: "hint",
+				parentId: null,
+				timestamp: "t",
+			}),
+		].join("\n")}\n`,
+	);
+	const child = SessionManager.open(join(dir, "child.jsonl"), dir);
+	expect(recordedCacheAffinityId(child, { provider: "openai-codex", id: "gpt-5" })).toBe("lineage-codex");
+	// Switched to another model: the cached prefix and its partition no longer belong to this model.
+	expect(recordedCacheAffinityId(child, { provider: "kimi-coding", id: "k2" })).toBeUndefined();
+	expect(resolveSessionCacheAffinityId(child, { provider: "kimi-coding", id: "k2" })).toBe(child.getSessionId());
+	// A record without a bound model stays model-agnostic for history written before it existed.
+	const file = join(dir, "agnostic.jsonl");
+	await writeFile(
+		file,
+		`${[
+			JSON.stringify({ type: "session", version: 1, id: "agnostic", timestamp: "t", cwd }),
+			JSON.stringify({
+				type: "custom",
+				customType: SESSION_CACHE_AFFINITY_ENTRY,
+				data: { version: 1, affinityId: "lineage-legacy" },
+				id: "hint",
+				parentId: null,
+				timestamp: "t",
+			}),
+		].join("\n")}\n`,
+	);
+	const agnostic = SessionManager.open(file, dir);
+	expect(recordedCacheAffinityId(agnostic, { provider: "kimi-coding", id: "k2" })).toBe("lineage-legacy");
+});
+
+test("a malformed bound model is ignored like any other invalid record", async () => {
+	const cwd = await tempDir("bad-bound");
+	const dir = join(cwd, "sessions");
+	await mkdir(dir, { recursive: true });
+	const file = join(dir, "bad.jsonl");
+	for (const boundModel of [{ provider: "p" }, { id: "m" }, "openai-codex", 7, []]) {
+		await writeFile(
+			file,
+			`${[
+				JSON.stringify({ type: "session", version: 1, id: "bad", timestamp: "t", cwd }),
+				JSON.stringify({
+					type: "custom",
+					customType: SESSION_CACHE_AFFINITY_ENTRY,
+					data: { version: 1, affinityId: "lineage", boundModel },
+					id: "hint",
+					parentId: null,
+					timestamp: "t",
+				}),
+			].join("\n")}\n`,
+		);
+		expect(recordedCacheAffinityId(SessionManager.open(file, dir))).toBeUndefined();
+	}
 });
 
 test("an unreadable parent chain falls back to the session id", async () => {

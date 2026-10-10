@@ -32,6 +32,7 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../s
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { configureHttpDispatcher } from "../src/core/http-dispatcher.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
+import { readSessionCacheAffinityHint, recordedCacheAffinityId } from "../src/core/session-cache-affinity.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -216,6 +217,23 @@ describe.skipIf(!RUN)("real /clone prompt cache reuse", () => {
 					// The production fork path threaded the parent lineage into the new runtime.
 					expect(inherited).toBe(parentId);
 					expect(lineages.at(-1)).toBe(parentId);
+					expect(readSessionCacheAffinityHint(session.sessionFile!)).toMatchObject({
+						affinityId: parentId,
+						boundModel: { provider: PROVIDER, id: MODEL_ID },
+					});
+					// Reopening keeps the lineage for the same model and drops it for another one.
+					expect(
+						recordedCacheAffinityId(SessionManager.open(session.sessionFile!), {
+							provider: PROVIDER,
+							id: MODEL_ID,
+						}),
+					).toBe(parentId);
+					expect(
+						recordedCacheAffinityId(SessionManager.open(session.sessionFile!), {
+							provider: PROVIDER,
+							id: "other-model",
+						}),
+					).toBeUndefined();
 					if (keepLineage) {
 						expect(cloneRequest.cacheAffinityId).toBe(parentId);
 						expect(cloneRequest.promptCacheKey).toBe(parentId);

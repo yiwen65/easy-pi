@@ -184,10 +184,7 @@ export class AgentSessionRuntime {
 		return { cancelled: result?.cancel === true };
 	}
 
-	private async teardownCurrent(
-		reason: SessionShutdownEvent["reason"],
-		targetSessionFile?: string,
-	): Promise<void> {
+	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
 		const session = this.session;
 		try {
 			// Persist the aborted turn before replacement.
@@ -317,8 +314,13 @@ export class AgentSessionRuntime {
 		}
 
 		// The branched session duplicates this session's provider prefix, so it joins the same
-		// cache lineage; identity, request ids and transport stay independent.
-		const cacheAffinityId = resolveSessionCacheAffinityId(this.session.sessionManager);
+		// cache lineage; identity, request ids and transport stay independent. A lineage bound to
+		// another model is not reusable, because the prefix was cached under that model.
+		const currentModel = this.session.model;
+		const cacheAffinityId = resolveSessionCacheAffinityId(
+			this.session.sessionManager,
+			currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+		);
 		const previousSessionFile = this.session.sessionFile;
 		if (this.session.sessionManager.isPersisted()) {
 			const currentSessionFile = this.session.sessionFile;
@@ -356,7 +358,11 @@ export class AgentSessionRuntime {
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
 			}
-			appendSessionCacheAffinity(sessionManager, cacheAffinityId);
+			appendSessionCacheAffinity(
+				sessionManager,
+				cacheAffinityId,
+				currentModel ? { provider: currentModel.provider, id: currentModel.id } : undefined,
+			);
 			await this.teardownCurrent("fork", sessionManager.getSessionFile());
 			await this.replace({
 				cwd: sessionManager.getCwd(),
@@ -464,7 +470,13 @@ export async function createAgentSessionRuntime(
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
 	const result = await createRuntime(options);
-	return new AgentSessionRuntime(result.session, result.services, createRuntime, result.diagnostics, result.modelFallbackMessage);
+	return new AgentSessionRuntime(
+		result.session,
+		result.services,
+		createRuntime,
+		result.diagnostics,
+		result.modelFallbackMessage,
+	);
 }
 
 export {

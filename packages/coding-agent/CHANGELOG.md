@@ -8,7 +8,7 @@
 
 ### Added
 
-- `/clone` and `/fork` branches now join the parent session's provider prompt-cache lineage: the branched session keeps its own session, request and file identity but reuses the provider cache key and Codex cache affinity of the session it duplicates, so the first request after branching can still read the already-cached prefix. The lineage is stored in the session file (`epi-session-cache-affinity`), survives `/resume`, repeated forks and restarts, and is dropped when a session falls back to a different model. Codex cache-affine requests use SSE.
+- `/clone` and `/fork` branches now join the parent session's provider prompt-cache lineage: the branched session keeps its own session, request and file identity but reuses the provider cache key and Codex cache affinity of the session it duplicates, so the first request after branching can still read the already-cached prefix. The lineage is stored in the session file (`epi-session-cache-affinity`) together with the model its cached prefix belongs to, survives `/resume`, repeated forks and restarts, and is dropped when the session falls back to, or switches to, a different model. Codex cache-affine requests use SSE.
 - Added durable native task recovery with `/resume-task` and `/reconcile-task`; interrupted runs retain confirmed progress and unknown tool effects require verification.
 - Added a live elapsed-time suffix to the `Working...` indicator: it counts in seconds and switches to minutes (`12m 34s`) and hours (`1h 2m 5s`) automatically, counting from the turn start and refreshing once per second.
 - Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- A cloned or forked session that later runs on a different model now leaves the inherited cache lineage behind instead of sending another model's cache routing key, which could only miss. The recorded lineage also names the model its cached prefix belongs to, so reopening a session under another model no longer restores it.
 - Cloning or forking a session that has no conversation yet (fresh session, first response still pending, or a resumed session without messages) is now refused before any branch file is written, with a message that names the real reason and the way forward. Session files are created before the first response, so the previous check for a missing file no longer described that state.
 - Fixed captured nonzero Bash exits pausing tasks as unknown effects; recovered earlier diagnostic-only exit results and automatically inspected interrupted effects within the current user turn.
 - Allowed new prompts while an earlier task has unconfirmed tool effects, retained paused tasks across restart, and added evidence-based model reconciliation while blocking identical unresolved operations.

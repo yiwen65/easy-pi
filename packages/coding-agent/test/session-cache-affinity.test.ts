@@ -12,7 +12,7 @@ import { afterEach, expect, test } from "vitest";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
-import { SESSION_CACHE_AFFINITY_ENTRY } from "../src/core/session-cache-affinity.ts";
+import { recordedCacheAffinityId, SESSION_CACHE_AFFINITY_ENTRY } from "../src/core/session-cache-affinity.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -198,6 +198,54 @@ test("a session without the record keeps its own identity as the cache lineage",
 	await f.runtime.fork(f.runtime.session.sessionManager.getLeafId()!, { position: "at" });
 	expect(f.runtime.session.agent.cacheAffinityId).toBe(rootId);
 	expect(f.runtime.session.agent.promptCacheKey).toBe(rootId);
+});
+
+test("switching model after cloning drops the inherited lineage", async () => {
+	const f = await fixture();
+	await f.runtime.session.prompt("parent message");
+	const parentId = f.runtime.session.sessionId;
+	await f.runtime.fork(f.runtime.session.sessionManager.getLeafId()!, { position: "at" });
+	const clone = f.runtime.session;
+	expect(clone.agent.cacheAffinityId).toBe(parentId);
+
+	// Same session, another model: the cached prefix (and its partition) belong to the old model.
+	const other = fauxProvider({ provider: "session-cache-other", api: "faux-other", tokensPerSecond: 0 });
+	const modelRuntime = await ModelRuntime.create({
+		credentials: new InMemoryCredentialStore(),
+		modelsPath: null,
+		allowModelNetwork: false,
+	});
+	modelRuntime.registerNativeProvider(other.provider);
+	clone.modelRuntime.registerNativeProvider(other.provider);
+	await clone.setModel(other.getModel());
+	expect(clone.agent.cacheAffinityId).toBeUndefined();
+	expect(clone.agent.promptCacheKey).toBeUndefined();
+	expect(clone.agent.transport).toBe("auto");
+});
+
+test("a lineage bound to another model is not restored when the session is reopened", async () => {
+	const f = await fixture();
+	await f.runtime.session.prompt("parent message");
+	const parentId = f.runtime.session.sessionId;
+	await f.runtime.fork(f.runtime.session.sessionManager.getLeafId()!, { position: "at" });
+	const cloneFile = f.runtime.session.sessionManager.getSessionFile()!;
+	await f.runtime.session.prompt("clone message");
+	// The recorded lineage names the model it was cached under.
+	const { readSessionCacheAffinityHint } = await import("../src/core/session-cache-affinity.ts");
+	expect(readSessionCacheAffinityHint(cloneFile)).toMatchObject({
+		affinityId: parentId,
+		boundModel: { provider: "session-cache-faux", id: f.faux.getModel().id },
+	});
+
+	// The app factory resolves the lineage from the file; a different model must not inherit it.
+	const otherModel = { provider: "session-cache-other", id: "other-1" };
+	expect(recordedCacheAffinityId(SessionManager.open(cloneFile, f.sessionDir), otherModel)).toBeUndefined();
+	expect(
+		recordedCacheAffinityId(SessionManager.open(cloneFile, f.sessionDir), {
+			provider: "session-cache-faux",
+			id: f.faux.getModel().id,
+		}),
+	).toBe(parentId);
 });
 
 test("non-Codex providers keep their configured transport", async () => {

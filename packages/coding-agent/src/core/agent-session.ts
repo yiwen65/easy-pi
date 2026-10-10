@@ -621,8 +621,8 @@ export class AgentSession {
 
 			const content = hookResult?.content ?? result.content ?? [];
 			const normalizedContent = await normalizeToolResultImages(content, {
-						autoResizeImages: this.settingsManager.getImageAutoResize(),
-					});
+				autoResizeImages: this.settingsManager.getImageAutoResize(),
+			});
 
 			if (!hookResult && normalizedContent === content) {
 				return undefined;
@@ -2497,6 +2497,22 @@ export class AgentSession {
 	}
 
 	/**
+	 * Leave any inherited cache lineage behind.
+	 *
+	 * A lineage records where a duplicated prefix was cached, under a specific model. Once this
+	 * session runs on another model, sending that routing key would only miss, and Codex
+	 * cache-affine requests are pinned to SSE, so the session returns to its own identity and its
+	 * configured transport preference. A lineage explicit to this session is not touched: only
+	 * model changes call this.
+	 */
+	private _dropInheritedCacheAffinity(): void {
+		if (this.agent.cacheAffinityId === undefined) return;
+		this.agent.promptCacheKey = undefined;
+		this.agent.cacheAffinityId = undefined;
+		this.agent.transport = this.settingsManager.getTransport();
+	}
+
+	/**
 	 * Set model directly.
 	 * Validates that auth is configured, saves to session and settings.
 	 * @throws Error if no auth is configured for the model
@@ -2509,6 +2525,7 @@ export class AgentSession {
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = model;
+		this._dropInheritedCacheAffinity();
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this._restoreSessionMessages();
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
@@ -2552,6 +2569,7 @@ export class AgentSession {
 
 		// Apply model
 		this.agent.state.model = next.model;
+		this._dropInheritedCacheAffinity();
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this._restoreSessionMessages();
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
@@ -2581,6 +2599,7 @@ export class AgentSession {
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = nextModel;
+		this._dropInheritedCacheAffinity();
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this._restoreSessionMessages();
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
@@ -3515,12 +3534,10 @@ export class AgentSession {
 						},
 					]
 				: []),
-			...this._customTools.map(
-				(definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
-				}),
-			),
+			...this._customTools.map((definition) => ({
+				definition,
+				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
+			})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
 			Array.from(this._baseToolDefinitions.entries())

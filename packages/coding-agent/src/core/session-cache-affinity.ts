@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { loadEntriesFromFile, type SessionManager } from "./session-manager.ts";
 
 /**
@@ -13,19 +13,58 @@ export const SESSION_CACHE_AFFINITY_ENTRY = "epi-session-cache-affinity";
 
 /** A fork never chains deeper than this when searching for an unrecorded ancestor lineage. */
 const MAX_LINEAGE_WALK = 64;
+/** A header is the first JSONL record; anything longer is not a header we should parse. */
+const MAX_HEADER_BYTES = 1024 * 1024;
+
+export interface SessionCacheAffinityModel {
+	provider: string;
+	id: string;
+}
 
 export interface SessionCacheAffinityHint {
 	version: 1;
 	/** Stable provider cache identity shared by one fork/clone lineage. */
 	affinityId: string;
+	/** Model the cached prefix belongs to. A record without it applies to any model. */
+	boundModel?: SessionCacheAffinityModel;
 }
 
 function isValidAffinityId(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && value.length <= 8192;
 }
 
-/** Read the recorded hint of one session file; malformed or unknown-version records are ignored. */
-export function readSessionCacheAffinityHint(sessionFile: string): SessionCacheAffinityHint | undefined {
+function readBoundModel(value: unknown): SessionCacheAffinityModel | undefined | false {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	const provider = record.provider;
+	const id = record.id;
+	if (typeof provider !== "string" || provider.length === 0 || typeof id !== "string" || id.length === 0) return false;
+	return { provider, id };
+}
+
+/** Parse one recorded hint; malformed or unknown-version records are ignored. */
+function parseHint(entry: { data?: unknown }): SessionCacheAffinityHint | undefined {
+	const data = entry.data as { version?: unknown; affinityId?: unknown; boundModel?: unknown } | undefined;
+	if (data?.version !== 1 || !isValidAffinityId(data.affinityId)) return undefined;
+	const boundModel = readBoundModel(data.boundModel);
+	if (boundModel === false) return undefined;
+	return { version: 1, affinityId: data.affinityId, ...(boundModel ? { boundModel } : {}) };
+}
+
+function forModel(hint: SessionCacheAffinityHint, model?: SessionCacheAffinityModel): boolean {
+	if (!model || !hint.boundModel) return true;
+	return hint.boundModel.provider === model.provider && hint.boundModel.id === model.id;
+}
+
+/**
+ * Read the recorded hint of one session file. A hint bound to a different model is skipped, so a
+ * session that switched models falls back to its own identity instead of another model's partition.
+ */
+export function readSessionCacheAffinityHint(
+	sessionFile: string,
+	model?: SessionCacheAffinityModel,
+): SessionCacheAffinityHint | undefined {
 	let entries: ReturnType<typeof loadEntriesFromFile>;
 	try {
 		entries = loadEntriesFromFile(sessionFile);
@@ -34,39 +73,57 @@ export function readSessionCacheAffinityHint(sessionFile: string): SessionCacheA
 	}
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== SESSION_CACHE_AFFINITY_ENTRY) continue;
-		const data = entry.data as { version?: unknown; affinityId?: unknown } | undefined;
-		if (data?.version !== 1 || !isValidAffinityId(data.affinityId)) continue;
-		return { version: 1, affinityId: data.affinityId };
+		const hint = parseHint(entry);
+		if (hint && forModel(hint, model)) return hint;
 	}
 	return undefined;
 }
 
-function parentSessionFile(sessionFile: string): string | undefined {
+/**
+ * Header of one session file, reading only its first record so a long ancestor history stays off
+ * the fork/resume path. Unknown or unreadable files yield no header.
+ */
+function readSessionHeader(sessionFile: string): { parentSession?: string } | undefined {
+	let descriptor: number | undefined;
 	try {
-		const header = loadEntriesFromFile(sessionFile).find((entry) => entry.type === "session");
-		return header && header.type === "session" ? header.parentSession : undefined;
+		descriptor = openSync(sessionFile, "r");
+		const size = fstatSync(descriptor).size;
+		if (size === 0) return undefined;
+		const buffer = Buffer.allocUnsafe(Math.min(size, MAX_HEADER_BYTES));
+		const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
+		const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0] ?? "";
+		const entry = JSON.parse(firstLine) as { type?: unknown; parentSession?: unknown };
+		if (entry.type !== "session" || typeof entry.parentSession !== "string" || entry.parentSession.length === 0)
+			return undefined;
+		return { parentSession: entry.parentSession };
 	} catch {
 		return undefined;
+	} finally {
+		if (descriptor !== undefined) closeSync(descriptor);
 	}
 }
 
+/** One ancestor in the chain: its recorded lineage for this model and the link to its parent. */
+function lookupSession(sessionFile: string, model?: SessionCacheAffinityModel) {
+	return {
+		affinityId: readSessionCacheAffinityHint(sessionFile, model)?.affinityId,
+		parent: readSessionHeader(sessionFile)?.parentSession,
+	};
+}
+
 /**
- * Cache lineage recorded by a fork lineage: this file's own record, else the nearest recorded
- * ancestor for branches saved before the record existed. No file is read twice and nothing is written.
+ * Cache lineage recorded by a fork lineage: this file's own record for the given model, else the
+ * nearest recorded ancestor for branches saved before the record existed. Each file is read once
+ * per hop and nothing is written.
  */
 export function recordedCacheAffinityId(
 	manager: Pick<SessionManager, "getSessionId" | "getSessionFile">,
+	model?: SessionCacheAffinityModel,
 ): string | undefined {
-	const sessionFile = manager.getSessionFile();
-	if (!sessionFile) return undefined;
-	const recorded = readSessionCacheAffinityHint(sessionFile);
-	if (recorded) return recorded.affinityId;
-	let current: string | undefined = sessionFile;
-	for (let hop = 0; hop < MAX_LINEAGE_WALK; hop++) {
-		const parent = parentSessionFile(current);
-		if (!parent) return undefined;
-		const inherited = readSessionCacheAffinityHint(parent);
-		if (inherited) return inherited.affinityId;
+	let current = manager.getSessionFile();
+	for (let hop = 0; hop < MAX_LINEAGE_WALK && current; hop++) {
+		const { affinityId, parent } = lookupSession(current, model);
+		if (affinityId) return affinityId;
 		current = parent;
 	}
 	return undefined;
@@ -75,14 +132,15 @@ export function recordedCacheAffinityId(
 /**
  * Resolve the cache lineage a new branch of this session must join.
  *
- * An already-recorded lineage wins, so repeated `/fork` keeps one lineage instead of decaying per
- * hop; a session that records nothing (memory-only, or a root that never forked) becomes the root
- * of its own lineage. No session file, history or metadata is written here.
+ * An already-recorded lineage for the same model wins, so repeated `/fork` keeps one lineage instead
+ * of decaying per hop; a session that records nothing (memory-only, a root that never forked, or a
+ * lineage bound to another model) becomes the root of its own lineage. Nothing is written here.
  */
 export function resolveSessionCacheAffinityId(
 	manager: Pick<SessionManager, "getSessionId" | "getSessionFile">,
+	model?: SessionCacheAffinityModel,
 ): string {
-	return recordedCacheAffinityId(manager) ?? manager.getSessionId();
+	return recordedCacheAffinityId(manager, model) ?? manager.getSessionId();
 }
 
 /**
@@ -90,20 +148,30 @@ export function resolveSessionCacheAffinityId(
  * The id is a cache-routing label, never a session, request or transport identity, and the call is
  * idempotent per branch.
  *
- * A branch whose file is not materialized yet stays unwritten: cloning an unsaved session keeps
- * failing on its existing preconditions instead of creating a file as a side effect, and that new
- * session simply keeps its own id as its cache identity.
+ * Returns false when there is nothing to write: a branch whose file is gone is not recreated
+ * (its conversation precondition is owned by the runtime), and an already-recorded branch is left
+ * untouched. That branch then keeps its own id as its cache identity.
  */
-export function appendSessionCacheAffinity(manager: SessionManager, affinityId: string): boolean {
+export function appendSessionCacheAffinity(
+	manager: SessionManager,
+	affinityId: string,
+	boundModel?: SessionCacheAffinityModel,
+): boolean {
 	const sessionFile = manager.getSessionFile();
-	if (!sessionFile || !existsSync(sessionFile)) return false;
+	if (!sessionFile) return false;
 	if (
 		manager.getEntries().some((entry) => entry.type === "custom" && entry.customType === SESSION_CACHE_AFFINITY_ENTRY)
 	)
 		return false;
+	try {
+		if (statSync(sessionFile).size === 0) return false;
+	} catch {
+		return false;
+	}
 	manager.appendCustomEntry(SESSION_CACHE_AFFINITY_ENTRY, {
 		version: 1,
 		affinityId,
+		...(boundModel ? { boundModel } : {}),
 	} satisfies SessionCacheAffinityHint);
 	return true;
 }
