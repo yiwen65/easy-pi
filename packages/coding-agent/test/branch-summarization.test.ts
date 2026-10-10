@@ -55,13 +55,15 @@ describe("branch summarization", () => {
 			return stream;
 		};
 
-		await generateBranchSummary(entries, {
+		const result = await generateBranchSummary(entries, {
 			model,
 			signal: new AbortController().signal,
 			streamFn,
 		});
 
 		expect(requestOptions?.toolChoice).toBe("none");
+		expect(result.error).toBeUndefined();
+		expect(result.summary).toContain("\n\nsummary");
 	});
 
 	it("rejects tool calls from branch summaries", async () => {
@@ -86,5 +88,52 @@ describe("branch summarization", () => {
 		});
 
 		expect(result.error).toBe("Branch summarization attempted to call a tool");
+	});
+
+	it("rejects length-limited branch summaries", async () => {
+		const streamFn: StreamFn = () => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() =>
+				stream.push({
+					type: "done",
+					reason: "length",
+					message: { ...response([{ type: "text", text: "partial" }]), stopReason: "length" },
+				}),
+			);
+			return stream;
+		};
+
+		const result = await generateBranchSummary(entries, {
+			model,
+			signal: new AbortController().signal,
+			streamFn,
+		});
+
+		expect(result.error).toBe(
+			"Branch summarization failed: generation hit the token cap and the summary is incomplete",
+		);
+		expect(result.summary).toBeUndefined();
+	});
+
+	it("preserves aborted branch summary responses", async () => {
+		const streamFn: StreamFn = () => {
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() =>
+				stream.push({
+					type: "error",
+					reason: "aborted",
+					error: { ...response([{ type: "text", text: "partial" }]), stopReason: "aborted" },
+				}),
+			);
+			return stream;
+		};
+
+		const result = await generateBranchSummary(entries, {
+			model,
+			signal: new AbortController().signal,
+			streamFn,
+		});
+
+		expect(result).toEqual({ aborted: true });
 	});
 });

@@ -355,12 +355,15 @@ export async function generateBranchSummary(
 	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: 2048 };
 	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
 
-	// Check if aborted or errored
+	// Check for responses that cannot safely be persisted
 	if (response.stopReason === "aborted") {
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
 		return { error: response.errorMessage || "Summarization failed" };
+	}
+	if (response.stopReason === "length") {
+		return { error: "Branch summarization failed: generation hit the token cap and the summary is incomplete" };
 	}
 	if (response.content.some((block) => block.type === "toolCall")) {
 		return { error: "Branch summarization attempted to call a tool" };
