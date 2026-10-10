@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -9,6 +9,7 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
+	EMPTY_SESSION_FORK_MESSAGE,
 } from "../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -341,17 +342,21 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(events).toEqual([{ type: "session_before_fork", entryId: "missing-entry", position: "at" }]);
 	});
 
-	it("reports why an unflushed session cannot be forked", async () => {
+	it("reports why a session without a conversation cannot be forked", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		const sessionFile = runtime.session.sessionFile;
 		const leafId = runtime.session.sessionManager.getLeafId();
 		expect(sessionFile).toBeDefined();
-		expect(existsSync(sessionFile!)).toBe(false);
+		// Session files are materialized before the first response, so the branchable state is
+		// "has no conversation yet", not "has no file yet".
+		expect(runtime.session.sessionManager.buildSessionContext().messages).toHaveLength(0);
 		expect(leafId).toBeTruthy();
+		const sessionDir = runtime.session.sessionManager.getSessionDir();
+		const filesBefore = readdirSync(sessionDir);
 
-		await expect(runtime.fork(leafId!, { position: "at" })).rejects.toThrow(
-			"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
-		);
+		await expect(runtime.fork(leafId!, { position: "at" })).rejects.toThrow(EMPTY_SESSION_FORK_MESSAGE);
+		// The rejection happens before any branch session file is written.
+		expect(readdirSync(sessionDir)).toEqual(filesBefore);
 	});
 
 	it("duplicates the current active branch when forking at the current position", async () => {

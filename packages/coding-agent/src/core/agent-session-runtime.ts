@@ -52,6 +52,14 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
 /**
+ * Raised when `/clone` or `/fork` targets a session that has no conversation content yet: session
+ * files are materialized before the first response, so a missing file can no longer stand in for
+ * "nothing to branch". Branching then would produce an empty session, so the action is refused.
+ */
+export const EMPTY_SESSION_FORK_MESSAGE =
+	"This session has no conversation to clone or fork yet. Send a message and wait for the first response before cloning or forking it.";
+
+/**
  * Thrown when /import references a JSONL file path that does not exist.
  */
 export class SessionImportFileNotFoundError extends Error {
@@ -316,6 +324,11 @@ export class AgentSessionRuntime {
 			const currentSessionFile = this.session.sessionFile;
 			if (!currentSessionFile) {
 				throw new Error("Persisted session is missing a session file");
+			}
+			// Session files are materialized before the first response, so file presence cannot mean
+			// "has content". A branch of nothing is not a clone: reject before writing any branch file.
+			if (targetLeafId && this.session.sessionManager.buildSessionContext().messages.length === 0) {
+				throw new Error(EMPTY_SESSION_FORK_MESSAGE);
 			}
 			const sessionDir = this.session.sessionManager.getSessionDir();
 			if (!targetLeafId) {

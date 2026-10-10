@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Cloning or forking a session that has no conversation yet (fresh session, first response still pending, or a resumed session without messages) is now refused before any branch file is written, with a message that names the real reason and the way forward. Session files are created before the first response, so the previous check for a missing file no longer described that state.
 - Fixed captured nonzero Bash exits pausing tasks as unknown effects; recovered earlier diagnostic-only exit results and automatically inspected interrupted effects within the current user turn.
 - Allowed new prompts while an earlier task has unconfirmed tool effects, retained paused tasks across restart, and added evidence-based model reconciliation while blocking identical unresolved operations.
 - Fixed reopening sessions with v1 task recovery records written before durable input IDs and queues were added, while preserving unconfirmed tool effects for verification.
