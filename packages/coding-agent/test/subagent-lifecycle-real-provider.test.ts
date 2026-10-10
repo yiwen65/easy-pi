@@ -12,14 +12,14 @@ import type { AgentSession } from "../src/core/agent-session.ts";
 import { configureHttpDispatcher } from "../src/core/http-dispatcher.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { createPiChildSessionHost } from "../src/extensions/pi-child-session-host.ts";
+import { realSubagentConfig } from "./subagent-real-config.ts";
 
 const RUN = process.env.PI_REAL_MODEL_EVAL === "1";
 if (RUN) {
 	delete process.env.PI_OFFLINE;
 	configureHttpDispatcher(60_000);
 }
-const provider = process.env.PI_REAL_SUBAGENT_PROVIDER ?? "openai-codex";
-const modelId = process.env.PI_REAL_SUBAGENT_MODEL ?? "gpt-6-astra";
+const { provider, modelId, thinkingLevel } = realSubagentConfig();
 const full = () => ({ mode: "full-access" as const, sessionGrants: [], protectedRoots: [] });
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -63,7 +63,7 @@ async function fixture(delivery: "nextRequest" | "wake" = "nextRequest", transpo
 	const rootSessionId = randomUUID();
 	const path = join(cwd, "team", "registry.sqlite");
 	const caller = { rootSessionId, agentPath: "/root" };
-	const model = { provider, id: modelId, thinkingLevel: "low" as const };
+	const model = { provider, id: modelId, thinkingLevel };
 	const make = () => {
 		const store = new CollaborationStore({ path, cwd, rootSessionId, recoverInterruptedOwner: true });
 		const controller = new CollaborationController({ store, host, agentDir: cwd, getPermissions: full });

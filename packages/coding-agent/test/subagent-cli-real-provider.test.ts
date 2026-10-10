@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
+import { realSubagentConfig } from "./subagent-real-config.ts";
 
 const RUN = process.env.PI_REAL_MODEL_EVAL === "1";
 const repo = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -38,8 +39,7 @@ test.skipIf(!RUN)(
 			}),
 			{ mode: 0o600 },
 		);
-		const provider = process.env.PI_REAL_SUBAGENT_PROVIDER ?? "openai-codex";
-		const model = process.env.PI_REAL_SUBAGENT_MODEL ?? "gpt-6-astra";
+		const { provider, modelId: model, thinkingLevel } = realSubagentConfig();
 		const children: ReturnType<typeof spawn>[] = [];
 		const exits: Promise<number | null>[] = [];
 		function launch(sessionFile?: string) {
@@ -52,7 +52,7 @@ test.skipIf(!RUN)(
 				"--model",
 				model,
 				"--thinking",
-				"low",
+				thinkingLevel,
 				"--no-extensions",
 				"--no-skills",
 				"--no-context-files",

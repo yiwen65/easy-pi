@@ -397,7 +397,7 @@ export class CollaborationController {
 			if (requestedTools && requestedTools !== "inherit") {
 				const teamTools = requestedTools.filter((name) => COLLABORATION_TEAM_TOOL_NAMES.has(name));
 				if (teamTools.length > 0)
-					throw new CollaborationError(
+					throw new CollaborationAdmissionError(
 						"forbidden",
 						"Team tools are usable by /root only; omit them from capabilities.tools",
 						"nested_delegation",
@@ -483,7 +483,7 @@ export class CollaborationController {
 			if (requestedTools && requestedTools !== "inherit") {
 				const teamTools = requestedTools.filter((name) => COLLABORATION_TEAM_TOOL_NAMES.has(name));
 				if (teamTools.length > 0)
-					throw new CollaborationError(
+					throw new CollaborationAdmissionError(
 						"forbidden",
 						"Team tools are usable by /root only; omit them from capabilities.tools",
 						"nested_delegation",
@@ -507,7 +507,7 @@ export class CollaborationController {
 					(delegation.task.relationship === "verify" || delegation.task.relationship === "explore") &&
 					(!record.delegation || record.delegation.task.relationship !== delegation.task.relationship)
 				)
-					throw new CollaborationError(
+					throw new CollaborationAdmissionError(
 						"context_unavailable",
 						"Independent work requires a fresh child, not a reused execution context",
 						"fresh_child_required",

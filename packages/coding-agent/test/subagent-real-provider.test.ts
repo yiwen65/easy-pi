@@ -3,7 +3,7 @@
  *
  * Never calls a provider unless PI_REAL_MODEL_EVAL=1 is set explicitly. Uses the
  * production ModelRuntime/AuthStorage path with real ~/.epi/agent credentials and the
- * openai-codex/gpt-6-astra model for both root and children (kimi-coding/k3 hits a concurrency 403 when root and child infer simultaneously). Each scenario gets a fresh temp
+ * default gpt-6.1-sol medium model for both root and children. Each scenario gets a fresh temp
  * agentDir/cwd, so teams and session files never touch real user state. Assertions
  * target session state (tool calls, tool results, persisted branch entries), never
  * exact model wording or credentials.
@@ -25,6 +25,7 @@ import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBuiltInExtensions } from "../src/extensions/index.ts";
+import { realSubagentConfig } from "./subagent-real-config.ts";
 
 const RUN = process.env.PI_REAL_MODEL_EVAL === "1";
 if (RUN) {
@@ -32,8 +33,7 @@ if (RUN) {
 	configureHttpDispatcher();
 }
 
-const PROVIDER = process.env.PI_REAL_SUBAGENT_PROVIDER ?? "openai-codex";
-const MODEL_ID = process.env.PI_REAL_SUBAGENT_MODEL ?? "gpt-6-astra";
+const { provider: PROVIDER, modelId: MODEL_ID, thinkingLevel } = realSubagentConfig();
 const TURN_TIMEOUT_MS = 280_000;
 const MAILBOX_MESSAGE_TYPE = "epi-collaboration-message";
 
@@ -80,7 +80,7 @@ async function realSession(): Promise<SessionFixture> {
 		agentDir,
 		modelRuntime,
 		model,
-		thinkingLevel: "low",
+		thinkingLevel,
 		settingsManager,
 		sessionManager: SessionManager.create(cwd, join(cwd, "root")),
 		resourceLoader,

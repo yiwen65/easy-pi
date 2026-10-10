@@ -326,3 +326,15 @@ Ingestion uses awaited `sendCustomMessage(..., { triggerTurn: false })` at that 
 Only after native persistence/sync is the message acknowledged in the team store. Pi can defer creation of a new root file until its first assistant response; until then the pending envelope is retained, with acknowledgement retried at assistant completion or the next request. There is no cross-database/session-file transaction and no claim of exactly-once model execution. Acknowledgement failure stops admission/request execution; explicit recovery recognizes already-ingested IDs without reinjecting them.
 
 Dead-owner recovery marks interrupted work and emits retained completion notifications; it never replays tasks, tools or provider requests. Shared edits and old DAG data are not cleaned by this adapter. History disposition and actual disk budgets remain T-006 work.
+
+## End-to-end contract validation
+
+From `packages/coding-agent`, run the opt-in real CLI contract tests with:
+
+```bash
+PI_REAL_MODEL_EVAL=1 node ../../node_modules/vitest/dist/cli.js --run test/subagent-e2e-real-provider.test.ts --silent=false
+```
+
+The default model is `openai-codex/gpt-6.1-sol` with `medium` effort for root and children. Explicit test overrides use `PI_REAL_SUBAGENT_PROVIDER`, `PI_REAL_SUBAGENT_MODEL` and `PI_REAL_SUBAGENT_EFFORT`; model and effort resolve independently through `subagent-real-config.ts`. CLI state and retained child metadata verify the requested configuration. The tests run isolated synthetic work through `pi-test.sh --mode rpc`, inspect JSONL/SQLite/filesystem effects, and cleanly close their processes. Prompt acceptance or a model's final statement is not sufficient evidence.
+
+The contract suite covers live capability narrowing, known no-effect admission rejection, isolated/curated/fork context, passive mail and explicit followup, pinned historical results, execution-versus-task-outcome separation, crash recovery without effect replay, and same-cwd team isolation. Precise quota/byte/race/fault boundaries remain deterministic regressions. A pre-admission rejection such as an invalid nested capability or fresh-reviewer requirement must carry `not_started` certainty, while a failed admission commit or disposal after mutation retains the existing unknown-effect/reconciliation boundary. No test automatically retries an uncertain effect.
