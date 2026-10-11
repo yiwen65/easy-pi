@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { type ProductConfig, resolveProductIdentity } from "./core/product-identity.ts";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
+import { stripBom } from "./utils/text.ts";
 
 // =============================================================================
 // Package Detection
@@ -471,7 +472,7 @@ interface PackageJson {
 
 let pkg: PackageJson = {};
 try {
-	pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8")) as PackageJson;
+	pkg = JSON.parse(stripBom(readFileSync(getPackageJsonPath(), "utf-8"))) as PackageJson;
 } catch (e: unknown) {
 	const err = e as NodeJS.ErrnoException;
 	if (err.code !== "ENOENT") throw e;
