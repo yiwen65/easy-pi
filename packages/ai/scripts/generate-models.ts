@@ -2044,7 +2044,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						input: m.cost?.input || (isKimiK3 ? KIMI_K3_COST.input : 0),
 						output: m.cost?.output || (isKimiK3 ? KIMI_K3_COST.output : 0),
 						cache_read: m.cost?.cache_read || (isKimiK3 ? KIMI_K3_COST.cacheRead : 0),
-						cache_write: m.cost?.cache_write || (isKimiK3 ? KIMI_K3_COST.cacheWrite : 0),
+						// Moonshot's default 5min K3 cache writes cost the input rate, unlike Kimi Coding's implied cost.
+						// https://platform.kimi.ai/docs/pricing/chat (CN: https://platform.kimi.com/docs/pricing/chat)
+						cache_write: m.cost?.cache_write || (isKimiK3 ? KIMI_K3_COST.input : 0),
 					}),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
