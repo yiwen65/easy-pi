@@ -500,3 +500,12 @@
 - Prevention: 区分移除与禁用，覆盖混合写入、重载、迁移重入、提交后提示写入失败，以及连续请求前缀。
 - Verified by: 2026-10-11 目标 session 副本迁移，135239136 原始字节保持一致、未知活跃调用 1→0、未伪造结果；13 个离线测试文件、214 个测试通过，根 check 通过。
 
+## ESM CLI main guard——比较 canonical 路径，并验证实际产物
+
+- Wrong approach: 直接比较 `import.meta.url` 与 `pathToFileURL(process.argv[1])`，用 exit0 判断目录工具已执行。
+- Why it failed: Node 会将模块路径解析到真实位置，而 argv 可保留 symlink 地址；macOS `/tmp` 与 `/private/tmp` 不相等，main 被跳过，进程无输出且没有 publication 产物。
+- Recognition signal: CLI exit0，但预期日志/输出文件不存在；通过绝对 symlink 调用才能复现，普通路径单元测试仍通过。
+- Correct approach: CLI main guard 对 argv 用 `realpathSync()` 后再转 file URL；仅做同一性比较，不改写操作对象的 I/O 地址。
+- Prevention: import-safe `.mjs` CLI 同时测试普通路径与绝对 symlink 启动，断言实际日志、输出内容及副作用，而非只断言退出码。
+- Verified by: 2026-10-11 catalog publisher/diff 两项 symlink guards先RED（静默跳过），canonical guard修复后53项工具测试及完整1523chat/45image离线bundle dry-run/diff通过；源码归档补充后父61/61通过。
+

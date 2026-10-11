@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /tmp/easy-pi-selective-migration-20261011
 - Mode: execute
-- Overall status: in_progress
+- Overall status: blocked
 - Source: 用户要求按建议选择性迁移，并逐项确认三阶段全部实施、替换旧图片公开接口及本文件所列执行/构建权限。
 
 <!-- task-doc-section:background-goal -->
@@ -40,6 +40,7 @@
 - Fixed base: `6f935c952e21956d1e5de1c751ef5834c64d09aa`。
 - Phase1 commit: `14164effe`；authorized baseline-price commit: `6bb392b2a6b6c20c36deaf3ac06db932f3dfd19b`。
 - Phase2 commit: `bd7b5a681b7c4268338575fd94afd3d5cdbe617c`。
+- Phase3 commit: `817d3d7824816efc141f9c95e8a5a2a3b8361cd6`。
 - 交付前还需对 original 忽略模型数据与初始baseline-provider-catalogs.json逐文件SHA核对；数据被其他session更新也应停止，不覆盖更新。
 - Upstream reference: `e37cdc420669e48b4df4bbce0fb2617fc3c71328`（本轮不更新它）。
 - Worktree: `/tmp/easy-pi-selective-migration-20261011`。
@@ -55,11 +56,12 @@
 | F-001 | 用户确认三阶段、旧图片接口替换、必要依赖锁更新及离线构建/打包烟测权限。 | 本轮 structured scope / compatibility / final confirmation 三次答复。 |
 | F-002 | 原目录由 a05295067 增加 6f935c952，仅四处 TUI 文件，无实施目标路径变化；执行前干净。 | git log a05295067..HEAD、git diff --stat、git status --porcelain；task-121 在 HEAD/clean 门禁后创建 worktree。 |
 | F-003 | 本地已有每请求 transform/压缩预检、prepareNextTurnWithContext 刷新、投影 revision 和 completed-item 恢复，不是缺少压缩/恢复功能。 | packages/agent/src/agent-loop.ts 完整读取；agent-session.ts:_installAgentNextTurnRefresh/_installTaskRecoveryHooks；docs/compaction.md、stream-recovery.md。 |
-| F-004 | 统一模型迁移必须携带运行时和目录消费者：当前 ImagesModels 分离、image refresh 没有 chat 的持久化 publication；Models 和 availability 按旧 ID 空间索引。 | packages/ai/src/images-models.ts 完整读取；models.ts:createProvider；coding-agent/model-runtime.ts:refreshProviderAvailability。 |
-| F-005 | 当前工具链为 typescript5.9.3/native-preview、tsx；AST 检查使用旧 TS Compiler API，专用产品构建绑定 native-preview 路径。 | package.json、tsconfig.base.json、scripts/check-ts-relative-imports.mjs、build-easy-pi-product.mjs、pi-test.sh。 |
-| F-006 | 官方 npm 实际提供 typescript7.0.2，engines Node>=16.20.0；官方 tarball 已通过正常 age gate 获取并解包，但尚未验证安装/运行/API兼容。 | task-123 npm view exit0；task-127 npm pack --ignore-scripts exit0；typescript7-metadata.json 与 typescript7/package；宿主 Node24.15.0/npm11.12.1。 |
+| F-004 | 迁移前消费基线：ImagesModels分离、image refresh没有chat的持久化publication，Models/availability旧ID空间索引；因此统一迁移必须携带runtime/目录消费者。 | packages/ai/src/images-models.ts 完整读取；models.ts:createProvider；coding-agent/model-runtime.ts:refreshProviderAvailability。 |
+| F-005 | 迁移前工具链为typescript5.9.3/native-preview、tsx；旧AST Compiler API与native-preview产品构建路径是T-005实际适配输入。 | package.json、tsconfig.base.json、scripts/check-ts-relative-imports.mjs、build-easy-pi-product.mjs、pi-test.sh。 |
+| F-006 | 官方npm提供typescript7.0.2，engines Node>=16.20.0；tarball正常age gate获取，T-005/T-006在Node24实际安装/API/check/source/build/pkg验证通过，未实际测试Node22。 | task-123 npm view exit0；task-127 npm pack --ignore-scripts exit0；typescript7-metadata.json 与 typescript7/package；宿主 Node24.15.0/npm11.12.1。 |
 | F-007 | 补充 AI 基线已有一项 Moonshot Kimi K3 cacheWrite 不匹配：忽略目录为3，已有 providers.test.ts 断言为0；发生于任何 AI/schema生产修改前。 | task-128：8文件101pass/1fail/3显式skip；完整读取 providers.test.ts；moonshotai及moonshotai-cn JSON目前cacheWrite3；不可把此既有失败归因迁移或自动改价。 |
 | F-008 | 官方现价证明原0断言过时：国际K3默认5min cacheWrite USD3/1M，与input3相同；1h为6。国内5min写入与未命中输入同为CNY20，1h40。本轮保留既有USD归一数据3，不引入汇率转换/1h计费迁移。 | 官方Moonshot URL 301到platform.kimi.ai/.com；task-141/142匿名无认证Markdown GET均HTTP200，4630/4257bytes且全文读取，kimi-*-pricing-public.md。browser web_fetch遇Tunnel/guard失败，非完整DOM扫描；不用摘录冒充全文。 |
+| F-009 | 原目录已漂移到11067598d（比固定base新增3提交），并有大量未提交recovery/MCP等改动，含AgentSession、SDK/扩展、依赖/锁、build/pack，和迁移目标重叠。不能按旧HEAD/clean门禁交付。 | 本轮readonly original git status、rev-parse及log 6f935..HEAD：612f54ace、95d2e3161、11067598d；未编辑/合并其任何内容。 |
 
 <!-- task-doc-section:assumptions-questions -->
 ## Assumptions and open questions
@@ -69,7 +71,7 @@
 - Decision Q-002: 旧图片 API 替换，不增加用户未要求的长期兼容层；chat API 的默认行为保留。
 - Decision Q-003: 保留 shrinkwrap/jiti/easy-pi 产品路线；允许必要工具链依赖锁改动与离线构建/临时包验收。
 - Decision Q-004: 用户选择并确认核实后最小修复Moonshot两提供商Kimi K3价格失配；可信来源不足/冲突时停止，不猜价格；不得改其他价格或削弱校验。
-- Open questions: 无未解决产品决定。工具发行可用性、实际迁移依赖和基线测试结果是待验证技术事实；若它们迫使更换已确认方向/扩大范围，则记录 blocker 后再询问用户。
+- Open question Q-005: 三阶段已在隔离分支完成验证；原my-pi仍HEAD11067598d且127条dirty paths，与迁移重叠。请用户选择仅交付隔离成果，或等待并发owner提交/settle后保留新baseline重新集成并重测。T-011当前blocked，未获得原目录写入/重基新授权。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -84,8 +86,8 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> {T-002,T-004,T-007}; T-002 -> T-013 -> T-014 -> T-003; {T-003,T-004} -> T-005 -> T-006; {T-006,T-007} -> T-008 -> T-009；T-001 -> T-012；{T-009,T-012} -> T-010 -> T-011。
-- Parallel batches: B0 协调者隔离/依赖/基线；B1 请求边界实现 T-002 与只读工具链审查 T-004、只读 schema 设计 T-007 可并行；B2 请求门禁 T-003；B3 工具链 T-005/T-006；B4 AI schema T-008；B5 runtime/消费者 T-009；B6 综合验收 T-010；B7 交付 T-011。
+- Dependency graph: T-001 -> {T-002,T-004,T-007}; T-002 -> T-013 -> T-014 -> T-003; {T-003,T-004} -> T-005 -> T-006; {T-006,T-007} -> T-008 -> {T-009,T-015,T-016}；T-009 -> T-017；T-016 -> T-018；T-001 -> T-012；{T-009,T-015,T-016,T-017,T-018,T-012} -> T-010 -> T-011。
+- Parallel batches: B0 协调者隔离/依赖/基线；B1 请求边界实现 T-002 与只读工具链审查 T-004、只读 schema 设计 T-007 可并行；B2 请求门禁 T-003；B3 工具链 T-005/T-006；B4 AI schema T-008；B5 runtime/消费者 T-009 与不重叠的目录工具 T-015；B6 综合验收 T-010；B7 交付 T-011。
 - Serialization constraints: authority 文档只由协调者编辑。实现阶段不重叠；依赖/锁/生成器/模型数据由明确 owner 串行管理。并行审查只给 read 工具。runtime 不提供 DAG 启动工具，使用可用 spawn_agent 的 parallel wrapper 启动独立、边界明确任务，不声称存在不存在的 DAG API。
 
 <!-- task-doc-section:task-list -->
@@ -203,9 +205,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-008 — AI chat/image 类型、Provider、Models 与目录迁移
+### [x] T-008 — AI chat/image 类型、Provider、Models 与目录迁移
 
-- Status: in_progress
+- Status: done
 - Owner: /root/migrate-chat-image-ai
 - Objective: 实现统一模型基础设施和必要生成/离线目录工具，替换旧 image collection。
 - Inputs and prerequisites: T-006、T-007。
@@ -215,45 +217,45 @@
 - Execution steps: 编码类型/错误操作/同ID/auth/cancel/publication guard；最小 forward-port；通过脚本/fixture 生成数据，不手改 models.generated.ts；保持非迁移目录语义。固定chat/image-only BaseModel/AnyModel、旧collection/factory删除而既有compat globals重接；离线normalized snapshot统一写出；内部schema3->4按chat:/image:键防碰撞，manifest.generatedAt原值；原公开models.json为chat投影，additive models.all.json/per-provider.all.json表达mixed，public catalog version1不变。
 - Acceptance criteria: 普通 getModels/getModel/getAvailable 只 chat；同 provider+type+id 索引；chat usage/cache/prices/defaults 保留；无旧 collection 适配层。
 - Verification method: V-004，类型检查，离线 catalog 验证和语义对照。
-- Validation evidence: Not run.
+- Validation evidence: child冻结79owned路径，父代理读取actual核心diff、完整Models/operations/catalog/model-data和3新/变更核心guards、报告/源helpers。parent task-164重跑全部21指定AI文件256pass/3credential skip；task-165 AI source/all test与source-only noEmit无诊断、真实model-data validator及1523chat/45image/39provider全语义/manifest timestamp/hash proof通过，diff check通过。root目前仍有6项已定位的非AI消费TS错误，留给T-009，不做cast/optional shim；独立只读review c6fdcedf并行进行，任何实际发现都需回归后修复，最终T-010门禁仍未通过。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-009 — runtime、扩展、SDK 消费者及迁移说明
+### [x] T-009 — runtime、扩展、SDK 消费者及迁移说明
 
-- Status: pending
-- Owner: unassigned
+- Status: done
+- Owner: /root/migrate-model-consumers；coordinator仅处理server exact-field消费者
 - Objective: 将仓库内消费者切到统一模型接口，保持选择/认证/子会话隔离行为。
 - Inputs and prerequisites: T-008 的固定接口与 actual diff。
-- Scope or files: coding-agent model-runtime/provider-composer/远程目录/扩展/SDK 等实际消费者、根 catalog 发布工具、必要文档/tests。
+- Scope or files: coding-agent model-runtime/provider-composer/远程目录/扩展/SDK 等实际消费者、server protocol exact-field gate、必要文档/tests；根catalog工具独立T-015。
 - Expected output: 所有本地消费者迁移及外部旧 image API 迁移指南。
 - Dependencies: T-008.
 - Execution steps: 根据新契约迁移；保持 chat 默认查询；新增 runtime image/custom-provider/隔离和 catalog guards；更新文档。
 - Acceptance criteria: 模型 selector/scopes 默认不混入 images；无隐含兼容层；旧公开接口迁移说明明确。
 - Verification method: V-004/V-005，消费者搜索、源码/外部包 smoke。
-- Validation evidence: Not run.
+- Validation evidence: child16codingowned路径冻结；父读actual主要runtime/composer/remote/type/config diff、完整新558lineguards/example/migration docs/report/inventory；parenttask-169实际20files370/370，server task-166 10/10，task-172完整rootcheck1418files No fixes/compile/browser全部通过。无ModelRuntime optional/cast shim；legacy/all client?type=all variant metadata mock/file roundtrip通过。两项既有Opus4 registry fixture失败同preserved源码重现后仅移至现存4.1并加强exist断言，不改catalog/default价格。独立review5e553dda和外部包gate仍属T-010，若发现必须回归修复后才阶段提交。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-010 — schema 阶段及跨阶段综合验收
+### [x] T-010 — schema 阶段及跨阶段综合验收
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 验证第三阶段和所有阶段依赖路径，独立审查并提交。
-- Inputs and prerequisites: T-009、T-012。
+- Inputs and prerequisites: T-009、T-015、T-016、T-017、T-018、T-012。
 - Scope or files: actual owned diff、离线数据/构建/pkg artifacts、本文和证据。
 - Expected output: phase3 commit、完整门禁证据和已验证限制。
-- Dependencies: T-009, T-012.
+- Dependencies: T-009, T-015, T-016, T-017, T-018, T-012.
 - Execution steps: 独立源码审查；重跑边界、runtime/catalog/recovery/collab；root check；offline build/包 smoke；复核 deps/data 语义。
 - Acceptance criteria: 全部修改测试/指定回归通过；无 defaults/权限/恢复/identity 回退；无 API 或发布。
 - Verification method: V-001..V-006 的必要交叉子集，git diff --check。
-- Validation evidence: Not run.
+- Validation evidence: parent最新AI267pass/3credential skip(175)、consumer374(176)、agent94(173)、coding恢复/prepare/queue/compaction/collab串行290(179)、catalog/archive61(168)、AST/resolver10(174)、server10(166)；177完整rootcheck1418 No fixes/type/browser通过，178清理私有ignored AI dist后offlinebuild通过，180sourceCLI/help/version/list及移除旧dist验证通过。独立catalog review3eefbee8无actionable；AI444a4888、consumer96e221f8 continuity确认此前全部发现已修复。181 actual generator isolated saved1523/45 replay/全部内部byte equality/no-fetch/原timestamp/hash/type通过。183 easy-pi pack11bundles/2637files，186全新consumer2-day/ignore-scripts完整offlineinstall121packages，187仓库外CLI/public SDK/faux/mixed+dynamicimage/header/helper/compat/jiti烟测通过，无resolver/NODE_PATH/真实provider；cache hydration185仅临时dir公共npm。105owned paths+coordinator2doc范围和runtime deps/engines/locks/identity proof通过；188 explicit105paths提交817d3d782，无staged余留。189实际source archive两次均执行archive-source validator且cmp byte-identical，SHA f894b9b13e93dcac6fddfb40d966286413501d7b4ce4e6bfdebc4677a1793e78，rootindex/status未变。未原交付。
 - Blocker: None.
 - Unblock condition: None.
 
 ### [ ] T-011 — 漂移门禁、交付和任务闭环
 
-- Status: pending
+- Status: blocked
 - Owner: coordinator
 - Objective: 在保留并发改动前提下交付已验证提交，并记录最终状态。
 - Inputs and prerequisites: T-010，固定原分支/base 门禁。
@@ -263,9 +265,9 @@
 - Execution steps: 再核验 original HEAD/branch/status；非预期漂移立即停；ff-only；安全准备必要依赖/生成数据；关键 smoke/check；提交最终文档。
 - Acceptance criteria: 所有任务 done、文档 validator 通过、原交付实际运行环境验证；不丢失他人提交/改动。
 - Verification method: V-005/关键 runtime smoke、git log/status、task_document.py validate。
-- Validation evidence: Not run.
-- Blocker: None.
-- Unblock condition: None.
+- Validation evidence: original-delivery-gate-final.json当前readonly original HEAD11067598d、my-pi、3新增提交、127dirty paths，旧fixedbase6f935 clean/HEAD gate不满足；40public ignored data逐文件SHA与baseline相同、无read错误。隔离T-010全部完成/commit817d3d782；originalWritten=false，不把观测hash当未来稳定承诺。
+- Blocker: 原目录漂移且其他任务未提交，不能ff/覆盖/自动重基或隐含把MCP/recovery工作并入本轮。
+- Unblock condition: 并发owner完成/提交其改动后，用户明确批准保留新基线重新集成/重测，或选择仅交付isolated成果；重新固定original门禁及ignoreddata哈希后才能实际写入。
 
 ### [x] T-012 — 既有 Moonshot 目录定价基线处置
 
@@ -315,6 +317,70 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [x] T-015 — 混合目录发布、diff与归档工具迁移
+
+- Status: done
+- Owner: /root/migrate-catalog-tools
+- Objective: 迁移根目录工具，完整验证、比较并归档additive混合目录，保留public schema1和旧chat投影/counts。
+- Inputs and prerequisites: T-008冻结接口、unified-model-catalog离线输出与baseline快照。
+- Scope or files: scripts目录catalog发布/diff/归档相关实际工具及独立node tests，必要目录工具文档；包含create-source-archive.sh已删除图片文件引用的必要最小修复，不改产品release/ref/version/发布流程；不修改AI或coding/runtime/server。
+- Expected output: images影响revision/hash、chat/image/total统计、分片验证、mock上传与离线diff路径的最小实现。
+- Dependencies: T-008.
+- Execution steps: 阅读完整实际工具及消费者；实现类型操作键与all分片验证/归档；用本地合成fixture和mock子进程验证，不运行真实发布或网络generator。
+- Acceptance criteria: legacy keyed chat catalogs/counts不变；image-only metadata变化改变revision；同ID跨操作不覆盖；schema1、easy-pi产品发布身份和权限不变。
+- Verification method: V-004/V-005，指定node:test及真实离线bundle dry-run（只临时目录写publication）。
+- Validation evidence: child最终8路径61node tests和实际1523/45/1568、39provider、81projectionfiles离线dry-run/diff proof通过；父代理读取完整validator/publisher/diff/3test/sourcearchive模块、实际报告/proof helper。parent task-168独立61/61、bash -n及tracked diff check通过；3eefbee8独立只读review无actionable issue。sourcearchive仅一行必需路径替换，1expectedRED->GREEN和8synthetic archive guards保留schema4双operation、确定性、临时index/旧输出保护、hash/schema失败。真实whole-worktree归档留T-010源码commit后，未发布/网络generator/真实AWS操作。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-016 — AI独立审查边界回归修复
+
+- Status: done
+- Owner: /root/migrate-chat-image-ai
+- Objective: 对独立review四项高置信度路径先RED重现，再最小修复并保持已冻结接口/数据语义。
+- Inputs and prerequisites: T-008、review c6fdcedf与父代理complete源码路径核对。
+- Scope or files: AI Models可用性、operation helper、generator事务与直接tests；不编辑coding/root工具/server/authority。
+- Expected output: provider实例一致的可用性结果、all-filter正确约束chat、显式null不默认chat、联合内部/公开生成完整回滚。
+- Dependencies: T-008.
+- Execution steps: 门控auth替换、仅filterAllModels、null外部记录、combined-public-swap故障各做失败guard；最小修复；全部AI修改tests/type/data复验。
+- Acceptance criteria: 四项均有RED->GREEN因果证据；chat读不依赖throwing all-list合同保留；provider/type/id、current auth、无fetch和全部数据保真不变。
+- Verification method: V-004/V-005，review复核与父独立gate。
+- Validation evidence: child仅6AI路径、四RED分别2/2/4/2fail日志与完整fix patch/guards/report已父读取；parenttask-170精确21AI文件266pass/3credential skip，task-171 actual修改generator隔离replay无fetch，1523/45所有非type字段、全部内部data/wrappers/aggregator byte equality与原timestamp/hash通过，source/all-test和source-only noemit通过。currentrootchecktask-172完整通过/No fixes；f53a6828 fresh independent repair review进行中，T-010等待其结果再提交。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-017 — 消费者独立审查的动态headers与chat隔离修复
+
+- Status: done
+- Owner: /root/migrate-model-consumers
+- Objective: 修复独立review已离线重现的动态image headers不更新及all-list故障移除overlaid chat两项回归。
+- Inputs and prerequisites: T-009；review5e553dda actual static trace/offline复现与父源码核对。
+- Scope or files: coding provider-composer/runtime有效动态definitions/header解析与直接runtime image guards；不修改AI/root工具/server/依赖/authority。
+- Expected output: 发布后的动态image changed/removed/new headers成为operation+ID解析权威；没有all-filter时chat overlay不依赖失败的all-list。
+- Dependencies: T-009.
+- Execution steps: 两项精确先RED guards，覆盖initial与later all-list失败、动态头改变/删除/新增；最小修复，保留env/commands/request transform once和canonical all-filter；重跑370邻域/type后冻结。
+- Acceptance criteria: 真实失败原因被修复、不回退静态model/config headers或过滤/鉴权/child session isolation；不扩大修复其他既有chat问题。
+- Verification method: V-004/V-005，父gate与独立continuity复核。
+- Validation evidence: child只3路径；父读取actualboundedpatch/完整新4cases/report/3RED preserved-source日志。parenttask-176 20files374/374，177完整rootcheck1418 No fixes通过；private per-provider resolver不改registration或sibling，默认chat独立allgetter而canonicalallfilter保留。continuity96e221f8确认两原因修复、另实跑4files44tests且无actionable。无AI接口/deps/其他chat兼容清理。
+- Blocker: None.
+- Unblock condition: None.
+
+### [x] T-018 — 联合生成commit后清理故障的一致性
+
+- Status: done
+- Owner: /root/migrate-chat-image-ai
+- Objective: 修复fresh review发现的public swap已成功但backup cleanup失败时只回滚internal的分裂版本路径。
+- Inputs and prerequisites: T-016、review f53a6828和父generator完整控制流核对。
+- Scope or files: generate-models.ts commit边界与normalized生成直接fault guard；不改公开API/数据/其他owner。
+- Expected output: public成功swap即jointcommit；postcommit cleanup失败不单边回滚，明确报清理失败但两边保留一致新版本。
+- Dependencies: T-016.
+- Execution steps: 注入public staging-root rm错误先RED，snapshot内外真实版本一致性；最小commit边界修复；重跑全部AI与saveddata proof，冻结。
+- Acceptance criteria: 新guard RED->GREEN；precommit staging/swap旧版本回滚guards仍通过，不引入crash-durable协议或吞掉cleanup错误。
+- Verification method: V-004/V-005，父独立重跑与review continuity确认。
+- Validation evidence: child2files仅comment+assignment production与真实fault guard，父完整patch/guard/report/1expectedRED日志已读。parenttask-175 AI267pass/3credential skip，181 actual修改generator isolated replay/fullsaved1523/45 byte+semantic+timestamp/hash/no-fetch及source/test/source-onlytype通过；177根check当前No fixes。continuity444a4888确认postcommit缺陷及此前四项已解决、无actionable；cleanup错误仍报出且backup可能残留，不承诺crash/arbitrary rollbackIO durability。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -332,8 +398,8 @@
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
 
-- 上游 TS7公开发行/最低Node已有metadata证据，安装与compiler API仍待验证；若要求范围变更，T-004/T-005 blocked。
-- F-007 AI既有Moonshot定价基线失败：用户Q-004已确认最小修复权限；可信来源仍须核实。不能隐含修改其他价格、削弱原断言或把通过数掩盖失败。
+- TS7公开发行/API/安装/source/build/pkg已在Node24验证；Node22/Windows仍未实际执行，旧Node22获取操作paused/unknown不得重复。
+- F-007 Moonshot基线问题已按Q-004/F-008/T-012官方核实并最小修复，保留原目录cacheWrite3及严格guard；未来不得隐含改其他价格或削弱断言。
 - 统一请求准备不能改变本地 compaction期间 steering收取、completed checkpoint continuation、恢复后未解决工具执行或 root-only协作。
 - 上游模型提交还含 classifier/新字段/别的迁移，本轮只 forward-port chat/image 必要行为；生成链不可凭空补价格或整批网络刷新。
 - npm lock regeneration可能清理无关旧记录；若发生，精确识别并恢复无关语义，不扩大清理范围。
@@ -365,10 +431,31 @@
 - 2026-10-11: T-005 child0ac9b0c2返回，父代理读实际25路径及新checker/resolver/guards；标实现done，T-006 in_progress。Node24上nativecompiler/source与实际offline构建已运行，未取得Node22/Windows实测；旧Node22操作未重试。开始独立代码/锁语义/包消费者验证，不把child报告自动当提交验收。
 - 2026-10-11: T-006独立门禁完成；parent151 rootcheck1416 No fixes+offlinebuild、149 10tests、150 66tests、e9134c31 staticreview无actionable；仓库外安装初次缺公共npmcache，明确failure后官方metadata确认/正常2-day --ignore-scripts补cache，160新目录完全offline安装、161 CLI/public SDK/faux/jiti烟测通过，无任何repo runtime dep变化。节点22旧下载没有重复；记录Node22/Windows未测试。
 - 2026-10-11: task-162 toolchain25ownedpaths提交bd7b5a681，T-006done；T-008交给migrate-chat-image-ai。固定内部最小schema4和原publicchat投影/additive混合数组；价格/SDK/default数据语义维持，classifier/Transcript字段排除，后续coding消费任务严格串行等AI接口冻结。
+- 2026-10-11: readonly原目录观测F-009：HEAD11067598d新增3提交且大量recovery/MCP未提交目标重叠，T-011 pending->blocked。不自动合并/重基/覆盖，不触碰其修改；隔离AI/消费/验证独立任务继续。最终交付必须等待并发提交及用户重新集成决定。
+
+- 2026-10-11: T-008冻结实现经父task-164/165离线package tests/type/全数据proof验收done；root6项消费错误仍须修复，未阶段提交。T-009/T-015 in_progress，runtime/coding与根目录工具owned边界不重叠，coordinator只改server exact-field gate与authority；AI保持冻结，独立review进行中。原HEAD仍11067598d且dirty，T-011保持blocked，旧Node22未重试。
+
+- 2026-10-11: AI独立review c6fdcedf返回四项高置信度边界问题；父代理核对availability/current registry路径、helper nullish默认与combined生成控制流后新增T-016 in_progress。先可失败guard再修复，T-010依赖它；T-009/T-015仍可继续，公开接口不变、AI生成不得和其他owner并发写共享数据。
+
+- 2026-10-11: T-015首份冻结报告6路径/53node tests与实际离线bundle dry-run/diff返回；父代理读取完整核心/报告/inventory。发现source-archive.sh仍要求已删除image-models.generated.ts，完整读取后明确批准T-015最小消费者修复和临时合成gitrepo归档guard；不迁产品release流程、不在currentHEAD/schema3上注入新schema4数据归档。父server metadata桥接guard10/10通过。
+
+- 2026-10-11: T-015done：父task-168全部61node tests及bashsyntax/diff通过，完整源/guard/报告已读；独立review3eefbee8无actionable issue。8owned路径冻结，含sourcearchive一行必要消费修复；T-016与T-009仍在实施，rootcheck/build尚未运行。
+
+- 2026-10-11: T-009/T-016冻结实现经父task-169(370tests)、170(266AI/3credential skip)、171(generator full proof/type)、166(server10tests)验收done；task-172全rootcheck1418 No fixes通过并核对owned范围。T-010 in_progress做跨阶段回归、两个独立review、stale dist清理/离线build/外部pkg/真实sourcearchive；原交付T-011依旧blocked。
+
+- 2026-10-11: consumer independentreview5e553dda离线重现两项遗漏：dynamicimage发布头仍读取旧registration、overlaidchat被optionalall-list故障清空。父核对rawModelHeaders/currentExtension/getModels实际路径后新增T-017先RED再最小修复；T-010暂停build/pkg/提交等待其门禁，之前370/rootcheck通过不掩盖未覆盖问题。
+
+- 2026-10-11: fresh AIreviewf53a6828确认四原始触发已解决，但发现publicswap成功后backup cleanup异常仍单边rollbackInternal。父读取控制流同意高置信度路径，新增T-018先RED最小jointcommit边界修复；不声称crash-durable或忽略清理错误。与coding T-017边界不重叠可并行，T-010提交门禁等待两者。
+
+- 2026-10-11: T-017/T-018经父374consumer、267AI/3skip、actualsaveddata replay/type和完整rootcheck1418 No fixes验收done；两个continuity reviewers确认所有发现解决。T-010父178清空仅私有ignored AI dist后offlinebuild通过，179跨阶段coding20files290tests、173agent94tests、174tools10tests、180sourceCLI/help/version/list与删旧dist/新helper证明通过。实现writers全部冻结，进入临时pack/install/外部SDK与源码归档gate。
+
+- 2026-10-11: T-010父183 pack成功（105 implementation paths，11bundles/2637files，无runtime src或退役图片dist，helper公开导出存在）；初182因缺output parent立即ENOENT，观察错误后只补私有parent重跑，不改产品。184首次offline安装缺公共npm cache ENOTCACHED；185临时dir正常2-day/ignore-scripts公共cache hydration，186全新dir同2-day门禁完全offline安装121packages成功。187仓库外CLI help/version/list、bare easy-pi SDK/faux/static+dynamic image headers/typed APIs/public helper/compat/jiti singleton均通过，无resolver/NODE_PATH/provider网络。105文件冻结SHA、runtime deps/engines/locks/identity proof通过；LEARNS只在隔离树追加已核实ESM symlink-main教训，原并发LEARNS未写。阶段source提交后做真实sourcearchive再验收T-010。
+
+- 2026-10-11: T-010done，188提交phase3 817d3d782、189whole-source archive twice validate+byte-identical通过；仅LEARNS/authority未提交，全部实现/审查children已关闭。readonly原门禁仍HEAD11067598d/my-pi/127dirty、40public data baseline hashes相同，T-011保持blocked并提出Q-005；不ff/重基/覆盖/stash/reset或写原ignoreddata，未push/release。overall blocked / final partial，等待用户交付选择。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: 隔离/基线、phase1请求准备实现/独立review修复与提交、Moonshot最小价格修复/提交、phase2 TS7/Node实现与独立check/build/外部包gate及提交均完成；schema AI实现开始，消费者/综合验收/最终交付尚未完成。
-- Limitations: phase3仍在实施，原目录尚未交付；Node22旧获取操作未确认且未重试，Node22/Windows实际运行未验证；无 provider API/凭证、push/release行为。
+- Evidence: 三阶段分别提交14164effe、bd7b5a681、817d3d782，授权Moonshot修复独立6bb392b2a。T-001..T-010与T-012..T-018全部done，定向回归/独立review/root check/offlinebuild/数据保真/仓库外包SDK/实际确定性源码归档均通过；仅T-011因original漂移和未提交并发工作blocked，等待Q-005。
+- Limitations: 原目录未交付或改写；Node22旧获取操作未确认且未重试，Node22/Windows实际运行未验证；无provider真实API/凭证/paid模型、真实typed目录server支持、push/release。临时npm cache hydration正常2-day/ignore-scripts；3image E2E credential skip如实记录；独立generator已有19严格typing诊断未范围外清理；cleanup失败一致性是in-process合同而非crash-durable协议。
