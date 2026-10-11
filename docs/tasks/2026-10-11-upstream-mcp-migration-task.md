@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户已追加「开始实施，完成交付」，授权按本方案第一期实现、必要安装/锁文件、本地构建和模拟服务器验证；不包含真实凭据、付费 API 或外部发布。
 
 <!-- task-doc-section:background-goal -->
@@ -161,8 +161,8 @@ root / child 执行时再次核验 live 权限
 
 - Assumption: 用户所说 main 是已核验 origin/main；easy-pi 目标为当前 my-pi 工作分支，而不是把提交移到 easy-pi/main。实施前需重新确认基线及并行恢复改动已稳定。
 - Assumption: 一期不要求脚本批量调用 MCP。建议 direct/deferred 足够交付基础功能，codemode 非强制依赖；如目标是与 upstream 默认 codemode 行为完全相同，范围将显著扩大。
-- Open question: 实施前确认一期范围和默认 deferred 的产品选择；显式 codemode/autoEnableCodemode 配置在一期报不支持，不静默解释成其他模式。
-- Open question: child 资源授权一期是否采用显式 server scope；未实现前默认不向 child 授予通用资源工具。该能力需要明确产品契约，不能在名称白名单内暗中扩权。
+- Decision: 用户授权按方案实施；一期默认 deferred，显式 codemode/autoEnableCodemode 报不支持，不静默解释成其他模式。
+- Decision: 一期 child 没有通用资源授权，显式 resourceServerScope=[] 并阻止 generic resource 工具委派；未暗中扩大名称授权。
 - Open question: 是否未来需要 auth.provider、Radius、CIMD。当前建议不取；CIMD 不能直接冒用 pi.dev 上游客户端身份。
 
 <!-- task-doc-section:acceptance-criteria -->
@@ -327,9 +327,9 @@ root / child 执行时再次核验 live 权限
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-007 — 打包、定向回归与发行门禁
+### [x] T-007 — 打包、定向回归与发行门禁
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 证明移植不仅在 workspace 中成立，独立 easy-pi 产物也可用且无核心回归。
 - Inputs and prerequisites: T-006、构建/产物 smoke 验证获得用户授权。
@@ -345,7 +345,7 @@ root / child 执行时再次核验 live 权限
   - 包外启动、MCP 调用、OAuth mock、进程退出均通过；缺平台验证如实记录。
 - Verification method:
   - 包内定向 Vitest、代码修改后的 npm run check、获授权的本地产物 smoke；不跑全 npm test。
-- Validation evidence: coordinator npm run check 全通过（formatter/pins/imports/shrinkwrap/install-lock/tsgo/browser）；offline build、pack/独立安装、包外 CLI/SDK stdio+HTTP+清理 smoke、pack fixture 3/3 通过。仅 MCP ownership patch 已暂存，纯 index 快照补齐已有 ignored 模型 JSON 后 tsgo 和 163 项 MCP 测试通过；待本轮最终提交。
+- Validation evidence: coordinator npm run check 全通过（formatter/pins/imports/shrinkwrap/install-lock/tsgo/browser）；offline build、pack/独立安装、包外 CLI/SDK stdio+HTTP+清理 smoke、pack fixture 3/3 通过。仅 MCP ownership patch 已暂存，纯 index 快照补齐已有 ignored 模型 JSON 后 tsgo 和 163 项 MCP 测试通过；MCP 功能已提交 d22113e47；未混入并行恢复源代码。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -507,6 +507,8 @@ root / child 执行时再次核验 live 权限
 <!-- task-doc-section:execution-log -->
 ## Execution log
 
+- 2026-10-11: 功能提交 d22113e47 完成；按 HEAD+MCP 暂存树构建并重新打包 commit-package（shasum 58752a12da3e0e6cd3945b3bd584c8b6254bcbce），隔离重新安装后 CLI/SDK stdio/HTTP/清理 smoke 再次通过。所有 T-001 至 T-013 完成；最终文档校验通过后提交收尾文档。其他会话工作和授权测试类型适配留在工作区，未混入功能提交。
+
 - 2026-10-11: T-013 精确类型/假数据适配经审核接受；全仓 check 全通过、192 项授权测试全过。暂存只含本任务 MCP/new tests/metadata；AgentSession 与 pi-collaboration-tools 按 ownership patch 从 HEAD 合成，排除并行恢复改动。纯 index 快照（补齐已忽略模型 JSON）tsgo 与 163 项 MCP 定向测试通过。新增两条已验证 LEARNS，仅暂存本任务追加，未包含其他会话日记。
 
 - 2026-10-11: 用户确认限定处理四个测试文件的类型/假数据以完成检查和提交；T-013 开始，未授权改变恢复行为或弱化断言。Node 包外 CLI/SDK stdio+HTTP smoke 通过；独立 browser smoke、pack 3/3、diff --check 通过。
@@ -530,6 +532,6 @@ root / child 执行时再次核验 live 权限
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: 协调端协议 43/43、MCP 集成 163/163、pack fixture 3/3 均通过；offline build 通过。独立 tarball 位于 `/tmp/easy-pi-mcp-delivery.cGjc3r/package/easy-pi-0.1.0-beta.1.tgz`，npm 安装到包外 install，CLI help/version/add/list 和 SDK stdio/HTTP 实际执行及退出清理 smoke 通过。验证日志 task-15（全仓 check）、task-16（build）、task-17（163 tests）、task-18（pack）、task-20（install）、task-21（smoke）均为真实工具输出。
-- Limitations: 全仓 check 的 10 个测试类型错误已按用户授权修正，检查通过；仅最终提交待完成，其他会话代码仍未提交；Bun 未安装，Bun binary 未验证；真实第三方 MCP/OAuth/付费 provider 与人工 TUI 操作未运行。MCP 第一阶段实现、Node 产物、全仓检查与纯暂存树验证完成；提交后再标整体 passed。
+- Result: passed
+- Evidence: 协调端协议 43/43、MCP 集成 163/163、pack fixture 3/3 均通过；offline build 通过。独立 tarball 位于 `/tmp/easy-pi-mcp-delivery.cGjc3r/commit-package/easy-pi-0.1.0-beta.1.tgz`，npm 安装到包外 install，CLI help/version/add/list 和 SDK stdio/HTTP 实际执行及退出清理 smoke 通过。验证日志 task-15（全仓 check）、task-16（build）、task-17（163 tests）、task-18（pack）、task-20（install）、task-21（smoke）均为真实工具输出。
+- Limitations: 全仓 check 的 10 个测试类型错误已按用户授权修正，检查通过；MCP 功能提交 d22113e47 已完成，其他会话代码仍未提交；Bun 未安装，Bun binary 未验证；真实第三方 MCP/OAuth/付费 provider 与人工 TUI 操作未运行。MCP 第一阶段实现、Node 产物、全仓检查、纯暂存树验证与功能提交已完成。
