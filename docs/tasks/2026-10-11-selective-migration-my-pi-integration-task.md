@@ -16,7 +16,8 @@
 
 - Source: integrate/selective-migration-20261011 @ 59faf2409bd9c48c738e271582bb8ba298d4e2fb；三阶段 source commits 14164effe、bd7b5a681、817d3d782，Moonshot 已批准修复 6bb392b2a。
 - Initial target: my-pi @ 83e46ae82c692c49112974e427656f89b19fbf70；first verified merge674320ff已保留source。
-- Current delivery target: my-pi @ 40610c758f6604ba50556a0a00ac6cea15e55c27；当前clean，新增CodeMode a2fd4ac0d与subagent progress 6dff658b4及其验收docs。T-008/T-009先保留这些已提交内容并补集成/重测，不能用旧674320ff直接ff覆盖其新commits。
+- Verified second target: my-pi @ 40610c758f6604ba50556a0a00ac6cea15e55c27；CodeMode/progress及三阶段union已c47951f65验收提交。
+- Current delivery target: my-pi @ f8db93311ffb975cd6d195f68ae8769f17b2486d；最终ff前发现cleanHEAD又增c86b95f98（CodeMode不兼容runtime context fail-closed）/f8db93311（progress fixture）；T-014先保留4path/152line新committeddelta并补影响门禁，再freshgate。
 - Private integration branch/worktree: integrate/selective-migration-my-pi-20261011 / /tmp/easy-pi-my-pi-integration-20261011。
 - Evidence: /tmp/pi-selective-migration-evidence-20261011/my-pi-integration/；不是任务状态源。
 - 保留三阶段请求准备、TS7/Node、chat/image全部原合同与SDK/cache/pricing/defaults，以及target已提交MCP/恢复/CodeMode durable nested authority/subagent非终态progress及interrupt handoff、writer ownership/unknown-effect reconciliation、easy-pi/epi/.epi/jiti/locks/独立打包。CodeMode是保留target既有功能，不是重做本迁移原排除的上游新功能。
@@ -37,6 +38,7 @@
 | F-005 | 私有integration worktree已从精确83e46创建，尚未合并source。 | worktree add成功；只有本新authority文件。 |
 | F-006 | Node22当前目录缺失/匹配下载解压进程未见，不证明旧下载终态。 | 当前readonly test/ps；未重复mkdir/curl/tar或调用reconcile。 |
 | F-007 | 用户继续时my-pi已clean且HEAD40610c758，四新增commits保留CodeMode/progress；先前dirty blocker已解除但candidate需纳入新base。 | readonly status空、log/diff 83e46..40610：132paths/13344新增行；private仍537aeae5clean。 |
+| F-008 | c47951f65验收后最终original门禁发现cleanHEAD f8db93311，新增runtime-context guard及progress fixture两commits，4paths/152insertions3deletions。 | 最新original-delivery-gate.json/完整f8db-target-delta.patch；无originalwrite，不能忽略新commit直接ff旧candidate。 |
 
 <!-- task-doc-section:assumptions-questions -->
 ## Assumptions and open questions
@@ -58,7 +60,7 @@
 <!-- task-doc-section:dependencies-batches -->
 ## Dependencies and parallel batches
 
-- Dependency graph: T-001 -> T-002 -> {T-006,T-007}；{T-002,T-006,T-007} -> T-003 -> T-004 -> {T-010,T-011}；{T-004,T-010,T-011} -> T-004 -> T-012；{T-008,T-012} -> T-013；{T-008,T-012,T-013} -> T-009；{T-004,T-009} -> T-005。
+- Dependency graph: T-001 -> T-002 -> {T-006,T-007}；{T-002,T-006,T-007} -> T-003 -> T-004 -> {T-010,T-011}；{T-004,T-010,T-011} -> T-004 -> T-012；{T-008,T-012} -> T-013；{T-008,T-012,T-013} -> T-009；T-009 -> T-014；{T-004,T-009,T-014} -> T-005。
 - Parallel batches: 当前T-002串行冲突处理；source冻结后只读review可与父受控tests并行，但T-004最终接受仍依赖T-003。
 - Serialization constraints: coordinator独占authority、Git index/merge/locks/data；其他owner只明确不重叠路径。read-only child只用read工具，bash本身不是只读边界。
 
@@ -137,7 +139,7 @@
 - Inputs and prerequisites: T-004 verified candidate、原最新committed HEAD/clean/public-data门禁。
 - Scope or files: 原目录ff-only与明确私有来源deps/data hydration，本authority。
 - Expected output: my-pi实际包含candidate，或明确blocked而不覆盖现场。
-- Dependencies: T-004, T-009.
+- Dependencies: T-004, T-009, T-014.
 - Execution steps: 原fresh状态核对；如有新commits先保留整合/补测；dirty时停；clean精确head/data gates后ff-only及必需runtime smoke/check。
 - Acceptance criteria: 原未提交工作没有被stash/覆盖/代提交；数据refresh没有丢失；实际更新才done。
 - Verification method: readonly fresh gate、ff输出、original runtime关键check及source/data/lock proofs。
@@ -273,6 +275,22 @@
 - Blocker: None.
 - Unblock condition: None.
 
+### [ ] T-014 — 最终交付前新committed runtime-context修复保留
+
+- Status: in_progress
+- Owner: coordinator
+- Objective: 纳入f8db93311最新clean目标两commits，保留source请求准备/已验收authority及不兼容CodeMode宿主not_started guard，避免ff覆盖并发已提交修复。
+- Inputs and prerequisites: T-009dad16b5候选、F-008原门禁漂移证据、完整4paths实际delta/context。
+- Scope or files: private mergef8db；CodeMode execute/docs/runtime-context regression/childfixture实际merge；本authority与必要影响tests/check/build/newpackage/artifacts，不写原目录到freshgate。
+- Expected output: 最新target/source两方祖先保留的verifiedcommit及精确4pathunion，current源码与产物一致。
+- Dependencies: T-009.
+- Execution steps: 精确no-commitmerge；完整读delta+相关currentcontext；text冲突最小union；新4regression与CodeMode/prepare/nested/recovery邻域、rootcheck/offlinebuild、newpack/外部SDKsmoke、独立只读审查、commit/parents/data/locksproof。
+- Acceptance criteria: latesttargetguard/docs/regressionbyte-preserved、3progress期待与已验收scope guards不倒退；不依赖旧loadedcore跑新extension；实际regression/type/build/provider-free消费通过、original未改直到T-005门禁。
+- Verification method: actualGitdelta/no-unmerged/2parentancestry、包根定向offlineguard/rootcheck/build/pack/newoutsideconsumer与只读review。
+- Validation evidence: merge仅1实际comment冲突（3progress arrays完全相同），保留comment后wholechildfixture byte-identical dad16b、execute/docs/new129lineguard exacttargetf8db。f8db composition/root/compilerlocks/data/core proof无新增runtime差异；wholeprepare+两个filter与targetnestedhooks保持。父8files122（含4新regression）/root1522No fixes/allofflinebuild/new13bundle2893filepack/全新outsideage2ignore-scripts完全offlineinstall122及SDK/image/MCP/QuickJSpublicworker/portable/WASM/store/licenses/jiti/compiledlegacyctxguard exactnot_started/noappend全GREEN。独立e5268503与连续94e08279读取actual4pathpatch/currentsource/logs，无actionable；Git commit/ancestry待执行不提前done。
+- Blocker: None.
+- Unblock condition: None.
+
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
 
@@ -329,9 +347,13 @@
 
 - 2026-10-11: T-009done，explicit仅本session10paths追加自动已提交targetmergeindex，PI_ALLOW_LOCKFILE_CHANGE=1正常commitc47951f65（parents537aeae5/40610），Git source59faf/latesttarget40610祖先gate与privateclean通过。newsourcearchive2次已归档实际validator+cmp byte-identical/hash67d6d8eb通过，不复用旧83e46archive。仅T-005最终original clean/HEAD/public40data复核、ff-only和runtimehydration待做；私有最终验收记录另docscommit后再交付，不提前声称my-pi已更新。
 
+- 2026-10-11: 新candidate验收docs dad16b5fc已提交并privateclean，但最终originalfreshgate HEAD=f8db93311clean而非40610，两个owner新commit不在candidate。原40data仍exactbaseline且无write；拒绝旧baseff，新增T-014明确保留4paths/152lines已committedruntime-contextfailclosed/progressfixture。父已完整读delta/execute/new129linefaux regression/docs并按实际影响补门禁，不重跑不相关已完成old-baseeffects，不删guard或用ours覆盖。
+
+- 2026-10-11: T-014保留latestf8db，实际唯一childfixturecomment冲突逐块全文读后解决，三个progress数组与priorcandidate相同；execute/docs/regression exacttarget、wholeprepare/nestedhooks不变proofpassed。新8files122（4ctxguards）/root1522No fixes/offlinebuild/新13bundle2893filepack/outside全新完全offline2dayignore-scripts122install/完整SDK+compiledctxfailclosed smoke全实际GREEN；newfreshreadonlyreviewe5268503+absoluteevidence补对94e08279无actionable。准备commit/ancestry/sourcearchive，original仍未write；仅保留已提交最新修复，不新增runtimeAPI。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: 历史T-001/002/003/004/006/007done与firstcandidate674320ff保持已完成；新T-008/010/011/012done。当前private537aeae5+MERGE_HEAD40610冲突全解决、exactunion/compilerlock/runtime/data proof通过，root1521No fixes/offlinebuild/codeMode185/agent147/subagent182/AI375+3credential skip/MCP43/server10/scripts77通过；13bundle2893filepack及新outside正常2-day/ignore-scripts install122packages、CLI/SDK/faux/image/static+dynamicheaders/MCPin-memory/CodeMode实际publicworker+portable WASM/store/licenses/jiti smoke通过。T-013已验收done（child54/parent49coding718/independentreview）且最终rootcheckNo fixes通过；T-009已done：mergec47951f65双parents/source+target ancestry/privateclean及新源码归档2次actual validator+cmp通过；仅T-005最终original gate/ff/hydration未执行。
-- Limitations: original my-pi最后只读40610clean且public40data不变，仍未更新。新candidate不能复用firstcandidate旧902tests/源码归档证据；offlineinstall首次quickjsmetadata ENOTCACHED后normalage install通过，烟测本身无provider网络，不能宣称这次安装完全离线。Node22未知下载paused不重试，22/Windows/Bun/liveprovider/liveexternalMCP未实测；无真实provider凭证/API/paidmodel、push/release。历史完整迁移authority不改写，本文件唯一当前状态。
+- Evidence: 历史T-001/002/003/004/006/007done与firstcandidate674320ff保持已完成；新T-008/010/011/012done。当前private537aeae5+MERGE_HEAD40610冲突全解决、exactunion/compilerlock/runtime/data proof通过，root1521No fixes/offlinebuild/codeMode185/agent147/subagent182/AI375+3credential skip/MCP43/server10/scripts77通过；13bundle2893filepack及新outside正常2-day/ignore-scripts install122packages、CLI/SDK/faux/image/static+dynamicheaders/MCPin-memory/CodeMode实际publicworker+portable WASM/store/licenses/jiti smoke通过。T-013已验收done（child54/parent49coding718/independentreview）且最终rootcheckNo fixes通过；T-009已done：mergec47951f65双parents/source+target ancestry/privateclean及新源码归档2次actual validator+cmp通过；最终originalgate又漂移到f8dbclean；T-014保留新2commits/影响验证与T-005ff/hydration未完成。
+- Limitations: original my-pi最后只读f8db93311clean且public40data不变，仍未更新。新candidate不能复用firstcandidate旧902tests/源码归档证据；offlineinstall首次quickjsmetadata ENOTCACHED后normalage install通过，烟测本身无provider网络，不能宣称这次安装完全离线。Node22未知下载paused不重试，22/Windows/Bun/liveprovider/liveexternalMCP未实测；无真实provider凭证/API/paidmodel、push/release。历史完整迁移authority不改写，本文件唯一当前状态。

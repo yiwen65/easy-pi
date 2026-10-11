@@ -31,6 +31,10 @@ For MCP tools configured with `codemode` exposure, the top-level `autoEnableCode
 
 Use `noCodemode: true` to omit the built-in registration from the SDK's default loader. Custom SDK resource loaders remain host-owned; add `createCodemodeExtension()` explicitly when needed. See [SDK](sdk.md#codemode).
 
+### Updating a running development session
+
+After updating the core source, restart the Easy Pi process and resume the session. `/reload` reloads resources and extensions, not the already-loaded core modules. An old core can therefore load a newer codemode extension without providing its invocation-scoped tool context. Codemode rejects that mismatch before starting the script or nested calls; retrying or `/reload` cannot repair the old core. SDK hosts must likewise supply the full `ExtensionToolContext`, not an event-handler context.
+
 ## Scripts
 
 The script is the body of an async function, so top-level `await` and `return` work. The tool schema accepts `{ code: "...JavaScript source..." }`; models with the supported constrained-sampling format can write raw source instead. Do not put a Markdown code fence inside `code`.

@@ -235,6 +235,20 @@ export async function executeCodemode(
 	ctx: ExtensionToolContext | undefined,
 	options: CodemodeToolOptions = {},
 ): Promise<AgentToolResult<CodemodeToolDetails>> {
+	// A source update can load this extension into a process whose core still passes
+	// ExtensionContext. Reject that host before creating a VM or dispatching effects.
+	if (
+		ctx &&
+		(!Array.isArray(ctx.tools) ||
+			typeof ctx.executeTool !== "function" ||
+			typeof ctx.waitForNestedTools !== "function")
+	) {
+		throw new AgentToolError(
+			"Codemode requires an invocation-scoped tool context. Restart Easy Pi and resume the session after updating; /reload cannot update the running core. SDK hosts must provide tools, executeTool, and waitForNestedTools. No script or nested tools were started.",
+			{ calls: [] },
+			{ executionOutcome: "not_started" },
+		);
+	}
 	const startedAt = performance.now();
 	let source: ReturnType<typeof parseCodemodeSource>;
 	try {
