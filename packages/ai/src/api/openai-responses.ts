@@ -87,18 +87,14 @@ function getPromptCacheRetention(
 		: undefined;
 }
 
-interface OpenAIPromptCacheOptions {
-	mode: "explicit" | "implicit";
-	ttl?: "30m" | "24h";
-}
-
 function getPromptCacheOptions(
 	compat: Required<OpenAIResponsesCompat>,
 	cacheRetention: CacheRetention,
-): OpenAIPromptCacheOptions | undefined {
+): ResponseCreateParamsStreaming["prompt_cache_options"] {
 	if (!compat.supportsExplicitPromptCacheMode) return undefined;
 	if (cacheRetention === "none") return { mode: "explicit" };
-	return { mode: "implicit", ttl: cacheRetention === "long" ? "24h" : "30m" };
+	// Explicit-cache models currently support only a 30m TTL, even for long retention.
+	return { mode: "implicit", ttl: "30m" };
 }
 
 function formatOpenAIResponsesError(error: unknown): string {
@@ -307,7 +303,7 @@ function buildParams(
 		},
 	});
 
-	const params: ResponseCreateParamsStreaming & { prompt_cache_options?: OpenAIPromptCacheOptions } = {
+	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		input: messages,
 		stream: true,
@@ -376,6 +372,7 @@ function getServiceTierCostMultiplier(
 	switch (serviceTier) {
 		case "flex":
 			return 0.5;
+		case "fast":
 		case "priority":
 			return model.id === "gpt-5.5" ? 2.5 : 2;
 		default:

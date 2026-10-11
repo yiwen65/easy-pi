@@ -276,7 +276,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			]);
 		});
 
-		it("should use the modern 24h GPT-5.6 TTL without the deprecated retention field", async () => {
+		it("should use the 30m GPT-5.6 TTL for long retention without the deprecated field", async () => {
 			const model = getModel("openai", "gpt-5.6-terra");
 			let capturedPayload: OpenAIResponsesCachePayload | undefined;
 
@@ -296,7 +296,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			}
 
 			expect(capturedPayload?.prompt_cache_retention).toBeUndefined();
-			expect(capturedPayload?.prompt_cache_options).toEqual({ mode: "implicit", ttl: "24h" });
+			expect(capturedPayload?.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
 		});
 
 		it.skipIf(!process.env.OPENAI_API_KEY)(
