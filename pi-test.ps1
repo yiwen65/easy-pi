@@ -58,13 +58,11 @@ if ($noEnv) {
 	Write-Host "Running without API keys..."
 }
 
-$tsxBin = Join-Path $scriptDir "node_modules/.bin/tsx.cmd"
-if (-not (Test-Path -LiteralPath $tsxBin)) {
-	throw "tsx not found at $tsxBin. Run npm install from the repo root first."
-}
-
+# Let Node encode the path as a module specifier, including Windows drives and #, ?, %.
+$resolverPath = Join-Path $scriptDir "scripts/source-resolver.mjs"
+$resolverUrl = & node -p 'require("node:url").pathToFileURL(process.argv[1]).href' $resolverPath
 $cliPath = Join-Path $scriptDir "packages/coding-agent/src/cli.ts"
-& $tsxBin $cliPath @forwardArgs
+& node --import $resolverUrl $cliPath @forwardArgs
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
 	exit $exitCode

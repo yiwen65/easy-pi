@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, fauxAssistantMessage, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -547,15 +548,15 @@ describe("native durable task recovery", () => {
 				'await harness.session.prompt("task");',
 			].join("\n"),
 		);
-		const root = new URL("../../../../", import.meta.url).pathname;
+		const rootUrl = new URL("../../../../", import.meta.url);
 		const child = spawnSync(
 			process.execPath,
-			[join(root, "node_modules/tsx/dist/cli.mjs"), "--tsconfig", join(root, "tsconfig.json"), script],
-			{ cwd: root, encoding: "utf8" },
+			["--import", new URL("scripts/source-resolver.mjs", rootUrl).href, script],
+			{ cwd: fileURLToPath(rootUrl), encoding: "utf8" },
 		);
 		expect(child.stderr).toBe("");
-		// tsx forwards the child's signal using exit 137 on some Node releases.
-		expect(child.signal === "SIGKILL" || child.status === 137).toBe(true);
+		expect(child.signal).toBe("SIGKILL");
+		expect(child.status).toBeNull();
 		const childTemp = readFileSync(join(dir, "child-temp"), "utf8");
 		expect(childTemp.startsWith(join(tmpdir(), "pi-suite-"))).toBe(true);
 		dirs.push(childTemp);

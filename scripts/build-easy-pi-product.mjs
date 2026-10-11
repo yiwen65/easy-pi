@@ -10,7 +10,7 @@ try {
 	// Compile the product modules together: their type-only extension API cycle
 	// must not depend on declarations left over from an earlier coding-agent build.
 	execFileSync(process.execPath, [
-		resolve(root, "node_modules/@typescript/native-preview/bin/tsgo.js"),
+		resolve(root, "node_modules/typescript/bin/tsc"),
 		"-p", resolve(root, "packages/coding-agent/tsconfig.product-build.json"),
 		"--outDir", output,
 	], { cwd: root, stdio: "inherit" });

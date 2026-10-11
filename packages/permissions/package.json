@@ -21,7 +21,7 @@
 		"dist"
 	],
 	"scripts": {
-		"build": "tsgo -p tsconfig.build.json"
+		"build": "tsc -p tsconfig.build.json"
 	},
 	"engines": {
 		"node": ">=22.19.0"
