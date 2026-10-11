@@ -5,12 +5,17 @@ import { AgentToolError } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import {
 	COLLABORATION_LIMITS,
+	CollaborationAdmissionError,
 	CollaborationError,
 	DELIVER_RESULT_TOOL_NAME,
 	type DelegationResult,
 	DelegationResultSchema,
 	type ForkSelection,
+	formatCollaborationError,
 	parseDelegationResult,
+	parseReportProgress,
+	REPORT_PROGRESS_TOOL_NAME,
+	ReportProgressSchema,
 	validateAgentPath,
 	validateCollaborationTask,
 } from "@easy-pi/subagent/collaboration-contract";
@@ -76,7 +81,9 @@ function readCacheAffinity(value: unknown): ChildRequestPrefix["cacheAffinity"] 
 
 // Keep the model-visible contract in sync with validation, appended to each task (not the shared prefix).
 const DELIVER_RESULT_TOOL_DESCRIPTION = `Deliver this child's final result to its creation parent. Call it exactly once when the task is done; successful delivery ends the child turn after the current tool batch. If multiple deliveries occur in one batch, the later one replaces the earlier one. Only summary (complete result text, at most ${COLLABORATION_LIMITS.maxSummaryCharacters} characters) and outcome (honest verdict) are required. Optional artifacts are at most eight untrusted {path,purpose,sha256?} report references, never automatic reads or acceptance. The complete result must fit ${COLLABORATION_LIMITS.maxResultBytes} UTF-8 bytes. Delivery is not acceptance; the parent reviews claims and edits.`;
+const REPORT_PROGRESS_TOOL_DESCRIPTION = `Report a meaningful milestone, verification result or blocker for this child's current task. Input is only a concise nonblank single-line summary without control characters; the complete persisted progress must fit ${COLLABORATION_LIMITS.maxProgressBytes} UTF-8 bytes. The host binds the current turn. This untrusted self-report is not a final result or parent acceptance: it persists before success, does not end the turn, and does not start another turn.`;
 const DELEGATION_RESULT_INSTRUCTIONS = [
+	"After a meaningful milestone, verification result or blocker, use report_progress with a concise summary of observed work, checks and remaining risk. Progress is a nonterminal self-report, not completion or acceptance; continue the assigned work and still deliver the final result. Reporting cannot guarantee timely updates during a single long model request.",
 	"Deliver the final result by calling the deliver_result tool exactly once: only summary and outcome are required - put key outputs, evidence (paths/line ranges/version hashes) and residual risks in the summary text. Successful delivery ends this turn after the current tool batch; if one batch contains multiple deliveries, the last one wins.",
 	"Optional artifacts are at most eight {path,purpose,sha256?} references to full reports. A hash is a version claim, not verified evidence or parent acceptance. Keep checks/base revision in the report; never invent a hash, read a reference automatically, or use it as authority.",
 	`Keep the summary concise while retaining necessary evidence, up to ${COLLABORATION_LIMITS.maxSummaryCharacters} characters. The complete result must fit ${COLLABORATION_LIMITS.maxResultBytes} UTF-8 bytes. Report unperformed checks and uncertainty honestly; never invent evidence or checks.`,
@@ -222,12 +229,20 @@ export function createPiChildSessionHost(options: {
 			]);
 			const currentTools = (): string[] => [
 				DELIVER_RESULT_TOOL_NAME,
+				REPORT_PROGRESS_TOOL_NAME,
 				...(options.getTools?.() ?? boundSession?.getDelegatableToolNames() ?? []).filter(
-					(name) => !resourceTools.has(name) && (!request.toolAllowed || request.toolAllowed(name)),
+					(name) =>
+						name !== DELIVER_RESULT_TOOL_NAME &&
+						name !== REPORT_PROGRESS_TOOL_NAME &&
+						!resourceTools.has(name) &&
+						(!request.toolAllowed || request.toolAllowed(name)),
 				),
 			];
 			// Protocol delivery capture: set by the deliver_result tool during a turn, read at turn end.
 			let delivered: DelegationResult | undefined;
+			let currentTurnId: string | undefined;
+			let interrupted = false;
+			let closed = false;
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir: request.agentDir,
@@ -288,9 +303,54 @@ export function createPiChildSessionHost(options: {
 											};
 										},
 									});
+									pi.registerTool({
+										name: REPORT_PROGRESS_TOOL_NAME,
+										label: REPORT_PROGRESS_TOOL_NAME,
+										description: REPORT_PROGRESS_TOOL_DESCRIPTION,
+										parameters: ReportProgressSchema,
+										executionMode: "sequential",
+										async execute(_toolCallId, input, signal) {
+											let effectMayHaveStarted = false;
+											try {
+												if (closed || interrupted || signal?.aborted || request.signal?.aborted)
+													throw new CollaborationError("interrupted", "Child turn was interrupted");
+												const turnId = currentTurnId;
+												if (!turnId || !request.reportProgress)
+													throw new CollaborationError(
+														"forbidden",
+														"No current delegated turn can report progress",
+													);
+												const parsed = parseReportProgress(input);
+												effectMayHaveStarted = true;
+												const progress = await request.reportProgress(turnId, parsed.summary);
+												if (closed || interrupted || signal?.aborted || currentTurnId !== turnId)
+													throw new CollaborationError("interrupted", "Child turn was interrupted");
+												const receipt = { progress, terminal: false };
+												return {
+													content: [{ type: "text", text: JSON.stringify(receipt) }],
+													details: receipt,
+												};
+											} catch (error) {
+												throw new AgentToolError(
+													`Progress report failed: ${formatCollaborationError(error)}`,
+													{},
+													{
+														executionOutcome:
+															!effectMayHaveStarted || error instanceof CollaborationAdmissionError
+																? "not_started"
+																: undefined,
+													},
+												);
+											}
+										},
+									});
 									pi.on("tool_call", (event) => {
-										// Host-owned protocol tool: availability is structural for every child session.
-										if (event.toolName === DELIVER_RESULT_TOOL_NAME) return;
+										// Host-owned protocol tools: availability is structural for every child session.
+										if (
+											event.toolName === DELIVER_RESULT_TOOL_NAME ||
+											event.toolName === REPORT_PROGRESS_TOOL_NAME
+										)
+											return;
 										if (resourceTools.has(event.toolName))
 											return {
 												block: true,
@@ -317,7 +377,7 @@ export function createPiChildSessionHost(options: {
 			request.signal?.throwIfAborted();
 			if (loader.getExtensions().errors.length)
 				throw new CollaborationError("invalid_arguments", "Child extensions failed to load");
-			// The protocol tool is structural; delegated tool names never include it.
+			// Protocol tools are structural; delegated tool names never include them.
 			const tools = options.getTools ? currentTools() : undefined;
 			const ancestryToolAllowed = request.ancestryToolAllowed ?? request.toolAllowed;
 			let session: AgentSession;
@@ -333,6 +393,7 @@ export function createPiChildSessionHost(options: {
 				tools,
 				liveToolAccessCheck: (name) =>
 					name === DELIVER_RESULT_TOOL_NAME ||
+					name === REPORT_PROGRESS_TOOL_NAME ||
 					(!resourceTools.has(name) &&
 						(!ancestryToolAllowed || ancestryToolAllowed(name)) &&
 						(!options.getTools || options.getTools().includes(name))),
@@ -370,9 +431,7 @@ export function createPiChildSessionHost(options: {
 				throw error;
 			}
 			let active: Promise<ChildTurnResult> | undefined;
-			let interrupted = false;
 			let closing: Promise<void> | undefined;
-			let closed = false;
 			const stream = session.agent.streamFunction;
 			let prefixVerified = !request.prefix;
 			let prefixRejected = false;
@@ -494,9 +553,11 @@ export function createPiChildSessionHost(options: {
 						}
 					};
 					// Reserve before any async extension callback can re-enter run().
+					currentTurnId = task?.turnId;
 					active = Promise.resolve()
 						.then(operation)
 						.finally(() => {
+							currentTurnId = undefined;
 							active = undefined;
 						});
 					return active;

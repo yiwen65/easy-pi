@@ -767,8 +767,8 @@ test("isolated verifier sees its assignment but no parent goals and cannot invok
 	await f.controller.settled();
 	expect(JSON.stringify(childContext?.messages)).not.toContain("PARENT_CONCLUSION_SECRET");
 	expect(JSON.stringify(childContext?.messages)).toContain("independent verification");
-	// The host-owned protocol tool is structurally available to every child, on top of the delegated set.
-	expect(childContext?.tools?.map((item) => item.name)).toEqual(["deliver_result", "read"]);
+	// Host-owned protocol tools are structurally available to every child, on top of the delegated set.
+	expect(childContext?.tools?.map((item) => item.name)).toEqual(["deliver_result", "report_progress", "read"]);
 	expect(existsSync(join(f.cwd, "should-not-exist"))).toBe(false);
 	expect(f.store.read().agents[0]).toMatchObject({
 		result: "unstructured result is retained",
@@ -984,8 +984,8 @@ test("cold explicit followup retains the delegated ceiling and child history wit
 	);
 	await restarted.session.prompt("explicitly continue the child");
 	await restarted.controller.settled();
-	// deliver_result stays structurally active across cold restarts; the delegated ceiling stays read-only.
-	expect(captured?.tools?.map((tool) => tool.name)).toEqual(["deliver_result", "read"]);
+	// Protocol tools stay structurally active across cold restarts; the delegated ceiling stays read-only.
+	expect(captured?.tools?.map((tool) => tool.name)).toEqual(["deliver_result", "report_progress", "read"]);
 	expect(JSON.stringify(captured?.messages)).toContain("RETAINED_CHILD_RESULT");
 	expect(JSON.stringify(captured?.messages)).toContain("second explicit task");
 	expect(restarted.store.read().agents[0].tools).toEqual(["read"]);
@@ -1138,10 +1138,10 @@ test("new query tools share root/child schemas but every child query is rejected
 	const f = await fixture(undefined, [], (session) => children.push(session));
 	let root = 0;
 	let child = 0;
-	const catalogs: string[][] = [];
+	const catalogs: ReturnType<typeof collaborationToolSchemas>[] = [];
 	f.faux.setResponses(
 		Array.from({ length: 12 }, () => (context: Context) => {
-			catalogs.push(context.tools?.map((tool) => tool.name).filter((name) => name !== "deliver_result") ?? []);
+			catalogs.push(collaborationToolSchemas(context.tools));
 			if (currentCollaborationPath(context) === "/root/worker") {
 				switch (child++) {
 					case 0:
@@ -1168,7 +1168,9 @@ test("new query tools share root/child schemas but every child query is rejected
 	expect(childResults.every((message) => message.isError)).toBe(true);
 	expect(JSON.stringify(childResults)).toContain("nested_delegation");
 	for (const catalog of catalogs) expect(catalog).toEqual(catalogs[0]);
-	expect(catalogs[0]).toEqual(expect.arrayContaining(["get_agent_result", "list_agent_turns"]));
+	expect(catalogs[0].map((tool) => tool.name)).toEqual(
+		expect.arrayContaining(["get_agent_result", "list_agent_turns"]),
+	);
 });
 
 test("targeted wait tool returns an already-ingested turn without another child or provider request", async () => {

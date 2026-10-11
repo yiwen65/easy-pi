@@ -137,7 +137,7 @@ export function registerPiCollaborationRoot(
 	});
 	pi.registerCommand("agents", {
 		description:
-			"Inspect native agent sessions and retained turns; explicitly message, follow up or interrupt; retry team initialization without replay",
+			"Inspect native sessions, progress and retained turns before interrupting; explicitly message or follow up; retry team initialization without replay",
 		handler: async (args, ctx) => {
 			if (stopped) return;
 			if (args.trim() && args.trim() !== "recover") {

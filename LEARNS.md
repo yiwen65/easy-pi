@@ -368,6 +368,8 @@
 - Verified by: 2026-09-10 collaboration-controller.test.ts 的 unloading a narrowed ancestor 在修正前 detach 后返回 true，修正后及重开 store 均保持 false；原生宿主重新广告 bash 的执行门、失败启动绑定释放回归通过。指定 subagent 64 项、coding-agent 69 项通过，未运行真实模型。
 - Live predicate follow-up（2026-10-11 codemode）: 新 session predicate 反查 controller.toolAllowed，而 controller 的 self getter 又读 session.getDelegatableToolNames，实际 production spawn 产生 RangeError。组合本地 ceiling 时使用单独 ancestryToolAllowed：检查 persisted self grant 与全部 live ancestor/root，但不反读自己的 effective getter；原 toolAllowed 仍保留全检查。新增 predicate 时必须画出 getter 依赖方向并跑真实 controller/child，而非仅注入宿主。agent-session-codemode-child.test.ts 原失败转为 4/4，controller/lifecycle/extension 72 项通过。
 
+- Shutdown follow-up（2026-10-11 progress）: 先设置 stopping 再调用解除绑定的实时 getter，会把执行门主动拒绝的 interrupted 当成真正权限不确定，并持久化空 ceiling；cold followup 因此丢失 read。进入 stopping 前捕获已验证 live ceiling，仅供 teardown 与原 ceiling 求交，不用于继续执行；捕获真正失败仍按空列表收窄。必须同时验证允许工具、root/local revoke、真实 getter failure 与 cold reopen。相同 native cold-followup 断言由失败转通过，4 个确定性清理场景及核心定向 182 tests 通过。
+
 ## 原生 Subagent 准入——同步状态通知也是取消重入边界
 
 - Wrong approach: 把慢加载移出控制队列后，只在加载前和 running 状态提交前检查取消，忽略 commit 内同步 observer 的重入。

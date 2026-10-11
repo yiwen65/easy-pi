@@ -12,8 +12,12 @@ import {
 	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
 	type CollaborationArtifact,
+	type CollaborationInterruption,
+	type CollaborationProgress,
 	type CollaborationResultQuery,
 	type CollaborationTurnView,
+	validateCollaborationInterruption,
+	validateCollaborationProgress,
 } from "@easy-pi/subagent/collaboration-contract";
 import { formatWorkedDuration } from "../../../utils/duration.ts";
 import { theme } from "../theme/theme.ts";
@@ -69,6 +73,8 @@ export interface MailboxEnvelope extends Record<string, unknown> {
 	status?: unknown;
 	text?: unknown;
 	resultValidation?: unknown;
+	progress?: unknown;
+	interruption?: unknown;
 }
 
 // Retain wire JSON without adding display metadata to the untrusted envelope itself.
@@ -251,6 +257,40 @@ const nullableCounter = (value: unknown) =>
 	value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0);
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[!-~]{1,128}$/.test(value);
 
+function progressValue(value: unknown): CollaborationProgress | undefined {
+	try {
+		return validateCollaborationProgress(value);
+	} catch {
+		return undefined;
+	}
+}
+
+function interruptionValue(value: unknown): CollaborationInterruption | undefined {
+	try {
+		return validateCollaborationInterruption(value);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Self-reported work is not a final result, and interrupt metadata is not an outcome. */
+export function collaborationHandoffLines(value: { progress?: unknown; interruption?: unknown }): string[] {
+	const progress = progressValue(value.progress);
+	const interruption = interruptionValue(value.interruption);
+	return [
+		...(progress
+			? [
+					`Progress (self-reported; not a final result) · revision ${progress.revision} · reported ${progress.reported_at}: ${progress.summary}`,
+				]
+			: []),
+		...(interruption
+			? [
+					`Interrupt: ${interruption.reason} · requested by ${interruption.requested_by} at ${interruption.requested_at}`,
+				]
+			: []),
+	];
+}
+
 function isTurnView(value: unknown): value is CollaborationTurnView {
 	if (!isRecord(value) || !isRecord(value.usage) || !isRecord(value.delivery)) return false;
 	const usage = value.usage;
@@ -278,6 +318,8 @@ function isTurnView(value: unknown): value is CollaborationTurnView {
 		nullableCounter(delivery.acknowledged_at) &&
 		["input", "output", "cacheRead", "cacheWrite"].every((key) => nullableCounter(usage[key])) &&
 		["admitted_at", "started_at", "finished_at"].every((key) => nullableCounter(value[key])) &&
+		(value.progress === undefined || progressValue(value.progress) !== undefined) &&
+		(value.interruption === undefined || interruptionValue(value.interruption) !== undefined) &&
 		(validation === undefined ||
 			(isRecord(validation) &&
 				typeof validation.contract === "string" &&
@@ -369,6 +411,7 @@ export function turnMetadata(turn: CollaborationTurnView): string[] {
 		`Task message: ${turn.task_message_id ?? "unknown"} · Result message: ${turn.result_message_id ?? "unknown"}`,
 		`Format: ${turn.resultValidation?.contract ?? "unknown"} · Outcome: ${turn.resultValidation?.outcome ?? "unknown"} · Delivery: ${turn.delivery.state} (not acceptance)`,
 		`Duration: ${duration} · Usage: ${usage.coverage} · input ${usage.input ?? "unknown"} / output ${usage.output ?? "unknown"} / cache read ${usage.cacheRead ?? "unknown"} / write ${usage.cacheWrite ?? "unknown"}`,
+		...collaborationHandoffLines(turn),
 	];
 }
 
@@ -457,6 +500,10 @@ export class SubagentGroupComponent extends Container {
 	private endedAt: number | undefined;
 	private readonly results: ResultMember[] = [];
 	private latestTurnId: string | undefined;
+	private readonly handoffs = new Map<
+		string,
+		{ progress?: CollaborationProgress; interruption?: CollaborationInterruption; interruptionTerminal?: boolean }
+	>();
 	readonly agentPath: string;
 
 	constructor(agentPath: string) {
@@ -574,33 +621,54 @@ export class SubagentGroupComponent extends Container {
 					this.endedAt = at ?? Date.now();
 				} else if (!result.isError && toolName === "interrupt_agent") {
 					this.established = true;
-					// A successful interrupt can be a no-op for an already settled child.
-					let previousStatus = (result.details as { previous_status?: unknown } | undefined)?.previous_status;
-					if (typeof previousStatus !== "string") {
+					// A successful interrupt can be a no-op, or refer to a turn before a fast followup.
+					let receipt: unknown = result.details;
+					if (!isRecord(receipt) || typeof receipt.previous_status !== "string") {
 						try {
-							const parsed = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "") as {
-								previous_status?: unknown;
-							};
-							previousStatus = parsed.previous_status;
+							receipt = JSON.parse(result.content.find((part) => part.type === "text")?.text ?? "");
 						} catch {
-							// Keep the last known state if the result has no status.
+							receipt = undefined;
 						}
 					}
-					if (previousStatus === "running" || previousStatus === "pending") this.state = "interrupted";
-					else if (
-						previousStatus === "completed" ||
-						previousStatus === "failed" ||
-						previousStatus === "interrupted" ||
-						previousStatus === "closed"
-					)
-						this.state = previousStatus;
-					if (this.state !== "running") this.endedAt = at ?? Date.now();
+					if (isRecord(receipt)) {
+						this.rememberHandoff(receipt.turn_id, receipt);
+						const previousStatus = receipt.previous_status;
+						if (!this.latestTurnId || receipt.turn_id === undefined || receipt.turn_id === this.latestTurnId) {
+							if (previousStatus === "running" || previousStatus === "pending") this.state = "interrupted";
+							else if (isTerminalStatus(previousStatus) || previousStatus === "closed")
+								this.state = previousStatus;
+							if (this.state !== "running") this.endedAt = at ?? Date.now();
+						}
+					}
 				}
 			}
 			return original(result, isPartial as never);
 		}) as ToolExecutionComponent["updateResult"];
 		this.addChild(component);
 		component.setExpanded(false);
+	}
+
+	private rememberHandoff(
+		turnId: unknown,
+		value: { progress?: unknown; interruption?: unknown },
+		terminal = false,
+	): void {
+		if (!identifier(turnId)) return;
+		const previous = this.handoffs.get(turnId);
+		const progress = progressValue(value.progress);
+		const interruption = interruptionValue(value.interruption);
+		if (!progress && !interruption) return;
+		this.handoffs.set(turnId, {
+			...previous,
+			...(progress && progress.revision > (previous?.progress?.revision ?? 0) ? { progress } : {}),
+			...(interruption &&
+			(terminal ||
+				!previous?.interruption ||
+				interruption.requested_at > previous.interruption.requested_at ||
+				(interruption.requested_at === previous.interruption.requested_at && !previous.interruptionTerminal))
+				? { interruption, interruptionTerminal: terminal }
+				: {}),
+		});
 	}
 
 	private addQueriedResult(query: Extract<CollaborationResultQuery, { state: "found" }>): void {
@@ -626,6 +694,10 @@ export class SubagentGroupComponent extends Container {
 
 	/** Register a delivered mailbox result belonging to this child. */
 	addMailboxResult(envelope: MailboxEnvelope, at?: number): void {
+		// Terminal delivery carries the canonical retained handoff; equal-time late control
+		// receipts cannot replace it (millisecond timestamps alone do not order requests).
+		this.rememberHandoff(envelope.turnId, envelope, envelope.kind === "result" && isTerminalStatus(envelope.status));
+		if (envelope.kind === "progress") return;
 		const duplicate = this.results.find(
 			(item) =>
 				typeof envelope.id === "string" &&
@@ -707,12 +779,14 @@ export class SubagentGroupComponent extends Container {
 				["get_agent_result", "list_agent_turns", "wait_agent"].includes(item.toolName),
 			);
 		const stateLabel = queryOnly ? "State unknown" : STATE_LABELS[this.state];
+		const progress = this.latestHandoff()?.progress;
+		const progressPreview = progress ? `Progress: ${progress.summary}` : undefined;
 		const summary =
 			queryOnly && this.results[0]
 				? `Read: ${this.results[0].displayText}`
 				: this.state === "running"
-					? this.objective
-					: (this.resultSummary ?? this.objective);
+					? (progressPreview ?? this.objective)
+					: this.resultSummary || progressPreview || this.objective;
 		const name = oneLine(this.agentPath.replace(/^\/root\//, ""));
 		const latest = this.latestTurnId
 			? this.results.find((item) => item.envelope.turnId === this.latestTurnId && item.mailbox)
@@ -764,6 +838,11 @@ export class SubagentGroupComponent extends Container {
 		);
 	}
 
+	private latestHandoff(): { progress?: CollaborationProgress; interruption?: CollaborationInterruption } | undefined {
+		const turnId = this.latestTurnId ?? this.results.at(-1)?.envelope.turnId ?? [...this.handoffs.keys()].at(-1);
+		return typeof turnId === "string" ? this.handoffs.get(turnId) : undefined;
+	}
+
 	private resultBlocks(width: number): string[] {
 		const lines: string[] = [];
 		for (let index = this.results.length - 1; index >= 0; index--) {
@@ -784,6 +863,11 @@ export class SubagentGroupComponent extends Container {
 				: [
 						`Turn: ${typeof result.envelope.turnId === "string" ? result.envelope.turnId : "unknown"} · Result message: ${typeof result.envelope.id === "string" ? result.envelope.id : "unknown"}`,
 						`Format: ${knownFormat} · Delivery: unknown (mailbox display is not acknowledgement)`,
+						...collaborationHandoffLines(
+							typeof result.envelope.turnId === "string"
+								? (this.handoffs.get(result.envelope.turnId) ?? result.envelope)
+								: result.envelope,
+						),
 					];
 			for (const reference of references)
 				lines.push(...wrapTextWithAnsi(safe(reference), width).map((line) => theme.fg("dim", line)));
@@ -816,6 +900,15 @@ export class SubagentGroupComponent extends Container {
 				"",
 				...wrapTextWithAnsi(`Task: ${safe(this.objective)}`, width).map((line) => theme.fg("muted", line)),
 			);
+		}
+		const handoff = this.latestHandoff();
+		const latestResultTurn = this.latestTurnId ?? this.results.at(-1)?.envelope.turnId;
+		const terminalHandoff = this.results.some(
+			(item) => item.mailbox && item.envelope.turnId === latestResultTurn && isTerminalStatus(item.envelope.status),
+		);
+		if (handoff && !terminalHandoff) {
+			for (const line of collaborationHandoffLines(handoff))
+				lines.push(...wrapTextWithAnsi(safe(line), width).map((part) => theme.fg("dim", part)));
 		}
 		lines.push(...this.resultBlocks(width));
 		for (const activity of this.activities) {

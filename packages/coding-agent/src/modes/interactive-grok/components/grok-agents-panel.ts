@@ -386,7 +386,8 @@ export class GrokAgentsPanel implements Component, Focusable {
 				? `${marker} ${presentation.icon} ${row.task_name} ${presentation.word} ${time}`
 				: `${marker} ${presentation.icon} ${pad(row.task_name, 22)} ${pad(presentation.word, 12)} ${pad(time, 12)} ${suffix}`;
 			const entry = [th.fg(selectedRow ? "accent" : presentation.color, text)];
-			const summary = row.resultSummary ?? row.objective;
+			const summary =
+				row.resultSummary || (row.progressSummary ? `Progress (not final): ${row.progressSummary}` : row.objective);
 			if (summary && row.task_name !== "/root") entry.push(th.fg("dim", `    ${oneLine(summary)}`));
 			return entry;
 		});
@@ -549,10 +550,17 @@ export class GrokAgentsPanel implements Component, Focusable {
 						.map((line) => th.fg("dim", oneLine(line))),
 				);
 			}
+			if (view.handoffMetadata) {
+				lines.push(...wrapTextWithAnsi(safe(view.handoffMetadata), contentWidth).map((line) => th.fg("dim", line)));
+			}
 			if (view.queryUnavailable) lines.push(th.fg("warning", view.queryUnavailable));
 			if (view.resultSummary) lines.push(th.fg("text", `Result: ${oneLine(view.resultSummary)}`));
 			const body = wrapTextWithAnsi(
-				safe((maxHeight < 8 ? view.resultSummary : undefined) || view.text || "Waiting for session activity…"),
+				safe(
+					(maxHeight < 8 ? view.resultSummary || view.handoffMetadata : undefined) ||
+						view.text ||
+						"Waiting for session activity…",
+				),
 				contentWidth,
 			).map((line) => roleLine(line, th));
 			// Keep a real conversation/result row visible rather than filling a short viewport with headers.

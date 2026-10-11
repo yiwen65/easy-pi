@@ -14,6 +14,8 @@ export const COLLABORATION_LIMITS = Object.freeze({
 	maxTaskCharacters: 40_000,
 	maxDelegationBytes: 256 * 1024,
 	maxPendingMessages: 64,
+	maxProgressBytes: 2048,
+	maxInterruptionReasonBytes: 1024,
 	maxCuratedBytes: 256 * 1024,
 	minWaitMs: 10_000,
 	defaultWaitMs: 30_000,
@@ -620,8 +622,77 @@ export const DelegationResultSchema = Type.Object(
 );
 export type DelegationResult = Static<typeof DelegationResultSchema>;
 
-/** Child-side protocol tool, registered by the native host; never part of delegated authority. */
+/** Child-side protocol tools, registered by the native host; never delegated authority. */
 export const DELIVER_RESULT_TOOL_NAME = "deliver_result";
+export const REPORT_PROGRESS_TOOL_NAME = "report_progress";
+
+const ProgressSummary = Type.String({ minLength: 1, maxLength: COLLABORATION_LIMITS.maxProgressBytes, pattern: "\\S" });
+const InterruptionReason = Type.String({
+	minLength: 1,
+	maxLength: COLLABORATION_LIMITS.maxInterruptionReasonBytes,
+	pattern: "\\S",
+});
+export const ReportProgressSchema = Type.Object({ summary: ProgressSummary }, { additionalProperties: false });
+export const CollaborationProgressSchema = Type.Object(
+	{
+		summary: ProgressSummary,
+		reported_at: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+		revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+	},
+	{ additionalProperties: false },
+);
+export type CollaborationProgress = Static<typeof CollaborationProgressSchema>;
+export const CollaborationInterruptionSchema = Type.Object(
+	{
+		reason: InterruptionReason,
+		requested_at: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+		requested_by: Type.String({ minLength: 1, maxLength: 265 }),
+	},
+	{ additionalProperties: false },
+);
+export type CollaborationInterruption = Static<typeof CollaborationInterruptionSchema>;
+
+/** No terminal controls or malformed UTF-16 are retained in handoff metadata. */
+function validateHandoffText(text: string): void {
+	if (!text.trim() || /[\u0000-\u001f\u007f-\u009f]/u.test(text) || /[\ud800-\udfff]/u.test(text))
+		throw new CollaborationError(
+			"invalid_arguments",
+			"Handoff text must be nonblank, well-formed text without controls",
+		);
+}
+
+export function parseReportProgress(value: unknown): Static<typeof ReportProgressSchema> {
+	if (!Value.Check(ReportProgressSchema, value))
+		throw new CollaborationError("invalid_arguments", "Invalid progress fields");
+	validateHandoffText(value.summary);
+	if (Buffer.byteLength(JSON.stringify(value), "utf8") > COLLABORATION_LIMITS.maxProgressBytes)
+		throw new CollaborationError("invalid_arguments", "Progress exceeds the 2048-byte budget");
+	return structuredClone(value);
+}
+
+export function validateCollaborationProgress(value: unknown): CollaborationProgress {
+	if (!Value.Check(CollaborationProgressSchema, value))
+		throw new CollaborationError("invalid_arguments", "Invalid progress metadata");
+	parseReportProgress({ summary: value.summary });
+	if (Buffer.byteLength(JSON.stringify(value), "utf8") > COLLABORATION_LIMITS.maxProgressBytes)
+		throw new CollaborationError("invalid_arguments", "Progress exceeds the 2048-byte budget");
+	return structuredClone(value);
+}
+
+export function validateInterruptionReason(reason: string): void {
+	if (typeof reason !== "string") throw new CollaborationError("invalid_arguments", "Invalid interruption reason");
+	validateHandoffText(reason);
+	if (Buffer.byteLength(reason, "utf8") > COLLABORATION_LIMITS.maxInterruptionReasonBytes)
+		throw new CollaborationError("invalid_arguments", "Interruption reason exceeds the 1024-byte budget");
+}
+
+export function validateCollaborationInterruption(value: unknown): CollaborationInterruption {
+	if (!Value.Check(CollaborationInterruptionSchema, value))
+		throw new CollaborationError("invalid_arguments", "Invalid interruption metadata");
+	validateInterruptionReason(value.reason);
+	validateAgentPath(value.requested_by);
+	return structuredClone(value);
+}
 
 export function parseDelegationResult(value: unknown): DelegationResult {
 	if (!Value.Check(DelegationResultSchema, value))
@@ -756,7 +827,10 @@ export const CollaborationSchemas = {
 		{ additionalProperties: false },
 	),
 	wait_agent: StagedCollaborationSchemas.wait_agent,
-	interrupt_agent: Type.Object({ target: Target }, { additionalProperties: false }),
+	interrupt_agent: Type.Object(
+		{ target: Target, reason: Type.Optional(InterruptionReason) },
+		{ additionalProperties: false },
+	),
 	close_agent: Type.Object({ target: Target }, { additionalProperties: false }),
 	list_agents: Type.Object({ path_prefix: Type.Optional(Target) }, { additionalProperties: false }),
 	get_agent_result: StagedCollaborationSchemas.get_agent_result,
@@ -780,6 +854,7 @@ export function parseCollaborationArguments<Name extends CollaborationToolName>(
 	}
 	const parsed = input as CollaborationArguments[Name];
 	if ("message" in parsed) validateCollaborationMessage(parsed.message);
+	if ("reason" in parsed && parsed.reason !== undefined) validateInterruptionReason(parsed.reason);
 	if ("task" in parsed) {
 		const taskArgs = parsed as {
 			task: DelegationTaskInput;
@@ -901,7 +976,7 @@ export function assertAgentTransition(from: CollaborationStatus, to: Collaborati
 	}
 }
 
-export type CollaborationMessageKind = "task" | "message" | "result";
+export type CollaborationMessageKind = "task" | "message" | "progress" | "result";
 export interface CollaborationMessage {
 	id: string;
 	rootSessionId: string;
@@ -915,6 +990,9 @@ export interface CollaborationMessage {
 	/** Optional only for retained pre-contract history and passive messages. */
 	delegation?: Delegation;
 	resultValidation?: ResultValidation;
+	/** Child self-report only: nonterminal, untrusted, and never authority or acceptance. */
+	progress?: CollaborationProgress;
+	interruption?: CollaborationInterruption;
 	parent?: string;
 	/** Delegation.context remains the creation recipe; follow-ups retain child history. */
 	contextUse?: "initial" | "existing";
@@ -932,6 +1010,8 @@ export interface CollaborationAgentView {
 		prefix: "required" | "rebuilt";
 	};
 	resultValidation?: ResultValidation;
+	progress?: CollaborationProgress;
+	interruption?: CollaborationInterruption;
 	/** Latest provider-reported turn usage, not added to parent billing. Missing/aborted zero can be incomplete. */
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
@@ -979,6 +1059,8 @@ export interface CollaborationTurnView {
 	delivery: CollaborationTurnDelivery;
 	usage: CollaborationTurnUsage;
 	resultValidation?: ResultValidation;
+	progress?: CollaborationProgress;
+	interruption?: CollaborationInterruption;
 }
 export interface CollaborationTurnRecord extends CollaborationTurnView {
 	rootSessionId: string;
@@ -1010,9 +1092,15 @@ export interface CollaborationMailboxWaitResult {
 	timed_out: boolean;
 }
 export type CollaborationTargetedWaitResult =
-	| { reason: "terminal"; timed_out: false; target: string; turn_id: string; result: CollaborationResultQuery }
+	| {
+			reason: "terminal" | "progress";
+			timed_out: false;
+			target: string;
+			turn_id: string;
+			result: CollaborationResultQuery;
+	  }
 	| { reason: "user_input"; timed_out: false; target: string; turn_id: string }
-	| { reason: "timeout"; timed_out: true; target: string; turn_id: string };
+	| { reason: "timeout"; timed_out: true; target: string; turn_id: string; result?: CollaborationResultQuery };
 /** Live latest-turn identity and ledger metadata; the base display view remains narrow. */
 export interface StagedCollaborationAgentView extends CollaborationAgentView {
 	turn_id: string;
@@ -1038,7 +1126,12 @@ export interface CollaborationResults {
 	send_message: { message_id: string; status: "accepted" };
 	followup_task: { message_id: string; turn_id: string; status: "accepted" };
 	wait_agent: CollaborationMailboxWaitResult | CollaborationTargetedWaitResult;
-	interrupt_agent: { previous_status: CollaborationStatus };
+	interrupt_agent: {
+		previous_status: CollaborationStatus;
+		turn_id: string;
+		progress?: CollaborationProgress;
+		interruption?: CollaborationInterruption;
+	};
 	close_agent: { previous_status: CollaborationStatus };
 	list_agents: { agents: StagedCollaborationAgentView[] };
 	get_agent_result: CollaborationResultQuery;
