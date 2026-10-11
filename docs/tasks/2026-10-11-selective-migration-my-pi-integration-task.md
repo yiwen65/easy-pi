@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /tmp/easy-pi-my-pi-integration-20261011
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户新请求「合并到 my-pi」，覆盖上一轮仅隔离交付的决定；不授权丢弃/代提交其他 session 的未提交改动。
 
 <!-- task-doc-section:background-goal -->
@@ -131,9 +131,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-005 — 原my-pi漂移门禁与交付
+### [x] T-005 — 原my-pi漂移门禁与交付
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 真正安全更新my-pi并验证原运行环境。
 - Inputs and prerequisites: T-004 verified candidate、原最新committed HEAD/clean/public-data门禁。
@@ -143,7 +143,7 @@
 - Execution steps: 原fresh状态核对；如有新commits先保留整合/补测；dirty时停；clean精确head/data gates后ff-only及必需runtime smoke/check。
 - Acceptance criteria: 原未提交工作没有被stash/覆盖/代提交；数据refresh没有丢失；实际更新才done。
 - Verification method: readonly fresh gate、ff输出、original runtime关键check及source/data/lock proofs。
-- Validation evidence: 历史firstcandidate原83e46/71dirty gate未交付保留；最新latest-target/original-delivery-gate.json实际HEAD40610/my-pi、dirty0、40publicdata baselineSHA全部相同、originalWritten=false且fixedBaseCleanDeliveryGate=true。原仍未ff/hydration；等待T-009并在交付紧前fresh复核，不能用此较早clean替代最终门禁。
+- Validation evidence: 历史83e46/71dirty及40610->f8db漂移gate未写现场记录保留。最终f8db-original-delivery-gate.json actualf8db/my-pi/dirty0/public40baselineSHA全相同；紧前shellHEAD/branch/status再次核对，actual ff-only到321707664f3b7dfa2acacdfde57eac2310caf32c，source59faf/latesttargetf8db/mergef098祖先gate通过。original公共schema3 exact40file先backup到evidence/original-schema3-data-backup，再逐filehash检查+原子replacement/manifestlast schema4；原1523chat/45image/39provider全部non-type字段/原stamp/manifesthash0ad3保真，source/原deep proofs通过且trackedclean。原完全offline/2dayignore-scripts npm ci341packages、root1522No fixes/alllock/TS7/browser checks、全offlinebuild、source+distCLIversion0.84.2/help/list、原source publicSDK/faux/shareddata/actualCodeModeworker smoke及6指定files96tests实际GREEN。最终readonlyHEAD仍321707/my-pi/clean、Node24.15/TS7.0.2，未stash/reset/force/覆盖或代提交任何并发未提交内容；仅最后本authority关闭docscommit的ff待记录。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -353,9 +353,11 @@
 
 - 2026-10-11: T-014done，实际mergef0983051d（parentsdad16b5fc/f8db93311）已正常提交/privateclean，保留最新target与source59faf祖先；新sourcearchive2次archivedvalidator+cmp通过/hashb1ac8017934653aa2687b2d8f106868ad5643fd07456e19a8557250b12f69e61。进入T-005freshoriginal门禁与ff-only/明确公共baseline数据backup+schema4 hydration及ignore-scripts runtime环境；所有历史未知操作继续暂停、不重试。
 
+- 2026-10-11: T-005done/overall done，finalfresh originalf8dbclean/public40hash gate满足，原actualff-only到321707664，无stash/reset/force或其他owner未提交文件操作。原公共baseline40files backup后perfilehash+manifestlast schema4 hydration和深语义1523/45/39data proofs通过；原offlineignore-scripts age2ci341、root1522No fixes/offlinebuild/source+distCLI0.84.2/sourceSDKfaux/shareddata/actualsourceworker/6files96tests全部GREEN。finalreadonly仍321707/my-pi/clean/Node24.15/TS7.0.2，全部source/latesttarget/f098 ancestry通过；只关闭本authority的docscommit与ff同步待最终确认。LEARNS只保留两方已有verifiedlessons，命令typo/一次性evidencefixture修正不另新增泛化lesson；历史未知Node22/read-onlybatches不假定终态。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: 历史T-001/002/003/004/006/007done与firstcandidate674320ff保持已完成；新T-008/010/011/012done。当前private537aeae5+MERGE_HEAD40610冲突全解决、exactunion/compilerlock/runtime/data proof通过，root1521No fixes/offlinebuild/codeMode185/agent147/subagent182/AI375+3credential skip/MCP43/server10/scripts77通过；13bundle2893filepack及新outside正常2-day/ignore-scripts install122packages、CLI/SDK/faux/image/static+dynamicheaders/MCPin-memory/CodeMode实际publicworker+portable WASM/store/licenses/jiti smoke通过。T-013已验收done（child54/parent49coding718/independentreview）且最终rootcheckNo fixes通过；T-009已done：mergec47951f65双parents/source+target ancestry/privateclean及新源码归档2次actual validator+cmp通过；最终originalgate又漂移到f8dbclean；T-014已done：新2commits完整保留、8files122/root1522/offlinebuild/新独立包烟测/readonlyreview/mergef0983051d+祖先/新源码归档双次validator+cmp全通过；仅T-005最终ff/hydration未完成。
-- Limitations: original my-pi最后只读f8db93311clean且public40data不变，仍未更新。新candidate不能复用firstcandidate旧902tests/源码归档证据；offlineinstall首次quickjsmetadata ENOTCACHED后normalage install通过，烟测本身无provider网络，不能宣称这次安装完全离线。Node22未知下载paused不重试，22/Windows/Bun/liveprovider/liveexternalMCP未实测；无真实provider凭证/API/paidmodel、push/release。历史完整迁移authority不改写，本文件唯一当前状态。
+- Result: passed
+- Evidence: Execute模式T-001–T-014全部done；历史firstcandidate门禁独立保留，当前交付actual my-pi已ff-only到321707664（含source59faf、latesttargetf8db、mergef0983051d及全部CodeMode/MCP/progress/authority修复）。最新组合完整coding49files718/CodeMode185/agent147/subagent182/AI375+3credential skip/MCP43/server10/scripts77通过，f8db新增guard/跨合同8files122、root1522No fixes/fullofflinebuild、13bundle2893filepack、全新outside完全offline2dayignore-scripts122install/CLI/publicSDK/images/MCP/QuickJSworker+portable/store/licenses/compiledlegacyctxnot_started/jiti烟测及新源码归档2次validator+cmp全部实际通过。original exactbaseline public40backup/schema4 hydration/341package完全offlineci/root1522No fixes/offlinebuild/source+builtCLI/publicsourceSDK实际worker/6files96runtime gates、source/latesttarget ancestry与clean/Node24.15/TS7.0.2均通过；原和private数据1523/45/39全部non-type/stamp/hash保真。最终关闭仅本authority docscommit，不改代码/价格/default/auth或其他owner文件。
+- Limitations: 仅Node24.15实际验证；Node22旧下载及历史interruptedread-only batches无终态证据，继续paused/unknown且不重试/假定成功/reconcile。22/Windows/Bun/真实provider/liveexternalMCP未实测；没有真实provider凭证/API/paidmodel、push/release。旧loadedEasyPi core须重启后resume，/reload不替换core；新CodeModeguard只not_started fail-closed不做不安全适配。早期isolated及40610 normalinstall日志/失败fixture记录保留，最新f8db外部安装与originalci才是完全offline证据；本authority唯一当前状态，历史完成architectureauthority不改写。
