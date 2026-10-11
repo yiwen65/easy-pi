@@ -243,42 +243,6 @@ export function isRetryableAssistantError(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error" || typeof message.errorMessage !== "string") return false;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(message.errorMessage)) return false;
 	const { status, text, errorType, providerBody } = getProviderErrorDetails(message);
-	if (status === 400) {
-		// Qoder's gateway reports temporary model-catalog lookup failures as 400
-		// invalid_request_error, including JSON encoded inside another error message.
-		// Inspect only message envelopes, never arbitrary body fields. The caller's
-		// normal budget/backoff still applies; ordinary request validation stays terminal.
-		let reason = text;
-		for (let depth = 0; depth < 5; depth++) {
-			reason = reason.replace(/^(?:Error:\s*)?(?:OpenAI API error \(400\)|\[?400\]?):\s*/, "");
-			if (!/^[{"]/.test(reason)) break;
-			try {
-				const parsed: unknown = JSON.parse(reason);
-				if (typeof parsed === "string") {
-					reason = parsed;
-					continue;
-				}
-				if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) break;
-				const envelope = parsed as Record<string, unknown>;
-				const error =
-					typeof envelope.error === "object" && envelope.error !== null
-						? (envelope.error as Record<string, unknown>)
-						: envelope;
-				if (error.type !== undefined && error.type !== "invalid_request_error") break;
-				if (error.code !== undefined && error.code !== "bad_request") break;
-				if (typeof error.message !== "string") break;
-				reason = error.message;
-			} catch {
-				break;
-			}
-		}
-		if (
-			/^qoder: model_config for .{1,256} not yet known \(run a model list fetch or check upstream connectivity\)$/.test(
-				reason,
-			)
-		)
-			return true;
-	}
 	if (status !== undefined) return status === 408 || status === 409 || status === 429 || status >= 500;
 	if (PERMANENT_PROVIDER_ERROR_PATTERN.test(errorType ?? "") || PERMANENT_PROVIDER_ERROR_PATTERN.test(text))
 		return false;
