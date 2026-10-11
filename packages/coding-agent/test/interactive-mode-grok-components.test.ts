@@ -182,17 +182,19 @@ describe("InteractiveMode Grok component routing", () => {
 
 		const subagent = createTool.call(context, "subagent", "tool-2", { agent: "worker", task: "review" });
 		addToolToChat.call(context, subagent);
-		expect(context.chatContainer.children).toEqual([subagent, firstGroup]);
+		const gap = context.chatContainer.children[1];
+		expect(gap.render(80)).toEqual([""]);
+		expect(context.chatContainer.children).toEqual([subagent, gap, firstGroup]);
 		expect(context.currentTurnToolGroup).toBe(firstGroup);
 		expect((firstGroup as GrokToolTurnGroupComponent).toolCount).toBe(1);
 
 		const last = createTool.call(context, "bash", "tool-3", { command: "npm test" });
 		addToolToChat.call(context, last);
-		const lastGroup = context.chatContainer.children[1];
+		const lastGroup = context.chatContainer.children[2];
 		expect(lastGroup).toBeInstanceOf(GrokToolTurnGroupComponent);
 		expect(lastGroup).toBe(firstGroup);
 		expect((lastGroup as GrokToolTurnGroupComponent).toolCount).toBe(2);
-		expect(context.chatContainer.children).toEqual([subagent, firstGroup]);
+		expect(context.chatContainer.children).toEqual([subagent, gap, firstGroup]);
 	});
 
 	test("merges multiple assistant thinking messages into one turn-level row", () => {

@@ -178,7 +178,11 @@ describe("InteractiveMode turn activity footer", () => {
 				"GrokThinkingTurnGroupComponent",
 				"GrokToolTurnGroupComponent",
 			]);
-			expect(host.chatContainer.children.slice(-5, -1)).toEqual(groups);
+			expect(host.chatContainer.children.slice(-6, -2)).toEqual(groups);
+			expect(host.chatContainer.children.at(-2)?.render(100)).toEqual([""]);
+			expect(host.chatContainer.children[host.chatContainer.children.indexOf(groups[0]) - 1].render(100)).toEqual([
+				"",
+			]);
 			expect(host.chatContainer.children.at(-1)).toBeInstanceOf(GrokTurnDurationComponent);
 			const text = stripAnsi(host.chatContainer.render(100).join("\n"));
 			expect(text).toContain("updated notice");
@@ -338,7 +342,8 @@ describe("InteractiveMode turn activity footer", () => {
 			});
 			host.showStatus("late notice");
 			expect(host.chatContainer.children.at(-1)).toBeInstanceOf(GrokTurnDurationComponent);
-			expect(host.chatContainer.children.at(-2)).toBeInstanceOf(GrokThinkingTurnGroupComponent);
+			expect(host.chatContainer.children.at(-2)?.render(100)).toEqual([""]);
+			expect(host.chatContainer.children.at(-3)).toBeInstanceOf(GrokThinkingTurnGroupComponent);
 		} finally {
 			host.clearChatContainer();
 		}
