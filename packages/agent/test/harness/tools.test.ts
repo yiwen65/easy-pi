@@ -548,7 +548,7 @@ describe("AgentHarness tools", () => {
 			await delay(20);
 			expect(env.secondEditWriteStarted).toBe(false);
 			env.finishFirstEditWrite.resolve();
-			await expect(firstEdit).rejects.toThrow("Operation aborted");
+			await expect(firstEdit).resolves.toMatchObject({ details: { diff: expect.stringContaining("ALPHA") } });
 			await secondEdit;
 			expect(env.firstEditWriteSettled).toBe(true);
 			expect(getOrThrow(await env.readTextFile("file.txt"))).toBe("ALPHA\nBETA\n");

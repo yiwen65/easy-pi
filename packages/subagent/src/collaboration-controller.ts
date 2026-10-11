@@ -389,7 +389,8 @@ export class CollaborationController {
 		const context = fork ? prepareCollaborationFork(fork) : undefined;
 		return this.serialize(() => {
 			this.assertReady();
-			if (signal?.aborted) throw new CollaborationError("interrupted", "Spawn was cancelled before admission");
+			if (signal?.aborted)
+				throw new CollaborationAdmissionError("interrupted", "Spawn was cancelled before admission");
 			this.assertCaller(caller);
 			if (caller.agentPath !== "/root")
 				throw new CollaborationAdmissionError("forbidden", "Only /root may create agents", "nested_delegation");
@@ -476,7 +477,8 @@ export class CollaborationController {
 		const delegation = admission ? validateDelegation(admission.delegation) : undefined;
 		return this.serialize(() => {
 			this.assertReady();
-			if (signal?.aborted) throw new CollaborationError("interrupted", "Followup was cancelled before admission");
+			if (signal?.aborted)
+				throw new CollaborationAdmissionError("interrupted", "Followup was cancelled before admission");
 			if (caller.agentPath !== "/root")
 				throw new CollaborationAdmissionError("forbidden", "Only /root may direct agents", "nested_delegation");
 			const requestedTools = delegation?.capabilities.tools;
@@ -552,7 +554,7 @@ export class CollaborationController {
 		return this.serialize(() => {
 			this.assertReady();
 			if (signal?.aborted)
-				throw new CollaborationError("interrupted", "Message send was cancelled before admission");
+				throw new CollaborationAdmissionError("interrupted", "Message send was cancelled before admission");
 			this.assertCaller(caller);
 			const path = resolveAgentPath(caller.agentPath, target);
 			const snapshot = this.store.read();

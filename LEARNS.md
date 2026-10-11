@@ -516,6 +516,30 @@
 - Prevention: 用真实 faux Session + UI 覆盖同输入内部恢复、异步 settled hook 启动持有 gate 的下一运行，以及订阅者抛错时已经 pending 的 waitForIdle；再验证 retry/compaction/新任务和历史重放。
 - Verified by: 2026-10-11 UI 提前结算与活跃 B 丢失 Working 分别稳定红测；`b824062c-bash-task-timing.test.ts` 四项组合回归、248 项定向测试及根 check 通过。
 
+## AI 离线目标选择——PI_OFFLINE 与大量 skipped 不证明没有真实 provider 路径
+
+- Wrong approach: 把离线 `test/overflow.test.ts` 误选成 `test/context-overflow.test.ts`，再从 34 skipped 推断真实 provider 全部未运行。
+- Why it failed: 后者不检查 PI_OFFLINE，顶层调用 OAuth credential helper（可读取、刷新及保存），至少一项测试仍调用 `complete`；summary 不列出该项，现有日志无法证明远端请求或认证更新是否发生。
+- Correct approach: 停止该路径并更正回执；最终只运行完整核对过的 `overflow.test.ts` 等离线文件，不通过查看个人凭据补证。
+- Prevention: 执行 AI 定向测试前读取目标文件及顶层 imports/credential helper，区分 unit 与 provider/e2e；不能把 PI_OFFLINE、skip 数或无网络日志当门禁证明。真实测试必须另有用户授权和显式 opt-in。
+- Verified by: 2026-10-11 recovery remediation 的误选 log 为 191 passed/34 skipped（其中 context-overflow 至少1项执行）；改用离线目标后协调者 9 files/224 tests passed，已向用户披露偏差及未证明边界。
+
+## AgentSession 并发 fixture——等待真实准入，删除私有目录前收敛 pending prompt
+
+- Wrong approach: `agent-session-concurrent.test.ts` 启动 prompt 后 sleep 10ms 就断言 streaming；失败后 dispose 并删除 auth fixture，未等待 pending prompt。
+- Why it failed: 大批测试负载下 disk/auth/extension preflight 尚未完成；主断言先失败，teardown 再导致异步 `No API key`，后者不是原产品故障。
+- Correct approach: 等待 agent_start 和真实非 aborted assistant_start；extension queue 等 queue_update。清理时 shutdown、allSettled pending prompt 后才删除目录，不放宽断言或增加睡眠。
+- Prevention: 所有依赖 AgentSession 运行状态的异步 fixture 用生命周期 barrier，并对 held preflight 覆盖“10ms 已过但尚未准入”；assertion failure 也要完整 drain。
+- Verified by: 2026-10-11 35-file矩阵在旧10ms断言失败并产生未处理拒绝；held-preflight旧 helper确定性ready过早红测，修正后协调者全文件8/8，无未处理错误。
+
+## 恢复结果关联——provider call ID 不跨 response 唯一，发布 receipt 必须写前持久化
+
+- Wrong approach: 以全历史 raw toolCallId Map 的最后结果重配所有 assistant；canonical append 后才记录对应 journal receipt。
+- Why it failed: 正常两轮 call_0 的 FIRST/SECOND 变为 SECOND/SECOND；canonical成功、receipt journal失败后重试又追加同一已确认结果，实际provider wire出现重复。仅断言faux context里有result，不能发现wire转换合成的No result provided。
+- Correct approach: 用canonical assistant occurrence与branch-visible result receipt关联；先持久化稳定UUID发布意图，再以同ID追加，实际canonical存在才证明发布。祖先fork里的off-path已消费ID必须重绑，不改旧audit；source离开checkpoint时在原位置替换historicalfact，保持请求前缀。
+- Prevention: 同时验证canonical、production convertToLlm/wire；覆盖不同response重用ID、partial A/B、reserve/append/ack三个failpoint的warm/cold恢复及ancestor fork，不能按rawID全局去重或把reserved当完成。
+- Verified by: 2026-10-11 实际普通FIRST/SECOND、双重发布和固定checkpoint前缀反例先失败；34永久driver回归、独立原trigger复核及922项离线矩阵通过。
+
 ## MCP 子会话 bootstrap——未注册不等于未授权
 
 - Wrong approach: 将子会话已注册/已声明工具作为 controller 的实时权限全集，只用注入宿主回调测试 MCP。

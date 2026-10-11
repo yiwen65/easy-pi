@@ -177,6 +177,7 @@ export async function executeShellWithCapture(
 					exitCode: undefined,
 					cancelled: true,
 					truncated: progress.truncation.truncated,
+					executionError: result.error,
 				});
 			}
 			if (options?.returnExecutionErrors) {
@@ -190,7 +191,9 @@ export async function executeShellWithCapture(
 			}
 			return err(result.error);
 		}
-		const cancelled = options?.abortSignal?.aborted ?? false;
+		const acknowledgedExit =
+			result.value.promotedTaskId === undefined && !result.value.signal && Number.isFinite(result.value.exitCode);
+		const cancelled = !acknowledgedExit && (options?.abortSignal?.aborted ?? false);
 		return ok({
 			...progress,
 			exitCode: cancelled || result.value.promotedTaskId !== undefined ? undefined : result.value.exitCode,

@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { access, constants, rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExecutionError, err, ok, type Result, toError } from "../types.ts";
@@ -164,18 +164,39 @@ export class BackgroundTaskManager {
 		options: { cwd: string; env?: NodeJS.ProcessEnv; inheritEnv?: boolean; timeoutMs?: number },
 	): Promise<Result<BackgroundTaskRecord, ExecutionError>> {
 		if (!this.accepting) {
-			return err(new ExecutionError("aborted", "Background task manager is shutting down"));
+			return err(
+				new ExecutionError("aborted", "Background task manager is shutting down", undefined, {
+					executionOutcome: "not_started",
+				}),
+			);
 		}
 		try {
-			await access(options.cwd, constants.F_OK);
+			if (!(await stat(options.cwd)).isDirectory()) {
+				return err(
+					new ExecutionError("spawn_error", `Working directory is not a directory: ${options.cwd}`, undefined, {
+						executionOutcome: "not_started",
+					}),
+				);
+			}
 		} catch (error) {
 			const cause = toError(error);
-			return err(new ExecutionError("spawn_error", `Working directory does not exist: ${options.cwd}`, cause));
+			return err(
+				new ExecutionError("spawn_error", `Working directory does not exist: ${options.cwd}`, cause, {
+					executionOutcome: "not_started",
+				}),
+			);
 		}
 		const shell = await this.shell();
-		if (!shell.ok) return shell;
+		if (!shell.ok)
+			return err(
+				new ExecutionError(shell.error.code, shell.error.message, shell.error, { executionOutcome: "not_started" }),
+			);
 		if (!this.accepting) {
-			return err(new ExecutionError("aborted", "Background task manager is shutting down"));
+			return err(
+				new ExecutionError("aborted", "Background task manager is shutting down", undefined, {
+					executionOutcome: "not_started",
+				}),
+			);
 		}
 		// Keep admission and registration in the same synchronous section: concurrent callers
 		// must count tasks registered while cwd/shell validation was awaiting.
@@ -186,6 +207,8 @@ export class BackgroundTaskManager {
 					"limit_reached",
 					`Refusing to start: ${activeTasks} background tasks are already running (limit ${this.maxTasks}). ` +
 						"Wait for one to finish, or stop one with task_stop.",
+					undefined,
+					{ executionOutcome: "not_started" },
 				),
 			);
 		}

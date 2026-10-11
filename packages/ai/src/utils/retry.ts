@@ -1,10 +1,14 @@
 import type { AssistantMessage } from "../types.ts";
+import { extractFormattedProviderErrorStatus } from "./error-body.ts";
 
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
 	return new RegExp(patterns.join("|"), "i");
 }
 
-const HTTP_SERVER_ERROR_PATTERN = "\\b5\\d\\d\\b";
+const PERMANENT_PROVIDER_ERROR_PATTERN =
+	/\b(?:invalid_request_error|invalid_function_parameters|invalid_value|authentication_error|permission_error|not_found_error)\b|^Validation error:/i;
+const TRANSIENT_PROVIDER_ERROR_TYPE_PATTERN =
+	/^(?:overloaded_error|server_busy|rate_limit_error|server_error|internal_error|internal_server_error|service_unavailable|ResourceExhausted)$/i;
 
 const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	// OpenCode Go/free-tier limits returned as 429 JSON error types by OpenCode's
@@ -44,7 +48,9 @@ const NETWORK_PROVIDER_ERROR_PATTERNS = [
 	"socket hang up",
 	"socket connection was closed",
 	"timed? out",
-	"timeout",
+	"\\b(?:request|connect(?:ion)?|socket|fetch|stream|read) timeout\\b",
+	"^timeout(?: error| exceeded|$)",
+	"operation was aborted due to timeout",
 
 	// WebSocket transports can report close/error text instead of HTTP/fetch text.
 	"websocket.?closed",
@@ -72,8 +78,6 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"servers are currently busy",
 	"rate.?limit",
 	"too many requests",
-	"429",
-	HTTP_SERVER_ERROR_PATTERN,
 	"service.?unavailable",
 	"server.?error",
 	"internal.?error",
@@ -83,7 +87,6 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"provider.?returned.?error",
 	"exceeded request buffer limit while retrying upstream",
 
-	...NETWORK_PROVIDER_ERROR_PATTERNS,
 	"terminated",
 
 	// Provider-requested retry delay cap failures should flow through the outer
@@ -237,17 +240,75 @@ export async function retryAssistantCall(
  * before restarting the assistant turn.
  */
 export function isRetryableAssistantError(message: AssistantMessage): boolean {
-	if (message.stopReason !== "error" || !message.errorMessage) return false;
-	const errorMessage = message.errorMessage;
-	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
-	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
+	if (message.stopReason !== "error" || typeof message.errorMessage !== "string") return false;
+	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(message.errorMessage)) return false;
+	const { status, text, errorType, providerBody } = getProviderErrorDetails(message);
+	if (status !== undefined) return status === 408 || status === 409 || status === 429 || status >= 500;
+	if (PERMANENT_PROVIDER_ERROR_PATTERN.test(errorType ?? "") || PERMANENT_PROVIDER_ERROR_PATTERN.test(text))
+		return false;
+	return (
+		TRANSIENT_PROVIDER_ERROR_TYPE_PATTERN.test(errorType ?? "") ||
+		RETRYABLE_PROVIDER_ERROR_PATTERN.test(text) ||
+		(!providerBody && NETWORK_PROVIDER_ERROR_PATTERN.test(text))
+	);
 }
 
 /** True when an assistant failure is caused by a network transport interruption. */
 export function isNetworkAssistantError(message: AssistantMessage): boolean {
-	return (
-		message.stopReason === "error" &&
-		typeof message.errorMessage === "string" &&
-		NETWORK_PROVIDER_ERROR_PATTERN.test(message.errorMessage)
-	);
+	if (message.stopReason !== "error" || typeof message.errorMessage !== "string") return false;
+	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(message.errorMessage)) return false;
+	const { status, text, errorType, providerBody } = getProviderErrorDetails(message);
+	// An HTTP error response is not evidence of a transport interruption, even if
+	// its body mentions a timeout or an invalid field named "timeout".
+	if (
+		status !== undefined ||
+		providerBody ||
+		PERMANENT_PROVIDER_ERROR_PATTERN.test(errorType ?? "") ||
+		PERMANENT_PROVIDER_ERROR_PATTERN.test(text)
+	)
+		return false;
+	return NETWORK_PROVIDER_ERROR_PATTERN.test(text);
+}
+
+function getProviderErrorDetails(message: AssistantMessage): {
+	status?: number;
+	text: string;
+	errorType?: string;
+	providerBody?: boolean;
+} {
+	const text = message.errorMessage!.trim();
+	// Bedrock already retains trusted SDK metadata alongside its legacy display
+	// prefix. Do not treat unrelated diagnostic fields as an HTTP response.
+	const sdkStatus = message.diagnostics?.find((diagnostic) => diagnostic.type === "bedrock_response_failure")?.details
+		?.status;
+	const status = getHttpErrorStatus(sdkStatus) ?? extractFormattedProviderErrorStatus(text);
+	if (status !== undefined) return { status, text };
+	if (!/^[{["]/.test(text)) return { text };
+
+	// SDK/provider JSON errors may expose a useful message/type, but arbitrary
+	// body keys and values must never be scanned as transport/server evidence.
+	try {
+		const parsed: unknown = JSON.parse(text);
+		if (typeof parsed === "string") return { text: parsed, status: extractFormattedProviderErrorStatus(parsed) };
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { text: "" };
+		const envelope = parsed as Record<string, unknown>;
+		const error =
+			typeof envelope.error === "object" && envelope.error !== null
+				? (envelope.error as Record<string, unknown>)
+				: envelope;
+		const types = [error.type, error.code].filter((value): value is string => typeof value === "string");
+		return {
+			text: typeof error.message === "string" ? error.message : "",
+			errorType:
+				types.find((type) => PERMANENT_PROVIDER_ERROR_PATTERN.test(type)) ??
+				types.find((type) => TRANSIENT_PROVIDER_ERROR_TYPE_PATTERN.test(type)),
+			providerBody: true,
+		};
+	} catch {
+		return { text: "" };
+	}
+}
+
+function getHttpErrorStatus(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 400 && value <= 599 ? value : undefined;
 }

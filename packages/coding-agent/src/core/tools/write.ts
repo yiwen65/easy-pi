@@ -1,4 +1,4 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { type AgentTool, AgentToolError } from "@earendil-works/pi-agent-core";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
@@ -205,31 +205,31 @@ export function createWriteToolDefinition(
 			_onUpdate?,
 			_ctx?,
 		) {
-			const absolutePath = resolveToCwd(path, cwd);
-			const dir = dirname(absolutePath);
-			return withFileMutationQueue(absolutePath, async () => {
-				// Do not reject from an abort event listener here: that would release the
-				// mutation queue while an in-flight filesystem operation may still finish.
-				// Checking signal.aborted after each await observes the same aborts while
-				// keeping the queue locked until the current operation has settled.
-				const throwIfAborted = (): void => {
+			let mutationStarted = false;
+			try {
+				const absolutePath = resolveToCwd(path, cwd);
+				const dir = dirname(absolutePath);
+				return await withFileMutationQueue(absolutePath, async () => {
+					// Keep the queue locked until in-flight filesystem operations settle.
 					if (signal?.aborted) throw new Error("Operation aborted");
-				};
+					// mkdir is the first mutation, even when target writeFile never runs.
+					mutationStarted = true;
+					await ops.mkdir(dir);
+					if (signal?.aborted) throw new Error("Operation aborted");
 
-				throwIfAborted();
-				// Create parent directories if needed.
-				await ops.mkdir(dir);
-				throwIfAborted();
-
-				// Write the file contents.
-				await ops.writeFile(absolutePath, content);
-				throwIfAborted();
-
-				return {
-					content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
-					details: undefined,
-				};
-			});
+					await ops.writeFile(absolutePath, content);
+					// Preserve a fulfilled target acknowledgement despite late cancellation.
+					return {
+						content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
+						details: undefined,
+					};
+				});
+			} catch (error) {
+				if (mutationStarted) throw error;
+				throw new AgentToolError(error instanceof Error ? error.message : String(error), undefined, {
+					executionOutcome: "not_started",
+				});
+			}
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;

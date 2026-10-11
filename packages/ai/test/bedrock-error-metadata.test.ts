@@ -52,6 +52,7 @@ import { stream as streamBedrock } from "../src/api/bedrock-converse-stream.ts";
 import { getModel } from "../src/compat.ts";
 import type { AssistantMessage, Context, Model } from "../src/types.ts";
 import type { AssistantMessageDiagnostic } from "../src/utils/diagnostics.ts";
+import { isNetworkAssistantError, isRetryableAssistantError } from "../src/utils/retry.ts";
 
 const DIAGNOSTIC_TYPE = "bedrock_response_failure";
 const VALIDATION_MESSAGE = "The provided model identifier is invalid.";
@@ -127,6 +128,21 @@ describe("bedrock failure diagnostics", () => {
 		};
 
 		expect((await runBedrock()).errorMessage).toBe(`Validation error: ${VALIDATION_MESSAGE}`);
+	});
+
+	it("keeps validation field names permanent using the existing HTTP diagnostic", async () => {
+		bedrockMock.send = {
+			kind: "reject",
+			error: makeServiceException("ValidationException", {
+				message: "Request timeout must be an integer; invalid value 512",
+				$metadata: { httpStatusCode: 400 },
+			}),
+		};
+		const message = await runBedrock();
+		expect(message.errorMessage).toBe("Validation error: Request timeout must be an integer; invalid value 512");
+		expect(findDiagnostic(message)?.details?.status).toBe(400);
+		expect(isRetryableAssistantError(message)).toBe(false);
+		expect(isNetworkAssistantError(message)).toBe(false);
 	});
 
 	it("reports only the request id for a modeled mid-stream exception", async () => {

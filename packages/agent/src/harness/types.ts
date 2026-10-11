@@ -172,11 +172,19 @@ export type ExecutionErrorCode =
 export class ExecutionError extends Error {
 	/** Backend-independent error code. */
 	public code: ExecutionErrorCode;
+	/** Only the backend's pre-launch boundary can prove that execution did not start. */
+	readonly executionOutcome: "not_started" | "unknown";
 
-	constructor(code: ExecutionErrorCode, message: string, cause?: Error) {
+	constructor(
+		code: ExecutionErrorCode,
+		message: string,
+		cause?: Error,
+		options?: { executionOutcome: "not_started" },
+	) {
 		super(message, cause === undefined ? undefined : { cause });
 		this.name = "ExecutionError";
 		this.code = code;
+		this.executionOutcome = options?.executionOutcome ?? "unknown";
 	}
 }
 

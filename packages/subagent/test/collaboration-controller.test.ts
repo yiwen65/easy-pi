@@ -8,6 +8,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import {
 	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
+	CollaborationAdmissionError,
 	CollaborationError,
 } from "../src/collaboration-contract.ts";
 import { CollaborationController } from "../src/collaboration-controller.ts";
@@ -72,6 +73,37 @@ function fixture(file = false) {
 	cleanups.push(() => controller.shutdown());
 	return { cwd, store, controller, host, runs, loads, finishes, disposed };
 }
+
+test.each(["spawn", "followup", "send"] as const)(
+	"%s cancelled in the serialization queue rejects admission without changing retained state",
+	async (operation) => {
+		const f = fixture();
+		if (operation !== "spawn") {
+			await f.controller.spawn(caller, "a", "seed", model);
+			f.finishes.get("/root/a")?.({ status: "completed", text: "done" });
+			await f.controller.settled();
+		}
+		const before = f.store.read();
+		const turns = f.store.countTurns();
+		const commit = vi.spyOn(f.store, "commit");
+		const abort = new AbortController();
+		const pending =
+			operation === "spawn"
+				? f.controller.spawnTurn(caller, "cancelled", "task", model, undefined, abort.signal)
+				: operation === "followup"
+					? f.controller.followupTurn(caller, "a", "next", abort.signal)
+					: f.controller.send(caller, "a", "message", abort.signal);
+		abort.abort();
+		const error = await pending.catch((error: unknown) => error);
+		expect(f.store.read()).toEqual(before);
+		expect(f.store.countTurns()).toBe(turns);
+		expect(commit).not.toHaveBeenCalled();
+		expect(f.loads).toHaveLength(operation === "spawn" ? 0 : 1);
+		expect(f.runs).toEqual(operation === "spawn" ? [] : ["seed"]);
+		expect(error).toBeInstanceOf(CollaborationAdmissionError);
+		expect(error).toMatchObject({ code: "interrupted", executionOutcome: "not_started" });
+	},
+);
 
 test("reserves duplicate names and execution slots atomically across concurrent spawns", async () => {
 	const f = fixture();

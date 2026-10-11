@@ -82,15 +82,19 @@ function extractCauseDetails(error: Error): string | undefined {
 }
 
 /**
- * Probe the HTTP status, first numeric hit wins, in SDK-field order:
+ * Probe the HTTP status, first valid HTTP code wins, in SDK-field order:
  * `statusCode` (Mistral) → `status` (`openai`, `@google/genai`) →
  * `$metadata.httpStatusCode` (Bedrock) → `$response.statusCode` (Bedrock).
  */
 function extractStatus(error: SdkErrorShape): number | undefined {
-	if (typeof error.statusCode === "number") return error.statusCode;
-	if (typeof error.status === "number") return error.status;
-	if (typeof error.$metadata?.httpStatusCode === "number") return error.$metadata.httpStatusCode;
-	if (typeof error.$response?.statusCode === "number") return error.$response.statusCode;
+	for (const status of [
+		error.statusCode,
+		error.status,
+		error.$metadata?.httpStatusCode,
+		error.$response?.statusCode,
+	]) {
+		if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) return status;
+	}
 	return undefined;
 }
 
@@ -144,11 +148,21 @@ function isPlainNonEmptyObject(value: unknown): boolean {
 	return Object.keys(value).length > 0;
 }
 
+// Only supported HTTP display forms carry status. A number elsewhere in an
+// error body (e.g. an invalid parameter value of 512) is not HTTP evidence.
+export function extractFormattedProviderErrorStatus(message: string): number | undefined {
+	const match = message
+		.trim()
+		.match(
+			/^(?:Error:\s*)?(?:(?:OpenAI API error|Azure OpenAI API error) \(([45]\d{2})\):|HTTP(?:\/\d(?:\.\d)?)?(?:\s+(?:status(?: code)?|error))?\s+([45]\d{2})\b|([45]\d{2})(?=:\s*|\s+[{[]|\s+(?:status code|bad request|unauthorized|forbidden|not found|request timeout|conflict|unprocessable entity|too many requests|internal server error|not implemented|bad gateway|service unavailable|gateway timeout|origin timeout)\b))/i,
+		);
+	return match ? Number(match[1] ?? match[2] ?? match[3]) : undefined;
+}
+
 /**
- * Compose a display string from a normalized error. When the message already
- * carries the body (Anthropic / `@google/genai` happy path) or no body/status
- * was extracted, the message is returned unchanged. Otherwise the status and
- * body are surfaced, with an optional provider prefix.
+ * Compose a display string with the authoritative HTTP status, when available.
+ * Preserve messages that already carry that status/body; otherwise surface the
+ * status and body (or message), with an optional provider prefix.
  *
  * - no prefix: `"<status>: <body>"`
  * - prefix:    `"<prefix> (<status>): <body>"`
@@ -162,6 +176,16 @@ export function formatProviderError(norm: NormalizedProviderError, prefix?: stri
 				: norm.message;
 	} else {
 		formatted = prefix !== undefined ? `${prefix} (${norm.status}): ${norm.body}` : `${norm.status}: ${norm.body}`;
+	}
+	// Some SDKs supply status separately even when the message carries the body.
+	// Keep that authoritative status available to the outer assistant retry policy.
+	if (
+		norm.status !== undefined &&
+		prefix === undefined &&
+		extractFormattedProviderErrorStatus(formatted) !== norm.status
+	) {
+		const sdkStatusPrefix = `${norm.status} `;
+		formatted = `${norm.status}: ${formatted.startsWith(sdkStatusPrefix) ? formatted.slice(sdkStatusPrefix.length) : formatted}`;
 	}
 	return norm.causeDetails && !formatted.includes(norm.causeDetails)
 		? `${formatted} (${norm.causeDetails})`

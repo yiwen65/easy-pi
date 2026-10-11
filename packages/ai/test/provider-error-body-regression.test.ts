@@ -13,7 +13,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { streamSimple as streamSimpleBedrock } from "../src/api/bedrock-converse-stream.ts";
 import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
 import { stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { AssistantMessage, Context, Model } from "../src/types.ts";
+import { isNetworkAssistantError, isRetryableAssistantError } from "../src/utils/retry.ts";
 
 // openai SDK APIError shape: "<status> status code (no body)" message, the
 // parsed body kept on `.error`.
@@ -35,13 +36,14 @@ const bedrockMock = vi.hoisted(() => ({
 const openaiMock = vi.hoisted(() => ({
 	// Default parsed body; individual tests may override before invoking.
 	parsedBody: { error: "blocked by gateway WAF" } as unknown,
+	error: undefined as unknown,
 }));
 
 vi.mock("openai", () => {
 	function throwingCreate() {
 		const promise = Promise.resolve(undefined) as unknown as { withResponse: () => Promise<never> };
 		promise.withResponse = async () => {
-			throw new FakeAPIError(403, openaiMock.parsedBody);
+			throw openaiMock.error ?? new FakeAPIError(403, openaiMock.parsedBody);
 		};
 		return promise;
 	}
@@ -124,7 +126,7 @@ const responsesModel: Model<"openai-responses"> = {
 
 async function drainResult(stream: {
 	[Symbol.asyncIterator](): AsyncIterator<unknown>;
-	result(): Promise<{ errorMessage?: string; stopReason?: string }>;
+	result(): Promise<AssistantMessage>;
 }) {
 	for await (const _event of stream) {
 		void _event;
@@ -135,6 +137,7 @@ async function drainResult(stream: {
 describe("provider error body passthrough (per-tier regression)", () => {
 	beforeEach(() => {
 		openaiMock.parsedBody = { error: "blocked by gateway WAF" };
+		openaiMock.error = undefined;
 	});
 
 	it("openai-completions (body-blind text) surfaces status + body", async () => {
@@ -162,6 +165,27 @@ describe("provider error body passthrough (per-tier regression)", () => {
 		const occurrences = output.errorMessage?.match(/upstream WAF blocked policy XYZ/g) ?? [];
 		expect(occurrences).toHaveLength(1);
 	});
+
+	it.each([
+		{ status: 400, message: "Invalid schema: properties.timeout; invalid value 512", retryable: false },
+		{ status: 400, message: "HTTP 503: timeout", retryable: false },
+		{ status: 503, message: "opaque provider failure", retryable: true },
+	])(
+		"preserves SDK status $status through text provider catches: $message",
+		async ({ status, message, retryable }) => {
+			openaiMock.error = Object.assign(new Error(message), { status });
+			const outputs = [
+				await drainResult(streamOpenAICompletions(completionsModel, context, { apiKey: "test" })),
+				await drainResult(streamOpenAIResponses(responsesModel, context, { apiKey: "test" })),
+			];
+			for (const output of outputs) {
+				expect(output.stopReason).toBe("error");
+				expect(output.errorMessage).toContain(String(status));
+				expect(isRetryableAssistantError(output)).toBe(retryable);
+				expect(isNetworkAssistantError(output)).toBe(false);
+			}
+		},
+	);
 
 	it("openai-responses (status-only) keeps the prefix and surfaces the body", async () => {
 		const output = await drainResult(streamOpenAIResponses(responsesModel, context, { apiKey: "test" }));

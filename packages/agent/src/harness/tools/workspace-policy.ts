@@ -35,13 +35,16 @@ function lexicalParent(path: string): string | undefined {
 function errorFromFile(error: FileError, path: string): ExecutionToolError {
 	switch (error.code) {
 		case "aborted":
-			return new ExecutionToolError("ABORTED", `Path resolution was aborted for ${path}.`, undefined, error);
+			return new ExecutionToolError("ABORTED", `Path resolution was aborted for ${path}.`, undefined, error, {
+				executionOutcome: "not_started",
+			});
 		case "permission_denied":
 			return new ExecutionToolError(
 				"PERMISSION_DENIED",
 				`Permission denied while resolving ${path}.`,
 				undefined,
 				error,
+				{ executionOutcome: "not_started" },
 			);
 		default:
 			return new ExecutionToolError(
@@ -49,6 +52,7 @@ function errorFromFile(error: FileError, path: string): ExecutionToolError {
 				`Could not resolve ${path}: ${error.message}`,
 				undefined,
 				error,
+				{ executionOutcome: "not_started" },
 			);
 	}
 }
@@ -81,7 +85,13 @@ async function canonicalExistingOrAncestor(
 		suffix.push(child);
 		candidate = parent;
 	}
-	throw new ExecutionToolError("NOT_FOUND", `No existing ancestor could be resolved for ${absolutePath}.`);
+	throw new ExecutionToolError(
+		"NOT_FOUND",
+		`No existing ancestor could be resolved for ${absolutePath}.`,
+		undefined,
+		undefined,
+		{ executionOutcome: "not_started" },
+	);
 }
 
 /**
@@ -112,6 +122,8 @@ export async function resolveWorkspacePath(
 				"SYMLINK_ESCAPE",
 				`A symlink component is not allowed for ${path}. Use a non-symlink path or change the explicit policy.`,
 				{ path },
+				undefined,
+				{ executionOutcome: "not_started" },
 			);
 		}
 	}
@@ -131,6 +143,8 @@ export async function resolveWorkspacePath(
 			"OUTSIDE_WORKSPACE",
 			`${path} resolves outside the allowed workspace roots. Choose a path inside the workspace.`,
 			{ path, canonicalPath: resolved.canonicalPath },
+			undefined,
+			{ executionOutcome: "not_started" },
 		);
 	}
 	return { absolutePath: absolute.value, canonicalPath: resolved.canonicalPath };

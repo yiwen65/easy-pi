@@ -16,6 +16,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	Agent,
 	AgentEvent,
@@ -350,7 +351,7 @@ export class AgentSession {
 	readonly settingsManager: SettingsManager;
 	private readonly _taskRecovery: TaskRecoveryJournal;
 	private _recoveringToolBatch = false;
-	private readonly _taskInputIds = new WeakMap<object, string>();
+	private _taskInputIds = new WeakMap<object, string>();
 	private readonly _queuedTaskInputIds = new Set<string>();
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -657,11 +658,13 @@ export class AgentSession {
 		const tasks = suspended.map(({ state }) => ({
 			taskId: state.id,
 			status: state.status,
+			plannedCalls: this._taskRecovery.plannedCalls(state),
 			tools: state.tools.map(({ call, safe, dispatched, result }) => ({
 				call,
 				safe,
 				dispatched,
 				resultRecorded: result !== undefined,
+				result,
 			})),
 		}));
 		const last = this.sessionManager
@@ -690,25 +693,114 @@ export class AgentSession {
 		const previousTransform = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
 			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
-			const suspended = this._taskRecovery.suspendedTasks;
-			if (suspended.length === 0) return transformed;
-			const pendingIds = new Set(
-				suspended.flatMap(
-					(task) =>
-						task.state.step?.message?.content
-							.filter((block) => block.type === "toolCall")
-							.map((call) => call.id) ?? [],
-				),
-			);
-			// The durable history keeps the original calls. Request projection replaces
-			// their incomplete protocol exchange with explicit execution facts.
-			return transformed.flatMap<AgentMessage>((message) => {
-				if (message.role === "toolResult" && pendingIds.has(message.toolCallId)) return [];
-				if (message.role !== "assistant") return [message];
-				const content = message.content.filter((block) => block.type !== "toolCall" || !pendingIds.has(block.id));
-				if (content.length === message.content.length) return [message];
-				while (content.at(-1)?.type === "thinking") content.pop();
-				return content.length > 0 ? [{ ...message, content, stopReason: "stop" as const }] : [];
+			const rawIndices = new Map(messages.map((message, index) => [message, index]));
+			const unchanged = isDeepStrictEqual(messages, transformed);
+			const entryIndex = (entryId: string): number => {
+				const entry = this.sessionManager.getEntry(entryId);
+				if (entry?.type !== "message") return -1;
+				const rawIndex = rawIndices.get(entry.message);
+				if (unchanged && rawIndex !== undefined) return rawIndex;
+				const matches = transformed.flatMap((message, index) =>
+					isDeepStrictEqual(message, entry.message) ? [index] : [],
+				);
+				if (matches.length > 1) throw new Error("Recovery occurrence is ambiguous after context transformation");
+				return matches[0] ?? -1;
+			};
+			const frames = new Map<number, Map<string, { index: number; message: ToolResultMessage }>>();
+			const contiguous = new Set<number>();
+			for (const [index, message] of transformed.entries()) {
+				if (message.role !== "assistant" || message.stopReason === "error" || message.stopReason === "aborted")
+					continue;
+				const calls = message.content.filter((block) => block.type === "toolCall");
+				const results = new Map<string, { index: number; message: ToolResultMessage }>();
+				for (let cursor = index + 1; transformed[cursor]?.role === "toolResult"; cursor++) {
+					const result = transformed[cursor];
+					if (
+						result.role !== "toolResult" ||
+						!calls.some((call) => call.id === result.toolCallId && call.name === result.toolName)
+					)
+						continue;
+					results.set(result.toolCallId, { index: cursor, message: result });
+					contiguous.add(cursor);
+				}
+				frames.set(index, results);
+			}
+			const resultSources = this._taskRecovery.resultEntrySources;
+			const pending = new Map<number, Set<string>>();
+			const omitted = new Set<number>();
+			const changedFrames = new Set<number>();
+			for (const { state } of this._taskRecovery.suspendedTasks) {
+				const sourceId = state.step?.assistantEntryId;
+				if (!sourceId) continue;
+				const index = entryIndex(sourceId);
+				if (index < 0) continue;
+				const ids = new Set(
+					this._taskRecovery
+						.plannedCalls(state)
+						.filter(
+							(call) =>
+								!state.tools.some(
+									(tool) =>
+										tool.call.id === call.id &&
+										tool.result &&
+										tool.resultEntryId &&
+										resultSources.get(tool.resultEntryId) === sourceId,
+								),
+						)
+						.map((call) => call.id),
+				);
+				if (ids.size === 0) continue;
+				pending.set(index, ids);
+				changedFrames.add(index);
+				for (const result of frames.get(index)?.values() ?? []) omitted.add(result.index);
+			}
+			const historical = new Map<number, AgentMessage>();
+			for (const [resultId, sourceId] of resultSources) {
+				const resultIndex = entryIndex(resultId);
+				if (resultIndex < 0 || contiguous.has(resultIndex)) continue;
+				const result = transformed[resultIndex];
+				if (result.role !== "toolResult") continue;
+				const sourceIndex = entryIndex(sourceId);
+				const frame = frames.get(sourceIndex);
+				omitted.add(resultIndex);
+				if (!frame) {
+					const source = this.sessionManager.getEntry(sourceId);
+					if (source?.type === "message" && rawIndices.has(source.message))
+						throw new Error("Context transformation changed a late recovery source occurrence");
+					historical.set(resultIndex, {
+						role: "custom",
+						customType: "task-recovery-context",
+						display: false,
+						content: `Historical verified result whose source response is outside the active projection: ${JSON.stringify(result)}`,
+						details: { assistantEntryId: sourceId, resultEntryId: resultId },
+						timestamp: result.timestamp,
+					});
+					continue;
+				}
+				frame.set(result.toolCallId, { index: resultIndex, message: result });
+				changedFrames.add(sourceIndex);
+				for (const item of frame.values()) omitted.add(item.index);
+			}
+			// Ordinary contiguous exchanges are never rewritten. Only identified task
+			// occurrences receive late receipts; raw call IDs are local to a response.
+			return transformed.flatMap<AgentMessage>((message, index) => {
+				const fact = historical.get(index);
+				if (fact) return [fact];
+				if (omitted.has(index)) return [];
+				if (!changedFrames.has(index) || message.role !== "assistant") return [message];
+				const content = message.content.filter(
+					(block) => block.type !== "toolCall" || !pending.get(index)?.has(block.id),
+				);
+				if (content.length !== message.content.length) while (content.at(-1)?.type === "thinking") content.pop();
+				if (content.length === 0) return [];
+				const calls = content.filter((block) => block.type === "toolCall");
+				return [
+					{ ...message, content, stopReason: calls.length > 0 ? ("toolUse" as const) : ("stop" as const) },
+					...calls.flatMap((call) => {
+						const item = frames.get(index)?.get(call.id);
+						return item ? [item.message] : [];
+					}),
+				];
 			});
 		};
 		const previousStop = this.agent.shouldStopAfterTurn;
@@ -1035,7 +1127,11 @@ export class AgentSession {
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
-	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+	private _handleAgentEvent = async (
+		event: AgentEvent,
+		_signal?: AbortSignal,
+		recoveredAssistantEntryId?: string,
+	): Promise<void> => {
 		if (event.type === "message_start") {
 			const id = this._taskInputIds.get(event.message);
 			const group = id ? this._taskRecovery.state?.queued.find((group) => group.entryIds.includes(id)) : undefined;
@@ -1054,8 +1150,11 @@ export class AgentSession {
 			);
 			const unknown = new Set(this._taskRecovery.unknownTools.map((tool) => tool.call.id));
 			for (const result of event.toolResults)
-				if (!existing.has(result.toolCallId) && !unknown.has(result.toolCallId))
-					this.sessionManager.appendMessage(result);
+				if (!existing.has(result.toolCallId) && !unknown.has(result.toolCallId)) {
+					const reservedId = assistantId ? this._taskRecovery.recordResultEntry(assistantId, result) : undefined;
+					const resultId = this.sessionManager.appendMessage(result, reservedId);
+					if (assistantId) this._taskRecovery.recordResultEntry(assistantId, result, resultId);
+				}
 			this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
 			this._recoveringToolBatch = false;
 		}
@@ -1105,13 +1204,13 @@ export class AgentSession {
 			}
 		}
 
+		const resultSourceId = recoveredAssistantEntryId ?? this._taskRecovery.state?.step?.assistantEntryId;
 		// Emit to extensions first (message_end handlers may transform the message)
 		await this._emitExtensionEvent(event);
-		if (event.type === "message_end" && event.message.role === "toolResult") {
-			const toolCallId = event.message.toolCallId;
-			const tool = this._taskRecovery.state?.tools.find((tool) => tool.call.id === toolCallId);
-			if (tool?.result) this._taskRecovery.result(event.message, tool.call, tool.terminate === true, false);
-		}
+		const resultEntryId =
+			event.type === "message_end" && event.message.role === "toolResult" && resultSourceId
+				? this._taskRecovery.recordResultEntry(resultSourceId, event.message)
+				: undefined;
 
 		// Canonical persistence BEFORE notifying subscribers: the durable session
 		// entry is the authority; a throwing or slow listener must not prevent it.
@@ -1129,6 +1228,7 @@ export class AgentSession {
 				);
 			} else if (
 				event.message.role === "toolResult" &&
+				resultSourceId === this._taskRecovery.state?.step?.assistantEntryId &&
 				this._taskRecovery.unknownTools.map((tool) => tool.call.id).includes(event.message.toolCallId)
 			) {
 				this.sessionManager.appendCustomEntry("pi-tool-interruption", { message: event.message });
@@ -1137,13 +1237,18 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				appendedEntryId = this.sessionManager.appendMessage(event.message, this._taskInputIds.get(event.message));
+				appendedEntryId = this.sessionManager.appendMessage(
+					event.message,
+					resultEntryId ?? this._taskInputIds.get(event.message),
+				);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			if (appendedEntryId) this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
 			if (appendedEntryId && event.message.role === "assistant")
 				this._taskRecovery.commitAssistant(event.message, appendedEntryId);
+			if (appendedEntryId && event.message.role === "toolResult" && resultSourceId)
+				this._taskRecovery.recordResultEntry(resultSourceId, event.message, appendedEntryId);
 		}
 
 		// Notify all listeners
@@ -1641,6 +1746,7 @@ export class AgentSession {
 	}
 
 	private _restoreTaskQueues(): void {
+		this._taskRecovery.rebindQueuedReceipts();
 		const branchIds = new Set(this.sessionManager.getBranch().map((entry) => entry.id));
 		for (const group of this._taskRecovery.state?.queued ?? []) {
 			if (group.cancelled) continue;
@@ -1719,6 +1825,7 @@ export class AgentSession {
 				this._steeringMessages = [];
 				this._followUpMessages = [];
 				this._queuedTaskInputIds.clear();
+				this._taskInputIds = new WeakMap();
 				this._pendingNextTurnMessages = [];
 				this._restoreSessionMessages();
 			} finally {
@@ -1810,11 +1917,54 @@ export class AgentSession {
 				}
 			}
 			this._restoreSessionMessages();
+			let truncatedWithoutCalls = false;
+			if (
+				assistantEntry?.type === "message" &&
+				assistantEntry.message.role === "assistant" &&
+				assistantEntry.message.stopReason === "length"
+			) {
+				// A committed length response is not an executable checkpoint. Complete
+				// its protocol exchange without ever dispatching salvaged arguments.
+				const calls = assistantEntry.message.content.filter((block) => block.type === "toolCall");
+				for (const call of calls) {
+					const tool = task.tools.find((tool) => tool.call.id === call.id);
+					if (!tool?.result && tool?.dispatched)
+						throw new Error(`Truncated tool ${call.id} was dispatched; verify its outcome before recovery`);
+					const result: ToolResultMessage = tool?.result ?? {
+						role: "toolResult",
+						toolCallId: call.id,
+						toolName: call.name,
+						content: [
+							{
+								type: "text",
+								text: `Tool call "${call.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`,
+							},
+						],
+						isError: true,
+						timestamp: Date.now(),
+					};
+					if (!tool?.result) this._taskRecovery.result(result, call, false, false);
+					if (
+						!this.agent.state.messages.some(
+							(message) => message.role === "toolResult" && message.toolCallId === call.id,
+						)
+					)
+						await this._handleAgentEvent({ type: "message_end", message: result });
+				}
+				this._restoreSessionMessages();
+				truncatedWithoutCalls = calls.length === 0;
+				assistantEntry = undefined;
+			}
 			// Failure artifacts stay in history; they are not the continuation anchor.
 			while (this.agent.state.messages.at(-1)?.role === "assistant") {
 				const last = this.agent.state.messages.at(-1);
 				if (last?.role !== "assistant" || (last.stopReason !== "error" && last.stopReason !== "aborted")) break;
 				this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+			}
+			if (truncatedWithoutCalls) {
+				const last = this.agent.state.messages.at(-1);
+				if (last?.role === "assistant" && last.stopReason === "length")
+					this.agent.state.messages = this.agent.state.messages.slice(0, -1);
 			}
 			task = this._taskRecovery.state ?? task;
 			if (assistantEntry?.type === "message" && assistantEntry.message.role === "assistant") {
@@ -1876,34 +2026,49 @@ export class AgentSession {
 		}
 	}
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[], onAccepted?: () => void): Promise<void> {
+	private async _runAgentPrompt(
+		messages: AgentMessage | AgentMessage[],
+		onAccepted?: () => void,
+		systemPrompt?: string,
+	): Promise<void> {
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
 		this._taskRecovery.acquire();
 		this._isAgentRunActive = true;
+		this._systemPromptOverride = systemPrompt;
+		this.agent.state.systemPrompt = systemPrompt ?? this._baseSystemPrompt;
 		let started = false;
 		let failed = false;
 		try {
 			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
-			const recoveredResults =
-				this._taskRecovery.state?.tools.flatMap((tool) =>
-					tool.result && hasConfirmedBashExit(tool.result.toolName, tool.result.details) ? [tool.result] : [],
-				) ?? [];
+			const recovery = this._taskRecovery.state;
+			const recoveredResults = [recovery, ...(recovery?.suspendedTasks ?? []).map((task) => task.state)].flatMap(
+				(task) => {
+					if (!task) return [];
+					const calls = this._taskRecovery.plannedCalls(task);
+					const tools = [
+						...calls.flatMap((call) => task.tools.filter((tool) => tool.call.id === call.id)),
+						...task.tools.filter((tool) => !calls.some((call) => call.id === tool.call.id)),
+					];
+					return tools.flatMap((tool) =>
+						tool.result ? [{ assistantEntryId: task.step?.assistantEntryId, result: tool.result }] : [],
+					);
+				},
+			);
 			let publishedRecovery = false;
-			for (const result of recoveredResults) {
-				if (
-					this.sessionManager
-						.getBranch()
-						.some(
-							(entry) =>
-								entry.type === "message" &&
-								entry.message.role === "toolResult" &&
-								entry.message.toolCallId === result.toolCallId,
-						)
-				)
+			for (const { assistantEntryId, result } of recoveredResults) {
+				const existing = assistantEntryId
+					? this._taskRecovery.findResultEntry(assistantEntryId, result.toolCallId)
+					: undefined;
+				if (existing && assistantEntryId) {
+					const entry = this.sessionManager.getEntry(existing);
+					if (entry?.type === "message" && entry.message.role === "toolResult")
+						this._taskRecovery.recordResultEntry(assistantEntryId, entry.message, existing);
+					publishedRecovery = true;
 					continue;
-				await this._handleAgentEvent({ type: "message_end", message: result });
+				}
+				await this._handleAgentEvent({ type: "message_end", message: result }, undefined, assistantEntryId);
 				publishedRecovery = true;
 			}
 			if (publishedRecovery) this._restoreSessionMessages();
@@ -1965,7 +2130,11 @@ export class AgentSession {
 					await this.agent.prompt(investigation);
 					this._taskRecovery.update((state) => {
 						const original = state.suspendedTasks?.find((task) => task.state.id === interruptedTaskId)?.state;
-						if (!original || original.status !== "interrupted" || original.tools.some((tool) => !tool.result))
+						if (
+							!original ||
+							original.status !== "interrupted" ||
+							this._taskRecovery.hasUnaccountedCalls(original)
+						)
 							return;
 						state.queued.push(...original.queued);
 						original.queued = [];
@@ -2109,6 +2278,7 @@ export class AgentSession {
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
 		let acceptedNextTurnMessages: CustomMessage[] = [];
+		let systemPrompt: string | undefined;
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
@@ -2244,15 +2414,8 @@ export class AgentSession {
 					});
 				}
 			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt !== undefined) {
-				this._systemPromptOverride = result.systemPrompt;
-				this.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this._systemPromptOverride = undefined;
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
-			}
+			// Apply only after claiming the driver; another preflight may still be active.
+			systemPrompt = result?.systemPrompt;
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -2268,12 +2431,18 @@ export class AgentSession {
 
 		let accepted = false;
 		try {
-			await this._runAgentPrompt(messages, () => {
-				accepted = true;
-				const consumed = new Set(acceptedNextTurnMessages);
-				this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !consumed.has(message));
-				preflightResult?.(true);
-			});
+			await this._runAgentPrompt(
+				messages,
+				() => {
+					accepted = true;
+					const consumed = new Set(acceptedNextTurnMessages);
+					this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter(
+						(message) => !consumed.has(message),
+					);
+					preflightResult?.(true);
+				},
+				systemPrompt,
+			);
 		} catch (error) {
 			if (!accepted) preflightResult?.(false);
 			throw error;
@@ -4436,6 +4605,18 @@ export class AgentSession {
 						(name) => this._toolDefinitions.get(name)?.definition.exposure !== "deferred",
 					),
 				});
+			}
+			// Live queues belong to the leaf we left. Keep their durable receipts on
+			// that branch, and restore only groups visible at the selected leaf.
+			if (this.sessionManager.getLeafId() !== oldLeafId) {
+				this.agent.clearAllQueues();
+				this._steeringMessages = [];
+				this._followUpMessages = [];
+				this._queuedTaskInputIds.clear();
+				this._taskInputIds = new WeakMap();
+				this._pendingNextTurnMessages = [];
+				this._restoreTaskQueues();
+				this._emitQueueUpdate();
 			}
 			// Emit session_tree event
 			await this._extensionRunner.emit({

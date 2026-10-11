@@ -18,6 +18,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { SessionManager } from "./session-manager.ts";
 
 const ENTRY_TYPE = "pi-task-recovery";
+const driverOwners = new WeakSet<SessionManager>();
 
 export interface RecoveryTool {
 	call: AgentToolCall;
@@ -26,6 +27,8 @@ export interface RecoveryTool {
 	dispatched: boolean;
 	definition?: string;
 	result?: ToolResultMessage;
+	/** Reserved canonical receipt; publication requires a matching branch-visible message. */
+	resultEntryId?: string;
 	terminate?: boolean;
 }
 
@@ -92,6 +95,7 @@ export class TaskRecoveryJournal {
 	private readonly manager: SessionManager;
 	private lockPath?: string;
 	private lockToken?: string;
+	private ownsDriver = false;
 
 	constructor(manager: SessionManager) {
 		this.manager = manager;
@@ -252,8 +256,12 @@ export class TaskRecoveryJournal {
 		const branchIds = new Set(this.manager.getBranch().map((entry) => entry.id));
 		const previous = this.state;
 		const suspendedTasks = previous?.suspendedTasks ?? [];
+		const unknown = previous?.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result);
 		const suspending =
-			!previous?.retirement && previous?.tools.some((tool) => tool.dispatched && !tool.safe && !tool.result);
+			previous &&
+			!previous.retirement &&
+			(unknown ||
+				(previous.status !== "cancelled" && previous.status !== "completed" && this.hasUnaccountedCalls(previous)));
 		if (previous && suspending) {
 			const { suspendedTasks: _suspended, ...paused } = previous;
 			const leafId = this.manager.getLeafId();
@@ -262,7 +270,7 @@ export class TaskRecoveryJournal {
 				leafId,
 				state: {
 					...paused,
-					status: "needs_reconciliation",
+					status: unknown ? "needs_reconciliation" : "interrupted",
 					queued: paused.queued.filter((group) => group.kind !== "nextTurn"),
 				},
 			});
@@ -315,7 +323,7 @@ export class TaskRecoveryJournal {
 			(task) => task.retirement || isUnfinishedComputerCaptureTask(task),
 		);
 		if (candidates.every((task) => task.retirement && notices.has(task.id))) return;
-		const owned = this.lockPath !== undefined;
+		const owned = this.ownsDriver;
 		if (!owned) this.acquire();
 		try {
 			const state = this.state;
@@ -438,7 +446,7 @@ export class TaskRecoveryJournal {
 	}
 
 	queue(kind: "steer" | "followUp" | "nextTurn", messages: AgentMessage[], label?: string): string[] {
-		const owned = this.lockPath !== undefined;
+		const owned = this.ownsDriver;
 		if (!owned) this.acquire();
 		try {
 			if (!this.state || this.state.status === "completed") {
@@ -457,9 +465,41 @@ export class TaskRecoveryJournal {
 		}
 	}
 
+	/** Replaying an ancestor's pending group creates delivery receipts on its new branch. */
+	rebindQueuedReceipts(): void {
+		const initial = this.state;
+		const branchIds = new Set(this.manager.getBranch().map((entry) => entry.id));
+		if (
+			!initial?.queued.some(
+				(group) => !group.cancelled && group.entryIds.some((id) => this.manager.getEntry(id) && !branchIds.has(id)),
+			)
+		)
+			return;
+		const owned = this.ownsDriver;
+		if (!owned) this.acquire();
+		try {
+			const state = this.state;
+			if (!state) return;
+			let changed = false;
+			for (const group of state.queued) {
+				if (group.cancelled) continue;
+				group.entryIds = group.entryIds.map((id) => {
+					if (!this.manager.getEntry(id) || branchIds.has(id)) return id;
+					changed = true;
+					return randomUUID();
+				});
+			}
+			// Also applies to queued snapshots whose original driver completed.
+			// Append on the selected branch; old branches retain their own receipts.
+			if (changed) this.save(state);
+		} finally {
+			if (!owned) this.release();
+		}
+	}
+
 	cancelQueued(entryIds: ReadonlySet<string>): void {
 		if (entryIds.size === 0) return;
-		const owned = this.lockPath !== undefined;
+		const owned = this.ownsDriver;
 		if (!owned) this.acquire();
 		try {
 			const state = this.state;
@@ -519,8 +559,24 @@ export class TaskRecoveryJournal {
 					tool.call.name === call.name &&
 					(isDeepStrictEqual(tool.args, args) || isDeepStrictEqual(tool.call.arguments, call.arguments)),
 			);
-		if (pending)
-			throw new Error(`Tool ${pending.call.id} has an unknown outcome; inspect it before repeating this operation`);
+		if (pending) {
+			const text = `Tool ${pending.call.id} has an unknown outcome; inspect it before repeating this operation`;
+			// This call was rejected before dispatch, unlike the unresolved original.
+			this.result(
+				{
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: call.name,
+					content: [{ type: "text", text }],
+					isError: true,
+					timestamp: Date.now(),
+				},
+				call,
+				false,
+				false,
+			);
+			throw new Error(text);
+		}
 		const previous = this.state?.tools.find((tool) => tool.call.id === call.id);
 		if (
 			previous?.dispatched &&
@@ -571,6 +627,85 @@ export class TaskRecoveryJournal {
 		});
 	}
 
+	/** A result belongs to this response occurrence, not every response reusing its call ID. */
+	findResultEntry(assistantEntryId: string, toolCallId: string): string | undefined {
+		const branch = this.manager.getBranch();
+		const sources = this.resultEntrySources;
+		const recorded = branch.find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === toolCallId &&
+				sources.get(entry.id) === assistantEntryId,
+		);
+		if (recorded) return recorded.id;
+		const index = branch.findIndex((entry) => entry.id === assistantEntryId);
+		if (index < 0) return undefined;
+		for (const entry of branch.slice(index + 1)) {
+			if (entry.type === "custom_message") break;
+			if (entry.type !== "message") continue;
+			if (entry.message.role !== "toolResult") break;
+			if (entry.message.toolCallId === toolCallId) return entry.id;
+		}
+		return undefined;
+	}
+
+	/** Persist occurrence ownership before publication, without changing execution certainty or task status. */
+	recordResultEntry(assistantEntryId: string, message: ToolResultMessage, resultEntryId?: string): string | undefined {
+		const active = this.state;
+		if (!active) return;
+		const task = [active, ...(active.suspendedTasks ?? []).map((task) => task.state)].find(
+			(task) => task.step?.assistantEntryId === assistantEntryId,
+		);
+		const tool = task?.tools.find(
+			(tool) => tool.call.id === message.toolCallId && tool.call.name === message.toolName,
+		);
+		if (!tool?.result) return;
+		tool.result = message;
+		const receipt = resultEntryId ?? tool.resultEntryId;
+		// An ancestor can reserve a receipt later consumed on another branch.
+		// Keep that branch's canonical audit, but publish on this branch with a fresh ID.
+		tool.resultEntryId =
+			receipt && (!this.manager.getEntry(receipt) || this.manager.getBranch().some((entry) => entry.id === receipt))
+				? receipt
+				: randomUUID();
+		this.save(active);
+		return tool.resultEntryId;
+	}
+
+	/** Published occurrence ownership requires a canonical message, not just a reserved receipt. */
+	get resultEntrySources(): Map<string, string> {
+		const branch = this.manager.getBranch();
+		const visible = new Set(branch.map((entry) => entry.id));
+		const sources = new Map<string, string>();
+		for (const entry of branch) {
+			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
+			const state = entry.data as TaskRecoveryState | undefined;
+			if (!state || !Array.isArray(state.tools)) continue;
+			for (const task of [state, ...(state.suspendedTasks ?? []).map((task) => task.state)]) {
+				const assistantId = task.step?.assistantEntryId;
+				if (!assistantId || !visible.has(assistantId)) continue;
+				const assistant = this.manager.getEntry(assistantId);
+				if (assistant?.type !== "message" || assistant.message.role !== "assistant") continue;
+				for (const tool of task.tools) {
+					if (!tool.resultEntryId || !visible.has(tool.resultEntryId)) continue;
+					const result = this.manager.getEntry(tool.resultEntryId);
+					if (
+						result?.type === "message" &&
+						result.message.role === "toolResult" &&
+						result.message.toolCallId === tool.call.id &&
+						result.message.toolName === tool.call.name &&
+						assistant.message.content.some(
+							(block) => block.type === "toolCall" && block.id === tool.call.id && block.name === tool.call.name,
+						)
+					)
+						sources.set(tool.resultEntryId, assistantId);
+				}
+			}
+		}
+		return sources;
+	}
+
 	get unknownTools(): RecoveryTool[] {
 		const state = this.state;
 		return !state?.retirement
@@ -578,11 +713,34 @@ export class TaskRecoveryJournal {
 			: [];
 	}
 
+	/** The full committed/checkpoint plan, not just calls that reached dispatch. */
+	plannedCalls(state: Pick<TaskRecoveryState, "step">): AgentToolCall[] {
+		const entry = state.step?.assistantEntryId ? this.manager.getEntry(state.step.assistantEntryId) : undefined;
+		const content =
+			entry?.type === "message" && entry.message.role === "assistant"
+				? entry.message.content
+				: state.step?.recoverable !== false
+					? [...(state.step?.items ?? [])].sort((a, b) => a.index - b.index).map((item) => item.block)
+					: [];
+		return content.filter((block) => block.type === "toolCall");
+	}
+
+	hasUnaccountedCalls(state: Pick<TaskRecoveryState, "step" | "tools">): boolean {
+		return (
+			state.tools.some((tool) => !tool.result) ||
+			this.plannedCalls(state).some((call) => !state.tools.some((tool) => tool.call.id === call.id && tool.result))
+		);
+	}
+
 	/** One native task driver owns this session until all its tool promises settle. */
 	acquire(): void {
+		if (this.ownsDriver || driverOwners.has(this.manager)) throw new Error("Task recovery driver is already active");
 		const sessionFile = this.manager.getSessionFile();
-		if (!this.manager.isPersisted() || !sessionFile) return;
-		if (this.lockPath) throw new Error("Task recovery driver is already active");
+		if (!this.manager.isPersisted() || !sessionFile) {
+			this.ownsDriver = true;
+			driverOwners.add(this.manager);
+			return;
+		}
 		const path = `${sessionFile}.task.lock`;
 		const token = randomUUID();
 		// Fresh claims and dead-owner reclamation share one gate, so a stale
@@ -618,6 +776,8 @@ export class TaskRecoveryJournal {
 			}
 			this.lockPath = path;
 			this.lockToken = token;
+			this.ownsDriver = true;
+			driverOwners.add(this.manager);
 		} finally {
 			rmdirSync(claimPath);
 		}
@@ -630,6 +790,8 @@ export class TaskRecoveryJournal {
 		}
 		this.lockPath = undefined;
 		this.lockToken = undefined;
+		if (this.ownsDriver) driverOwners.delete(this.manager);
+		this.ownsDriver = false;
 	}
 
 	private save(state: TaskRecoveryState): void {

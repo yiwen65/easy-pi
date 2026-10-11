@@ -366,7 +366,7 @@ export function createEditToolDefinition(
 					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 					writeStarted = true;
 					await ops.writeFile(absolutePath, finalContent);
-					throwIfAborted();
+					// A fulfilled target write is acknowledged; late cancellation cannot erase its diff.
 
 					const diffResult = generateDiffString(baseContent, newContent);
 					const patch = generateUnifiedPatch(path, baseContent, newContent);

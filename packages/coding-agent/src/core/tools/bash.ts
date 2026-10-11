@@ -1,5 +1,4 @@
-import { constants } from "node:fs";
-import { access as fsAccess } from "node:fs/promises";
+import { stat as fsStat } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
 	type AgentTool,
@@ -37,12 +36,16 @@ const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 	if (timeout === undefined) return undefined;
 	if (!Number.isFinite(timeout) || timeout <= 0) {
-		throw new Error("Invalid timeout: must be a finite number of seconds");
+		throw new ExecutionError("timeout", "Invalid timeout: must be a finite number of seconds", undefined, {
+			executionOutcome: "not_started",
+		});
 	}
 
 	const timeoutMs = timeout * 1000;
 	if (timeoutMs > MAX_TIMEOUT_MS) {
-		throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
+		throw new ExecutionError("timeout", `Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`, undefined, {
+			executionOutcome: "not_started",
+		});
 	}
 	return timeoutMs;
 }
@@ -103,13 +106,34 @@ export function createLocalBashOperations(options?: {
 		exec: async (command, cwd, { onData, signal, timeout, env, promoteOnTimeout }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
-				throw new Error("aborted");
+				throw new ExecutionError("aborted", "aborted", undefined, { executionOutcome: "not_started" });
 			}
-			const shellConfig = getShellConfig(options?.shellPath);
+			let shellConfig: ReturnType<typeof getShellConfig>;
 			try {
-				await fsAccess(cwd, constants.F_OK);
-			} catch {
-				throw new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`);
+				shellConfig = getShellConfig(options?.shellPath);
+			} catch (error) {
+				const cause = error instanceof Error ? error : new Error(String(error));
+				throw new ExecutionError("shell_unavailable", cause.message, cause, { executionOutcome: "not_started" });
+			}
+			let cwdIsDirectory: boolean;
+			try {
+				cwdIsDirectory = (await fsStat(cwd)).isDirectory();
+			} catch (error) {
+				throw new ExecutionError(
+					"spawn_error",
+					`Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
+					error instanceof Error ? error : undefined,
+					{ executionOutcome: "not_started" },
+				);
+			}
+
+			if (!cwdIsDirectory) {
+				throw new ExecutionError(
+					"spawn_error",
+					`Working directory is not a directory: ${cwd}\nCannot execute bash commands.`,
+					undefined,
+					{ executionOutcome: "not_started" },
+				);
 			}
 
 			const forwardData = (chunk: Uint8Array): void => {
@@ -132,17 +156,16 @@ export function createLocalBashOperations(options?: {
 				if (result.value.promotedTaskId !== undefined) {
 					return { exitCode: null, promotedTaskId: result.value.promotedTaskId };
 				}
-				if (signal?.aborted) throw new Error("aborted");
 				return { exitCode: result.value.exitCode, signal: result.value.signal ?? undefined };
 			}
-			if (result.error.code === "aborted" || (result.error.code === "timeout" && signal?.aborted)) {
-				throw new Error("aborted");
+			if (result.error.code === "aborted") throw result.error;
+			if (result.error.code === "timeout" && signal?.aborted) {
+				throw new ExecutionError("aborted", "aborted", result.error);
 			}
 			if (result.error.code === "timeout") {
-				throw new Error(`timeout:${timeout}`);
+				throw new ExecutionError("timeout", `timeout:${timeout}`, result.error);
 			}
-			if (result.error.cause instanceof Error) throw result.error.cause;
-			throw new Error(result.error.message);
+			throw result.error;
 		},
 	};
 }
@@ -360,7 +383,8 @@ async function captureBashOperations(
 	};
 	try {
 		try {
-			if (options.abortSignal?.aborted) throw new Error("aborted");
+			if (options.abortSignal?.aborted)
+				throw new ExecutionError("aborted", "aborted", undefined, { executionOutcome: "not_started" });
 			const result = await ops.exec(execution.command, execution.cwd, {
 				onData: (data) => {
 					if (!acceptingOutput) return;
@@ -378,18 +402,17 @@ async function captureBashOperations(
 		} catch (error) {
 			const cause = error instanceof Error ? error : new Error(String(error));
 			cancelled = options.abortSignal?.aborted === true || cause.message === "aborted";
-			if (!cancelled) {
-				executionError =
-					error instanceof ExecutionError
-						? error
-						: new ExecutionError(
-								cause.message.startsWith("timeout:") ? "timeout" : "unknown",
-								cause.message.startsWith("timeout:")
-									? `Command timed out after ${cause.message.slice("timeout:".length)} seconds`
-									: cause.message,
-								cause,
-							);
-			}
+			// Preserve backend proof even when cancellation is also observed.
+			executionError =
+				error instanceof ExecutionError
+					? error
+					: new ExecutionError(
+							cause.message.startsWith("timeout:") ? "timeout" : "unknown",
+							cause.message.startsWith("timeout:")
+								? `Command timed out after ${cause.message.slice("timeout:".length)} seconds`
+								: cause.message,
+							cause,
+						);
 		} finally {
 			acceptingOutput = false;
 			output.finish();

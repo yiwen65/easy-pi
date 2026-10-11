@@ -183,6 +183,17 @@ describe("normalizeProviderError", () => {
 		expect(norm.body?.length).toBeLessThan(longBody.length);
 	});
 
+	it.each([NaN, Infinity, -1, 0, 512.5, 600, "500"])(
+		"ignores malformed statusCode %s instead of hiding the valid permanent status",
+		(statusCode) => {
+			const norm = normalizeProviderError(
+				Object.assign(new Error("Request timeout is invalid"), { statusCode, status: 400 }),
+			);
+			expect(norm.status).toBe(400);
+			expect(formatProviderError(norm)).toBe("400: Request timeout is invalid");
+		},
+	);
+
 	it("sets messageCarriesBody when the message already contains the extracted body", () => {
 		const error = Object.assign(new Error("500: upstream exploded"), {
 			statusCode: 500,
@@ -229,6 +240,21 @@ describe("formatProviderError", () => {
 		const norm = normalizeProviderError(Object.assign(new Error(body), { status: 403 }));
 
 		expect(formatProviderError(norm, "OpenAI API error")).toBe(`OpenAI API error (403): ${body}`);
+	});
+
+	it.each([400, 408, 409, 429, 503])("retains SDK status %i when its message has no status or body", (status) => {
+		const norm = normalizeProviderError(Object.assign(new Error("opaque provider failure"), { status }));
+		expect(formatProviderError(norm)).toBe(`${status}: opaque provider failure`);
+	});
+
+	it("retains the authoritative status over a conflicting status in the message", () => {
+		const norm = normalizeProviderError(Object.assign(new Error("HTTP 503: timeout"), { status: 400 }));
+		expect(formatProviderError(norm)).toBe("400: HTTP 503: timeout");
+	});
+
+	it("does not duplicate an existing SDK status representation", () => {
+		const norm = normalizeProviderError(Object.assign(new Error("400 status code (no body)"), { status: 400 }));
+		expect(formatProviderError(norm)).toBe("400 status code (no body)");
 	});
 
 	it("returns the bare message for a non-Error value", () => {

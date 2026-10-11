@@ -125,7 +125,7 @@ export function createEditTool<TContext extends ExecutionToolContext = Execution
 					writeStarted = true;
 					const writeResult = await env.writeFile(absolutePath, finalContent, signal);
 					if (!writeResult.ok) throw editAccessError(path, writeResult.error);
-					if (signal?.aborted) throw new Error("Operation aborted");
+					// Preserve the acknowledged target write; cancellation still stops later dispatch.
 
 					const diffResult = generateDiffString(baseContent, newContent);
 					return {

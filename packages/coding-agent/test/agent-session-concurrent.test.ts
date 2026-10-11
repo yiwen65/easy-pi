@@ -16,8 +16,8 @@ import {
 	type TextContent,
 } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentSession } from "../src/core/agent-session.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -61,6 +61,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	const pendingPrompts: Promise<void>[] = [];
 
 	beforeEach(async () => {
 		tempDir = join(tmpdir(), `pi-concurrent-test-${Date.now()}`);
@@ -71,8 +72,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		delete (globalThis as typeof globalThis & { testExtensionApi?: unknown }).testExtensionApi;
 		delete (globalThis as typeof globalThis & { testCommandRuns?: unknown }).testCommandRuns;
 		if (session) {
-			session.dispose();
+			await session.shutdown();
 		}
+		await Promise.allSettled(pendingPrompts.splice(0));
+		vi.restoreAllMocks();
+		vi.useRealTimers();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
@@ -128,14 +132,86 @@ describe("AgentSession concurrent prompt guard", () => {
 		return session;
 	}
 
+	function waitForSessionEvent(predicate: (event: AgentSessionEvent) => boolean): Promise<void> {
+		return new Promise((resolve) => {
+			const unsubscribe = session.subscribe((event) => {
+				if (!predicate(event)) return;
+				unsubscribe();
+				resolve();
+			});
+		});
+	}
+
+	async function startStreamingPrompt(text: string): Promise<{ prompt: Promise<void> }> {
+		const started = waitForSessionEvent((event) => event.type === "agent_start");
+		// Admission precedes the provider stream. These fixtures must also be
+		// listening for abort before tests cancel a run with pending follow-ups.
+		const streamStarted = waitForSessionEvent(
+			(event) =>
+				event.type === "message_start" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason !== "aborted",
+		);
+		const prompt = session.prompt(text);
+		pendingPrompts.push(prompt);
+		void prompt.catch(() => {});
+		await Promise.race([
+			Promise.all([started, streamStarted]),
+			prompt.then(() => {
+				throw new Error("Prompt ended before agent_start");
+			}),
+		]);
+		return { prompt };
+	}
+
+	it("waits for actual admission when prompt preflight outlasts the old fixed timer", async () => {
+		await createSession();
+		let releasePreflight = () => {};
+		const preflightGate = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		let markPreflightEntered = () => {};
+		const preflightEntered = new Promise<void>((resolve) => {
+			markPreflightEntered = resolve;
+		});
+		vi.spyOn(session.extensionRunner, "emitBeforeAgentStart").mockImplementation(async () => {
+			markPreflightEntered();
+			await preflightGate;
+			return undefined;
+		});
+		vi.useFakeTimers();
+		const starting = startStreamingPrompt("Held preflight");
+		let ready = false;
+		void starting.then(
+			() => {
+				ready = true;
+			},
+			() => {},
+		);
+		try {
+			await preflightEntered;
+			await vi.advanceTimersByTimeAsync(10);
+			expect(session.isStreaming).toBe(false);
+			expect(ready).toBe(false);
+			vi.useRealTimers();
+			releasePreflight();
+			const { prompt } = await starting;
+			expect(session.isStreaming).toBe(true);
+			await session.abort();
+			await prompt.catch(() => {});
+		} finally {
+			vi.useRealTimers();
+			releasePreflight();
+			await session.shutdown();
+			await starting.catch(() => {});
+		}
+	});
+
 	it("should throw when prompt() called while streaming", async () => {
 		await createSession();
 
-		// Start first prompt (don't await, it will block until abort)
-		const firstPrompt = session.prompt("First message");
-
-		// Wait a tick for isStreaming to be set
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		// Keep the first prompt live until abort.
+		const { prompt: firstPrompt } = await startStreamingPrompt("First message");
 
 		// Verify we're streaming
 		expect(session.isStreaming).toBe(true);
@@ -153,12 +229,10 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should allow steer() while streaming", async () => {
 		await createSession();
 
-		// Start first prompt
-		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		const { prompt: firstPrompt } = await startStreamingPrompt("First message");
 
 		// steer should work while streaming
-		expect(() => session.steer("Steering message")).not.toThrow();
+		await expect(session.steer("Steering message")).resolves.toBeUndefined();
 		expect(session.pendingMessageCount).toBe(1);
 
 		// Cleanup
@@ -169,12 +243,10 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should allow followUp() while streaming", async () => {
 		await createSession();
 
-		// Start first prompt
-		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		const { prompt: firstPrompt } = await startStreamingPrompt("First message");
 
 		// followUp should work while streaming
-		expect(() => session.followUp("Follow-up message")).not.toThrow();
+		await expect(session.followUp("Follow-up message")).resolves.toBeUndefined();
 		expect(session.pendingMessageCount).toBe(1);
 
 		// Cleanup
@@ -266,8 +338,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			}
 		});
 
-		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		const { prompt: firstPrompt } = await startStreamingPrompt("First message");
 		expect(session.isStreaming).toBe(true);
 
 		const pi = (
@@ -279,8 +350,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		).testExtensionApi;
 		expect(pi).toBeDefined();
 
+		const steeringQueued = waitForSessionEvent(
+			(event) => event.type === "queue_update" && event.steering.includes("Steer from extension"),
+		);
 		pi!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		await steeringQueued;
 
 		expect(session.pendingMessageCount).toBe(1);
 		expect(session.getSteeringMessages()).toContain("Steer from extension");
@@ -447,6 +521,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
 				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
 				emitToolCall: (event: { type: string; toolCallId: string }) => Promise<undefined>;
+				isInSessionShutdown: () => boolean;
 				emitInput: (
 					text: string,
 					images: unknown,
@@ -464,6 +539,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		};
 		sessionWithRunner._extensionRunner = {
 			hasHandlers: (eventType) => eventType === "tool_call",
+			isInSessionShutdown: () => false,
 			emit: async () => {},
 			emitMessageEnd: async () => undefined,
 			emitToolCall: async () => {
@@ -593,6 +669,7 @@ describe("AgentSession concurrent prompt guard", () => {
 				hasHandlers: (eventType: string) => boolean;
 				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
 				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
+				isInSessionShutdown: () => boolean;
 				emitInput: (
 					text: string,
 					images: unknown,
@@ -610,6 +687,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		};
 		sessionWithRunner._extensionRunner = {
 			hasHandlers: () => false,
+			isInSessionShutdown: () => false,
 			emit: async () => {},
 			emitMessageEnd: async (event) => {
 				if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -622,9 +700,10 @@ describe("AgentSession concurrent prompt guard", () => {
 			invalidate: () => {},
 		};
 
+		const settled = waitForSessionEvent((event) => event.type === "agent_settled");
 		await session.prompt("hi");
 		await session.agent.waitForIdle();
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		await settled;
 
 		const messageEntries = sessionManager.getEntries().filter((entry) => entry.type === "message");
 		expect(messageEntries.map((entry) => entry.message.role)).toEqual([

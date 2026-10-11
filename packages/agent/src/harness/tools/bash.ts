@@ -1,7 +1,6 @@
 import { type Static, Type } from "typebox";
 import { AgentToolError } from "../../types.ts";
 import type { AgentHarnessTool, ExecutionError, Result } from "../types.ts";
-import { getOrThrow } from "../types.ts";
 import {
 	executeShellWithCapture,
 	type ShellCaptureOptions,
@@ -197,7 +196,7 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					timeoutMs: timeout !== undefined ? timeout * 1000 : undefined,
 				});
 				if (!started.ok) {
-					// Failed admission did not launch the command; post-start failures stay on the task record.
+					// Only backend pre-launch evidence proves a failed start had no command effects.
 					throw new ExecutionToolError(
 						started.error.code === "not_found"
 							? "NOT_FOUND"
@@ -206,8 +205,8 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 								: "SPAWN_ERROR",
 						started.error.message,
 						undefined,
-						undefined,
-						{ executionOutcome: "not_started" },
+						started.error,
+						started.error.executionOutcome === "not_started" ? { executionOutcome: "not_started" } : undefined,
 					);
 				}
 				const task = started.value;
@@ -281,11 +280,16 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 						scheduleOutputUpdate();
 					},
 				};
-				const capture = getOrThrow(
-					await (options?.capture
-						? options.capture(execution, captureOptions)
-						: executeShellWithCapture(env, execution.command, captureOptions)),
-				);
+				const captured = await (options?.capture
+					? options.capture(execution, captureOptions)
+					: executeShellWithCapture(env, execution.command, captureOptions));
+				if (!captured.ok) {
+					throw new AgentToolError(captured.error.message, initialDetails, {
+						cause: captured.error,
+						...(captured.error.executionOutcome === "not_started" ? { executionOutcome: "not_started" } : {}),
+					});
+				}
+				const capture = captured.value;
 				clearUpdateTimer();
 				getLatestProgress = () => capture;
 				updateDirty = true;
@@ -310,7 +314,12 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					};
 				}
 
-				const cancelled = capture.cancelled || signal?.aborted === true;
+				const acknowledgedExit =
+					!capture.cancelled &&
+					capture.executionError === undefined &&
+					!capture.signal &&
+					Number.isFinite(capture.exitCode);
+				const cancelled = !acknowledgedExit && (capture.cancelled || signal?.aborted === true);
 				const timedOut = !cancelled && capture.executionError?.code === "timeout";
 				const exitSignal = cancelled || timedOut ? null : (capture.signal ?? null);
 				const exitCode = cancelled || timedOut || exitSignal ? null : (capture.exitCode ?? null);
@@ -347,11 +356,12 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				}
 				const fail = (code: string, status: string, cause?: Error): never => {
 					throw Object.assign(
-						new AgentToolError(
-							`${outputText ? `${outputText}\n\n` : ""}${status}`,
-							details,
-							cause ? { cause } : undefined,
-						),
+						new AgentToolError(`${outputText ? `${outputText}\n\n` : ""}${status}`, details, {
+							...(cause ? { cause } : {}),
+							...(capture.executionError?.executionOutcome === "not_started"
+								? { executionOutcome: "not_started" }
+								: {}),
+						}),
 						{ code },
 					);
 				};

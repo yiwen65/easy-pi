@@ -250,7 +250,8 @@ export class NodeProcessExecutor {
 		command: string,
 		options: NodeProcessExecutionOptions,
 	): Promise<Result<NodeProcessExecutionResult, ExecutionError>> {
-		if (options.abortSignal?.aborted) return err(new ExecutionError("aborted", "aborted"));
+		if (options.abortSignal?.aborted)
+			return err(new ExecutionError("aborted", "aborted", undefined, { executionOutcome: "not_started" }));
 		let child: ReturnType<typeof spawn> | undefined;
 		let timeoutId: ReturnType<typeof setTimeout> | undefined;
 		let timedOut = false;
@@ -353,7 +354,9 @@ export class NodeProcessExecutor {
 			if (result === undefined) return err(new ExecutionError("timeout", `timeout:${options.timeoutMs}`));
 			if (callbackError) return err(callbackError);
 			if (timedOut) return err(new ExecutionError("timeout", `timeout:${options.timeoutMs}`));
-			if (options.abortSignal?.aborted) return err(new ExecutionError("aborted", "aborted"));
+			// A normal numeric exit is an acknowledgement, not an in-flight cancellation.
+			if (options.abortSignal?.aborted && (result.exitCode === null || result.signal !== null))
+				return err(new ExecutionError("aborted", "aborted"));
 			return ok(result);
 		} catch (error) {
 			const cause = toError(error);

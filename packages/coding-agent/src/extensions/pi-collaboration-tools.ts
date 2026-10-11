@@ -13,6 +13,7 @@ import {
 	formatCollaborationError,
 	parseCollaborationArguments,
 	parseForkSelection,
+	resolveAgentPath,
 	validateDelegation,
 } from "@easy-pi/subagent/collaboration-contract";
 import type { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
@@ -379,6 +380,7 @@ export function registerPiCollaborationTools(options: {
 						}
 						case "send_message": {
 							const args = parseCollaborationArguments(name, input);
+							resolveAgentPath(identity.agentPath, args.target);
 							effectMayHaveStarted = true;
 							result = {
 								message_id: await controller.send(identity, args.target, args.message, signal),
@@ -441,12 +443,14 @@ export function registerPiCollaborationTools(options: {
 						}
 						case "interrupt_agent": {
 							const args = parseCollaborationArguments(name, input);
+							resolveAgentPath(identity.agentPath, args.target);
 							effectMayHaveStarted = true;
 							result = { previous_status: await controller.interrupt(identity, args.target) };
 							break;
 						}
 						case "close_agent": {
 							const args = parseCollaborationArguments(name, input);
+							resolveAgentPath(identity.agentPath, args.target);
 							effectMayHaveStarted = true;
 							result = { previous_status: await controller.close(identity, args.target) };
 							break;

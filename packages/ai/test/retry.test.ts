@@ -1,5 +1,7 @@
+import OpenAI from "openai";
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "../src/providers/faux.ts";
+import { formatProviderError, normalizeProviderError } from "../src/utils/error-body.ts";
 import {
 	isNetworkAssistantError,
 	isRetryableAssistantError,
@@ -22,6 +24,142 @@ const pendingStreamCanceledMessage = "The pending stream has been canceled";
 const serverBusyMessage = "Codex error: Our servers are currently busy. Please try again later.";
 
 describe("provider retry classification", () => {
+	it.each([
+		{ code: "invalid_function_parameters", message: "Invalid schema: properties.timeout must have a type" },
+		{ code: "invalid_value", message: "Invalid value: 512" },
+	])("does not retry a formatted permanent SDK 400: $code", ({ code, message }) => {
+		const error = OpenAI.APIError.generate(
+			400,
+			{ error: { type: "invalid_request_error", code, message } },
+			undefined,
+			new Headers(),
+		);
+		const errorMessage = formatProviderError(normalizeProviderError(error), "OpenAI API error");
+		const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+
+		expect(errorMessage).toContain("OpenAI API error (400)");
+		expect.soft(isRetryableAssistantError(response)).toBe(false);
+		expect.soft(isNetworkAssistantError(response)).toBe(false);
+	});
+
+	it.each([408, 409, 429, 500, 503, 599])("preserves transient SDK status %i with an opaque message", (status) => {
+		const error = Object.assign(new Error("opaque provider failure"), { status });
+		for (const prefix of [undefined, "OpenAI API error"]) {
+			const errorMessage = formatProviderError(normalizeProviderError(error), prefix);
+			const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			expect(isRetryableAssistantError(response)).toBe(true);
+			expect(isNetworkAssistantError(response)).toBe(false);
+		}
+	});
+
+	it.each([400, 401, 403, 404, 422])("prioritizes permanent SDK status %i over body wording", (status) => {
+		const error = Object.assign(new Error("properties.timeout: 512; please retry your request"), { status });
+		for (const prefix of [undefined, "OpenAI API error"]) {
+			const errorMessage = formatProviderError(normalizeProviderError(error), prefix);
+			const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			expect(isRetryableAssistantError(response)).toBe(false);
+			expect(isNetworkAssistantError(response)).toBe(false);
+		}
+	});
+
+	it.each([
+		"Invalid value: 512",
+		"Invalid value: 429",
+		'400 {"type":"invalid_request_error","message":"properties.timeout: 512"}',
+		"Error: 400 request timeout field is invalid",
+		"512",
+		"429",
+		'{"error":{"message":"Invalid value: 429","value":429}}',
+		'{"error":{"type":"error","code":"invalid_value","message":"Request timeout: value 512"}}',
+		"Schema field properties.timeout must have a type",
+		'{"properties":{"timeout":{},"server_error":{},"value":512}}',
+		'{"error":{"type":"invalid_request_error","message":"Request timeout: value 512"}}',
+		'{"type":"authentication_error","message":"server_busy"}',
+		'{"status":400,"message":"Request timeout: invalid value 512"}',
+		'{"statusCode":403,"message":"Connection timeout"}',
+		'{"error":{"message":"invalid_request_error: Request timeout"}}',
+		'{"error":{"message":"properties.timeout must have a type","value":512}}',
+		'{"error":{"message":"timeout",',
+		'"properties.timeout: 512"',
+	])("does not infer transient failures from body fields or ordinary values: %s", (errorMessage) => {
+		const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(response)).toBe(false);
+		expect(isNetworkAssistantError(response)).toBe(false);
+	});
+
+	it.each([408, 409, 429, 503])("does not trust status %i inside an arbitrary JSON body", (status) => {
+		const errorMessage = JSON.stringify({ status, message: "Request timeout: invalid value", value: 512 });
+		const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(response)).toBe(false);
+		expect(isNetworkAssistantError(response)).toBe(false);
+	});
+
+	it.each([503, 599])("keeps HTTP %i authoritative over body error type", (status) => {
+		const error = Object.assign(new Error("opaque"), {
+			status,
+			error: { type: "invalid_request_error", message: "opaque provider failure" },
+		});
+		const errorMessage = formatProviderError(normalizeProviderError(error));
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each(["Connection timeout", "Request timeout", "Timeout error", '"Connection timeout"'])(
+		"preserves explicit transport timeout messages: %s",
+		(errorMessage) => {
+			const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			expect(isRetryableAssistantError(response)).toBe(true);
+			expect(isNetworkAssistantError(response)).toBe(true);
+		},
+	);
+
+	it("preserves the AbortSignal.timeout DOMException through the production formatter", () => {
+		const error = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+		const errorMessage = formatProviderError(normalizeProviderError(error));
+		const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(response)).toBe(true);
+		expect(isNetworkAssistantError(response)).toBe(true);
+	});
+
+	it.each(["overloaded_error", "rate_limit_error", "server_busy"])(
+		"preserves supported provider JSON error types: %s",
+		(type) => {
+			const errorMessage = JSON.stringify({ error: { type, message: "opaque provider failure" } });
+			const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+			expect(isRetryableAssistantError(response)).toBe(true);
+			expect(isNetworkAssistantError(response)).toBe(false);
+		},
+	);
+
+	it("uses existing Bedrock HTTP metadata before ambiguous display text", () => {
+		const response = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "Connection timeout",
+		});
+		expect(isRetryableAssistantError(response)).toBe(true);
+		expect(isNetworkAssistantError(response)).toBe(true);
+		response.diagnostics = [{ type: "bedrock_response_failure", timestamp: 0, details: { status: 400 } }];
+		expect(isRetryableAssistantError(response)).toBe(false);
+		expect(isNetworkAssistantError(response)).toBe(false);
+	});
+
+	it("prioritizes trusted HTTP metadata over a conflicting status in display text", () => {
+		const error = Object.assign(new Error("HTTP 503: timeout"), { status: 400 });
+		const errorMessage = formatProviderError(normalizeProviderError(error));
+		const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		expect(isRetryableAssistantError(response)).toBe(false);
+		expect(isNetworkAssistantError(response)).toBe(false);
+	});
+
+	it.each([
+		"HTTP 503: upstream unavailable",
+		"HTTP status 503",
+		"HTTP/1.1 503 Service Unavailable",
+		'503 {"type":"api_error","message":"opaque provider failure"}',
+		"Error: 503 status code (no body)",
+	])("supports explicit HTTP status representations: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
 	it("matches explicit provider retry guidance", () => {
 		expect(
 			isRetryableAssistantError(

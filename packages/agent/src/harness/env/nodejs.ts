@@ -25,6 +25,7 @@ import {
 	realpath,
 	rename,
 	rm,
+	stat,
 	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -57,12 +58,20 @@ const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 function resolveTimeoutMs(timeout: number | undefined): Result<number | undefined, ExecutionError> {
 	if (timeout === undefined) return ok(undefined);
 	if (!Number.isFinite(timeout) || timeout <= 0) {
-		return err(new ExecutionError("timeout", "Invalid timeout: must be a finite number of seconds"));
+		return err(
+			new ExecutionError("timeout", "Invalid timeout: must be a finite number of seconds", undefined, {
+				executionOutcome: "not_started",
+			}),
+		);
 	}
 
 	const timeoutMs = timeout * 1000;
 	if (timeoutMs > MAX_TIMEOUT_MS) {
-		return err(new ExecutionError("timeout", `Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`));
+		return err(
+			new ExecutionError("timeout", `Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`, undefined, {
+				executionOutcome: "not_started",
+			}),
+		);
 	}
 	return ok(timeoutMs);
 }
@@ -527,14 +536,29 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async exec(command: string, options?: ShellExecOptions): Promise<Result<ShellExecResult, ExecutionError>> {
-		if (options?.abortSignal?.aborted) return err(new ExecutionError("aborted", "aborted"));
+		if (options?.abortSignal?.aborted)
+			return err(new ExecutionError("aborted", "aborted", undefined, { executionOutcome: "not_started" }));
 		const timeoutMsResult = resolveTimeoutMs(options?.timeout);
 		if (!timeoutMsResult.ok) return err(timeoutMsResult.error);
 		const cwd = options?.cwd ? resolvePath(this.cwd, options.cwd) : this.cwd;
 		const shellConfig = await getShellConfig(this.shellPath);
-		if (!shellConfig.ok) return shellConfig;
+		if (!shellConfig.ok)
+			return err(
+				new ExecutionError(shellConfig.error.code, shellConfig.error.message, shellConfig.error, {
+					executionOutcome: "not_started",
+				}),
+			);
 		try {
-			await access(cwd, constants.F_OK);
+			if (!(await stat(cwd)).isDirectory()) {
+				return err(
+					new ExecutionError(
+						"spawn_error",
+						`Working directory is not a directory: ${cwd}\nCannot execute bash commands.`,
+						undefined,
+						{ executionOutcome: "not_started" },
+					),
+				);
+			}
 		} catch (error) {
 			const cause = toError(error);
 			return err(
@@ -542,6 +566,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 					"spawn_error",
 					`Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
 					cause,
+					{ executionOutcome: "not_started" },
 				),
 			);
 		}
