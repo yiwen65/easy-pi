@@ -123,7 +123,19 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		"Complete the current task before ending your turn; if blocked by missing information, permission, or a decision, stop and ask or report rather than improvise.",
 	);
 	addGuideline(
-		"Keep context focused on the current objective: retrieve details on demand and disregard stale or superseded information.",
+		"Keep context focused on the current objective: use scoped searches and relevant excerpts unless full reads are required. Reuse recorded evidence and terminal results; inspect missing output as needed, and re-check when external state may have changed or a concrete evidence gap remains.",
+	);
+	addGuideline(
+		"Once the next routine action is clear, execute it directly; batch independent read-only inspections while keeping dependent actions and writes ordered.",
+	);
+	const waitTools = ["wait_for", "wait_agent"].filter((name) => tools.includes(name));
+	if (waitTools.length > 0) {
+		addGuideline(
+			`When waiting is the only remaining dependency, use ${waitTools.join(" or ")} instead of polling status; inspect output to diagnose a problem or fill an evidence gap, not to repeatedly check completion.`,
+		);
+	}
+	addGuideline(
+		"Once a required interaction capability is confirmed unavailable, stop repeated discovery; use a verified equivalent or report the remaining validation gap.",
 	);
 	addGuideline(
 		"Optimize for correctness first, then efficiency; increase effort only when risk or uncertainty justifies it.",

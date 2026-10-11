@@ -87,6 +87,54 @@ describe("buildSystemPrompt", () => {
 		});
 	});
 
+	describe("workflow efficiency", () => {
+		test("guides direct actions and evidence reuse without weakening validation", () => {
+			const prompt = buildSystemPrompt({ selectedTools: ["read"], cwd: "/workspace" });
+
+			expect(prompt).toContain("Once the next routine action is clear, execute it directly");
+			expect(prompt).toContain("batch independent read-only inspections");
+			expect(prompt).toContain("keeping dependent actions and writes ordered");
+			expect(prompt).toContain("use scoped searches and relevant excerpts unless full reads are required");
+			expect(prompt).toContain("Reuse recorded evidence and terminal results; inspect missing output as needed");
+			expect(prompt).toContain("re-check when external state may have changed or a concrete evidence gap remains");
+			expect(prompt).toContain(
+				"Once a required interaction capability is confirmed unavailable, stop repeated discovery",
+			);
+			expect(prompt).toContain("use a verified equivalent or report the remaining validation gap");
+			expect(prompt).toContain("verify changes with the smallest check that can catch a meaningful failure");
+			expect(prompt).toContain("Optimize for correctness first, then efficiency");
+		});
+
+		test.each([
+			{ tools: [], waitTools: undefined },
+			{ tools: ["wait_for"], waitTools: "wait_for" },
+			{ tools: ["wait_agent"], waitTools: "wait_agent" },
+			{ tools: ["wait_for", "wait_agent"], waitTools: "wait_for or wait_agent" },
+		])("limits blocking-wait guidance to available tools: $tools", ({ tools, waitTools }) => {
+			const prompt = buildSystemPrompt({ selectedTools: tools, cwd: "/workspace" });
+
+			if (waitTools === undefined) {
+				expect(prompt).not.toContain("When waiting is the only remaining dependency");
+			} else {
+				expect(prompt).toContain(`use ${waitTools} instead of polling status`);
+				expect(prompt).toContain("not to repeatedly check completion");
+			}
+			for (const name of ["wait_for", "wait_agent"]) {
+				if (!tools.some((tool) => tool === name)) expect(prompt).not.toContain(name);
+			}
+		});
+
+		test("preserves custom system-prompt replacement without default workflow guidance", () => {
+			const prompt = buildSystemPrompt({
+				customPrompt: "Custom instructions only.",
+				selectedTools: ["read", "wait_for", "wait_agent"],
+				cwd: "/workspace",
+			});
+
+			expect(prompt).toBe("Custom instructions only.\nCurrent working directory: /workspace\n");
+		});
+	});
+
 	describe("prompt guidelines", () => {
 		test("appends promptGuidelines to default guidelines", () => {
 			const prompt = buildSystemPrompt({
