@@ -1,11 +1,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { BackgroundTaskManager, BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { type Component, Text } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { type Component, Container, Text } from "@earendil-works/pi-tui";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { BackgroundTaskGroupComponent } from "../src/modes/interactive/components/background-task-group.ts";
+import type { StatusIndicator } from "../src/modes/interactive/components/status-indicator.ts";
 import { SubagentTurnGroupComponent } from "../src/modes/interactive/components/subagent-group.ts";
 import { TurnTranscriptContainer } from "../src/modes/interactive/components/turn-transcript-container.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -25,6 +26,14 @@ interface FooterHost {
 	backgroundTaskOwners: Map<string, { owner: object; group: BackgroundTaskGroupComponent }>;
 	toolTurnOwners: Map<string, object>;
 	grokTurnStartedAt?: number;
+	activeStatusIndicator?: StatusIndicator;
+	statusContainer: Container;
+	pendingTools: Map<string, unknown>;
+	streamingComponent?: Component;
+	streamingMessage?: AssistantMessage;
+	defaultEditor: { onEscape?: () => void };
+	ui: { requestRender: ReturnType<typeof vi.fn>; terminal: { setProgress: ReturnType<typeof vi.fn> } };
+	clearStatusIndicator(): void;
 	addMessageToChat(message: AgentMessage): void;
 	addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void;
 	ensureBackgroundTaskGroup(id: string, owner?: object): void;
@@ -88,13 +97,14 @@ function fixture(grok = true, manager?: BackgroundTaskManager) {
 			getShowImages: () => false,
 			getImageWidthCells: () => 60,
 			getShowCacheMissNotices: () => false,
-			getShowTerminalProgress: () => false,
+			getShowTerminalProgress: () => true,
 		},
 		extensionRunner: {
 			getMessageRenderer: () => undefined,
 			getEntryRenderer: () => () => new Text("custom entry", 0, 0),
 		},
 		getToolDefinition: () => undefined,
+		abortRetry: vi.fn(),
 	};
 	const host = Object.assign(Object.create(InteractiveMode.prototype), {
 		runtimeHost: { session },
@@ -110,12 +120,17 @@ function fixture(grok = true, manager?: BackgroundTaskManager) {
 		backgroundTaskOwners: new Map(),
 		toolTurnOwners: new Map(),
 		isInitialized: true,
-		ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
+		workingVisible: true,
+		defaultWorkingMessage: "Working...",
+		statusContainer: new Container(),
+		options: { tuiMode: "regular" },
+		ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() }, getClearOnShrink: () => false },
 		footer: { invalidate: vi.fn() },
 		editor: { addToHistory: vi.fn() },
+		defaultEditor: { onEscape: vi.fn() },
+		updatePendingMessagesDisplay: vi.fn(),
 		getMarkdownThemeWithSettings: getMarkdownTheme,
 		getMarkdownTransformers: () => [],
-		clearStatusIndicator: vi.fn(),
 	}) as FooterHost;
 	return { host, session, sessionManager };
 }
@@ -128,8 +143,187 @@ const categories = (children: Component[]) =>
 			child instanceof GrokToolTurnGroupComponent,
 	);
 
+function clockFixture() {
+	vi.useFakeTimers();
+	let now = 1_000;
+	vi.spyOn(performance, "now").mockImplementation(() => now);
+	return (ms: number) => {
+		now += ms;
+		vi.advanceTimersByTime(ms);
+	};
+}
+
 beforeAll(() => initTheme("dark"));
+afterEach(() => {
+	vi.restoreAllMocks();
+	vi.useRealTimers();
+});
 describe("InteractiveMode turn activity footer", () => {
+	test("internal end/start without new user keeps Working continuous until one final settlement", async () => {
+		const advance = clockFixture();
+		const { host, sessionManager } = fixture();
+		try {
+			await host.handleEvent({ type: "agent_start" });
+			await host.handleEvent({ type: "message_start", message: { role: "user", content: "first", timestamp: 0 } });
+			host.addMessageToChat(assistant([{ type: "thinking", thinking: "original reasoning" }]));
+			const group = host.currentTurnThinkingGroup!;
+			const complete = vi.spyOn(group, "completeTurn");
+			const owner = host.chatContainer.currentTurn;
+			const startedAt = host.grokTurnStartedAt;
+			advance(12_000);
+			await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+			expect(sessionManager.getEntries()).toEqual([]);
+			expect(stripAnsi(host.chatContainer.render(100).join("\n"))).not.toContain("worked");
+			expect(stripAnsi(host.statusContainer.render(100).join("\n"))).toContain("Working... 12s");
+			expect(complete).not.toHaveBeenCalled();
+			expect(host.ui.terminal.setProgress).toHaveBeenLastCalledWith(true);
+
+			advance(1_000);
+			await host.handleEvent({ type: "agent_start" });
+			expect(host.grokTurnStartedAt).toBe(startedAt);
+			expect(host.chatContainer.currentTurn).toBe(owner);
+			expect(stripAnsi(host.statusContainer.render(100).join("\n"))).toContain("Working... 13s");
+			host.addMessageToChat(assistant([{ type: "thinking", thinking: "recovered reasoning" }]));
+			expect(host.currentTurnThinkingGroup).toBe(group);
+			advance(20_000);
+			await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+			expect(sessionManager.getEntries()).toEqual([]);
+			expect(complete).not.toHaveBeenCalled();
+			advance(2_000);
+			await host.handleEvent({ type: "agent_settled" });
+			expect(complete).toHaveBeenCalledOnce();
+			expect(host.activeStatusIndicator).toBeUndefined();
+			expect(host.grokTurnStartedAt).toBeUndefined();
+			expect(host.ui.terminal.setProgress).toHaveBeenLastCalledWith(false);
+			expect(stripAnsi(host.chatContainer.render(100).join("\n"))).toContain("worked 35s");
+			expect(sessionManager.getEntries()).toEqual([
+				expect.objectContaining({ type: "custom", customType: "pi-turn-duration", data: { durationMs: 35_000 } }),
+			]);
+			await host.handleEvent({ type: "agent_settled" });
+			expect(sessionManager.getEntries()).toHaveLength(1);
+			expect(host.chatContainer.children.filter((child) => child instanceof GrokTurnDurationComponent)).toHaveLength(
+				1,
+			);
+
+			advance(10_000);
+			await host.handleEvent({ type: "agent_start" });
+			await host.handleEvent({ type: "message_start", message: { role: "user", content: "second", timestamp: 1 } });
+			expect(host.chatContainer.currentTurn).not.toBe(owner);
+			expect(stripAnsi(host.statusContainer.render(100).join("\n"))).toContain("Working... 0s");
+			advance(2_000);
+			await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+			await host.handleEvent({ type: "agent_settled" });
+			expect(sessionManager.getEntries()).toHaveLength(2);
+			expect(sessionManager.getEntries().at(-1)).toMatchObject({ data: { durationMs: 2_000 } });
+			expect(host.chatContainer.children.filter((child) => child instanceof GrokTurnDurationComponent)).toHaveLength(
+				2,
+			);
+		} finally {
+			host.clearStatusIndicator();
+			host.clearChatContainer();
+		}
+	});
+
+	test.each([true, false])(
+		"bounded retry settles one clock after recovery or backoff cancellation (success %s)",
+		async (success) => {
+			const advance = clockFixture();
+			const { host, sessionManager } = fixture();
+			const originalEscape = host.defaultEditor.onEscape;
+			try {
+				await host.handleEvent({ type: "agent_start" });
+				host.addMessageToChat(assistant([{ type: "thinking", thinking: "initial reasoning" }]));
+				const complete = vi.spyOn(host.currentTurnThinkingGroup!, "completeTurn");
+				advance(12_000);
+				await host.handleEvent({ type: "agent_end", messages: [], willRetry: true });
+				await host.handleEvent({
+					type: "auto_retry_start",
+					attempt: 1,
+					maxAttempts: 3,
+					delayMs: 3_000,
+					errorMessage: "overloaded_error",
+				});
+				expect(stripAnsi(host.statusContainer.render(100).join("\n"))).toContain("Retrying (1/3)");
+				advance(3_000);
+				if (success) {
+					await host.handleEvent({ type: "agent_start" });
+					expect(stripAnsi(host.statusContainer.render(100).join("\n"))).toContain("Working... 15s");
+					advance(5_000);
+					await host.handleEvent({ type: "auto_retry_end", success: true, attempt: 1 });
+					await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+				} else {
+					await host.handleEvent({
+						type: "auto_retry_end",
+						success: false,
+						attempt: 1,
+						finalError: "Retry cancelled",
+					});
+					expect(stripAnsi(host.chatContainer.render(100).join("\n"))).toContain(
+						"Retry failed after 1 attempts: Retry cancelled",
+					);
+				}
+				expect(host.defaultEditor.onEscape).toBe(originalEscape);
+				expect(complete).not.toHaveBeenCalled();
+				expect(sessionManager.getEntries()).toEqual([]);
+				await host.handleEvent({ type: "agent_settled" });
+				expect(complete).toHaveBeenCalledOnce();
+				expect(host.activeStatusIndicator).toBeUndefined();
+				expect(sessionManager.getEntries()).toEqual([
+					expect.objectContaining({
+						customType: "pi-turn-duration",
+						data: { durationMs: success ? 20_000 : 15_000 },
+					}),
+				]);
+			} finally {
+				host.clearStatusIndicator();
+				host.clearChatContainer();
+			}
+		},
+	);
+
+	test.each(["aborted", "exception"])("settlement cleans up %s without an agent_end", async (reason) => {
+		const advance = clockFixture();
+		const { host, sessionManager } = fixture();
+		try {
+			await host.handleEvent({ type: "agent_start" });
+			host.addMessageToChat(assistant([{ type: "thinking", thinking: "unfinished reasoning" }]));
+			const complete = vi.spyOn(host.currentTurnThinkingGroup!, "completeTurn");
+			await host.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "unfinished",
+				toolName: "read",
+				args: { path: "/tmp/a" },
+			});
+			const message = assistant([{ type: "text", text: "partial response" }]);
+			await host.handleEvent({ type: "message_start", message });
+			if (reason === "aborted")
+				await host.handleEvent({ type: "message_end", message: { ...message, stopReason: "aborted" } });
+			const dispose = vi.spyOn(host.activeStatusIndicator!, "dispose");
+			advance(5_000);
+			host.ui.requestRender.mockClear();
+			await host.handleEvent({ type: "agent_settled" });
+			expect(dispose).toHaveBeenCalledOnce();
+			expect(complete).toHaveBeenCalledOnce();
+			expect(host.activeStatusIndicator).toBeUndefined();
+			expect(host.statusContainer.children).toEqual([]);
+			expect(host.pendingTools.size).toBe(0);
+			expect(host.streamingComponent).toBeUndefined();
+			expect(host.streamingMessage).toBeUndefined();
+			expect(host.grokTurnStartedAt).toBeUndefined();
+			expect(host.ui.terminal.setProgress).toHaveBeenLastCalledWith(false);
+			expect(host.ui.requestRender).toHaveBeenCalled();
+			expect(sessionManager.getEntries()).toEqual([
+				expect.objectContaining({ customType: "pi-turn-duration", data: { durationMs: 5_000 } }),
+			]);
+			host.ui.requestRender.mockClear();
+			advance(10_000);
+			expect(host.ui.requestRender).not.toHaveBeenCalled();
+		} finally {
+			host.clearStatusIndicator();
+			host.clearChatContainer();
+		}
+	});
+
 	test("live paths keep late body above four adjacent categories and duration last", async () => {
 		const { manager, add } = managerFixture();
 		const { host } = fixture(true, manager);
@@ -170,6 +364,7 @@ describe("InteractiveMode turn activity footer", () => {
 			});
 			host.grokTurnStartedAt = performance.now() - 100;
 			await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+			await host.handleEvent({ type: "agent_settled" });
 			host.showStatus("late final notice");
 			const groups = categories(host.chatContainer.children);
 			expect(groups.map((group) => group.constructor.name)).toEqual([
@@ -358,6 +553,8 @@ describe("InteractiveMode turn activity footer", () => {
 			await host.handleEvent({ type: "agent_end", messages: [], willRetry: true });
 			expect(complete).not.toHaveBeenCalled();
 			await host.handleEvent({ type: "agent_end", messages: [], willRetry: false });
+			expect(complete).not.toHaveBeenCalled();
+			await host.handleEvent({ type: "agent_settled" });
 			expect(complete).toHaveBeenCalledOnce();
 			const owner = host.chatContainer.currentTurn;
 			host.clearChatContainer();

@@ -5,6 +5,7 @@ import { createEditTool } from "../../src/harness/tools/edit.ts";
 import { createReadTool } from "../../src/harness/tools/read.ts";
 import { ExecutionError, err, getOrThrow, ok, type Result, type ShellExecOptions } from "../../src/harness/types.ts";
 import { DEFAULT_MAX_LINES } from "../../src/harness/utils/truncate.ts";
+import { getToolErrorOutcome } from "../../src/tool-outcome.ts";
 import { AgentToolError } from "../../src/types.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
@@ -58,6 +59,16 @@ class AbortingExecutionEnv extends NodeExecutionEnv {
 			options?.abortSignal?.addEventListener("abort", () => resolve(), { once: true }),
 		);
 		return err(new ExecutionError("aborted", "aborted"));
+	}
+}
+
+class FailingExecutionEnv extends NodeExecutionEnv {
+	override async exec(
+		_command: string,
+		options?: ShellExecOptions,
+	): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>> {
+		options?.onStdout?.("effect started\n");
+		return err(new ExecutionError("spawn_error", "Lost execution transport after start"));
 	}
 }
 
@@ -273,11 +284,35 @@ describe("unified bash", () => {
 		expect(result.content[0]).toMatchObject({ text: `${getOrThrow(await env.canonicalPath("sub"))}\n` });
 	});
 
-	it("validates cwd as a directory before execution", async () => {
-		const env = new NodeExecutionEnv({ cwd: createTempDir() });
-		await expect(
-			createBashTool().execute("id", { command: "pwd", cwd: "missing" }, undefined, undefined, { env }),
-		).rejects.toMatchObject({ code: "NOT_FOUND" });
+	it.each([
+		{ cwd: "missing", code: "NOT_FOUND" },
+		{ cwd: "file", code: "NOT_A_DIRECTORY" },
+	])("classifies cwd validation failure as not started ($code)", async ({ cwd, code }) => {
+		const env = new StreamingExecutionEnv({ cwd: createTempDir() });
+		getOrThrow(await env.writeFile("file", "not a directory"));
+		try {
+			await expect(
+				createBashTool().execute("id", { command: "pwd", cwd }, undefined, undefined, { env }),
+			).rejects.toMatchObject({ code, executionOutcome: "not_started" });
+			expect(env.command).toBeUndefined();
+		} finally {
+			await env.cleanup();
+		}
+	});
+
+	it("keeps errors after execution begins unknown even when their code is spawn_error", async () => {
+		const env = new FailingExecutionEnv({ cwd: createTempDir() });
+		const args = { command: "perform an effect" };
+		try {
+			const result = await commandError(
+				createBashTool().execute("started-error", args, undefined, undefined, { env }),
+			);
+			expect(result.message).toContain("effect started");
+			expect(result.executionOutcome).toBe("unknown");
+			expect(getToolErrorOutcome(result, "bash", args)).toBe("unknown");
+		} finally {
+			await env.cleanup();
+		}
 	});
 
 	it("rejects an empty command and describes cwd as non-sandboxing", async () => {

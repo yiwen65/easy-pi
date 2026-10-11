@@ -1006,10 +1006,14 @@ export class AgentSession {
 	private async _emitAgentSettled(): Promise<void> {
 		this._isAgentRunActive = false;
 		try {
-			await this._extensionRunner.emit({ type: "agent_settled" });
+			// Finish subscriber cleanup before a settlement hook can start another run.
 			this._emit({ type: "agent_settled" });
 		} finally {
-			this._resolveIdleWaitIfIdle();
+			try {
+				await this._extensionRunner.emit({ type: "agent_settled" });
+			} finally {
+				this._resolveIdleWaitIfIdle();
+			}
 		}
 	}
 

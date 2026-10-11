@@ -37,7 +37,7 @@ describe("InteractiveMode compaction events", () => {
 			render(width: number): string[];
 		};
 		const chatContainer = new TurnTranscriptContainer();
-		// All folding rows settle only when the run finishes, not during retry.
+		// Folding rows settle with the user task, not an internal run or retry.
 		const toolGroups = [new GrokToolTurnGroupComponent(), new GrokToolTurnGroupComponent()];
 		const completeToolGroups = toolGroups.map((group) => {
 			const completeTurn = vi.spyOn(group, "completeTurn");
@@ -93,6 +93,7 @@ describe("InteractiveMode compaction events", () => {
 			showError: vi.fn(),
 			showStatus: vi.fn(),
 			flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
+			checkShutdownRequested: vi.fn().mockResolvedValue(undefined),
 		};
 		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
 			this: typeof fakeThis,
@@ -106,7 +107,8 @@ describe("InteractiveMode compaction events", () => {
 						aborted: false;
 						willRetry: false;
 				  }
-				| { type: "agent_end"; messages: []; willRetry: boolean },
+				| { type: "agent_end"; messages: []; willRetry: boolean }
+				| { type: "agent_settled" },
 		) => Promise<void>;
 
 		await handleEvent.call(fakeThis, { type: "agent_start" });
@@ -128,6 +130,10 @@ describe("InteractiveMode compaction events", () => {
 		expect(fakeThis.grokTurnStartedAt).toBe(startedAt);
 		await handleEvent.call(fakeThis, { type: "agent_start" });
 		await handleEvent.call(fakeThis, { type: "agent_end", messages: [], willRetry: false });
+		for (const completeTurn of completeToolGroups) expect(completeTurn).not.toHaveBeenCalled();
+		expect(fakeThis.grokTurnStartedAt).toBe(startedAt);
+		expect(fakeThis.sessionManager.getEntries()).toEqual([]);
+		await handleEvent.call(fakeThis, { type: "agent_settled" });
 
 		for (const completeTurn of completeToolGroups) expect(completeTurn).toHaveBeenCalledOnce();
 		expect(statusAfterCompaction).toBe("working");

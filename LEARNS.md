@@ -500,3 +500,19 @@
 - Prevention: 区分移除与禁用，覆盖混合写入、重载、迁移重入、提交后提示写入失败，以及连续请求前缀。
 - Verified by: 2026-10-11 目标 session 副本迁移，135239136 原始字节保持一致、未知活跃调用 1→0、未伪造结果；13 个离线测试文件、214 个测试通过，根 check 通过。
 
+## Bash 启动前失败——错误结果不等于未知副作用
+
+- Wrong approach: 本地后台 manager 在 cwd 不存在、shell 准备或容量准入失败时返回错误，Bash 包装却省略执行确定性，默认成为 `unknown`。
+- Why it failed: TaskRecoveryJournal 因缺少确认结果进入 `needs_reconciliation`，同一用户任务额外启动恢复调用；实际命令未启动，命令里的 mkdir 也无法修复初始 cwd。
+- Correct approach: 在明确没有启动命令的拒绝边界保留 `not_started`；原错误结果仍持久化并交给模型正常处理。不要按错误码 blanket 重分类后启动或不透明 adapter 的异常。
+- Prevention: 同时测试 core Bash 与实际 coding-agent Bash/faux，断言 shell/后台任务/目录副作用均为零、只有一次 start/end/settled，以及真实未知效果仍暂停。当前恢复 state.tools 会在下一 assistant step 清空，历史结果断言应读取 canonical toolResult/journal 记录。
+- Verified by: 2026-10-11 core 七项及会话额外恢复回归先红后绿；最终 Agent 四文件 59/59、coding-agent 十三文件 189/189 与根 check 通过。
+
+## TUI 任务收尾——内部 end 不是 settled，扩展重入前先通知订阅者
+
+- Wrong approach: 在 `agent_end(!willRetry)` 写 worked 并重置时钟；改用 settled 时又沿用“先 await 扩展、后通知 UI”的顺序。
+- Why it failed: 一次 prompt 可包含恢复/续跑的多个内部 run；前者产生同任务历史 worked 与新 Working，后者允许 settled 扩展启动 B 后，A 的旧通知清空仍活跃 B 的状态和时钟。
+- Correct approach: 最终 `agent_settled` 才清理指示器/活动组和结算耗时；公开通知先于可重入扩展 hook，用 finally 保留订阅者抛错后的扩展收尾及已有 idle waiter 解析。
+- Prevention: 用真实 faux Session + UI 覆盖同输入内部恢复、异步 settled hook 启动持有 gate 的下一运行，以及订阅者抛错时已经 pending 的 waitForIdle；再验证 retry/compaction/新任务和历史重放。
+- Verified by: 2026-10-11 UI 提前结算与活跃 B 丢失 Working 分别稳定红测；`b824062c-bash-task-timing.test.ts` 四项组合回归、248 项定向测试及根 check 通过。
+

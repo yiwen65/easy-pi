@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { BackgroundTaskManager } from "../../src/harness/env/background-task-manager.ts";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import {
+	BackgroundTaskManager,
+	type BackgroundTaskManagerOptions,
+} from "../../src/harness/env/background-task-manager.ts";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import {
 	createTaskListTool,
@@ -11,8 +16,10 @@ import {
 	type TaskStopDetails,
 	type WaitForDetails,
 } from "../../src/harness/tools/background-tasks.ts";
-import { type BashToolDetails, createBashTool } from "../../src/harness/tools/bash.ts";
+import { type BashToolDetails, type BashToolOptions, createBashTool } from "../../src/harness/tools/bash.ts";
 import type { ExecutionToolContext } from "../../src/harness/tools/tool-context.ts";
+import { ExecutionError, err, ok } from "../../src/harness/types.ts";
+import { getToolErrorOutcome } from "../../src/tool-outcome.ts";
 import { createTempDir } from "./session-test-utils.ts";
 
 function createEnv(): NodeExecutionEnv {
@@ -59,6 +66,95 @@ describe("bash run_in_background", () => {
 		await env.cleanup();
 	});
 
+	it("classifies a missing background cwd as not started without resolving the shell or registering a task", async () => {
+		const cwd = createTempDir();
+		const shell = vi.fn<BackgroundTaskManagerOptions["shell"]>(async () => ok({ shell: "bash", args: ["-c"] }));
+		const manager = new BackgroundTaskManager({ shell });
+		const env = new NodeExecutionEnv({ cwd, backgroundTasks: manager });
+		const capture = vi.fn<NonNullable<BashToolOptions["capture"]>>(async () =>
+			err(new ExecutionError("unknown", "unexpected foreground capture")),
+		);
+		const bash = createBashTool({ capture });
+		const missingCwd = join(cwd, "node22");
+		const args = {
+			command: `mkdir -p ${JSON.stringify(missingCwd)}; echo started`,
+			cwd: missingCwd,
+			run_in_background: true,
+		};
+		try {
+			const error = await bash
+				.execute("missing-cwd", args, undefined, undefined, { env })
+				.catch((error: unknown) => error);
+			expect(error).toMatchObject({
+				code: "SPAWN_ERROR",
+				message: `SPAWN_ERROR\n\nWorking directory does not exist: ${missingCwd}`,
+			});
+			expect(shell).not.toHaveBeenCalled();
+			expect(capture).not.toHaveBeenCalled();
+			expect(manager.list({ activeOnly: false })).toEqual([]);
+			expect(existsSync(missingCwd)).toBe(false);
+			expect(getToolErrorOutcome(error, "bash", args)).toBe("not_started");
+		} finally {
+			await env.cleanup();
+		}
+	});
+
+	it("classifies shell preparation failure as not started", async () => {
+		const manager = new BackgroundTaskManager({
+			shell: async () => err(new ExecutionError("shell_unavailable", "No usable shell")),
+		});
+		const env = new NodeExecutionEnv({ cwd: createTempDir(), backgroundTasks: manager });
+		try {
+			await expect(
+				createBashTool().execute(
+					"shell-failed",
+					{ command: "echo hi", run_in_background: true },
+					undefined,
+					undefined,
+					{ env },
+				),
+			).rejects.toMatchObject({ code: "SPAWN_ERROR", executionOutcome: "not_started" });
+			expect(manager.list({ activeOnly: false })).toEqual([]);
+		} finally {
+			await env.cleanup();
+		}
+	});
+
+	it("classifies manager shutdown rejection as not started", async () => {
+		const env = createEnv();
+		await env.backgroundTasks.shutdown();
+		try {
+			await expect(
+				createBashTool().execute(
+					"shutdown",
+					{ command: "echo hi", run_in_background: true },
+					undefined,
+					undefined,
+					{ env },
+				),
+			).rejects.toMatchObject({ code: "SPAWN_ERROR", executionOutcome: "not_started" });
+			expect(env.backgroundTasks.list({ activeOnly: false })).toEqual([]);
+		} finally {
+			await env.cleanup();
+		}
+	});
+
+	it("classifies capacity rejection as not started without registering another task", async () => {
+		const env = new NodeExecutionEnv({ cwd: createTempDir(), backgroundTaskMaxTasks: 1 });
+		try {
+			const bash = createBashTool();
+			await bash.execute("running", { command: "sleep 60", run_in_background: true }, undefined, undefined, { env });
+			await expect(
+				bash.execute("over-capacity", { command: "echo hi", run_in_background: true }, undefined, undefined, {
+					env,
+				}),
+			).rejects.toMatchObject({ code: "LIMIT_REACHED", executionOutcome: "not_started" });
+			expect(env.backgroundTasks.list({ activeOnly: false })).toHaveLength(1);
+		} finally {
+			await env.cleanup();
+		}
+	});
+
 	it("fails cleanly when the environment has no background task support", async () => {
 		const env = createEnv();
 		const withoutManager = Object.create(Object.getPrototypeOf(env), Object.getOwnPropertyDescriptors(env));
@@ -68,7 +164,7 @@ describe("bash run_in_background", () => {
 			bash.execute("call-2", { command: "echo hi", run_in_background: true }, undefined, undefined, {
 				env: withoutManager,
 			}),
-		).rejects.toMatchObject({ code: "UNSUPPORTED" });
+		).rejects.toMatchObject({ code: "UNSUPPORTED", executionOutcome: "not_started" });
 		await env.cleanup();
 	});
 });

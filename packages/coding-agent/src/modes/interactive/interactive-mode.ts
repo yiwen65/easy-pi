@@ -3680,10 +3680,6 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(false);
-				}
-				this.clearStatusIndicator("working");
 				if (this.streamingComponent) {
 					this.chatContainer.removeChild(this.streamingComponent);
 					this.streamingComponent = undefined;
@@ -3701,22 +3697,37 @@ export class InteractiveMode {
 							});
 						}
 					}
-					this.completeTurnGroups();
-					const duration = this.finishGrokTurnTiming();
-					if (duration !== undefined) {
-						// Keep the marker when the transcript is rebuilt or the session is resumed.
-						// Custom entries are UI metadata and do not enter the provider context.
-						this.sessionManager.appendCustomEntry(TURN_DURATION_ENTRY_TYPE, { durationMs: duration });
-						this.chatContainer.mountActivity("duration", new GrokTurnDurationComponent(duration, this.outputPad));
-					}
 				}
 
 				this.ui.requestRender();
 				break;
 
-			case "agent_settled":
+			case "agent_settled": {
+				// agent_end closes only an internal run; recovery, retries, and queued
+				// continuations can start another run within the same user task.
+				if (this.settingsManager.getShowTerminalProgress()) {
+					this.ui.terminal.setProgress(false);
+				}
+				this.clearStatusIndicator();
+				// Exceptions can settle the task without emitting agent_end.
+				if (this.streamingComponent) {
+					this.chatContainer.removeChild(this.streamingComponent);
+					this.streamingComponent = undefined;
+					this.streamingMessage = undefined;
+				}
+				this.pendingTools.clear();
+				this.completeTurnGroups();
+				const duration = this.finishGrokTurnTiming();
+				this.ui.requestRender();
+				if (duration !== undefined) {
+					// Keep the marker when the transcript is rebuilt or the session is resumed.
+					// Custom entries are UI metadata and do not enter the provider context.
+					this.sessionManager.appendCustomEntry(TURN_DURATION_ENTRY_TYPE, { durationMs: duration });
+					this.chatContainer.mountActivity("duration", new GrokTurnDurationComponent(duration, this.outputPad));
+				}
 				await this.checkShutdownRequested();
 				break;
+			}
 
 			case "compaction_start": {
 				if (this.settingsManager.getShowTerminalProgress()) {

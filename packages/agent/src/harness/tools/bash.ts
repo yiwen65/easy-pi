@@ -147,10 +147,19 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					throw new ExecutionToolError(
 						info.error.code === "not_found" ? "NOT_FOUND" : "PERMISSION_DENIED",
 						`Could not inspect cwd ${executionCwd}: ${info.error.message}`,
+						undefined,
+						undefined,
+						{ executionOutcome: "not_started" },
 					);
 				}
 				if (info.value.kind !== "directory")
-					throw new ExecutionToolError("NOT_A_DIRECTORY", `cwd is not a directory: ${executionCwd}`);
+					throw new ExecutionToolError(
+						"NOT_A_DIRECTORY",
+						`cwd is not a directory: ${executionCwd}`,
+						undefined,
+						undefined,
+						{ executionOutcome: "not_started" },
+					);
 				executionCwd = resolved.absolutePath;
 			}
 			const execution: BashExecution = {
@@ -176,6 +185,9 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					throw new ExecutionToolError(
 						"UNSUPPORTED",
 						"Background tasks are not supported by this execution environment.",
+						undefined,
+						undefined,
+						{ executionOutcome: "not_started" },
 					);
 				}
 				const started = await backgroundTasks.start(execution.command, {
@@ -185,6 +197,7 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					timeoutMs: timeout !== undefined ? timeout * 1000 : undefined,
 				});
 				if (!started.ok) {
+					// Failed admission did not launch the command; post-start failures stay on the task record.
 					throw new ExecutionToolError(
 						started.error.code === "not_found"
 							? "NOT_FOUND"
@@ -192,6 +205,9 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 								? "LIMIT_REACHED"
 								: "SPAWN_ERROR",
 						started.error.message,
+						undefined,
+						undefined,
+						{ executionOutcome: "not_started" },
 					);
 				}
 				const task = started.value;

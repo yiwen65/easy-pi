@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs";
+import { join } from "node:path";
 import { finished } from "node:stream/promises";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -123,6 +124,75 @@ describe("AgentSession bash and persistence characterization", () => {
 		expect(harness.session.hasPendingBashMessages).toBe(false);
 		expect(harness.session.messages.some((message) => message.role === "bashExecution")).toBe(true);
 		expect(getEntryTypes(harness).filter((type) => type === "message").length).toBeGreaterThan(0);
+	});
+
+	it("does not recover or suspend a task when background bash rejects a missing cwd before starting", async () => {
+		const harness = await createHarness({
+			hfCompaction: { mode: "off" },
+			settings: { retry: { enabled: false } },
+		});
+		harnesses.push(harness);
+		const manager = harness.session.backgroundTasks;
+		if (!manager) throw new Error("Expected the built-in Bash background task manager");
+		const start = vi.spyOn(manager, "start");
+		const missingCwd = join(harness.tempDir, "node22");
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall(
+						"bash",
+						{
+							command: `mkdir -p ${JSON.stringify(missingCwd)}; echo started`,
+							cwd: missingCwd,
+							run_in_background: true,
+						},
+						{ id: "missing-cwd" },
+					),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("The command did not start because its working directory does not exist."),
+			fauxAssistantMessage("Unexpected recovery run"),
+		]);
+
+		await harness.session.prompt("Run the setup command in the background");
+
+		expect(start).toHaveBeenCalledTimes(1);
+		expect(await start.mock.results[0].value).toMatchObject({ ok: false, error: { code: "spawn_error" } });
+		expect(manager.list({ activeOnly: false })).toEqual([]);
+		expect(fs.existsSync(missingCwd)).toBe(false);
+		expect(harness.eventsOfType("background_task_started")).toEqual([]);
+		expect(
+			harness.events
+				.filter((event) => ["agent_start", "agent_end", "agent_settled"].includes(event.type))
+				.map((event) => event.type),
+		).toEqual(["agent_start", "agent_end", "agent_settled"]);
+		expect(harness.session.suspendedTaskRecovery).toEqual([]);
+		expect(harness.sessionManager.getEntries()).not.toContainEqual(
+			expect.objectContaining({
+				type: "custom",
+				customType: "pi-task-recovery",
+				data: expect.objectContaining({ status: "needs_reconciliation" }),
+			}),
+		);
+		expect(harness.session.taskRecovery?.status).toBe("completed");
+		const persistedResult = harness.sessionManager
+			.getEntries()
+			.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "missing-cwd",
+			);
+		expect(persistedResult).toMatchObject({
+			type: "message",
+			message: {
+				toolName: "bash",
+				isError: true,
+				content: [{ type: "text", text: `SPAWN_ERROR\n\nWorking directory does not exist: ${missingCwd}` }],
+			},
+		});
+		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
 	it("executes bash commands and records the result", async () => {
