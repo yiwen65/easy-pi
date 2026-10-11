@@ -12,7 +12,7 @@ import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-w
 import { describe, expect, it, vi } from "vitest";
 import { getToolErrorOutcome } from "../../agent/src/tool-outcome.ts";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
-import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 import type { McpServerEntry } from "../src/extensions/mcp/config.ts";
 import {
 	createDefaultTransport,
@@ -120,7 +120,7 @@ describe("MCP connections", () => {
 		});
 		try {
 			await connection.getClient();
-			const work = tool.execute("id", {}, undefined, undefined, {} as ExtensionContext);
+			const work = wrapToolDefinition(tool).execute("id", {});
 			await expect(work).rejects.toMatchObject({ executionOutcome: "unknown" });
 			try {
 				await work;

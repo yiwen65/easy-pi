@@ -8,6 +8,16 @@ import test from "node:test";
 
 const script = fileURLToPath(new URL("./pack-easy-pi.mjs", import.meta.url));
 
+test("Bun build and runtime reference the existing codemode worker entry", () => {
+	const repository = fileURLToPath(new URL("../", import.meta.url));
+	const entry = "src/extensions/codemode/worker.ts";
+	assert.match(readFileSync(join(repository, "packages/coding-agent", entry), "utf8"), /import "@earendil-works\/pi-codemode\/worker"/);
+	const manifest = JSON.parse(readFileSync(join(repository, "packages/coding-agent/package.json"), "utf8"));
+	assert.ok(manifest.scripts["build:binary"].includes(entry));
+	assert.ok(readFileSync(join(repository, "scripts/build-binaries.sh"), "utf8").includes(entry));
+	assert.ok(readFileSync(join(repository, "packages/coding-agent/src/config.ts"), "utf8").includes(entry));
+});
+
 for (const useLink of [false, true]) {
 	test(`refuses existing output ${useLink ? "symlink" : "directory"} without deleting contents`, () => {
 		const directory = mkdtempSync(join(tmpdir(), "epi-pack-safety-"));
@@ -26,12 +36,12 @@ for (const useLink of [false, true]) {
 	});
 }
 
-test("standalone package includes web-search and MCP licenses without source or user extensions", () => {
+test("standalone package includes codemode worker, web-search, and MCP licenses without source or user extensions", () => {
 	const directory = mkdtempSync(join(tmpdir(), "epi-pack-web-"));
 	const repository = fileURLToPath(new URL("../", import.meta.url));
 	const fixture = join(directory, "repo");
 	const home = join(directory, "home");
-	const internal = ["ai", "agent", "mcp", "client", "grok-tui", "protocol", "server", "tui", "telemetry", "permissions", "subagent", "pi-web-search"];
+	const internal = ["ai", "agent", "mcp", "codemode", "client", "grok-tui", "protocol", "server", "tui", "telemetry", "permissions", "subagent", "pi-web-search"];
 	const env = { PATH: process.env.PATH, HOME: home, npm_config_offline: "true", npm_config_ignore_scripts: "true" };
 	try {
 		mkdirSync(home);
@@ -56,6 +66,13 @@ test("standalone package includes web-search and MCP licenses without source or 
 		const mcp = join(fixture, "packages/mcp");
 		mkdirSync(join(mcp, "LICENSES"));
 		copyFileSync(join(repository, "packages/mcp/LICENSES/modelcontextprotocol-typescript-sdk.txt"), join(mcp, "LICENSES/modelcontextprotocol-typescript-sdk.txt"));
+		const codemode = join(fixture, "packages/codemode");
+		mkdirSync(join(codemode, "dist/runtime"));
+		writeFileSync(join(codemode, "dist/runtime/worker.js"), "// worker fixture\n");
+		mkdirSync(join(codemode, "LICENSES"));
+		for (const name of ["quickjs-wasi", "quickjs-ng", "unicode"]) {
+			copyFileSync(join(repository, "packages/codemode/LICENSES", `${name}.txt`), join(codemode, "LICENSES", `${name}.txt`));
+		}
 		const output = join(directory, "output");
 		const result = spawnSync(process.execPath, [join(fixture, "scripts/pack-easy-pi.mjs"), output], {
 			cwd: directory, env, encoding: "utf8", timeout: 30000,
@@ -67,6 +84,9 @@ test("standalone package includes web-search and MCP licenses without source or 
 		assert.ok(manifest.bundleDependencies.includes("@easy-pi/web-search"));
 		assert.ok(manifest.bundleDependencies.includes("@earendil-works/pi-mcp"));
 		assert.equal(manifest.dependencies["@earendil-works/pi-mcp"], "0.84.2");
+		assert.ok(manifest.bundleDependencies.includes("@earendil-works/pi-codemode"));
+		assert.equal(manifest.dependencies["@earendil-works/pi-codemode"], "0.84.2");
+		assert.equal(manifest.dependencies["quickjs-wasi"], "3.6.2");
 		const tarball = readdirSync(output).find(name => name.endsWith(".tgz"));
 		assert.ok(tarball);
 		const archive = spawnSync("tar", ["-tf", join(output, tarball)], { encoding: "utf8", env });
@@ -77,7 +97,11 @@ test("standalone package includes web-search and MCP licenses without source or 
 		assert.ok(archive.stdout.includes("package/node_modules/@easy-pi/web-search/package.json"));
 		assert.ok(archive.stdout.includes("package/node_modules/@earendil-works/pi-mcp/dist/index.js"));
 		assert.ok(archive.stdout.includes("package/node_modules/@earendil-works/pi-mcp/LICENSES/modelcontextprotocol-typescript-sdk.txt"));
-		assert.doesNotMatch(archive.stdout, /web-search\/src\/|pi-mcp\/src\/|\.epi\/|extensions\/web-search/);
+		assert.ok(archive.stdout.includes("package/node_modules/@earendil-works/pi-codemode/dist/runtime/worker.js"));
+		for (const name of ["quickjs-wasi", "quickjs-ng", "unicode"]) {
+			assert.ok(archive.stdout.includes(`package/node_modules/@earendil-works/pi-codemode/LICENSES/${name}.txt`));
+		}
+		assert.doesNotMatch(archive.stdout, /web-search\/src\/|pi-mcp\/src\/|pi-codemode\/src\/|\.epi\/|extensions\/web-search/);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

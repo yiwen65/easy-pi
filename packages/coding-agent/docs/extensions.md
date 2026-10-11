@@ -43,6 +43,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
   - [Model Events](#model-events)
   - [Tool Events](#tool-events)
 - [ExtensionContext](#extensioncontext)
+- [ExtensionToolContext](#extensiontoolcontext)
 - [ExtensionCommandContext](#extensioncommandcontext)
 - [ExtensionAPI Methods](#extensionapi-methods)
 - [State Management](#state-management)
@@ -627,7 +628,7 @@ pi.on("message_end", async (event, ctx) => {
 
 #### tool_execution_start / tool_execution_update / tool_execution_end
 
-Fired for tool execution lifecycle updates.
+Fired for tool execution lifecycle updates. Nested calls made through `ctx.executeTool()` also emit these events, with `parentToolCallId` identifying the calling tool; they do not emit standalone provider transcript messages.
 
 In parallel tool mode:
 - `tool_execution_start` is emitted in assistant source order during the preflight phase
@@ -765,7 +766,7 @@ In the default parallel tool execution mode, sibling tool calls from the same as
 Behavior guarantees:
 - Mutations to `event.input` affect the actual tool execution
 - Later `tool_call` handlers see mutations made by earlier handlers
-- No re-validation is performed after your mutation
+- Mutated arguments are revalidated against the target schema before execution, for direct and nested calls
 - Return values from `tool_call` control blocking via `{ block: true, reason?: string, terminate?: boolean }`
 - `terminate` only applies to a blocked call; the agent stops early only when every finalized result in the batch is terminating
 
@@ -775,6 +776,7 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 pi.on("tool_call", async (event, ctx) => {
   // event.toolName - "bash", "read", "write", "edit", etc.
   // event.toolCallId
+  // event.parentToolCallId - set for a nested tool call
   // event.input - tool parameters (mutable)
 
   // Built-in tools: no type params needed
@@ -834,6 +836,7 @@ import { isBashToolResult } from "@earendil-works/pi-coding-agent";
 
 pi.on("tool_result", async (event, ctx) => {
   // event.toolName, event.toolCallId, event.input
+  // event.parentToolCallId - set for a nested tool call
   // event.content, event.details, event.isError, event.usage
 
   if (isBashToolResult(event)) {
@@ -1102,6 +1105,31 @@ pi.on("before_agent_start", (event, ctx) => {
   console.log(`System prompt length: ${prompt.length}`);
 });
 ```
+
+## ExtensionToolContext
+
+A tool's `execute()` receives `ExtensionToolContext`, which extends `ExtensionContext` with the session's callable tools and nested execution:
+
+```typescript
+// ctx is the fifth argument to a ToolDefinition's execute().
+ctx.tools; // readonly AgentTool[]; current callable tools, not an authorization grant
+const outcome = await ctx.executeTool("lookup", { query: "example" }, {
+  signal,       // optional; always combined with the parent invocation's signal
+  onUpdate,     // optional nested partial-result callback
+});
+// outcome: { toolCall, result, isError, executionOutcome }
+// executionOutcome: "not_started" | "confirmed" | "unknown"
+```
+
+Use `ctx.executeTool()` rather than calling an `AgentTool.execute()` handler directly. It applies argument preparation, schema validation and revalidation, tool hooks, current authority, host admission, and execution-resource scheduling. Ordinary tool failures return `isError: true`; persistence or infrastructure failures may reject. Presentation hooks changing `isError` do not change `executionOutcome`.
+
+Nested IDs have the form `<parent call id>/<n>`. `tool_call`, `tool_result`, and `tool_execution_*` events carry `parentToolCallId`. Nested results are not independent provider transcript messages. Their execution facts are recorded with the parent task; bounded display metadata is not a substitute for those durable facts.
+
+Before committing orchestrator state, call `await ctx.waitForNestedTools()`. It drains nested host calls and returns their aggregate execution certainty (`"not_started"`, `"confirmed"`, or `"unknown"`); do not commit state on `"unknown"`. The host also checks unresolved nested outcomes before accepting the parent result, so catching a failure cannot erase uncertainty.
+
+The callable set includes active `direct` tools and permitted `codemode`/`deferred` tools, not hidden, model-only, explicitly disabled, or revoked tools. Calling another tool never grants it. The same live root/ancestor restrictions apply inside native children. Unresolved nested effects cannot be hidden by an orchestrator returning success or changing a presentation error flag, and must not be replayed automatically. Await work that matters; signalling cancellation is not proof that an effect stopped.
+
+This context requires a bound `AgentSession`. A standalone tool invoked in a plain `Agent` or by calling its handler directly does not acquire session tools or nested authority automatically. See [Codemode](codemode.md) for the built-in local QuickJS orchestrator.
 
 ## ExtensionCommandContext
 
@@ -1691,7 +1719,7 @@ pi.setActiveTools([...new Set([...active, "my_custom_tool"])]); // Keep current 
 pi.setActiveTools(["read", "bash"]); // Switch to read-only
 ```
 
-`pi.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, and `sourceInfo`.
+`pi.getAllTools()` returns access-filtered metadata including `name`, `description`, `parameters`, `promptGuidelines`, `exposure`, `namespace`, `annotations`, and `sourceInfo`. In codemode `only` mode, omitted provider declarations remain active; `getActiveTools()` is not merely the provider-facing declaration list.
 
 Typical `sourceInfo.source` values:
 - `builtin` for built-in tools
@@ -2009,6 +2037,26 @@ pi.registerTool({
   renderResult(result, options, theme, context) { ... },
 });
 ```
+
+### Exposure, structured results, and loadout
+
+`exposure` controls how a tool is reached, subject to the host's tool grants:
+
+| Exposure | Behavior |
+| --- | --- |
+| `direct` (default) | An active tool is declared to the model and callable from scripts. |
+| `model-only` | An active tool is declared to the model but cannot be called by another tool. The built-in codemode tool uses this to prevent recursive scripts. |
+| `codemode` | Callable through nested execution, without a direct model declaration. |
+| `deferred` | Available to authorized discovery/nested calls; declared directly only after activation. |
+| `hidden` | Not discoverable, declared, or callable. |
+
+`defaultActive: false` registers a direct or model-only tool without activating it. Explicit tool selection or `pi.setActiveTools()` can activate it within existing grants. Registration and activation are not permission grants.
+
+Set `orchestratesTools: true` for a tool that invokes other tools through `ctx.executeTool()`. It leaves scheduler slots to the nested targets rather than holding a parent slot while waiting for them. This is incompatible with `executionResource`; do not have an orchestrator hold the same resource it needs its targets to acquire. Declare an honest side-effect contract for the whole orchestration, not merely for its local script VM.
+
+A tool with `outputSchema` should return a JSON-serializable `structuredContent` value matching that schema. Codemode uses that value for a structured script result; tools without a structured result resolve to their text. `content` remains the model-facing text/images and `details` remains logging/rendering metadata. Returning an `isError` property from `execute()` still does not signal failure; throw instead.
+
+An active orchestration tool can implement `prepareLoadout(loadout)` to adjust presentation. The loadout provides `declared`, `callable`, and `registered` tool lists, plus `getExposure(name)`, `getNamespace(name)`, and `getPromptGuidelines(name)`. The returned `ToolLoadoutChanges` may supply `descriptions` by tool name and `hiddenDeclarations` names. Hiding a declaration does not deactivate the target or authorize an unavailable tool. Codemode's `only` mode uses this to omit direct declarations while preserving the true active set. Treat all catalogs as subject to current host grants, not as authority to bypass them.
 
 **Usage accounting:** If a tool makes nested LLM calls, return their combined `Usage` as `usage`. Pi persists it on the tool result and includes it in footer, `/session`, and RPC session totals. `tool_result` handlers can inspect or replace this value.
 

@@ -291,7 +291,8 @@ describe("MCP ownership and live authority in native children", () => {
 			}),
 		]);
 		expect(await child.run("Generic names are not server authority")).toMatchObject({ status: "completed" });
-		expect(native.getActiveToolNames()).toEqual(["deliver_result"]);
+		// Host-owned protocol tools are structural, not resource or server grants.
+		expect(native.getActiveToolNames()).toEqual(["deliver_result", "report_progress"]);
 		expect(f.starts()).toEqual(before);
 		expect(f.calls()).toEqual([]);
 		for (const name of resourceNames) expect(native.getToolDefinition(name)).toBeUndefined();
@@ -413,7 +414,7 @@ describe("MCP ownership and live authority in native children", () => {
 			expect(
 				declared.sort(),
 				`Child result: ${responseText}; fixture starts: ${JSON.stringify(audit().filter((record) => record.event === "start"))}`,
-			).toEqual(["deliver_result", echoTool].sort());
+			).toEqual(["deliver_result", "report_progress", echoTool].sort());
 			for (const resource of resourceNames) expect(declared).not.toContain(resource);
 			expect(responseError, responseText).toBe(false);
 			const call = audit().find(

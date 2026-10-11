@@ -13,7 +13,11 @@ import type { CollaborationController } from "@easy-pi/subagent/collaboration-co
 import type { ChildSessionIdentity } from "@easy-pi/subagent/session-host";
 import type { AgentSession, AgentSessionEvent } from "../core/agent-session.ts";
 import { buildSessionContext, CURRENT_SESSION_VERSION, type SessionEntry } from "../core/session-manager.ts";
-import { parseDeliverResult, resultQueryText } from "../modes/interactive/components/subagent-group.ts";
+import {
+	collaborationHandoffLines,
+	parseDeliverResult,
+	resultQueryText,
+} from "../modes/interactive/components/subagent-group.ts";
 
 const MAX_PREVIEW = 64 * 1024;
 const MAX_HISTORY = 4 * 1024 * 1024;
@@ -65,6 +69,9 @@ export interface AgentListRow {
 	objective?: string;
 	/** First line of the delivered result, when the agent settled. */
 	resultSummary?: string;
+	/** Self-report only, never substituted for the final result. */
+	progressSummary?: string;
+	handoffMetadata?: string;
 	turnId?: string;
 	turnDuration?: number | null;
 	resultMetadata?: string;
@@ -81,6 +88,8 @@ export interface AgentRuntimeView {
 	model: string;
 	objective?: string;
 	resultSummary?: string;
+	progressSummary?: string;
+	handoffMetadata?: string;
 	resultMetadata?: string;
 	queryUnavailable?: string;
 	lastActivityAt?: number;
@@ -113,12 +122,18 @@ export class PiCollaborationMonitor {
 			controller.subscribe(() => {
 				try {
 					const previous = new Map(
-						this.children.map((child) => [child.task_name, `${child.status}:${child.loaded}`]),
+						this.children.map((child) => [
+							child.task_name,
+							`${child.status}:${child.loaded}:${child.turn_id}:${child.progress?.revision ?? 0}`,
+						]),
 					);
 					this.children = controller.list(this.identity);
 					const now = Date.now();
 					for (const child of this.children) {
-						if (previous.get(child.task_name) !== `${child.status}:${child.loaded}`) {
+						if (
+							previous.get(child.task_name) !==
+							`${child.status}:${child.loaded}:${child.turn_id}:${child.progress?.revision ?? 0}`
+						) {
 							this.activity.set(child.task_name, now);
 						}
 					}
@@ -307,6 +322,8 @@ export class PiCollaborationMonitor {
 					resultSummary: this.firstLine(
 						parseDeliverResult(retained?.state === "found" ? retained.result.preview : undefined).displayText,
 					),
+					progressSummary: this.firstLine(child.progress?.summary),
+					handoffMetadata: collaborationHandoffLines(child).join("\n") || undefined,
 					turnId: child.turn_id,
 					turnDuration:
 						retained &&
@@ -335,6 +352,8 @@ export class PiCollaborationMonitor {
 			model: row.model,
 			objective: row.objective,
 			resultSummary: row.resultSummary,
+			progressSummary: row.progressSummary,
+			handoffMetadata: row.handoffMetadata,
 			resultMetadata: row.resultMetadata,
 			queryUnavailable: row.queryUnavailable,
 			lastActivityAt: row.lastActivityAt,
@@ -450,7 +469,11 @@ export class PiCollaborationMonitor {
 				);
 			return `Task accepted: ${await this.controller.followup(this.identity, path, args.task.objective, signal, { delegation, tools })}`;
 		}
-		return `Interrupt finished; previous status: ${await this.controller.interrupt(this.identity, path)}`;
+		const receipt = await this.controller.interruptWithHandoff(this.identity, path, "Operator requested interrupt");
+		return [
+			`Interrupt finished; previous status: ${receipt.previous_status} · turn ${receipt.turn_id}`,
+			...collaborationHandoffLines(receipt),
+		].join("\n");
 	}
 	dispose(): void {
 		if (this.closed) return;

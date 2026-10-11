@@ -12,11 +12,15 @@ import {
 	CollaborationArtifactsSchema,
 	CollaborationError,
 	type CollaborationHistoryCoverage,
+	CollaborationInterruptionSchema,
+	CollaborationProgressSchema,
 	type CollaborationTurnRecord,
 	type CollaborationTurnView,
 	DelegationSchema,
 	ResultValidationSchema,
 	validateAgentPath,
+	validateCollaborationInterruption,
+	validateCollaborationProgress,
 	validateDelegation,
 } from "./collaboration-contract.ts";
 
@@ -43,7 +47,12 @@ const MessageSchema = Type.Object(
 		from: Type.String(),
 		to: Type.String(),
 		turnId: Type.String({ minLength: 1 }),
-		kind: Type.Union([Type.Literal("task"), Type.Literal("message"), Type.Literal("result")]),
+		kind: Type.Union([
+			Type.Literal("task"),
+			Type.Literal("message"),
+			Type.Literal("progress"),
+			Type.Literal("result"),
+		]),
 		status: Type.Optional(
 			Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("interrupted")]),
 		),
@@ -54,6 +63,8 @@ const MessageSchema = Type.Object(
 		parent: Type.Optional(Type.String()),
 		contextUse: Type.Optional(Type.Union([Type.Literal("initial"), Type.Literal("existing")])),
 		resultValidation: Type.Optional(ResultValidationSchema),
+		progress: Type.Optional(CollaborationProgressSchema),
+		interruption: Type.Optional(CollaborationInterruptionSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -92,6 +103,8 @@ const AgentSchema = Type.Object(
 		// Inherited native catalogs can exceed the model-facing explicit allowlist limit.
 		tools: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true })),
 		resultValidation: Type.Optional(ResultValidationSchema),
+		progress: Type.Optional(CollaborationProgressSchema),
+		interruption: Type.Optional(CollaborationInterruptionSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -140,6 +153,7 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 		}
 		paths.add(agent.path);
 		ids.add(agent.id);
+		validateStoredHandoff(agent);
 	}
 	if (value.agents.some((agent) => agent.parent !== "/root" && !paths.has(agent.parent))) {
 		throw new CollaborationError("storage_error", "Missing parent agent");
@@ -160,6 +174,22 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 					(message.kind === "result" ? COLLABORATION_LIMITS.maxResultBytes : COLLABORATION_LIMITS.maxMessageBytes))
 		)
 			throw new CollaborationError("storage_error", "Invalid mailbox message");
+		validateStoredHandoff(message);
+		if (message.kind === "progress") {
+			const producer = value.agents.find((agent) => agent.path === message.from);
+			if (
+				!producer ||
+				producer.parent !== message.to ||
+				!message.progress ||
+				message.text !== message.progress.summary ||
+				message.status !== undefined ||
+				message.resultValidation !== undefined ||
+				message.interruption !== undefined ||
+				!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(message.id) ||
+				!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(message.turnId)
+			)
+				throw new CollaborationError("storage_error", "Invalid progress notification");
+		}
 		if (message.delegation) validateDelegation(message.delegation);
 		if (message.parent !== undefined) validateAgentPath(message.parent);
 		messageIds.add(message.id);
@@ -178,6 +208,18 @@ function validateSnapshot(value: unknown): CollaborationSnapshot {
 	if ([...counts.values()].some((count) => count > COLLABORATION_LIMITS.maxPendingMessages))
 		throw new CollaborationError("storage_error", "Mailbox capacity exceeded");
 	return structuredClone(value);
+}
+
+function validateStoredHandoff(record: {
+	progress?: StoredCollaborationAgent["progress"];
+	interruption?: StoredCollaborationAgent["interruption"];
+}): void {
+	try {
+		if (record.progress) validateCollaborationProgress(record.progress);
+		if (record.interruption) validateCollaborationInterruption(record.interruption);
+	} catch {
+		throw new CollaborationError("storage_error", "Invalid retained handoff metadata");
+	}
 }
 
 const NullableTime = Type.Union([Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), Type.Null()]);
@@ -232,6 +274,8 @@ const TurnSchema = Type.Object(
 			{ additionalProperties: false },
 		),
 		resultValidation: Type.Optional(ResultValidationSchema),
+		progress: Type.Optional(CollaborationProgressSchema),
+		interruption: Type.Optional(CollaborationInterruptionSchema),
 		delegation: Type.Optional(DelegationSchema),
 		result: Type.Optional(
 			Type.Object(
@@ -409,7 +453,21 @@ export class CollaborationStore {
 				if (legacy) this.seedHistory(snapshot);
 				const beforeRecovery = structuredClone(snapshot);
 				for (const agent of snapshot.agents) {
-					if (agent.status === "pending" || agent.status === "running") agent.status = "interrupted";
+					if (
+						agent.status === "pending" ||
+						agent.status === "running" ||
+						(agent.status === "interrupted" && agent.completionPending)
+					) {
+						agent.status = "interrupted";
+						agent.interruption ??= {
+							reason:
+								row.owner === null
+									? "Retained active turn had no controller; no task was resumed."
+									: "Previous controller owner is no longer alive; no task was resumed.",
+							requested_at: Date.now(),
+							requested_by: "/root",
+						};
+					}
 					if (agent.completionPending) {
 						if (agent.delegation) agent.resultValidation = { contract: "not_completed" };
 						snapshot.messages ??= [];
@@ -423,6 +481,8 @@ export class CollaborationStore {
 							status: "interrupted",
 							text: "Interrupted controller; inspect retained child history. No task was resumed.",
 							...(agent.resultValidation ? { resultValidation: agent.resultValidation } : {}),
+							...(agent.progress ? { progress: agent.progress } : {}),
+							...(agent.interruption ? { interruption: agent.interruption } : {}),
 						});
 						agent.completionPending = false;
 					}
@@ -651,6 +711,8 @@ export class CollaborationStore {
 			delivery: { state: legacy ? "unknown" : "not_enqueued", enqueued_at: null, acknowledged_at: null },
 			usage: { coverage: "unknown", input: null, output: null, cacheRead: null, cacheWrite: null },
 			...(agent.delegation ? { delegation: agent.delegation } : {}),
+			...(agent.progress ? { progress: agent.progress } : {}),
+			...(agent.interruption ? { interruption: agent.interruption } : {}),
 		};
 	}
 
@@ -690,6 +752,7 @@ export class CollaborationStore {
 			throw new CollaborationError("storage_error", "Invalid turn contract");
 		}
 		if (record.target === "/root") throw new CollaborationError("storage_error", "Invalid turn target");
+		validateStoredHandoff(record);
 		if (record.result) {
 			const source = record.result.source;
 			if (
@@ -758,7 +821,15 @@ export class CollaborationStore {
 			const turn =
 				this.getTurn(agent.path, { turn_id: message.turnId }) ??
 				this.newTurn(
-					{ ...agent, turnId: message.turnId, status: "closed", taskMessage: undefined, delegation: undefined },
+					{
+						...agent,
+						turnId: message.turnId,
+						status: "closed",
+						taskMessage: undefined,
+						delegation: undefined,
+						progress: message.progress,
+						interruption: message.interruption,
+					},
 					true,
 				);
 			if (
@@ -783,6 +854,8 @@ export class CollaborationStore {
 			turn.delivery.state = "enqueued";
 			if (message.resultValidation)
 				turn.resultValidation = { ...turn.resultValidation, ...message.resultValidation };
+			if (message.progress) turn.progress = message.progress;
+			if (message.interruption) turn.interruption = message.interruption;
 			this.writeTurn(turn);
 		}
 	}
@@ -814,6 +887,8 @@ export class CollaborationStore {
 				turn.status = agent.status;
 			}
 			if (agent.resultValidation) turn.resultValidation = agent.resultValidation;
+			if (agent.progress) turn.progress = agent.progress;
+			if (agent.interruption) turn.interruption = agent.interruption;
 			if (
 				agent.usage &&
 				(old?.turnId !== agent.turnId ||

@@ -1,6 +1,6 @@
 # Native collaboration wiring
 
-The CLI/SDK built-in factory now composes native collaboration instead of the old DAG. The nine delegation tools are registered when the root session binds its extensions, and the child host registers the `deliver_result` protocol tool in every child; discovery/help alone opens no team. Persistent teams live under `.epi/agent/teams/<root-session-id>/`; ephemeral roots use memory only. These are internal host APIs, not a new public npm API. Custom ResourceLoaders remain embedding-owned.
+The CLI/SDK built-in factory now composes native collaboration instead of the old DAG. The nine delegation tools are registered when the root session binds its extensions, and the child host registers the `deliver_result` and `report_progress` protocol tools in every child; discovery/help alone opens no team. Persistent teams live under `.epi/agent/teams/<root-session-id>/`; ephemeral roots use memory only. These are internal host APIs, not a new public npm API. Custom ResourceLoaders remain embedding-owned.
 
 ## Grok-TUI: `/agents`
 
@@ -99,6 +99,24 @@ Each initial task and explicit followup appends these output instructions after 
 
 `list_agents` exposes creation projection bytes and measurement scope (`messages` or `request_prefix`), the requested prefix policy (`required` is not itself proof of successful execution), result-format state, and available latest-turn provider-reported input/output/cache usage. Missing sizes/usage are unknown, and interrupted zero usage can be incomplete. These are not current context-token estimates or an additional charge added to parent usage. Successful first-prefix checks also write a noncontextual `epi-collaboration-prefix` entry in native child history.
 
+### Nonterminal progress and interrupt handoff
+
+A child can call `report_progress` without ending its assigned turn:
+
+```json
+{"summary":"Implemented dispatch validation; 38 local regressions passed. Remaining: final diff review."}
+```
+
+Report a meaningful implementation milestone, an observed verification result, or a blocker and the next concrete action. Do not report success from unrun checks. Progress is an untrusted self-report, not `deliver_result`, a completion verdict, parent acceptance, or authorization. The host supplies the current admitted turn identity; the tool accepts no target, turn ID, timestamp, or status. Root and settled/stale turns cannot use it. It grants no other team tool capability and never starts another child inference turn.
+
+The controller retains only the latest `progress` for each turn: `{summary, reported_at, revision}`. Timestamps are host epoch milliseconds and revisions increase within that turn. Complete progress JSON is capped at 2048 UTF-8 bytes, including escaping and metadata. Summaries and interruption reasons must be well-formed single-line text without control characters. A verified precommit validation/capacity rejection is `not_started` and does not suspend the assigned task; storage or postcommit uncertainty remains unknown and must not be blindly replayed. Repeated unconsumed notifications for the same child/turn are coalesced without releasing its completion reservation. Persisted progress remains available through `list_agents`, `get_agent_result` and `list_agent_turns`, including after interrupt, close, cold inspection or recovery. A followup starts with no progress; older turn progress remains historical. Old records without these optional fields remain readable.
+
+Before interrupting, inspect the latest progress and relevant tool logs. A `wait_agent` timeout alone is not evidence of no progress or failed work: a test may have finished while the child is still generating its next response. When available, use a bounded `deliver_result` with `outcome: "partial"` for a stage handoff, then explicitly admit further work with `followup_task`. Children cannot use `send_message` to reply to root.
+
+`interrupt_agent` accepts an optional nonblank `reason` capped at 1024 UTF-8 bytes. Its receipt pins the selected `turn_id` and returns `previous_status`, optional latest `progress`, and `interruption` metadata (`reason`, `requested_at`, `requested_by`). It does not fabricate a final report, erase shared edits, or mark work successful. The operator panel records an operator-requested reason. Waiting does not automatically interrupt; no new execution timeout is introduced. Progress and interruption remain separate from the terminal `interrupted` / `not_completed` result.
+
+The transcript and `/agents` label progress as nonfinal and show retained handoff details separately from the delivered result. A model cannot invoke this tool in the middle of one long provider request, so the protocol improves observability but does not guarantee wall-clock progress-report frequency. Existing running sessions do not hot-update to the new protocol.
+
 ### Retained result lookup and pinned waiting
 
 The source implementation registers `get_agent_result` and `list_agent_turns` and
@@ -183,18 +201,21 @@ not a claim that the assignment was empty.
 `target` is invalid. Without target the existing mailbox/user-input/timeout behavior
 is unchanged. With target, resolve and pin the explicit or current turn **once at
 entry**, before subscribing. Check before and after subscription to prevent lost
-wakeups; subsequent followups cannot replace the pinned turn.
+wakeups; subsequent followups cannot replace the pinned turn. The initial progress
+revision is captured once: a subsequent wait does not repeatedly return the same
+old report. Terminal completion takes precedence over progress.
 
 | Observed pinned turn / event | Targeted wait result |
 | --- | --- |
-| Pending/running, no activity | Stay subscribed to that turn, not arbitrary mailbox arrivals. |
+| Pending/running, no new progress | Stay subscribed to that turn, not arbitrary mailbox arrivals. |
+| A new progress revision on the pinned running turn | Return `progress`, `timed_out: false`, target, turn ID and current result query; this is not terminal completion. |
 | Completed/failed/interrupted, even already acknowledged | Immediately `terminal`, `timed_out: false`, target, turn ID and result query. |
 | Startup failed before result notification | `terminal` with `no_result`; notification is not required. |
 | Followup admitted during wait | Keep waiting for the original turn, never the latest one. |
 | Close after a terminal turn | Return retained terminal status, not `closed` as a turn status. |
 | Dead-owner recovery | Interrupted pinned turn is terminal; no replay or restart. |
-| Simultaneous user input and terminal event | `user_input` wins; include pinned target/turn ID. |
-| Deadline without user input or terminal event | `timeout`, `timed_out: true`, pinned target/turn ID. |
+| Simultaneous user input and progress/terminal event | `user_input` wins; include pinned target/turn ID. |
+| Deadline without user input, new progress or terminal event | `timeout`, `timed_out: true`, pinned target/turn ID and current result query; the child keeps running. |
 | Unknown legacy terminal status / missing legacy turn | `context_unavailable / history_unavailable`, not an infinite wait or guessed completion. |
 | Cancellation / shutdown / ownership loss | Existing safe error/cancellation path; release timer/listeners and never interrupt the child merely because waiting ended. |
 
@@ -294,10 +315,11 @@ Local Luna/Codex/SSE header-isolation experiments supported `session-id` as a fa
 | `wait_agent` | With target, pin the specified/current turn and return terminal result even after ack. Without target, observe pending mailbox/user input, not history. User input wins; timeout/cancellation do not cancel children. |
 | `get_agent_result` | Read one retained result by target/current turn, explicit turn ID or result notification ID. No child loading/inference, mailbox consumption or source reading. |
 | `list_agent_turns` | Metadata-only history pages with scoped cursor/high-water membership and explicit coverage. No loading/inference or mailbox consumption. |
-| `interrupt_agent` | Cancel pending startup or abort execution without rolling back shared edits. Reject root/self and return the previous status. |
+| `interrupt_agent` | Cancel pending startup or abort execution without rolling back shared edits. Reject root/self; return previous status and a pinned progress/interruption handoff. |
 | `list_agents` | Return child status and loaded state, optionally filtered by a canonical path subtree. Completion is not delivery. |
 | `close_agent` | Retire a settled descendant: keep its record, session file and last result for audit while releasing its team slot and native session, and return the previous status. Pending/running children must be interrupted first and descendants closed leaf-first; root, self and other branches are rejected. Idempotent on already-closed agents; closed names are never reused. |
 | `deliver_result` | Child-side protocol tool whose input schema is the `DelegationResultSchema`. Captures the structured final result during the turn; a later call replaces the delivered result and an oversized call is rejected with a compact-and-redeliver hint. It is never bound at the root. |
+| `report_progress` | Child-side nonterminal protocol tool. Atomically retains and notifies the creation parent of latest current-turn self-reported progress; never ends the turn, wakes idle work or grants team authority. |
 
 Pending inboxes are capped at 64 messages, including reserved completion slots. Ordinary passive text is capped at 8192 UTF-8 bytes; automatic result notifications and retained previews use a separate 64 KiB budget. Every valid structured delivery fits that preview budget and reaches the parent in full. Oversized fallback output carries an explicit truncated preview; complete output remains in the child history. A completed turn and its parent result notification are committed together. Completion notifications include terminal status. A rejected startup releases its completion reservation after cleanup and retains an inspectable failed/interrupted record; it does not emit a normal completion notification or retry inference.
 

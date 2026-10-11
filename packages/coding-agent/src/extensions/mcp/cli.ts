@@ -69,7 +69,7 @@ Options for add:
                           Fixed OAuth callback port
   --oauth-client-name <name>
                           Client name sent when registering with the OAuth server
-  --exposure <mode>       deferred (default), direct, or hidden
+  --exposure <mode>       deferred (default), direct, codemode, or hidden
   --description <text>    What the server offers, shown in the system prompt
 
 Other options:

@@ -150,6 +150,9 @@ describe("pi-ai protocol bridge", () => {
 			toolName: "read",
 			content: [{ type: "text", text: "result" }],
 			details: circular,
+			structuredContent: { hostOnly: true },
+			nestedCalls: { calls: [{ id: "call-1/1", name: "lookup", status: "ok" }], complete: true },
+			nestedExecutionOutcome: "unknown",
 			isError: false,
 			timestamp: 2,
 		} satisfies ToolResultMessage;
@@ -178,6 +181,9 @@ describe("pi-ai protocol bridge", () => {
 			details: { self: "[Circular]" },
 			status: "complete",
 		});
+		expect(toolResult).not.toHaveProperty("structuredContent");
+		expect(toolResult).not.toHaveProperty("nestedCalls");
+		expect(toolResult).not.toHaveProperty("nestedExecutionOutcome");
 		assertValidServerPayload(toolResult);
 	});
 

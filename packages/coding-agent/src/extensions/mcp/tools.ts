@@ -20,7 +20,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import type { McpExposure } from "./config.ts";
 import { McpOutputPreview, truncateMiddle, writeMcpOutputFile } from "./output.ts";
 
-/** MCP supports direct, deferred, and hidden exposure. */
+/** MCP supports direct, deferred, codemode, and hidden exposure. */
 export function toToolExposure(exposure: McpExposure): ToolExposure {
 	return exposure;
 }
@@ -188,10 +188,22 @@ export async function convertMcpResult(
 	}
 	const { content, fullOutputPath } = await limitMcpContent(converted, options.saveOutput);
 	const details = { server, tool, ...(fullOutputPath ? { fullOutputPath } : {}) };
+	// Protocol metadata may contain credentials or private routing information. Scripts get
+	// the full, untruncated public result, never _meta.
+	const { _meta: _ignored, ...publicResult } = result;
+	const structuredContent: CallToolResult = {
+		...publicResult,
+		content: result.content.map((block): ContentBlock => {
+			const { _meta: _blockMeta, ...publicBlock } = block;
+			if (publicBlock.type !== "resource") return publicBlock;
+			const { _meta: _resourceMeta, ...resource } = publicBlock.resource;
+			return { ...publicBlock, resource };
+		}),
+	};
 	if (result.isError) {
-		throw new AgentToolError(textOf(content), details, { executionOutcome: "confirmed" });
+		throw new AgentToolError(textOf(content), details, { executionOutcome: "confirmed", structuredContent });
 	}
-	return { content, details };
+	return { content, details, structuredContent };
 }
 
 /**
@@ -227,6 +239,20 @@ export async function boundedMcpError(
 	);
 }
 
+/** Shape of the public CallToolResult received by scripts (including explicit MCP errors). */
+export function createMcpResultSchema(structuredContentSchema: Record<string, unknown> | undefined): TSchema {
+	return {
+		type: "object",
+		properties: {
+			content: { type: "array", items: { type: "object" } },
+			...(structuredContentSchema ? { structuredContent: structuredContentSchema } : {}),
+			isError: { type: "boolean" },
+			_meta: { type: "object" },
+		},
+		required: ["content"],
+	} as unknown as TSchema;
+}
+
 const ANNOTATION_HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
 
 /** The boolean hints of an MCP tool's annotations, or undefined when it has none. */
@@ -259,6 +285,7 @@ export function createMcpToolDefinition(options: {
 		label,
 		description: tool.description?.trim() || title || `MCP tool ${tool.name} from server ${server}`,
 		parameters: toParameters(tool.inputSchema),
+		outputSchema: createMcpResultSchema(tool.outputSchema),
 		contract: { sideEffects: "external" },
 		exposure: toToolExposure(options.exposure),
 		namespace: options.namespace,

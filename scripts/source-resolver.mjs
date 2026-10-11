@@ -18,7 +18,7 @@ function sourceTarget(target) {
 
 for (const directory of [
 	"permissions", "subagent", "pi-web-search", "grok-tui", "grok-tui-compat",
-	"ai", "agent", "mcp", "telemetry", "coding-agent", "client", "server", "protocol",
+	"ai", "agent", "codemode", "mcp", "telemetry", "coding-agent", "client", "server", "protocol",
 	"tui", "session-backends/sqlite-node",
 ]) {
 	const packageRoot = resolve(root, "packages", directory);

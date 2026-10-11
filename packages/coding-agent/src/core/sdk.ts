@@ -64,6 +64,8 @@ export interface CreateAgentSessionOptions {
 	noTools?: "all" | "builtin";
 	/** Disable MCP when creating the default resource loader. Custom loaders remain host-owned. */
 	noMcp?: boolean;
+	/** Do not register codemode in the default loader. Custom loaders remain host-owned. */
+	noCodemode?: boolean;
 	/**
 	 * Optional allowlist of tool names.
 	 *
@@ -76,6 +78,8 @@ export interface CreateAgentSessionOptions {
 	tools?: string[];
 	/** Optional denylist of tool names to disable. Applies after `tools` when both are provided. */
 	excludeTools?: string[];
+	/** Trusted live restriction, intersected with tools/excludeTools for discovery and execution. */
+	liveToolAccessCheck?: (name: string) => boolean;
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 
@@ -124,6 +128,7 @@ export type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionToolContext,
 	InlineExtension,
 	SlashCommandInfo,
 	SlashCommandSource,
@@ -208,6 +213,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionFactories: createBuiltInExtensions(agentDir, {
 				collaboration: settingsManager.getSubagentEnabled(),
 				mcp: !options.noMcp,
+				codemode: !options.noCodemode,
 			}),
 		});
 		await resourceLoader.reload();
@@ -429,6 +435,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		initialActiveToolNames,
 		allowedToolNames,
 		excludedToolNames,
+		liveToolAccessCheck: options.liveToolAccessCheck,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 		backgroundBash: options.backgroundBash,

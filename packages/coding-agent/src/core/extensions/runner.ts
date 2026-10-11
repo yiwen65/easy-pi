@@ -3,7 +3,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
@@ -11,6 +11,7 @@ import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import { type NestedCallSummary, ToolInvocationScope } from "../nested-tool-calls.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type {
@@ -35,6 +36,7 @@ import type {
 	ExtensionMode,
 	ExtensionRuntime,
 	ExtensionShortcut,
+	ExtensionToolContext,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
@@ -305,6 +307,9 @@ export class ExtensionRunner {
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private getToolAccessFn: () => ToolAccess = () => ({});
+	private getCallableToolsFn: () => readonly AgentTool[] = () => [];
+	private executeToolFn?: ExtensionContextActions["executeTool"];
+	private readonly toolScopes = new WeakMap<ExtensionToolContext, ToolInvocationScope>();
 	private isIdleFn: () => boolean = () => true;
 	private isProjectTrustedFn: () => boolean = () => true;
 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
@@ -359,6 +364,7 @@ export class ExtensionRunner {
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setLabel = actions.setLabel;
+		this.runtime.getSettings = actions.getSettings ?? (() => ({}));
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = actions.setActiveTools;
@@ -372,6 +378,8 @@ export class ExtensionRunner {
 		this.getModel = contextActions.getModel;
 		this.getScopedModels = contextActions.getScopedModels;
 		this.getToolAccessFn = contextActions.getToolAccess ?? (() => ({}));
+		this.getCallableToolsFn = contextActions.getCallableTools ?? (() => []);
+		this.executeToolFn = contextActions.executeTool;
 		this.isIdleFn = contextActions.isIdle;
 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
 		this.getSignalFn = contextActions.getSignal;
@@ -807,6 +815,58 @@ export class ExtensionRunner {
 		};
 	}
 
+	/** A fresh, invocation-scoped context; its nested grants remain live. */
+	createToolContext(toolCallId: string, signal?: AbortSignal): ExtensionToolContext {
+		const scope = new ToolInvocationScope();
+		const signals = [signal, this.getSignalFn()].filter((value): value is AbortSignal => value !== undefined);
+		// Receipt-producing tools can intentionally outlive their invocation (native spawn,
+		// background work). Finishing this scope cancels only executeTool() children, not
+		// the caller's original run signal passed to such tools.
+		const callerSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+		const invocationSignal = AbortSignal.any([scope.controller.signal, ...signals]);
+		const context = Object.defineProperties(this.createContext() as ExtensionToolContext, {
+			signal: {
+				get: () => {
+					this.assertActive();
+					return callerSignal;
+				},
+			},
+			tools: {
+				get: () => {
+					this.assertActive();
+					return this.getCallableToolsFn();
+				},
+			},
+		});
+		context.executeTool = (name, args, options = {}) => {
+			this.assertActive();
+			if (!scope.isAccepting || !this.executeToolFn) {
+				return Promise.resolve({
+					toolCall: {
+						type: "toolCall",
+						id: `${toolCallId}/closed`,
+						name,
+						arguments: (args ?? {}) as Record<string, unknown>,
+					},
+					result: { content: [{ type: "text", text: "Nested tool invocation is no longer active" }], details: {} },
+					isError: true,
+					executionOutcome: "not_started",
+				});
+			}
+			const callSignal = options.signal ? AbortSignal.any([invocationSignal, options.signal]) : invocationSignal;
+			return scope.run(() => this.executeToolFn!(toolCallId, name, args, { ...options, signal: callSignal }));
+		};
+		context.waitForNestedTools = () => scope.drain();
+		this.toolScopes.set(context, scope);
+		return context;
+	}
+
+	async finishToolContext(context: ExtensionToolContext): Promise<NestedCallSummary> {
+		const scope = this.toolScopes.get(context);
+		this.toolScopes.delete(context);
+		return scope ? await scope.finish() : { executionOutcome: "confirmed" };
+	}
+
 	createCommandContext(): ExtensionCommandContext {
 		// Use property descriptors instead of object spread so the guarded getters from
 		// createContext() stay lazy. A spread would eagerly read them once and freeze the
@@ -954,8 +1014,9 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
+	async emitToolResult(event: ToolResultEvent, signal?: AbortSignal): Promise<ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
+		if (signal) Object.defineProperty(ctx, "signal", { get: () => signal });
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -970,6 +1031,10 @@ export class ExtensionRunner {
 
 					if (handlerResult.content !== undefined) {
 						currentEvent.content = handlerResult.content;
+						modified = true;
+					}
+					if (handlerResult.structuredContent !== undefined) {
+						currentEvent.structuredContent = handlerResult.structuredContent;
 						modified = true;
 					}
 					if (handlerResult.details !== undefined) {
@@ -1003,14 +1068,16 @@ export class ExtensionRunner {
 
 		return {
 			content: currentEvent.content,
+			structuredContent: currentEvent.structuredContent,
 			details: currentEvent.details,
 			isError: currentEvent.isError,
 			usage: currentEvent.usage,
 		};
 	}
 
-	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
+	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext();
+		if (signal) Object.defineProperty(ctx, "signal", { get: () => signal });
 		let result: ToolCallEventResult | undefined;
 
 		for (const ext of this.extensions) {

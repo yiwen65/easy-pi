@@ -17,6 +17,7 @@ import type {
 import { createToolNameMatcher, mcpNamespace } from "../../core/mcp-servers.ts";
 import type { ReadonlySessionManager } from "../../core/session-manager.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
+import { CODEMODE_TOOL_NAME, isCodemodeTool } from "../codemode/tool.ts";
 import { isToolSearchTool, TOOL_SEARCH_TOOL_NAME } from "../tool-search/tool.ts";
 import { canReachMcpServer } from "./authority.ts";
 import {
@@ -114,6 +115,7 @@ const EXPOSURE_DESCRIPTIONS: Record<McpExposure, string> = {
 	hidden: "registered but unreachable",
 	deferred: "not declared until tool_search loads them, then called directly",
 	direct: "declared to the model like built-in tools",
+	codemode: "called only from authorized codemode scripts",
 };
 
 function errorMessage(error: unknown): string {
@@ -145,7 +147,7 @@ function hasDirectTools(entry: McpServerEntry): boolean {
 /** Whether some of the server's tools are reached through tool_search. */
 function hasIndirectTools(entry: McpServerEntry): boolean {
 	const exposures = configuredExposures(entry);
-	return exposures.has("deferred");
+	return exposures.has("deferred") || exposures.has("codemode");
 }
 
 /** Name of the system prompt section that lists the servers whose tools are not declared. */
@@ -162,6 +164,7 @@ export const MAX_SERVERS_SECTION_CHARS = 4096;
 function serversSectionIntro(reaches: ReadonlySet<string>): string {
 	let intro = "MCP servers whose tools are not declared to you.";
 	if (reaches.has("tool_search")) intro += " Load the tools of `tool_search` servers with `tool_search`.";
+	if (reaches.has("codemode")) intro += " Call the tools of `codemode` servers from authorized codemode scripts.";
 	return intro;
 }
 
@@ -192,8 +195,15 @@ export function renderServersSection(servers: readonly McpServerListing[]): stri
 		.filter((server) => isEnabled(server) && hasIndirectTools(server.entry))
 		.sort((a, b) => a.entry.name.localeCompare(b.entry.name));
 	if (listed.length === 0) return undefined;
-	const reaches = listed.map(() => "tool_search");
-	const intro = serversSectionIntro(new Set(reaches));
+	const routes = listed.map((server) => {
+		const exposures = configuredExposures(server.entry);
+		return [
+			exposures.has("deferred") ? "tool_search" : undefined,
+			exposures.has("codemode") ? "codemode" : undefined,
+		].filter((value): value is string => value !== undefined);
+	});
+	const reaches = routes.map((route) => route.join(", "));
+	const intro = serversSectionIntro(new Set(routes.flat()));
 	const heads = listed.map((server, index) => `- ${mcpNamespace(server.entry.name)} (${reaches[index]})`);
 	const omitted = (count: number) =>
 		count > 0 ? [`- … ${count} more server${count === 1 ? "" : "s"}; find their tools with tool_search`] : [];
@@ -269,6 +279,7 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 		let configErrors: string[] = [];
 		/** The trusted project's `mcp.json`, where `/mcp` saves project overrides of global servers. */
 		let projectConfig: string | undefined;
+		let autoEnableCodemode = true;
 		/** Registered servers that `mcp.json` overrides, shown in `/mcp`. */
 		let overridden: string[] = [];
 		/** Whether the "deferred tools unreachable" warning was shown since the session started. */
@@ -476,7 +487,7 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 		 */
 		const syncResourceTools = () => {
 			const exposures = new Set(serversWithResources().map((server) => exposureOf(server.entry)));
-			const exposure = (["direct", "deferred"] as const).find((candidate) => exposures.has(candidate));
+			const exposure = (["direct", "deferred", "codemode"] as const).find((candidate) => exposures.has(candidate));
 			const next = exposure ?? "hidden";
 			if (next === resourceToolsExposure || (resourceToolsExposure === undefined && next === "hidden")) return;
 			const wasDirect = resourceToolsExposure === "direct";
@@ -490,16 +501,41 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 		};
 
 		const ensureDiscoveryActive = (ctx: ExtensionContext) => {
-			if (!servers.some((server) => isEnabled(server) && hasIndirectTools(server.entry))) return;
-			const active = pi.getActiveTools();
-			if (active.includes(TOOL_SEARCH_TOOL_NAME)) return;
-			if (pi.getAllTools().some(isToolSearchTool)) {
-				pi.setActiveTools([...active, TOOL_SEARCH_TOOL_NAME]);
-				if (pi.getActiveTools().includes(TOOL_SEARCH_TOOL_NAME)) return;
+			const reachable = servers.filter((server) => isEnabled(server) && canConnect(server.entry, ctx));
+			if (!reachable.some((server) => hasIndirectTools(server.entry))) return;
+			const exposures = new Set(reachable.flatMap((server) => [...configuredExposures(server.entry)]));
+			let active = pi.getActiveTools();
+			if (
+				exposures.has("codemode") &&
+				autoEnableCodemode &&
+				!active.includes(CODEMODE_TOOL_NAME) &&
+				pi.getAllTools().some(isCodemodeTool)
+			) {
+				// setActiveTools still applies exact/wildcard grants and exclusions; this never grants a target tool.
+				pi.setActiveTools([...active, CODEMODE_TOOL_NAME]);
+				active = pi.getActiveTools();
 			}
-			if (warnedUnreachable) return;
+			if (
+				exposures.has("deferred") &&
+				!active.includes(TOOL_SEARCH_TOOL_NAME) &&
+				pi.getAllTools().some(isToolSearchTool)
+			) {
+				pi.setActiveTools([...active, TOOL_SEARCH_TOOL_NAME]);
+				active = pi.getActiveTools();
+			}
+			const missingSearch =
+				exposures.has("deferred") &&
+				!active.includes(TOOL_SEARCH_TOOL_NAME) &&
+				!active.includes(CODEMODE_TOOL_NAME);
+			const missingCodemode = exposures.has("codemode") && !active.includes(CODEMODE_TOOL_NAME);
+			if ((!missingSearch && !missingCodemode) || warnedUnreachable) return;
 			warnedUnreachable = true;
-			ctx.ui.notify("Deferred MCP tools require an authorized tool_search tool, but it is not active.", "warning");
+			ctx.ui.notify(
+				missingCodemode
+					? "Script-only MCP tools require an authorized codemode tool, but it is not active."
+					: "Deferred MCP tools require an authorized tool_search or codemode tool, but neither is active.",
+				"warning",
+			);
 		};
 
 		/**
@@ -1096,6 +1132,7 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 					});
 			configErrors = loaded.errors;
 			projectConfig = loaded.projectConfig;
+			autoEnableCodemode = loaded.autoEnableCodemode !== false;
 			warnedUnreachable = false;
 			waitedForStartup = false;
 			sessionCwd = ctx.cwd;
@@ -1110,6 +1147,7 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 				canConnect(server.entry, ctx),
 			);
 			configView = () => ({
+				autoEnableCodemode,
 				servers: servers.map((server) => server.entry),
 				errors: [...configErrors],
 				...(projectConfig ? { projectConfig } : {}),
@@ -1181,13 +1219,13 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 		pi.on("before_agent_start", async (_event, ctx) => {
 			await waitForDirectServers(ctx);
 			if (session.signal.aborted || ctx.signal?.aborted) return;
-			const section = renderServersSection(servers);
+			const section = renderServersSection(servers.filter((server) => canConnect(server.entry, ctx)));
 			if (section === lastServersSection) return;
 			lastServersSection = section;
 			return {
 				message: {
 					customType: MCP_SERVERS_SECTION,
-					content: section ?? "No deferred MCP servers are available.",
+					content: section ?? "No indirect MCP servers are available.",
 					display: false,
 				},
 			};
@@ -1202,7 +1240,7 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 			const readyServers = servers.filter((server) => isEnabled(server) && server.ready);
 			if (readyServers.length === 0) return;
 			let waiting: McpServer[] = [];
-			if (isToolSearchTool(tool) || RESOURCE_TOOL_NAMES.has(tool.name)) {
+			if (isToolSearchTool(tool) || isCodemodeTool(tool) || RESOURCE_TOOL_NAMES.has(tool.name)) {
 				waiting = readyServers;
 			} else {
 				const owner = toolOwners.get(event.toolName)?.split("\0", 1)[0];

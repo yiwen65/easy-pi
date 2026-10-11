@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext, ToolAccess, ToolDefinition } from "../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { RegisteredMcpServer } from "../src/core/mcp-servers.ts";
+import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 import { canReachMcpServer } from "../src/extensions/mcp/authority.ts";
 import { createMcpExtension, getSessionMcpConfig } from "../src/extensions/mcp/index.ts";
 import { McpManagerView } from "../src/extensions/mcp/ui.ts";
@@ -255,9 +256,11 @@ describe("MCP adapter lifecycle", () => {
 		await pair.server.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
 		await vi.waitFor(() => expect(h.tools.get("mcp__docs__search")?.exposure).toBe("hidden"));
 		expect(h.tools.get("mcp__docs__new")?.exposure).toBe("deferred");
-		await expect(
-			h.tools.get("mcp__docs__search")?.execute("id", {}, undefined, undefined, h.ctx),
-		).rejects.toMatchObject({ executionOutcome: "not_started" });
+		const withdrawn = h.tools.get("mcp__docs__search");
+		if (!withdrawn) throw new Error("Withdrawn MCP tool is missing");
+		await expect(wrapToolDefinition(withdrawn).execute("id", {})).rejects.toMatchObject({
+			executionOutcome: "not_started",
+		});
 		await h.handlers.get("session_shutdown")?.({}, h.ctx);
 		expect(closed).toHaveBeenCalledTimes(1);
 	});

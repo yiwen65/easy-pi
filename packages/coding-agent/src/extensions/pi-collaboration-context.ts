@@ -9,6 +9,7 @@ import {
 	CollaborationError,
 	DELIVER_RESULT_TOOL_NAME,
 	type DelegationContext,
+	REPORT_PROGRESS_TOOL_NAME,
 } from "@easy-pi/subagent/collaboration-contract";
 import type { ChildRequestPrefix } from "@easy-pi/subagent/session-host";
 import type { AgentSession } from "../core/agent-session.ts";
@@ -18,7 +19,7 @@ const prefixes = new WeakMap<AgentSession, { prefix: ChildRequestPrefix; checkpo
 /** Do not copy executable tool implementations into a context snapshot. */
 export function collaborationToolSchemas(tools: readonly Tool[] | undefined): Tool[] {
 	return (tools ?? [])
-		.filter((tool) => tool.name !== DELIVER_RESULT_TOOL_NAME)
+		.filter((tool) => tool.name !== DELIVER_RESULT_TOOL_NAME && tool.name !== REPORT_PROGRESS_TOOL_NAME)
 		.map(({ name, description, parameters, constrainedSampling }) =>
 			structuredClone({
 				name,

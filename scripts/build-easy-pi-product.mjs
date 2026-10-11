@@ -32,13 +32,14 @@ try {
 	}
 	// npm pack omits hoisted workspace symlinks, even for bundleDependencies.
 	// Materialize only these private, compiled packages under the product.
-	for (const [directory, name] of [["permissions", "@easy-pi/permissions"], ["subagent", "@easy-pi/subagent"], ["pi-web-search", "@easy-pi/web-search"], ["mcp", "@earendil-works/pi-mcp"]]) {
+	for (const [directory, name] of [["permissions", "@easy-pi/permissions"], ["subagent", "@easy-pi/subagent"], ["pi-web-search", "@easy-pi/web-search"], ["mcp", "@earendil-works/pi-mcp"], ["codemode", "@earendil-works/pi-codemode"]]) {
 		const destination = join(root, "packages/coding-agent/node_modules", name);
 		rmSync(destination, { recursive: true, force: true });
 		mkdirSync(destination, { recursive: true });
 		cpSync(join(root, "packages", directory, "package.json"), join(destination, "package.json"));
 		cpSync(join(root, "packages", directory, "dist"), join(destination, "dist"), { recursive: true });
-		if (directory === "mcp") cpSync(join(root, "packages/mcp/LICENSES"), join(destination, "LICENSES"), { recursive: true });
+		if (directory === "mcp" || directory === "codemode") cpSync(join(root, "packages", directory, "LICENSES"), join(destination, "LICENSES"), { recursive: true });
+		if (directory === "codemode") cpSync(join(root, "packages/codemode/LICENSE"), join(destination, "LICENSE"));
 	}
 } finally {
 	rmSync(output, { recursive: true, force: true });

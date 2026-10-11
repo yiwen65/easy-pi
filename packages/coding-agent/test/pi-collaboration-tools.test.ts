@@ -767,8 +767,8 @@ test("isolated verifier sees its assignment but no parent goals and cannot invok
 	await f.controller.settled();
 	expect(JSON.stringify(childContext?.messages)).not.toContain("PARENT_CONCLUSION_SECRET");
 	expect(JSON.stringify(childContext?.messages)).toContain("independent verification");
-	// The host-owned protocol tool is structurally available to every child, on top of the delegated set.
-	expect(childContext?.tools?.map((item) => item.name)).toEqual(["deliver_result", "read"]);
+	// Host-owned protocol tools are structurally available to every child, on top of the delegated set.
+	expect(childContext?.tools?.map((item) => item.name)).toEqual(["deliver_result", "report_progress", "read"]);
 	expect(existsSync(join(f.cwd, "should-not-exist"))).toBe(false);
 	expect(f.store.read().agents[0]).toMatchObject({
 		result: "unstructured result is retained",
@@ -776,8 +776,24 @@ test("isolated verifier sees its assignment but no parent goals and cannot invok
 	});
 });
 
-test("live root tool revocation blocks an already-advertised child tool", async () => {
-	const f = await fixture();
+test("live root tool revocation blocks an already-advertised child tool even if a host restores its schema", async () => {
+	let nativeChild: AgentSession;
+	const outcomes: string[] = [];
+	const dispatch = vi.fn();
+	const f = await fixture(undefined, [], (native) => {
+		nativeChild = native;
+		const previousDispatch = native.agent.beforeToolDispatch;
+		native.agent.beforeToolDispatch = async (context) => {
+			if (context.tool.name === "bash") dispatch();
+			await previousDispatch?.(context);
+		};
+		const previousResult = native.agent.onToolResult;
+		native.agent.onToolResult = async (message, context) => {
+			if (context.toolCall.name === "bash") outcomes.push(context.executionOutcome);
+			await previousResult?.(message, context);
+		};
+	});
+	const bash = f.session.agent.state.tools.find((tool) => tool.name === "bash")!;
 	let rootStep = 0;
 	let childStep = 0;
 	f.faux.setResponses(
@@ -786,6 +802,11 @@ test("live root tool revocation blocks an already-advertised child tool", async 
 				if (childStep++ === 0) {
 					expect(context.tools?.some((item) => item.name === "bash")).toBe(true);
 					f.session.setActiveToolsByName(f.session.getActiveToolNames().filter((name) => name !== "bash"));
+					// The request already bound bash. Restoring live state must not bypass ancestry denial.
+					nativeChild.agent.state.tools = [
+						...nativeChild.agent.state.tools.filter((tool) => tool.name !== "bash"),
+						bash,
+					];
 					return tool("bash", { command: "printf unauthorized > revoked-tool-output" });
 				}
 				return fauxAssistantMessage("blocked");
@@ -799,9 +820,15 @@ test("live root tool revocation blocks an already-advertised child tool", async 
 	expect(existsSync(join(f.cwd, "revoked-tool-output"))).toBe(false);
 	const record = f.controller.inspect(f.identity, "worker");
 	const messages = SessionManager.open(record.sessionPath!).buildSessionContext().messages;
-	expect(
-		messages.some((message) => message.role === "toolResult" && message.toolName === "bash" && message.isError),
-	).toBe(true);
+	const denied = messages.filter((message) => message.role === "toolResult" && message.toolName === "bash");
+	expect(denied).toHaveLength(1);
+	expect(denied[0]).toMatchObject({
+		isError: true,
+		content: [{ type: "text", text: "Tool denied by live delegation ancestry" }],
+	});
+	expect(outcomes).toEqual(["not_started"]);
+	expect(dispatch).not.toHaveBeenCalled();
+	expect(record).toMatchObject({ status: "completed", result: "blocked" });
 });
 
 test("curated context uses exact hash-pinned lines and rejects changed, denied and symlink sources", async () => {
@@ -875,15 +902,16 @@ test("a checkpoint change during the spawn batch cannot resurrect the older capt
 	expect(f.faux.state.callCount).toBe(2);
 });
 
-test("execution gate blocks a restricted tool even if a trusted host re-advertises its schema", async () => {
+test("request preparation excludes a restricted tool even if a trusted host re-advertises its schema", async () => {
 	let nativeChild: AgentSession;
 	let bash: AgentSession["agent"]["state"]["tools"][number];
+	const outcomes: string[] = [];
 	const f = await fixture(
 		undefined,
 		[
 			(pi) => {
-				// setActiveTools cannot bypass the SDK allowlist. Deliberately exercise the
-				// stronger public host seam instead, so this test reaches execution gating.
+				// setActiveTools cannot bypass the SDK allowlist. Exercise the public host
+				// seam instead; request preparation must filter this unauthorized schema.
 				pi.on("before_agent_start", () => {
 					nativeChild.agent.state.tools = [...nativeChild.agent.state.tools, bash];
 				});
@@ -891,16 +919,24 @@ test("execution gate blocks a restricted tool even if a trusted host re-advertis
 		],
 		(native) => {
 			nativeChild = native;
+			const previousResult = native.agent.onToolResult;
+			native.agent.onToolResult = async (message, context) => {
+				if (context.toolCall.name === "bash") outcomes.push(context.executionOutcome);
+				await previousResult?.(message, context);
+			};
 		},
 	);
 	bash = f.session.agent.state.tools.find((tool) => tool.name === "bash")!;
+	const execute = vi.spyOn(bash, "execute");
 	let root = 0;
 	let child = 0;
 	f.faux.setResponses(
 		Array.from({ length: 8 }, () => (context: Context) => {
 			if (currentCollaborationPath(context) === "/root/worker") {
 				if (child++ === 0) {
-					expect(context.tools?.some((tool) => tool.name === "bash")).toBe(true);
+					expect(context.tools?.map((tool) => tool.name)).toEqual(["deliver_result", "report_progress", "read"]);
+					// Even another host mutation after binding cannot add bash to this request's plan.
+					nativeChild.agent.state.tools = [...nativeChild.agent.state.tools, bash];
 					return tool("bash", { command: "printf forbidden > read-only-bypass" });
 				}
 				return fauxAssistantMessage("gate checked");
@@ -919,9 +955,16 @@ test("execution gate blocks a restricted tool even if a trusted host re-advertis
 	await f.controller.settled();
 	expect(existsSync(join(f.cwd, "read-only-bypass"))).toBe(false);
 	const record = f.controller.inspect(f.identity, "worker");
-	expect(JSON.stringify(SessionManager.open(record.sessionPath!).buildSessionContext().messages)).toContain(
-		"Tool denied by live delegation ancestry",
-	);
+	const messages = SessionManager.open(record.sessionPath!).buildSessionContext().messages;
+	const denied = messages.filter((message) => message.role === "toolResult" && message.toolName === "bash");
+	expect(denied).toHaveLength(1);
+	expect(denied[0]).toMatchObject({
+		isError: true,
+		content: [{ type: "text", text: "Tool bash not found" }],
+	});
+	expect(outcomes).toEqual(["not_started"]);
+	expect(execute).not.toHaveBeenCalled();
+	expect(record).toMatchObject({ status: "completed", result: "gate checked", tools: ["read"] });
 });
 
 test("curated spawn sends only pinned evidence and the current assignment, not parent beliefs", async () => {
@@ -984,8 +1027,8 @@ test("cold explicit followup retains the delegated ceiling and child history wit
 	);
 	await restarted.session.prompt("explicitly continue the child");
 	await restarted.controller.settled();
-	// deliver_result stays structurally active across cold restarts; the delegated ceiling stays read-only.
-	expect(captured?.tools?.map((tool) => tool.name)).toEqual(["deliver_result", "read"]);
+	// Protocol tools stay structurally active across cold restarts; the delegated ceiling stays read-only.
+	expect(captured?.tools?.map((tool) => tool.name)).toEqual(["deliver_result", "report_progress", "read"]);
 	expect(JSON.stringify(captured?.messages)).toContain("RETAINED_CHILD_RESULT");
 	expect(JSON.stringify(captured?.messages)).toContain("second explicit task");
 	expect(restarted.store.read().agents[0].tools).toEqual(["read"]);
@@ -1138,10 +1181,10 @@ test("new query tools share root/child schemas but every child query is rejected
 	const f = await fixture(undefined, [], (session) => children.push(session));
 	let root = 0;
 	let child = 0;
-	const catalogs: string[][] = [];
+	const catalogs: ReturnType<typeof collaborationToolSchemas>[] = [];
 	f.faux.setResponses(
 		Array.from({ length: 12 }, () => (context: Context) => {
-			catalogs.push(context.tools?.map((tool) => tool.name).filter((name) => name !== "deliver_result") ?? []);
+			catalogs.push(collaborationToolSchemas(context.tools));
 			if (currentCollaborationPath(context) === "/root/worker") {
 				switch (child++) {
 					case 0:
@@ -1168,7 +1211,9 @@ test("new query tools share root/child schemas but every child query is rejected
 	expect(childResults.every((message) => message.isError)).toBe(true);
 	expect(JSON.stringify(childResults)).toContain("nested_delegation");
 	for (const catalog of catalogs) expect(catalog).toEqual(catalogs[0]);
-	expect(catalogs[0]).toEqual(expect.arrayContaining(["get_agent_result", "list_agent_turns"]));
+	expect(catalogs[0].map((tool) => tool.name)).toEqual(
+		expect.arrayContaining(["get_agent_result", "list_agent_turns"]),
+	);
 });
 
 test("targeted wait tool returns an already-ingested turn without another child or provider request", async () => {

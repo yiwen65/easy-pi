@@ -15,6 +15,7 @@ import {
 	runAgentLoop,
 	runAgentLoopContinue,
 	runAgentLoopResumeTools,
+	runToolCall as runSingleToolCall,
 } from "./agent-loop.ts";
 import { RunScope } from "./run-scope.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
@@ -29,6 +30,9 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolCall,
+	AgentToolCallOutcome,
+	AgentToolUpdateCallback,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	PrepareNextTurnContext,
@@ -38,6 +42,8 @@ import type {
 	StreamFn,
 	ToolExecutionMode,
 } from "./types.ts";
+
+import { AgentToolError } from "./types.ts";
 
 export type { QueueMode } from "./types.ts";
 
@@ -313,6 +319,81 @@ export class Agent {
 			{ convertToLlm: this.convertToLlm, transformContext: this.transformContext },
 			signal,
 		);
+	}
+
+	/** Execute a nested tool in the active run, with the host's real hooks, gates and scheduler. */
+	async runToolCall(
+		toolCall: AgentToolCall,
+		tools: readonly AgentTool[],
+		parentToolCallId: string,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback,
+	): Promise<AgentToolCallOutcome> {
+		const assistant = this._state.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "assistant");
+		if (!this.activeRun || assistant?.role !== "assistant") {
+			return {
+				toolCall,
+				result: { content: [{ type: "text", text: "Nested tools require an active agent run" }], details: {} },
+				isError: true,
+				executionOutcome: "not_started",
+			};
+		}
+		const config = this.createLoopConfig();
+		config.parentToolCallId = parentToolCallId;
+		// These callbacks run before the target execute() starts. Their failures cannot be
+		// mistaken for uncertain remote execution, even when they persisted an intent.
+		const dispatch = config.beforeToolDispatch;
+		config.beforeToolDispatch = async (context) => {
+			try {
+				await dispatch?.(context);
+			} catch (error) {
+				throw new AgentToolError(
+					error instanceof Error ? error.message : String(error),
+					{},
+					{ executionOutcome: "not_started", cause: error },
+				);
+			}
+		};
+		const admission = config.admitToolCall;
+		config.admitToolCall = admission
+			? async (context) => {
+					try {
+						return await admission(context);
+					} catch (error) {
+						throw new AgentToolError(
+							error instanceof Error ? error.message : String(error),
+							{},
+							{ executionOutcome: "not_started", cause: error },
+						);
+					}
+				}
+			: undefined;
+		try {
+			return await runSingleToolCall(
+				{ systemPrompt: this._state.systemPrompt, messages: this._state.messages.slice(), tools: [...tools] },
+				assistant,
+				toolCall,
+				config,
+				signal,
+				async (event) => {
+					if (event.type === "tool_execution_update") onUpdate?.(event.partialResult);
+					await this.processEvents(event);
+				},
+			);
+		} catch (error) {
+			return {
+				toolCall,
+				result: {
+					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+					details: error instanceof AgentToolError ? error.details : {},
+				},
+				isError: true,
+				executionOutcome: error instanceof AgentToolError ? error.executionOutcome : "unknown",
+			};
+		}
 	}
 
 	/** Controls how queued steering messages are drained. */

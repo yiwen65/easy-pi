@@ -7,6 +7,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	NestedToolCalls,
 	SimpleStreamOptions,
 	TextContent,
 	Tool,
@@ -86,6 +87,7 @@ export interface BeforeToolCallResult {
  */
 export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];
+	structuredContent?: unknown;
 	details?: unknown;
 	isError?: boolean;
 	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
@@ -101,6 +103,7 @@ export interface AfterToolCallResult {
 export interface ToolAdmissionContext {
 	/** Stable run identity, when the call belongs to an Agent run. */
 	readonly runId?: string;
+	readonly parentToolCallId?: string;
 	readonly toolCall: AgentToolCall;
 	readonly tool: AgentTool<any>;
 	readonly args: unknown;
@@ -114,6 +117,7 @@ export interface ToolAdmissionResult {
 }
 
 export interface BeforeToolCallContext {
+	parentToolCallId?: string;
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
 	/** The raw tool call block from `assistantMessage.content`. */
@@ -126,6 +130,7 @@ export interface BeforeToolCallContext {
 
 /** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
+	parentToolCallId?: string;
 	/** The assistant message that requested the tool call. */
 	assistantMessage: AssistantMessage;
 	/** The raw tool call block from `assistantMessage.content`. */
@@ -259,6 +264,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/** Current provider step identity for internal diagnostics. */
 	stepId?: string;
 	toolPlanRevision?: number;
+	/** Calling tool identity for host-issued nested executions. */
+	parentToolCallId?: string;
 	/** Optional redacted execution observer. Exceptions do not affect the run. */
 	onExecutionEvent?: AgentExecutionObserver;
 	/** Persist a completed output item before exposing it to listeners. Failures stop the run. */
@@ -277,6 +284,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 			terminate: boolean;
 			/** Execution certainty before presentation hooks; independent of isError. */
 			executionOutcome: ToolExecutionOutcome;
+			parentToolCallId?: string;
 		},
 	) => Promise<void> | void;
 	/** Persist dispatch intent after scheduler admission, before the final synchronous gate. */
@@ -462,6 +470,11 @@ export interface AgentState {
 
 /** Final or partial result produced by a tool. */
 export interface AgentToolResult<T> {
+	/** Structured output for tool orchestration; not inferred from display text. */
+	structuredContent?: unknown;
+	nestedCalls?: NestedToolCalls;
+	/** Authoritative composed-execution uncertainty, never inferred from display metadata. */
+	nestedExecutionOutcome?: "unknown";
 	/** Text or image content returned to the model. */
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
@@ -479,7 +492,19 @@ export interface AgentToolResult<T> {
 
 export type ToolExecutionOutcome = "not_started" | "confirmed" | "unknown";
 
+/** Outcome of one tool pipeline execution, without transcript publication. */
+export interface AgentToolCallOutcome {
+	toolCall: AgentToolCall;
+	result: AgentToolResult<unknown>;
+	isError: boolean;
+	executionOutcome: ToolExecutionOutcome;
+}
+
 export interface AgentToolErrorOptions extends ErrorOptions {
+	nestedExecutionOutcome?: "unknown";
+	structuredContent?: unknown;
+	nestedCalls?: NestedToolCalls;
+	usage?: Usage;
 	/** Set only at a throw site that can prove the operation did not start or its result is known. */
 	executionOutcome?: Exclude<ToolExecutionOutcome, "unknown">;
 }
@@ -488,12 +513,20 @@ export interface AgentToolErrorOptions extends ErrorOptions {
 export class AgentToolError<TDetails = unknown> extends Error {
 	readonly details: TDetails;
 	readonly executionOutcome: ToolExecutionOutcome;
+	readonly structuredContent?: unknown;
+	readonly nestedCalls?: NestedToolCalls;
+	readonly nestedExecutionOutcome?: "unknown";
+	readonly usage?: Usage;
 
 	constructor(message: string, details: TDetails, options?: AgentToolErrorOptions) {
 		super(message, options);
 		this.name = "AgentToolError";
 		this.details = details;
 		this.executionOutcome = options?.executionOutcome ?? "unknown";
+		this.structuredContent = options?.structuredContent;
+		this.nestedCalls = options?.nestedCalls;
+		this.nestedExecutionOutcome = options?.nestedExecutionOutcome;
+		this.usage = options?.usage;
 	}
 }
 
@@ -537,6 +570,10 @@ export interface ToolExecutionInfo {
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
 	label: string;
+	/** Schema of structuredContent, when the tool returns a structured script value. */
+	outputSchema?: TSchema;
+	/** Orchestrators do not occupy a scheduler slot while awaiting their nested tools. */
+	orchestratesTools?: boolean;
 	/** Declarative execution contract used by durable drivers for dispatch gating. */
 	contract?: ToolContract;
 	/**
@@ -595,6 +632,20 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; parentToolCallId?: string }
+	| {
+			type: "tool_execution_update";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			partialResult: any;
+			parentToolCallId?: string;
+	  }
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			result: any;
+			isError: boolean;
+			parentToolCallId?: string;
+	  };

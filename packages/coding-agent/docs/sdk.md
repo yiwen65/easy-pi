@@ -628,7 +628,41 @@ const { session } = await createAgentSession({
 
 ### MCP
 
-The default resource loader includes MCP and `tool_search`. Use `noMcp: true` to disable the built-in integration. Custom resource loaders remain host-owned; add `createMcpExtension({ agentDir })` and `createToolSearchExtension()` explicitly when needed. MCP respects the same strict `tools`/`excludeTools` grants, including `*` patterns. Deferred discovery changes declarations, never authorization. See [MCP servers](mcp.md) for configuration, OAuth, embedding factories, and child resource restrictions.
+The default resource loader includes MCP and `tool_search`. Use `noMcp: true` to disable the built-in integration. Custom resource loaders remain host-owned; add `createMcpExtension({ agentDir })` and `createToolSearchExtension()` explicitly when needed. MCP respects the same strict `tools`/`excludeTools` grants, including `*` patterns. Deferred discovery and codemode scripts never add authorization. See [MCP servers](mcp.md) for configuration, OAuth, embedding factories, and child resource restrictions.
+
+### Codemode
+
+The default SDK resource loader registers the local QuickJS `codemode` tool inactive. Use `noCodemode: true` to omit that built-in registration; custom loaders remain host-owned. Name codemode and its target tools in the strict `tools` allowlist to activate it:
+
+```typescript
+import { createAgentSession, SettingsManager } from "@earendil-works/pi-coding-agent";
+
+const { session } = await createAgentSession({
+  tools: ["codemode", "read"],
+  settingsManager: SettingsManager.inMemory({
+    codemode: { mode: "only", inlineBudget: 3000 },
+  }),
+});
+```
+
+`mode: "only"` changes provider declarations, not tool authority or activation. `tools: ["codemode"]` permits scripts with no target tool access. Native children require separate grants for codemode and each target, and retain live root/ancestor restrictions.
+
+For a custom resource loader, add the factory explicitly before creating the session:
+
+```typescript
+import { createCodemodeExtension, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+
+const loader = new DefaultResourceLoader({
+  cwd,
+  agentDir,
+  extensionFactories: [
+    { name: "codemode", factory: createCodemodeExtension({ mode: "only" }), builtin: true, replaceable: true },
+  ],
+});
+await loader.reload();
+```
+
+The factory also accepts `inlineBudget`. The integration does not expose the upstream `models.*` catalog/classifier/image API. Scripts use the session's nested execution pipeline, not direct `AgentTool.execute()` calls. Schema validation, hooks, host admission, scheduling, and durable dispatch facts still apply; caught unknown outcomes cannot authorize replay or committed store writes. See [Codemode](codemode.md) for the source format, tool results, output limits, and branch-local store, and [ExtensionToolContext](extensions.md#extensiontoolcontext) for custom orchestrators.
 
 ### Custom Tools
 

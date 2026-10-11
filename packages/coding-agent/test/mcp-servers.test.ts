@@ -20,6 +20,7 @@ describe("MCP server configuration", () => {
 		{ url: "https://example.test/mcp", headers: { Authorization: "Bearer configured-token" } },
 		{ type: "http", url: "http://localhost:9000/mcp", exposure: "direct" },
 		{ type: "streamable-http", url: "https://example.test/mcp", exposure: "hidden" },
+		{ command: "node", exposure: "codemode", toolExposure: { search: "codemode" } },
 	])("accepts stdio and Streamable HTTP entries: %j", (config) => {
 		expect(validateMcpServerConfig("docs", config)).toEqual(config);
 	});
@@ -61,7 +62,7 @@ describe("MCP server configuration", () => {
 		expect(validateMcpServerConfig(name as string, raw)).toEqual(expect.stringContaining(message as string));
 	});
 
-	it.each(["codemode", "codemode-deferred", "model-only", "invalid"])(
+	it.each(["codemode-deferred", "model-only", "invalid"])(
 		"rejects unsupported MCP exposure %s rather than translating it",
 		(exposure) => {
 			expect(validateMcpServerConfig("docs", { command: "node", exposure })).toContain("exposure must be one of");

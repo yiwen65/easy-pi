@@ -93,6 +93,119 @@ describe("AgentSession request preparation", () => {
 		expect(harness.session.pendingMessageCount).toBe(0);
 	});
 
+	it.each(["first", "queued"])(
+		"filters live tool revocation by an awaited selected-input listener before preparation (%s)",
+		async (revokedAt) => {
+			let allowed = true;
+			const preparedTools: string[][] = [];
+			const advertisedTools: string[][] = [];
+			const harness = await createHarness({
+				tools: [tool("revoked"), tool("allowed")],
+				settings: { compaction: { enabled: false } },
+				prepareRequest: ({ context }) => {
+					preparedTools.push(context.tools?.map((entry) => entry.name) ?? []);
+				},
+			});
+			harnesses.push(harness);
+			harness.session.setLiveToolAccessCheck((name) => name !== "revoked" || allowed);
+			expect(harness.session.agent.state.tools.map((entry) => entry.name)).toEqual(["revoked", "allowed"]);
+			harness.session.agent.subscribe(async (event) => {
+				if (event.type !== "message_end") return;
+				if (event.message.role === "user" && getMessageText(event.message) === revokedAt) {
+					await Promise.resolve();
+					// A live ancestor predicate changes without rebuilding the cached registry.
+					allowed = false;
+				}
+				if (event.message.role === "assistant" && getMessageText(event.message) === "queue trigger") {
+					await harness.session.followUp("queued");
+				}
+			});
+			const response = (context: Context) => {
+				advertisedTools.push(context.tools?.map((entry) => entry.name) ?? []);
+				return fauxAssistantMessage(
+					revokedAt === "queued" && advertisedTools.length === 1 ? "queue trigger" : "done",
+				);
+			};
+			harness.setResponses(revokedAt === "queued" ? [response, response] : [response]);
+			await harness.session.prompt("first");
+			const expected = revokedAt === "queued" ? [["revoked", "allowed"], ["allowed"]] : [["allowed"]];
+			expect(preparedTools).toEqual(expected);
+			expect(advertisedTools).toEqual(expected);
+			expect(harness.faux.state.callCount).toBe(expected.length);
+			// Prove filtering happened at the request boundary, not through a registry refresh.
+			expect(harness.session.agent.state.tools.map((entry) => entry.name)).toContain("revoked");
+		},
+	);
+
+	it("rechecks callback revocation and binds the final allowed schema and handler for the provider step", async () => {
+		let allowed = true;
+		let originalExecutions = 0;
+		let preparedExecutions = 0;
+		let lateExecutions = 0;
+		let preparations = 0;
+		const preparedTools: string[][] = [];
+		const advertisedTools: string[][] = [];
+		const original = tool("allowed");
+		original.execute = async () => {
+			originalExecutions++;
+			return { content: [{ type: "text", text: "original handler" }], details: {} };
+		};
+		let harness: Harness;
+		harness = await createHarness({
+			tools: [tool("revoked"), original],
+			settings: { compaction: { enabled: false } },
+			prepareRequest: ({ context }) => {
+				preparedTools.push(context.tools?.map((entry) => entry.name) ?? []);
+				if (++preparations !== 1) return;
+				allowed = false;
+				harness.session.agent.state.tools = harness.session.agent.state.tools.map((entry) =>
+					entry.name === "allowed"
+						? {
+								...entry,
+								parameters: Type.Object({ value: Type.Literal("prepared") }),
+								execute: async () => {
+									preparedExecutions++;
+									return { content: [{ type: "text", text: "prepared handler" }], details: {} };
+								},
+							}
+						: entry,
+				);
+				// Returning a stale context must not re-advertise the revoked tool or its old binding.
+				return { context };
+			},
+		});
+		harnesses.push(harness);
+		harness.session.setLiveToolAccessCheck((name) => name !== "revoked" || allowed);
+		harness.setResponses([
+			(context) => {
+				advertisedTools.push(context.tools?.map((entry) => entry.name) ?? []);
+				// Mutating live state after binding must not replace this step's schema or handler.
+				const live = harness.session.agent.state.tools.find((entry) => entry.name === "allowed");
+				if (!live) throw new Error("Missing allowed live tool");
+				live.parameters = Type.Object({ value: Type.Literal("late") });
+				live.execute = async () => {
+					lateExecutions++;
+					return { content: [{ type: "text", text: "late handler" }], details: {} };
+				};
+				return fauxAssistantMessage(fauxToolCall("allowed", { value: "prepared" }), { stopReason: "toolUse" });
+			},
+			(context) => {
+				advertisedTools.push(context.tools?.map((entry) => entry.name) ?? []);
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.session.prompt("first");
+		expect(preparedTools).toEqual([["revoked", "allowed"], ["allowed"]]);
+		expect(advertisedTools).toEqual([["allowed"], ["allowed"]]);
+		expect(preparedExecutions).toBe(1);
+		expect(originalExecutions).toBe(0);
+		expect(lateExecutions).toBe(0);
+		expect(harness.session.messages.filter((message) => message.role === "toolResult").map(getMessageText)).toEqual([
+			"prepared handler",
+		]);
+		expect(harness.faux.state.callCount).toBe(2);
+	});
+
 	it("uses live persisted messages added by an awaited input listener before step binding", async () => {
 		const harness = await createHarness({ tools: [], settings: { compaction: { enabled: false } } });
 		harnesses.push(harness);

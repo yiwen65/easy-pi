@@ -331,7 +331,7 @@
 - Wrong approach: 为基线创建 detached worktree 并链接现有 node_modules 后，直接运行 source-alias SDK 测试，认为源码 revision 已包含全部运行输入。
 - Why it failed: `packages/ai/src/providers/data/` 被 Git 忽略；已跟踪的 `*.models.ts` 仍静态导入这些 JSON，基线进程因此在生成前就报 `Cannot find module './data/amazon-bedrock.json'`。
 - Correct approach: 只复制当前已存在的公开模型 JSON，不下载、重新生成或复制认证配置；将目录内容哈希与产品/runner 哈希一起封存。
-- Prevention: 版本隔离预检同时验证 tracked 源码、忽略的必需运行输入、实际 package/subpath alias 和生产 schema；不能以 node_modules 链接存在代替加载成功与版本一致性。
+- Prevention: 版本隔离预检同时验证 tracked 源码、忽略的必需运行输入、实际 package/subpath alias 和生产 schema；不能以 node_modules 链接存在代替加载成功与版本一致性。复制 data 时还必须包含隐藏的 `.manifest.json`，不能只用 `*.json` glob；2026-10-11 codemode 纯树验证首次漏掉它，造成一个 unknown 类型错误与 11 个导入失败，补齐既有公开 manifest 后 check/build、22 文件/262 tests 通过。
 - Verified by: 2026-09-05 v2 attribution baseline 首轮两个 suite 导入失败；复制 JSON 并纳入 catalogHash 后，live/baseline 各 21 tests passed，源、catalog、runner 与运行时函数哈希完全一致。
 
 ## Pi 原生子会话——共享认证不等于共享可变 provider 注册表
@@ -366,6 +366,9 @@
 - Correct approach: 解除绑定前把当前工具列表与原 ceiling 的交集持久化；失败启动也必须发 child shutdown 释放已安装的绑定，再 dispose。持久化失败仍停止团队，不扩大权限或自动重跑。
 - Prevention: 同时覆盖 live revoke→detach/LRU→cold reopen，以及 startup failure→explicit followup。执行门测试必须先证明工具确实被广告：SDK setActiveTools 本身不能突破初始 allowlist，不能把它挡住的调用当作后端权限门证据。
 - Verified by: 2026-09-10 collaboration-controller.test.ts 的 unloading a narrowed ancestor 在修正前 detach 后返回 true，修正后及重开 store 均保持 false；原生宿主重新广告 bash 的执行门、失败启动绑定释放回归通过。指定 subagent 64 项、coding-agent 69 项通过，未运行真实模型。
+- Live predicate follow-up（2026-10-11 codemode）: 新 session predicate 反查 controller.toolAllowed，而 controller 的 self getter 又读 session.getDelegatableToolNames，实际 production spawn 产生 RangeError。组合本地 ceiling 时使用单独 ancestryToolAllowed：检查 persisted self grant 与全部 live ancestor/root，但不反读自己的 effective getter；原 toolAllowed 仍保留全检查。新增 predicate 时必须画出 getter 依赖方向并跑真实 controller/child，而非仅注入宿主。agent-session-codemode-child.test.ts 原失败转为 4/4，controller/lifecycle/extension 72 项通过。
+
+- Shutdown follow-up（2026-10-11 progress）: 先设置 stopping 再调用解除绑定的实时 getter，会把执行门主动拒绝的 interrupted 当成真正权限不确定，并持久化空 ceiling；cold followup 因此丢失 read。进入 stopping 前捕获已验证 live ceiling，仅供 teardown 与原 ceiling 求交，不用于继续执行；捕获真正失败仍按空列表收窄。必须同时验证允许工具、root/local revoke、真实 getter failure 与 cold reopen。相同 native cold-followup 断言由失败转通过，4 个确定性清理场景及核心定向 182 tests 通过。
 
 ## 原生 Subagent 准入——同步状态通知也是取消重入边界
 
@@ -564,3 +567,11 @@
 - Correct approach: CLI main guard 对 argv 用 `realpathSync()` 后再转 file URL；仅做同一性比较，不改写操作对象的 I/O 地址。
 - Prevention: import-safe `.mjs` CLI 同时测试普通路径与绝对 symlink 启动，断言实际日志、输出内容及副作用，而非只断言退出码。
 - Verified by: 2026-10-11 catalog publisher/diff 两项 symlink guards先RED（静默跳过），canonical guard修复后53项工具测试及完整1523chat/45image离线bundle dry-run/diff通过；源码归档补充后父61/61通过。
+
+## Codemode 跨 VM 投影——terminal payload 与协议 metadata 必须覆盖所有位置
+
+- Wrong approach: 只限制 text/image/console helper 输出，并只剥离 MCP result 顶层 _meta。
+- Why it failed: 大 return 和巨大 error JSON 绕过 16 Mi 硬预算进入宿主；合法 content blocks/embedded resource 自带的 _meta 也进入脚本。软 token 截断发生在 host 解码/保存之后，不能替代桥接前硬门。
+- Correct approach: prelude.done 在跨桥接前按已有输出加 serialized terminal payload 计量，return 计一个 item，超限改有界诊断且不报告 storeWrites；MCP 按协议定义剥离 result/block/resource 位置的 _meta，保留 business structuredContent 的同名数据字段。
+- Prevention: bridge 测试同时覆盖大 return、输出加 return、item 上限加 return、巨大 throw，以及 successful/error MCP 的各 protocol metadata 位置。不要用递归删所有 _meta 损坏应用数据。
+- Verified by: 2026-10-11 terminal-output-budget.test.ts 四项修复前全部红、修复后与 sandbox 合计 160 项通过；真实 QuickJS MCP metadata/wildcard 红测修复后及 unit/native-child/nested 4 文件 42 项通过。

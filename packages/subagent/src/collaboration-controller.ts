@@ -10,6 +10,7 @@ import {
 	type CollaborationArguments,
 	CollaborationError,
 	type CollaborationMessage,
+	type CollaborationProgress,
 	type CollaborationResultQuery,
 	type CollaborationResults,
 	type CollaborationStatus,
@@ -21,10 +22,13 @@ import {
 	parseDelegationResultText,
 	resolveAgentPath,
 	type StagedCollaborationAgentView,
+	validateCollaborationInterruption,
 	validateCollaborationMessage,
+	validateCollaborationProgress,
 	validateCollaborationTask,
 	validateDelegation,
 	validateDelegationResult,
+	validateInterruptionReason,
 } from "./collaboration-contract.ts";
 import { CollaborationMailboxActivity } from "./collaboration-mailbox.ts";
 import type {
@@ -64,6 +68,7 @@ export class CollaborationController {
 	private readonly observers = new Set<() => void>();
 	private readonly authorityObservers = new Set<() => void>();
 	private readonly liveTools = new Map<string, () => readonly string[]>();
+	private readonly shutdownTools = new Map<string, readonly string[]>();
 
 	constructor(options: {
 		store: CollaborationStore;
@@ -151,6 +156,8 @@ export class CollaborationController {
 							}
 						: {}),
 					...(agent.resultValidation ? { resultValidation: agent.resultValidation } : {}),
+					...(turn.progress ? { progress: turn.progress } : {}),
+					...(turn.interruption ? { interruption: turn.interruption } : {}),
 					...(agent.usage ? { usage: agent.usage } : {}),
 				};
 			});
@@ -326,7 +333,7 @@ export class CollaborationController {
 				if (caller.agentPath !== "/root" && !this.failure) {
 					let active: readonly string[];
 					try {
-						active = getTools();
+						active = this.stopping ? (this.shutdownTools.get(caller.agentPath) ?? []) : getTools();
 					} catch {
 						active = [];
 					}
@@ -339,19 +346,24 @@ export class CollaborationController {
 				}
 			} finally {
 				this.liveTools.delete(caller.agentPath);
+				this.shutdownTools.delete(caller.agentPath);
 			}
 		};
 	}
 
 	/** A live deny anywhere in the creation ancestry also denies descendant execution. */
 	toolAllowed(caller: ChildSessionIdentity, name: string): boolean {
+		return this.checkToolAuthority(caller, name, true);
+	}
+
+	private checkToolAuthority(caller: ChildSessionIdentity, name: string, includeCallerBinding: boolean): boolean {
 		this.assertReady();
 		const records = this.store.readAuthority();
 		this.assertCaller(caller, records);
 		let path = caller.agentPath;
 		while (path !== "/root") {
 			const live = this.liveTools.get(path);
-			if (live && !live().includes(name)) return false;
+			if (live && (includeCallerBinding || path !== caller.agentPath) && !live().includes(name)) return false;
 			const record = records.find((agent) => agent.path === path);
 			if (!record || record.status === "closed" || (record.tools && !record.tools.includes(name))) return false;
 			path = record.parent;
@@ -578,6 +590,74 @@ export class CollaborationController {
 		});
 	}
 
+	/** Only the live child may self-report its exact current turn; progress never settles it. */
+	reportProgress(caller: ChildSessionIdentity, turnId: string, summary: string): Promise<CollaborationProgress> {
+		return this.serialize(() => {
+			let snapshot: CollaborationSnapshot;
+			let record: StoredCollaborationAgent;
+			let progress: CollaborationProgress;
+			try {
+				this.assertReady();
+				this.assertCaller(caller);
+				if (caller.agentPath === "/root")
+					throw new CollaborationError("forbidden", "Only a running child may report progress");
+				snapshot = this.store.read();
+				record = snapshot.agents.find((agent) => agent.path === caller.agentPath)!;
+				if (record.status !== "running" || record.turnId !== turnId || !this.active.has(record.path))
+					throw new CollaborationError("busy", "Progress requires the child's current running turn");
+				progress = validateCollaborationProgress({
+					summary,
+					reported_at: Date.now(),
+					revision: (record.progress?.revision ?? 0) + 1,
+				});
+				snapshot.messages ??= [];
+				const existing = snapshot.messages.findIndex(
+					(message) =>
+						message.kind === "progress" &&
+						message.from === record.path &&
+						message.turnId === turnId &&
+						message.to === record.parent,
+				);
+				if (existing < 0) this.checkMailboxCapacity(snapshot, record.parent);
+				const message: CollaborationMessage = {
+					id: randomUUID(),
+					rootSessionId: snapshot.rootSessionId,
+					from: record.path,
+					to: record.parent,
+					turnId,
+					kind: "progress",
+					text: progress.summary,
+					progress,
+				};
+				if (existing < 0) snapshot.messages.push(message);
+				else snapshot.messages[existing] = message;
+				record.progress = progress;
+			} catch (error) {
+				// This phase only mutates detached clones. Known admission guards prove no effect;
+				// storage corruption and unfamiliar failures remain unknown even before commit.
+				if (error instanceof CollaborationAdmissionError) throw error;
+				if (
+					error instanceof CollaborationError &&
+					["invalid_arguments", "unknown_agent", "forbidden", "busy", "interrupted", "limit_reached"].includes(
+						error.code,
+					)
+				)
+					throw new CollaborationAdmissionError(
+						error.code,
+						error.message,
+						error.reason,
+						error.detail,
+						error.availableTools,
+					);
+				throw error;
+			}
+			// Persistence and postcommit notifications must never be classified as not_started.
+			this.persist(snapshot);
+			this.activity.notify(record.parent);
+			return structuredClone(progress);
+		});
+	}
+
 	pending(caller: ChildSessionIdentity): CollaborationMessage[] {
 		this.assertReady();
 		this.assertCaller(caller);
@@ -641,7 +721,7 @@ export class CollaborationController {
 			throw new CollaborationError("context_unavailable", "Turn completion is not known", "history_unavailable");
 		const target = initial.turn.target;
 		const turn_id = initial.turn.turn_id;
-		let latest = initial;
+		const initialRevision = initial.turn.progress?.revision ?? 0;
 		// A change before waiter registration is caught by Activity.wait's initial check;
 		// subsequent completion, startup cleanup and recovery changes wake the pinned check.
 		const unsubscribe = this.subscribe(() => this.activity.notify(caller.agentPath));
@@ -657,23 +737,34 @@ export class CollaborationController {
 							"Turn completion is not known",
 							"history_unavailable",
 						);
-					latest = observed;
-					return ["completed", "failed", "interrupted"].includes(observed.turn.status);
+					return (
+						["completed", "failed", "interrupted"].includes(observed.turn.status) ||
+						(observed.turn.progress?.revision ?? 0) > initialRevision
+					);
 				},
 				args.timeout_ms,
 				signal,
 			)
-			.then(
-				(activity): CollaborationTargetedWaitResult =>
-					activity.reason === "mailbox"
-						? this.boundedResponse(
-								{ reason: "terminal", timed_out: false, target, turn_id, result: latest },
-								COLLABORATION_HISTORY_LIMITS.maxResultResponseBytes,
-							)
-						: activity.reason === "user_input"
-							? { reason: "user_input", timed_out: false, target, turn_id }
-							: { reason: "timeout", timed_out: true, target, turn_id },
-			)
+			.then((activity): CollaborationTargetedWaitResult => {
+				if (activity.reason === "user_input") return { reason: "user_input", timed_out: false, target, turn_id };
+				this.assertRootQuery(caller, "wait_agent");
+				const latest = this.readAgentResult(caller, { target, turn_id });
+				if (latest.state === "history_unavailable" || latest.turn.status === "unknown")
+					throw new CollaborationError(
+						"context_unavailable",
+						"Turn completion is not known",
+						"history_unavailable",
+					);
+				const terminal = ["completed", "failed", "interrupted"].includes(latest.turn.status);
+				return this.boundedResponse(
+					terminal
+						? { reason: "terminal", timed_out: false, target, turn_id, result: latest }
+						: activity.reason === "mailbox"
+							? { reason: "progress", timed_out: false, target, turn_id, result: latest }
+							: { reason: "timeout", timed_out: true, target, turn_id, result: latest },
+					COLLABORATION_HISTORY_LIMITS.maxResultResponseBytes,
+				);
+			})
 			.finally(unsubscribe);
 	}
 
@@ -769,8 +860,14 @@ export class CollaborationController {
 			model: record.model,
 			fork,
 			prefix,
+			reportProgress: (turnId, summary) =>
+				this.reportProgress({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, turnId, summary),
 			toolAllowed: (name) =>
 				this.toolAllowed({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name),
+			// Native local grants compose with ancestors, rather than reading their own bound
+			// effective getter again. The ordinary execution callback above remains fully restrictive.
+			ancestryToolAllowed: (name) =>
+				this.checkToolAuthority({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name, false),
 			subscribeAuthority: (refresh) => {
 				this.authorityObservers.add(refresh);
 				return () => this.authorityObservers.delete(refresh);
@@ -852,6 +949,8 @@ export class CollaborationController {
 		record.taskMessage = taskMessage;
 		record.result = undefined;
 		record.resultValidation = undefined;
+		record.progress = undefined;
+		record.interruption = undefined;
 		record.usage = undefined;
 	}
 
@@ -927,6 +1026,8 @@ export class CollaborationController {
 				status: current.status,
 				text: current.result,
 				...(current.resultValidation ? { resultValidation: current.resultValidation } : {}),
+				...(current.progress ? { progress: current.progress } : {}),
+				...(current.interruption ? { interruption: current.interruption } : {}),
 			});
 			this.persist(snapshot, [{ target: current.path, turn_id: current.turnId, result: { truncated } }]);
 			this.activity.notify(current.parent);
@@ -934,28 +1035,45 @@ export class CollaborationController {
 	}
 
 	async interrupt(caller: ChildSessionIdentity, target: string): Promise<CollaborationStatus> {
-		const { session, status } = await this.serialize(() => {
+		return (await this.interruptWithHandoff(caller, target)).previous_status;
+	}
+
+	async interruptWithHandoff(
+		caller: ChildSessionIdentity,
+		target: string,
+		reason: string = "Explicit coordinator request.",
+	): Promise<CollaborationResults["interrupt_agent"]> {
+		validateInterruptionReason(reason);
+		const { session, receipt } = await this.serialize(() => {
 			this.assertReady();
 			const record = this.target(caller, target);
 			if (record.path === caller.agentPath)
 				throw new CollaborationAdmissionError("forbidden", "An agent cannot interrupt itself");
 			const loading = this.loading.get(record.path);
-			if (loading) {
+			const active = this.active.has(record.path);
+			const interruption =
+				loading || active
+					? validateCollaborationInterruption({ reason, requested_at: Date.now(), requested_by: caller.agentPath })
+					: record.interruption;
+			// Pin the turn and handoff in admission, before abort can settle and another followup can start.
+			const receipt: CollaborationResults["interrupt_agent"] = {
+				previous_status: record.status,
+				turn_id: record.turnId,
+				...(record.progress ? { progress: record.progress } : {}),
+				...(interruption ? { interruption } : {}),
+			};
+			if (loading || active) {
 				this.update(record.path, (current) => {
 					current.status = "interrupted";
+					current.interruption = interruption;
 				});
-				loading.abort.abort();
-				return { status: record.status, session: undefined };
 			}
-			if (!this.active.has(record.path)) return { status: record.status, session: undefined };
-			this.update(record.path, (current) => {
-				current.status = "interrupted";
-			});
-			return { session: this.sessions.get(record.path), status: record.status };
+			loading?.abort.abort();
+			return { session: !loading && active ? this.sessions.get(record.path) : undefined, receipt };
 		});
 		// abort may await a running child tool which itself needs the control queue.
 		await session?.abort();
-		return status;
+		return receipt;
 	}
 
 	/**
@@ -1013,6 +1131,16 @@ export class CollaborationController {
 
 	shutdown(): Promise<void> {
 		if (this.shutdownPromise) return this.shutdownPromise;
+		// Capture real live ceilings before stopping rejects native introspection. These snapshots
+		// are teardown-only, never execution authority; uncertain or late bindings still fail closed.
+		for (const [path, getTools] of this.liveTools) {
+			if (path === "/root") continue;
+			try {
+				this.shutdownTools.set(path, [...getTools()]);
+			} catch {
+				this.shutdownTools.set(path, []);
+			}
+		}
 		this.stopping = true;
 		this.shutdownPromise = Promise.resolve().then(async () => {
 			await this.queue;
@@ -1030,6 +1158,7 @@ export class CollaborationController {
 			this.sessions.clear();
 			this.authorityObservers.clear();
 			this.liveTools.clear();
+			this.shutdownTools.clear();
 			this.store.close();
 			if (aborts.some((result) => result.status === "rejected")) {
 				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");

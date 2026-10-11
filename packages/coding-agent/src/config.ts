@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
@@ -448,6 +449,21 @@ export function getReadmePath(): string {
 /** Get path to docs directory */
 export function getDocsPath(): string {
 	return resolve(join(getPackageDir(), "docs"));
+}
+
+let quickJSWasmPath: string | undefined;
+
+/** Path to the QuickJS VM, next to a compiled binary or in the installed dependency. */
+export function getQuickJSWasmPath(): string {
+	quickJSWasmPath ??= isBunBinary
+		? join(getPackageDir(), "quickjs.wasm")
+		: createRequire(import.meta.url).resolve("quickjs-wasi/quickjs.wasm");
+	return quickJSWasmPath;
+}
+
+/** Compiled Bun binaries embed this worker as an explicit build entrypoint. */
+export function getCodemodeWorkerSpecifier(): string | URL | undefined {
+	return isBunBinary ? "./src/extensions/codemode/worker.ts" : undefined;
 }
 
 /** Get path to examples directory */

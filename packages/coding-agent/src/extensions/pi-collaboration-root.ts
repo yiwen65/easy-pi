@@ -52,6 +52,7 @@ export function registerPiCollaborationRoot(
 				settings: {
 					...settings.getGlobalSettings(),
 					...settings.getProjectSettings(),
+					codemode: settings.getSettings().codemode,
 					compaction: settings.getCompactionSettings(),
 					retry: { ...settings.getRetrySettings(), provider: settings.getProviderRetrySettings() },
 					transport: settings.getTransport(),
@@ -79,6 +80,9 @@ export function registerPiCollaborationRoot(
 					);
 					const loaded = getSessionMcpConfig(ctx.sessionManager);
 					return {
+						...(loaded?.autoEnableCodemode === undefined
+							? {}
+							: { autoEnableCodemode: loaded.autoEnableCodemode }),
 						servers: (loaded?.servers ?? []).filter((entry) => namespaces.has(mcpNamespace(entry.name))),
 						errors: [],
 					};
@@ -133,7 +137,7 @@ export function registerPiCollaborationRoot(
 	});
 	pi.registerCommand("agents", {
 		description:
-			"Inspect native agent sessions and retained turns; explicitly message, follow up or interrupt; retry team initialization without replay",
+			"Inspect native sessions, progress and retained turns before interrupting; explicitly message or follow up; retry team initialization without replay",
 		handler: async (args, ctx) => {
 			if (stopped) return;
 			if (args.trim() && args.trim() !== "recover") {
