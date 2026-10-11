@@ -35,6 +35,7 @@ export interface Args {
 	excludeTools?: string[];
 	noTools?: boolean;
 	noBuiltinTools?: boolean;
+	noMcp?: boolean;
 	extensions?: string[];
 	noExtensions?: boolean;
 	print?: boolean;
@@ -146,6 +147,8 @@ export function parseArgs(args: string[]): Args {
 			});
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
+		} else if (arg === "--no-mcp") {
+			result.noMcp = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
 			result.noBuiltinTools = true;
 		} else if ((arg === "--tools" || arg === "-t") && i + 1 < args.length) {
@@ -302,6 +305,7 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
+  ${APP_NAME} mcp <command>             Add, remove, inspect or authenticate MCP servers
   ${APP_NAME} stats [options]           Serve a local token usage panel for session files
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config/auth/stats
 
@@ -326,7 +330,8 @@ ${chalk.bold("Options:")}
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
   --no-tools, -nt                Disable all tools by default (built-in and extension)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
-  --tools, -t <tools>            Comma-separated allowlist of tool names to enable
+  --no-mcp                       Disable built-in MCP for this run
+  --tools, -t <tools>            Strict comma-separated tool allowlist (supports *)
                                  Applies to built-in, extension, and custom tools
   --exclude-tools, -xt <tools>   Comma-separated denylist of tool names to disable
                                  Applies to built-in, extension, and custom tools

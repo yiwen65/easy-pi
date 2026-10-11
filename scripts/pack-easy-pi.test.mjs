@@ -26,12 +26,12 @@ for (const useLink of [false, true]) {
 	});
 }
 
-test("standalone package includes the built-in web-search package without source or user extensions", () => {
+test("standalone package includes web-search and MCP licenses without source or user extensions", () => {
 	const directory = mkdtempSync(join(tmpdir(), "epi-pack-web-"));
 	const repository = fileURLToPath(new URL("../", import.meta.url));
 	const fixture = join(directory, "repo");
 	const home = join(directory, "home");
-	const internal = ["ai", "agent", "client", "grok-tui", "protocol", "server", "tui", "telemetry", "permissions", "subagent", "pi-web-search"];
+	const internal = ["ai", "agent", "mcp", "client", "grok-tui", "protocol", "server", "tui", "telemetry", "permissions", "subagent", "pi-web-search"];
 	const env = { PATH: process.env.PATH, HOME: home, npm_config_offline: "true", npm_config_ignore_scripts: "true" };
 	try {
 		mkdirSync(home);
@@ -53,6 +53,9 @@ test("standalone package includes the built-in web-search package without source
 		for (const name of ["browser", "network"]) writeFileSync(join(web, "dist", `${name}.js`), "// compiled fixture\n");
 		mkdirSync(join(web, "src"));
 		writeFileSync(join(web, "src/index.ts"), "// source must not ship\n");
+		const mcp = join(fixture, "packages/mcp");
+		mkdirSync(join(mcp, "LICENSES"));
+		copyFileSync(join(repository, "packages/mcp/LICENSES/modelcontextprotocol-typescript-sdk.txt"), join(mcp, "LICENSES/modelcontextprotocol-typescript-sdk.txt"));
 		const output = join(directory, "output");
 		const result = spawnSync(process.execPath, [join(fixture, "scripts/pack-easy-pi.mjs"), output], {
 			cwd: directory, env, encoding: "utf8", timeout: 30000,
@@ -62,6 +65,8 @@ test("standalone package includes the built-in web-search package without source
 		const webManifest = JSON.parse(readFileSync(join(web, "package.json"), "utf8"));
 		assert.equal(manifest.dependencies["@easy-pi/web-search"], webManifest.version);
 		assert.ok(manifest.bundleDependencies.includes("@easy-pi/web-search"));
+		assert.ok(manifest.bundleDependencies.includes("@earendil-works/pi-mcp"));
+		assert.equal(manifest.dependencies["@earendil-works/pi-mcp"], "0.84.2");
 		const tarball = readdirSync(output).find(name => name.endsWith(".tgz"));
 		assert.ok(tarball);
 		const archive = spawnSync("tar", ["-tf", join(output, tarball)], { encoding: "utf8", env });
@@ -70,7 +75,9 @@ test("standalone package includes the built-in web-search package without source
 			assert.ok(archive.stdout.includes(`package/node_modules/@easy-pi/web-search/dist/${name}.js`));
 		}
 		assert.ok(archive.stdout.includes("package/node_modules/@easy-pi/web-search/package.json"));
-		assert.doesNotMatch(archive.stdout, /web-search\/src\/|\.epi\/|extensions\/web-search/);
+		assert.ok(archive.stdout.includes("package/node_modules/@earendil-works/pi-mcp/dist/index.js"));
+		assert.ok(archive.stdout.includes("package/node_modules/@earendil-works/pi-mcp/LICENSES/modelcontextprotocol-typescript-sdk.txt"));
+		assert.doesNotMatch(archive.stdout, /web-search\/src\/|pi-mcp\/src\/|\.epi\/|extensions\/web-search/);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

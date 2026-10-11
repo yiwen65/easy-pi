@@ -29,6 +29,7 @@ import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { type McpServerConfig, McpServerRegistry, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
@@ -203,6 +204,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
 		flagValues: new Map(),
+		mcpServers: new McpServerRegistry(),
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
 		assertActive,
@@ -211,6 +213,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			state.staleMessage =
 				message ??
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
+			runtime.mcpServers.setChangeListener(undefined);
 			for (const unsubscribe of eventBusUnsubscribers) unsubscribe();
 			eventBusUnsubscribers.clear();
 		},
@@ -266,6 +269,9 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			runtime.assertActive();
+			if (tool.exposure !== undefined && !["direct", "model-only", "deferred", "hidden"].includes(tool.exposure)) {
+				throw new Error(`Invalid exposure for tool "${tool.name}": use direct, model-only, deferred, or hidden`);
+			}
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
@@ -418,6 +424,25 @@ function createExtensionAPI(
 			runtime.unregisterProvider(name, extension.path);
 		},
 
+		registerMcpServer(name: string, config: McpServerConfig): void {
+			runtime.assertActive();
+			const validated = validateMcpServerConfig(name, config);
+			if (typeof validated === "string") {
+				throw new Error(`Invalid MCP server registered by extension "${extension.path}": ${validated}`);
+			}
+			runtime.mcpServers.register({ name, config: validated, extensionPath: extension.path });
+		},
+
+		unregisterMcpServer(name: string): void {
+			runtime.assertActive();
+			runtime.mcpServers.unregister(name, extension.path);
+		},
+
+		getMcpServers() {
+			runtime.assertActive();
+			return runtime.mcpServers.list();
+		},
+
 		events: {
 			emit(channel, data) {
 				runtime.assertActive();
@@ -495,6 +520,29 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+async function runExtensionFactory(
+	factory: ExtensionFactory,
+	extension: Extension,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+): Promise<void> {
+	const previous = runtime.mcpServers.list().filter((server) => server.extensionPath === extension.path);
+	const previousNames = new Set(previous.map((server) => server.name));
+	try {
+		await factory(createExtensionAPI(extension, runtime, cwd, eventBus));
+	} catch (error) {
+		// A discarded extension must not leave orphan registrations in the shared runtime.
+		for (const server of runtime.mcpServers.list()) {
+			if (server.extensionPath === extension.path && !previousNames.has(server.name)) {
+				runtime.mcpServers.unregister(server.name, extension.path);
+			}
+		}
+		for (const server of previous) runtime.mcpServers.register(server);
+		throw error;
+	}
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
@@ -512,8 +560,7 @@ async function loadExtension(
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
-		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-		await factory(api);
+		await runExtensionFactory(factory, extension, cwd, eventBus, runtime);
 		time(`${extensionPath} factory`, "extensions");
 
 		return { extension, error: null };
@@ -535,8 +582,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(extensionPath, extensionPath);
 	const resolvedCwd = resolvePath(cwd);
-	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
-	await factory(api);
+	await runExtensionFactory(factory, extension, resolvedCwd, eventBus, runtime);
 	time(`${extensionPath} factory`, "extensions");
 	return extension;
 }

@@ -54,6 +54,7 @@ import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
+import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "../mcp-servers.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
@@ -306,6 +307,12 @@ export interface CompactOptions {
  */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/** Configured authorization filters, distinct from the model's active tool set. */
+export interface ToolAccess {
+	readonly allowlist?: readonly string[];
+	readonly excluded?: readonly string[];
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -332,6 +339,8 @@ export interface ExtensionContext {
 	isIdle(): boolean;
 	/** Whether project-local trust is active for this context. */
 	isProjectTrusted(): boolean;
+	/** Snapshot of the session's authorization filters, when provided by the host. */
+	getToolAccess?(): ToolAccess;
 	/** The current abort signal, or undefined when the agent is not streaming. */
 	signal: AbortSignal | undefined;
 	/** Abort the current agent operation */
@@ -446,6 +455,30 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 }
 
 /**
+ * How a tool is exposed to the model. Direct (the default) and model-only tools are
+ * declared while active; deferred tools require discovery/activation; hidden tools
+ * remain registered but cannot be activated. Model-only is reserved for orchestration
+ * and interactive tools; no nested tool execution API is provided.
+ */
+export type ToolExposure = "direct" | "model-only" | "deferred" | "hidden";
+
+/** Unverified author hints, not an execution contract or authorization grant. */
+export interface ToolAnnotations {
+	readOnlyHint?: boolean;
+	destructiveHint?: boolean;
+	idempotentHint?: boolean;
+	openWorldHint?: boolean;
+}
+
+/** A group of related tools, for example the tools of one MCP server. */
+export interface ToolNamespace {
+	name: string;
+	description?: string;
+	/** Longer usage guidance, such as MCP server instructions. */
+	instructions?: string;
+}
+
+/**
  * Tool definition for registerTool().
  */
 export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = unknown, TState = any> {
@@ -465,6 +498,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	constrainedSampling?: false | ConstrainedSamplingConfig;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */
 	renderShell?: "default" | "self";
+
+	/** How the model reaches this tool. Default: direct. */
+	exposure?: ToolExposure;
+	/** Related tools, for example those of one MCP server. */
+	namespace?: ToolNamespace;
+	/** Unverified hints from the tool's author. */
+	annotations?: ToolAnnotations;
 
 	/** Optional compatibility shim to prepare raw tool call arguments before schema validation. Must return an object conforming to TParams. */
 	prepareArguments?: (args: unknown) => Static<TParams>;
@@ -552,6 +592,12 @@ export interface ResourcesDiscoverEvent {
 	type: "resources_discover";
 	cwd: string;
 	reason: "startup" | "reload";
+}
+
+/** Registrations changed after binding. Read initial registrations on session_start. */
+export interface McpServersChangeEvent {
+	type: "mcp_servers_change";
+	servers: RegisteredMcpServer[];
 }
 
 /** Result from resources_discover event handler */
@@ -1064,6 +1110,7 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 export type ExtensionEvent =
 	| ProjectTrustEvent
 	| ResourcesDiscoverEvent
+	| McpServersChangeEvent
 	| SessionEvent
 	| BackgroundTaskEvent
 	| ContextEvent
@@ -1264,6 +1311,7 @@ export interface ExtensionAPI {
 
 	on(event: "project_trust", handler: ProjectTrustHandler): void;
 	on(event: "resources_discover", handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>): void;
+	on(event: "mcp_servers_change", handler: ExtensionHandler<McpServersChangeEvent>): void;
 	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
 	on(event: "session_info_changed", handler: ExtensionHandler<SessionInfoChangedEvent>): void;
 	on(
@@ -1408,7 +1456,7 @@ export interface ExtensionAPI {
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
-	/** Get all configured tools with parameter schema, prompt guidelines, and source metadata. */
+	/** Get configured tools with schema, exposure, namespace, annotations, prompt guidelines, and source metadata. */
 	getAllTools(): ToolInfo[];
 
 	/** Set the active tools by name. */
@@ -1504,6 +1552,15 @@ export interface ExtensionAPI {
 	 */
 	unregisterProvider(name: string): void;
 
+	/** Register/replace this extension's server, during loading or at runtime. Connections are owned by an MCP extension. */
+	registerMcpServer(name: string, config: McpServerConfig): void;
+
+	/** Remove only this extension's registration. */
+	unregisterMcpServer(name: string): void;
+
+	/** Detached snapshots of all extension registrations, in registration order. */
+	getMcpServers(): RegisteredMcpServer[];
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -1598,6 +1655,10 @@ export type InlineExtension =
 			factory: ExtensionFactory;
 			/** Omit this extension from the startup Extensions list. */
 			hidden?: boolean;
+			/** Marks a product built-in for resource-loader enable/disable handling. */
+			builtin?: boolean;
+			/** Allow a user command/tool extension to replace this built-in. */
+			replaceable?: boolean;
 	  };
 
 // ============================================================================
@@ -1644,8 +1705,12 @@ export type GetSessionNameHandler = () => string | undefined;
 
 export type GetActiveToolsHandler = () => string[];
 
-/** Tool info with name, description, parameter schema, prompt guidelines, and source metadata. */
-export type ToolInfo = Pick<ToolDefinition, "name" | "description" | "parameters" | "promptGuidelines"> & {
+/** Tool metadata with resolved exposure (direct when omitted in the definition). */
+export type ToolInfo = Pick<
+	ToolDefinition,
+	"name" | "description" | "parameters" | "promptGuidelines" | "namespace" | "annotations"
+> & {
+	exposure: ToolExposure;
 	sourceInfo: SourceInfo;
 };
 
@@ -1671,6 +1736,8 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
+	/** Servers registered by extensions; core does not connect them. */
+	mcpServers: McpServerRegistry;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
 	/** Native pi-ai provider registrations queued during extension loading, processed when runner binds. */
@@ -1719,6 +1786,7 @@ export interface ExtensionActions {
  */
 export interface ExtensionContextActions {
 	getModel: () => Model<any> | undefined;
+	getToolAccess?: () => ToolAccess;
 	getScopedModels: () => readonly ScopedModel[];
 	isIdle: () => boolean;
 	isProjectTrusted: () => boolean;

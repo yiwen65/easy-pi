@@ -19,6 +19,12 @@ import type { CollaborationController } from "@easy-pi/subagent/collaboration-co
 import type { ChildSessionIdentity, ChildSessionModel } from "@easy-pi/subagent/session-host";
 import type { AgentSession } from "../core/agent-session.ts";
 import type { ExtensionAPI, ExtensionContext } from "../core/extensions/types.ts";
+import {
+	createToolNameMatcher,
+	LIST_MCP_RESOURCE_TEMPLATES_TOOL,
+	LIST_MCP_RESOURCES_TOOL,
+	READ_MCP_RESOURCE_TOOL,
+} from "../core/mcp-servers.ts";
 import type { Settings } from "../core/settings-manager.ts";
 import { preparePiCollaborationFork } from "./pi-child-session-host.ts";
 import {
@@ -28,6 +34,11 @@ import {
 } from "./pi-collaboration-context.ts";
 
 const MESSAGE_TYPE = "epi-collaboration-message";
+const MCP_RESOURCE_TOOLS = new Set([LIST_MCP_RESOURCES_TOOL, LIST_MCP_RESOURCE_TEMPLATES_TOOL, READ_MCP_RESOURCE_TOOL]);
+
+function delegatableTools(session: AgentSession): string[] {
+	return session.getDelegatableToolNames().filter((name) => !MCP_RESOURCE_TOOLS.has(name));
+}
 const descriptions: Record<CollaborationToolName, string> = {
 	get_agent_result:
 		"Read a retained child turn result without running/loading the child, reading source files, or consuming mail. Supply target and optionally exactly one turn_id or result message_id; omitted IDs pin the current turn. Use this before requesting a resend. Returns bounded preview, source reference, execution/format/delivery and usage coverage, not acceptance.",
@@ -178,9 +189,25 @@ export function registerPiCollaborationTools(options: {
 		const session = sessionFor(ctx);
 		if (restoreTransform) return;
 		restorePrefix = observeCollaborationPrefix(session);
-		unbindTools = controller.bindTools(identity, () =>
-			session.getActiveToolNames().filter((name) => name !== DELIVER_RESULT_TOOL_NAME),
-		);
+		unbindTools = controller.bindTools(identity, () => {
+			const available = delegatableTools(session);
+			if (identity.agentPath !== "/root") {
+				// A granted MCP name is not revoked merely because this child's connection has not registered it yet.
+				// The controller still intersects this concrete ceiling with every live ancestor/root grant.
+				const access = session.getToolAccess();
+				const excluded = createToolNameMatcher(access.excluded ?? []);
+				for (const name of access.allowlist ?? []) {
+					if (
+						name.startsWith("mcp__") &&
+						!name.includes("*") &&
+						!excluded(name) &&
+						!session.getToolDefinition(name)
+					)
+						available.push(name);
+				}
+			}
+			return [...new Set(available)].filter((name) => name !== DELIVER_RESULT_TOOL_NAME);
+		});
 		const previous = session.agent.transformContext;
 		// Public Agent host seam, outside Pi's existing transform wrapper: persist
 		// inbox messages BEFORE compaction evaluates the next request, not in the
@@ -296,8 +323,7 @@ export function registerPiCollaborationTools(options: {
 								context: args.context,
 								tools: args.tools,
 							});
-							const available = session
-								.getActiveToolNames()
+							const available = delegatableTools(session)
 								.filter((name) => controller.toolAllowed(identity, name));
 							// Names are already namespace-normalized by validateDelegation.
 							const tools =
@@ -369,8 +395,7 @@ export function registerPiCollaborationTools(options: {
 								tools: args.tools,
 								context: current.delegation?.context ?? { mode: "fork", turns: "all", prefix: "rebuild" },
 							});
-							const available = session
-								.getActiveToolNames()
+							const available = delegatableTools(session)
 								.filter(
 									(name) =>
 										controller.toolAllowed(identity, name) &&

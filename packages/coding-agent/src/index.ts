@@ -162,8 +162,17 @@ export {
 	wrapRegisteredTool,
 	wrapRegisteredTools,
 } from "./core/extensions/index.ts";
+export type { ToolAccess, ToolAnnotations, ToolExposure, ToolNamespace } from "./core/extensions/types.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+export type {
+	McpExposure,
+	McpHttpServerConfig,
+	McpOAuthConfig,
+	McpServerConfig,
+	McpStdioServerConfig,
+	RegisteredMcpServer,
+} from "./core/mcp-servers.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export {
@@ -326,6 +335,9 @@ export {
 	type ProjectTrustStoreEntry,
 	type ProjectTrustUpdate,
 } from "./core/trust-manager.ts";
+export { type LoadedMcpConfig, loadMcpConfig, type McpServerEntry } from "./extensions/mcp/config.ts";
+export { createMcpExtension, type McpExtensionOptions, type McpTransportFactory } from "./extensions/mcp/index.ts";
+export { createToolSearchExtension } from "./extensions/tool-search/index.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage

@@ -113,6 +113,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { createToolNameMatcher } from "./mcp-servers.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -407,8 +408,10 @@ export class AgentSession {
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
 	private _initialActiveToolNames?: string[];
-	private _allowedToolNames?: Set<string>;
-	private _excludedToolNames?: Set<string>;
+	private _allowedToolNames?: string[];
+	private _excludedToolNames?: string[];
+	private _matchesAllowedToolName?: (name: string) => boolean;
+	private _matchesExcludedToolName?: (name: string) => boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _baseToolDefinitionsOverride?: Record<string, ToolDefinition<any, any>>;
 	private _disposed = false;
@@ -436,6 +439,12 @@ export class AgentSession {
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
+	/** Branch-visible discoveries whose definitions have not registered yet. */
+	private _pendingDeferredToolNames = new Set<string>();
+	/** Preserve live deactivation/removal across reloads, but never across branches. */
+	private _inactiveDeferredToolNames = new Set<string>();
+	/** Explicit tool choices are distinct from temporary exposure/connection withdrawal. */
+	private _explicitlyInactiveToolNames = new Set<string>();
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
@@ -454,8 +463,12 @@ export class AgentSession {
 		this._modelRuntime = config.modelRuntime;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
-		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
-		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
+		this._allowedToolNames = config.allowedToolNames ? [...config.allowedToolNames] : undefined;
+		this._excludedToolNames = config.excludedToolNames ? [...config.excludedToolNames] : undefined;
+		this._matchesAllowedToolName = this._allowedToolNames ? createToolNameMatcher(this._allowedToolNames) : undefined;
+		this._matchesExcludedToolName = this._excludedToolNames
+			? createToolNameMatcher(this._excludedToolNames)
+			: undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._baseToolDefinitionsOverride = config.baseToolDefinitionsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
@@ -482,6 +495,7 @@ export class AgentSession {
 			});
 		}
 
+		this._restoreDeferredToolsFromHistory();
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
@@ -1306,47 +1320,59 @@ export class AgentSession {
 
 	/** Awaitable shutdown report for the resources owned by this session. */
 	async shutdown(): Promise<SessionShutdownReport> {
-		if (this._shutdownPromise) return this._shutdownPromise;
-		// Reserve before abort callbacks can reenter shutdown().
-		this._shutdownPromise = Promise.resolve().then(async () => {
-			const stopped = await Promise.allSettled([this.abort()]);
-			let backgroundReport:
-				| { complete: boolean; failed: string[]; timedOut: string[]; remaining: string[] }
-				| undefined;
-			if (this._backgroundTaskManager?.shutdown) {
-				backgroundReport = await this._backgroundTaskManager.shutdown();
-			} else {
-				await this._backgroundTaskManager?.cleanup();
+		if (!this._shutdownPromise) {
+			// Reserve cleanup even when an externally emitted shutdown hook is the first caller.
+			this._shutdownPromise = Promise.resolve().then(async () => {
+				try {
+					const stopped = await Promise.allSettled([this.abort()]);
+					let backgroundReport:
+						| { complete: boolean; failed: string[]; timedOut: string[]; remaining: string[] }
+						| undefined;
+					if (this._backgroundTaskManager?.shutdown) {
+						backgroundReport = await this._backgroundTaskManager.shutdown();
+					} else {
+						await this._backgroundTaskManager?.cleanup();
+					}
+					cleanupSessionResources(this.sessionId);
+					for (const result of stopped) {
+						if (result.status === "rejected") throw result.reason;
+					}
+					return {
+						complete: backgroundReport?.complete ?? true,
+						failedResources: backgroundReport?.failed ?? [],
+						timedOutResources: backgroundReport?.timedOut ?? [],
+						remainingResources: backgroundReport?.remaining ?? [],
+					};
+				} finally {
+					try {
+						await this._extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+					} finally {
+						this._extensionRunner.invalidate();
+						this._disconnectFromAgent();
+						this._eventListeners = [];
+						for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
+						this._backgroundTaskNotifications.dispose();
+					}
+				}
+			});
+			this._disposed = true;
+			this._lifecycleGeneration++;
+			try {
+				this.abortRetry();
+				this.abortCompaction();
+				this.abortBranchSummary();
+				this.abortBash();
+				this.agent.abort();
+			} catch {
+				// Shutdown must continue even if an abort hook throws.
 			}
-			cleanupSessionResources(this.sessionId);
-			for (const result of stopped) {
-				if (result.status === "rejected") throw result.reason;
-			}
-			return {
-				complete: backgroundReport?.complete ?? true,
-				failedResources: backgroundReport?.failed ?? [],
-				timedOutResources: backgroundReport?.timedOut ?? [],
-				remainingResources: backgroundReport?.remaining ?? [],
-			};
-		});
-		this._disposed = true;
-		this._lifecycleGeneration++;
-		try {
-			this.abortRetry();
-			this.abortCompaction();
-			this.abortBranchSummary();
-			this.abortBash();
-			this.agent.abort();
-		} catch {
-			// Shutdown must continue even if an abort hook throws.
 		}
-		this._extensionRunner.invalidate(
-			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
-		);
-		this._disconnectFromAgent();
-		this._eventListeners = [];
-		for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
-		this._backgroundTaskNotifications.dispose();
+		// A callback must not wait on the emission awaiting that same callback.
+		// Per-runner async scope keeps other sessions and outside callers on the full drain.
+		if (this._extensionRunner.isInSessionShutdown()) {
+			void this._shutdownPromise.catch(() => undefined);
+			return { complete: false, failedResources: [], timedOutResources: [], remainingResources: ["extensions"] };
+		}
 		return this._shutdownPromise;
 	}
 
@@ -1402,15 +1428,45 @@ export class AgentSession {
 		return this.agent.state.tools.map((t) => t.name);
 	}
 
-	/**
-	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
-	 */
+	/** Detached effective access filters, including patterns, for extension connection policy. */
+	getToolAccess(): { allowlist?: readonly string[]; excluded?: readonly string[] } {
+		return {
+			allowlist: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+			excluded: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
+		};
+	}
+
+	/** Replace the host allowlist without changing the denylist or auto-declaring deferred tools. */
+	setToolAccessByName(toolNames: readonly string[]): void {
+		this._allowedToolNames = [...toolNames];
+		this._matchesAllowedToolName = createToolNameMatcher(this._allowedToolNames);
+		this._refreshToolRegistry();
+	}
+
+	/** Concrete capabilities that children may inherit; discovery does not grant wildcard access. */
+	getDelegatableToolNames(): string[] {
+		return [
+			...new Set([
+				...this.getActiveToolNames().filter(
+					(name) => this._isToolAllowed(name) && this._toolDefinitions.get(name)?.definition.exposure !== "hidden",
+				),
+				...Array.from(this._toolDefinitions.values())
+					.filter(({ definition }) => definition.exposure === "deferred" && this._isToolAllowed(definition.name))
+					.map(({ definition }) => definition.name),
+			]),
+		];
+	}
+
+	/** Get the access-filtered registry, including exposure, namespace, and author hints. */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
 			name: definition.name,
 			description: definition.description,
 			parameters: definition.parameters,
 			promptGuidelines: definition.promptGuidelines,
+			exposure: definition.exposure ?? "direct",
+			namespace: definition.namespace,
+			annotations: definition.annotations,
 			sourceInfo,
 		}));
 	}
@@ -1426,13 +1482,29 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
+		const previousActiveToolNames = this.getActiveToolNames();
+		this._applyActiveToolNames(toolNames);
+		const active = new Set(this.getActiveToolNames());
+		for (const name of active) this._explicitlyInactiveToolNames.delete(name);
+		for (const name of previousActiveToolNames) {
+			if (active.has(name)) continue;
+			this._explicitlyInactiveToolNames.add(name);
+			if (this._toolDefinitions.get(name)?.definition.exposure === "deferred") {
+				this._inactiveDeferredToolNames.add(name);
+				this._pendingDeferredToolNames.delete(name);
+			}
+		}
+	}
+
+	private _applyActiveToolNames(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
-		for (const name of toolNames) {
+		for (const name of new Set(toolNames)) {
 			const tool = this._toolRegistry.get(name);
-			if (tool) {
+			if (tool && this._isToolAllowed(name) && this._toolDefinitions.get(name)?.definition.exposure !== "hidden") {
 				tools.push(tool);
 				validToolNames.push(name);
+				this._inactiveDeferredToolNames.delete(name);
 			}
 		}
 		this.agent.state.tools = tools;
@@ -3410,6 +3482,7 @@ export class AgentSession {
 		this._extensionErrorUnsubscriber = this._extensionErrorListener
 			? runner.onError(this._extensionErrorListener)
 			: undefined;
+		if (this._extensionErrorListener) runner.reportUnhandledMcpServers();
 	}
 
 	private _refreshCurrentModelFromRegistry(): void {
@@ -3503,6 +3576,7 @@ export class AgentSession {
 			},
 			{
 				getScopedModels: () => this._scopedModels,
+				getToolAccess: () => this.getToolAccess(),
 				getModel: () => this.model,
 				isIdle: () => this.isIdle,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
@@ -3550,13 +3624,30 @@ export class AgentSession {
 		);
 	}
 
+	private _isToolAllowed(name: string): boolean {
+		return (
+			(!this._matchesAllowedToolName || this._matchesAllowedToolName(name)) && !this._matchesExcludedToolName?.(name)
+		);
+	}
+
+	/** Raw branch receipts remain available even when compaction replaces provider messages. */
+	private _restoreDeferredToolsFromHistory(): void {
+		this._pendingDeferredToolNames.clear();
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+			for (const name of entry.message.addedToolNames ?? []) {
+				if (this._isToolAllowed(name) && !this._inactiveDeferredToolNames.has(name)) {
+					this._pendingDeferredToolNames.add(name);
+				}
+			}
+		}
+	}
+
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
-		const allowedToolNames = this._allowedToolNames;
-		const excludedToolNames = this._excludedToolNames;
-		const isAllowedTool = (name: string): boolean =>
-			(!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name);
+		const previousDefinitions = this._toolDefinitions;
+		const isAllowedTool = (name: string): boolean => this._isToolAllowed(name);
 
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
@@ -3590,6 +3681,17 @@ export class AgentSession {
 				definition: tool.definition,
 				sourceInfo: tool.sourceInfo,
 			});
+		}
+		for (const [name, { definition }] of previousDefinitions) {
+			// Reload may register these again in session_start; only a live removal retires pending discovery.
+			if (
+				definition.exposure === "deferred" &&
+				((!options?.includeAllExtensionTools && !definitionRegistry.has(name)) ||
+					definitionRegistry.get(name)?.definition.exposure === "hidden")
+			) {
+				this._inactiveDeferredToolNames.add(name);
+				this._pendingDeferredToolNames.delete(name);
+			}
 		}
 		this._toolDefinitions = definitionRegistry;
 		this._toolPromptSnippets = new Map(
@@ -3630,25 +3732,39 @@ export class AgentSession {
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
 		).filter((name) => isAllowedTool(name));
 
-		if (allowedToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (allowedToolNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
+		const autoActivate = (name: string): void => {
+			const exposure = definitionRegistry.get(name)?.definition.exposure;
+			if (exposure !== "hidden" && exposure !== "deferred" && !this._explicitlyInactiveToolNames.has(name)) {
+				nextActiveToolNames.push(name);
 			}
-		} else if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) {
-				nextActiveToolNames.push(tool.name);
+		};
+		if (options?.includeAllExtensionTools) {
+			if (this._allowedToolNames) {
+				for (const name of this._toolRegistry.keys()) autoActivate(name);
+			} else {
+				for (const tool of wrappedExtensionTools) autoActivate(tool.name);
 			}
 		} else if (!options?.activeToolNames) {
-			for (const toolName of this._toolRegistry.keys()) {
-				if (!previousRegistryNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
+			for (const name of this._toolRegistry.keys()) {
+				const previousExposure = previousDefinitions.get(name)?.definition.exposure;
+				if (!previousRegistryNames.has(name) || previousExposure === "deferred" || previousExposure === "hidden") {
+					autoActivate(name);
 				}
 			}
 		}
 
-		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		for (const name of this._pendingDeferredToolNames) {
+			const definition = definitionRegistry.get(name)?.definition;
+			if (!isAllowedTool(name) || this._inactiveDeferredToolNames.has(name)) {
+				this._pendingDeferredToolNames.delete(name);
+			} else if (definition) {
+				if (definition.exposure === "deferred") nextActiveToolNames.push(name);
+				if (definition.exposure === "hidden") this._inactiveDeferredToolNames.add(name);
+				this._pendingDeferredToolNames.delete(name);
+			}
+		}
+
+		this._applyActiveToolNames([...new Set(nextActiveToolNames)]);
 	}
 
 	private _createTaskReconciliationTool(): ToolDefinition {
@@ -3810,7 +3926,12 @@ export class AgentSession {
 			: this._baseToolsOverride
 				? Object.keys(this._baseToolsOverride)
 				: ["read", "bash", "edit", "write", ...BACKGROUND_TASK_TOOL_NAMES];
-		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		const baseActiveToolNames =
+			options.activeToolNames ??
+			defaultActiveToolNames.filter((name) => {
+				const exposure = this._baseToolDefinitions.get(name)?.exposure;
+				return exposure !== "deferred" && exposure !== "hidden";
+			});
 		this._taskRecovery.retireRemovedComputerCaptures(
 			new Set([
 				...this._baseToolDefinitions.keys(),
@@ -3836,6 +3957,7 @@ export class AgentSession {
 		await this._resourceLoader.reload();
 		if (this._disposed) throw new Error("AgentSession is disposed");
 		const activeToolNames = this.getActiveToolNames();
+		this._restoreDeferredToolsFromHistory();
 		this._buildRuntime({
 			activeToolNames,
 			flagValues: previousFlagValues,
@@ -4305,6 +4427,16 @@ export class AgentSession {
 			const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = restoredProjection ?? sessionContext.messages;
+			if (this.sessionManager.getLeafId() !== oldLeafId) {
+				this._inactiveDeferredToolNames.clear();
+				this._explicitlyInactiveToolNames.clear();
+				this._restoreDeferredToolsFromHistory();
+				this._refreshToolRegistry({
+					activeToolNames: this.getActiveToolNames().filter(
+						(name) => this._toolDefinitions.get(name)?.definition.exposure !== "deferred",
+					),
+				});
+			}
 			// Emit session_tree event
 			await this._extensionRunner.emit({
 				type: "session_tree",

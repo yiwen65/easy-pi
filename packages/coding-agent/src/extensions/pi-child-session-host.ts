@@ -25,6 +25,12 @@ import type {
 import webSearchExtension from "@easy-pi/web-search";
 import type { AgentSession } from "../core/agent-session.ts";
 import type { ExtensionAPI, InlineExtension } from "../core/extensions/types.ts";
+import {
+	LIST_MCP_RESOURCE_TEMPLATES_TOOL,
+	LIST_MCP_RESOURCES_TOOL,
+	mcpNamespace,
+	READ_MCP_RESOURCE_TOOL,
+} from "../core/mcp-servers.ts";
 import type { ModelRuntime } from "../core/model-runtime.ts";
 import { DefaultResourceLoader } from "../core/resource-loader.ts";
 import { createAgentSession } from "../core/sdk.ts";
@@ -36,7 +42,10 @@ import {
 } from "../core/session-manager.ts";
 import { type Settings, SettingsManager } from "../core/settings-manager.ts";
 import { createEasyPiHarness } from "./easy-pi.ts";
+import type { LoadedMcpConfig } from "./mcp/config.ts";
+import { createMcpExtension } from "./mcp/index.ts";
 import { collaborationToolSchemas } from "./pi-collaboration-context.ts";
+import toolSearchExtension from "./tool-search/index.ts";
 
 const IDENTITY_ENTRY = "epi-collaboration-identity";
 
@@ -96,6 +105,8 @@ export function createPiChildSessionHost(options: {
 	modelRuntime: ModelRuntime;
 	settings: Settings;
 	getTools?: () => string[];
+	/** Approved root configuration restricted to the concrete delegated tools; never rediscover in a child. */
+	getMcpConfig?: (toolNames: readonly string[]) => LoadedMcpConfig;
 	observeSession?: (identity: Readonly<ChildSessionIdentity>, session: AgentSession) => () => void;
 	registerTools: (identity: Readonly<ChildSessionIdentity>, pi: ExtensionAPI, getSession: () => AgentSession) => void;
 	additionalExtensions?: (identity: Readonly<ChildSessionIdentity>) => InlineExtension[];
@@ -202,6 +213,18 @@ export function createPiChildSessionHost(options: {
 				backgroundBashCompletionDelivery: "nextRequest",
 			});
 			let boundSession: AgentSession | undefined;
+			// Generic resources require a server-scoped grant, which the first-phase delegation API does not supply.
+			const resourceTools = new Set([
+				LIST_MCP_RESOURCES_TOOL,
+				LIST_MCP_RESOURCE_TEMPLATES_TOOL,
+				READ_MCP_RESOURCE_TOOL,
+			]);
+			const currentTools = (): string[] => [
+				DELIVER_RESULT_TOOL_NAME,
+				...(options.getTools?.() ?? boundSession?.getDelegatableToolNames() ?? []).filter(
+					(name) => !resourceTools.has(name) && (!request.toolAllowed || request.toolAllowed(name)),
+				),
+			];
 			// Protocol delivery capture: set by the deliver_result tool during a turn, read at turn end.
 			let delivered: DelegationResult | undefined;
 			const loader = new DefaultResourceLoader({
@@ -213,6 +236,26 @@ export function createPiChildSessionHost(options: {
 				extensionFactories: [
 					// Registration matches the root; getTools/toolAllowed still bound the active set.
 					{ name: "web-search", factory: webSearchExtension, hidden: true },
+					...(options.getMcpConfig
+						? [
+								{ name: "tool-search", factory: toolSearchExtension, builtin: true, replaceable: true },
+								{
+									name: "mcp",
+									factory: createMcpExtension({
+										agentDir: request.agentDir,
+										restricted: true,
+										resourceServerScope: [],
+										loadConfig: () => options.getMcpConfig!(currentTools()),
+										canConnectServer: (entry) =>
+											options.getMcpConfig!(currentTools()).servers.some(
+												(approved) => mcpNamespace(approved.name) === mcpNamespace(entry.name),
+											),
+									}),
+									builtin: true,
+									replaceable: true,
+								},
+							]
+						: []),
 					{
 						name: "easy-pi-child",
 						factory: createEasyPiHarness({
@@ -246,6 +289,12 @@ export function createPiChildSessionHost(options: {
 									pi.on("tool_call", (event) => {
 										// Host-owned protocol tool: availability is structural for every child session.
 										if (event.toolName === DELIVER_RESULT_TOOL_NAME) return;
+										if (resourceTools.has(event.toolName))
+											return {
+												block: true,
+												reason: "MCP resources require an explicit server-scoped child grant",
+											};
+										if (options.getTools) boundSession?.setToolAccessByName(currentTools());
 										if (request.toolAllowed && !request.toolAllowed(event.toolName))
 											return { block: true, reason: "Tool denied by live delegation ancestry" };
 										if (options.getTools && !options.getTools().includes(event.toolName))
@@ -267,12 +316,7 @@ export function createPiChildSessionHost(options: {
 			if (loader.getExtensions().errors.length)
 				throw new CollaborationError("invalid_arguments", "Child extensions failed to load");
 			// The protocol tool is structural; delegated tool names never include it.
-			const tools = options.getTools
-				? [
-						DELIVER_RESULT_TOOL_NAME,
-						...options.getTools().filter((name) => !request.toolAllowed || request.toolAllowed(name)),
-					]
-				: undefined;
+			const tools = options.getTools ? currentTools() : undefined;
 			let session: AgentSession;
 			({ session } = await createAgentSession({
 				cwd,
@@ -379,13 +423,12 @@ export function createPiChildSessionHost(options: {
 					if (active) throw new CollaborationError("busy", "Child session is already running");
 					interrupted = false;
 					delivered = undefined;
-					session.setActiveToolsByName(
-						[DELIVER_RESULT_TOOL_NAME, ...(options.getTools?.() ?? session.getActiveToolNames())].filter(
-							(name, index, all) =>
-								all.indexOf(name) === index &&
-								(name === DELIVER_RESULT_TOOL_NAME || !request.toolAllowed || request.toolAllowed(name)),
-						),
-					);
+					const allowed = currentTools();
+					if (options.getTools) session.setToolAccessByName(allowed);
+					session.setActiveToolsByName([
+						...session.getActiveToolNames().filter((name) => allowed.includes(name)),
+						...allowed.filter((name) => session.getToolDefinition(name)?.exposure !== "deferred"),
+					]);
 					const operation = async (): Promise<ChildTurnResult> => {
 						if (closed || interrupted) return { status: "interrupted", text: "" };
 						let last: AssistantMessage | undefined;

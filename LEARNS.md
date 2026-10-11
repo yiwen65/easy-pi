@@ -516,3 +516,19 @@
 - Prevention: 用真实 faux Session + UI 覆盖同输入内部恢复、异步 settled hook 启动持有 gate 的下一运行，以及订阅者抛错时已经 pending 的 waitForIdle；再验证 retry/compaction/新任务和历史重放。
 - Verified by: 2026-10-11 UI 提前结算与活跃 B 丢失 Working 分别稳定红测；`b824062c-bash-task-timing.test.ts` 四项组合回归、248 项定向测试及根 check 通过。
 
+## MCP 子会话 bootstrap——未注册不等于未授权
+
+- Wrong approach: 将子会话已注册/已声明工具作为 controller 的实时权限全集，只用注入宿主回调测试 MCP。
+- Why it failed: controller 在连接完成前绑定 child getter，合法 MCP grant 因尚未注册被撤掉；canConnectServer 再检查祖先权限形成循环，实际 production child 只剩 deliver_result，MCP 调用 not found。
+- Correct approach: 仅保留创建 ceiling 中明确、未注册的 MCP 名称用于 bootstrap；仍交集实时 root/祖先与 exclusions，generic resources 不获得额外 scope。配置取 root 当前 runtime 的批准快照，不重新读改动过的配置文件。
+- Prevention: 用真实 registerPiCollaborationRoot/controller + 本地 stdio 覆盖 spawn、晚连接、撤权、未批准服务器及外部配置漂移；注入宿主测试不是生产接线证明。
+- Verified by: 2026-10-11 agent-session-mcp-child.test.ts 生产回归修正前仅 root PID，修正后 child 调用与批准配置断言通过；协调端 MCP 12 files / 163 tests 全过。
+
+## Unknown outcome 回归——跟踪原 task ID，不把核验 successor 当原操作
+
+- Wrong approach: 看到 session.taskRecovery.status=completed，就断言断线的 MCP 操作被错误确认；要求后续模型响应不能被消费。
+- Why it failed: 最新活跃 state 是独立 task-interruption-recovery successor；原任务仍在 suspendedTasks，needs_reconciliation、safe:false、dispatched:true 且无 result。
+- Correct approach: 按派发时捕获的 original task ID 检查未确认记录；保留既有核验机制，另断言重复调用在 dispatch 前被拒、远端副作用只发生一次。
+- Prevention: 区分“当前核验任务完成”与“原副作用已确认”，同时观察 executionOutcome、original/suspended state 与真实 RPC 次数，避免为了错误断言禁用恢复功能。
+- Verified by: 2026-10-11 agent-session-mcp-migration.test.ts unknown-drop：outcome unknown、两次 dispatch 尝试但一次 RPC、原任务无 terminal result；协调端回归通过。
+

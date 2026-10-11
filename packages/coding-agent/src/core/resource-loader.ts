@@ -466,6 +466,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				}
 			}
 		}
+		extensionsResult.extensions = this.filterBuiltInExtensions(extensionsResult.extensions);
 		this.extensionsResult = this.extensionsOverride ? this.extensionsOverride(extensionsResult) : extensionsResult;
 		this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
 
@@ -629,6 +630,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private addExtensionConflictDiagnostics(extensionsResult: LoadExtensionsResult): void {
+		extensionsResult.extensions = this.filterBuiltInExtensions(extensionsResult.extensions);
 		// Detect extension conflicts (tools, commands, flags with same names from different extensions)
 		// Keep all extensions loaded. Conflicts are reported as diagnostics, and precedence is handled by load order.
 		const conflicts = this.detectExtensionConflicts(extensionsResult.extensions);
@@ -947,6 +949,30 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 	}
 
+	private filterBuiltInExtensions(extensions: Extension[]): Extension[] {
+		const factories = new Map<string, { name: string; replaceable?: boolean }>(
+			this.extensionFactories.flatMap((input) =>
+				typeof input !== "function" && input.builtin ? [[`<inline:${input.name}>`, input] as const] : [],
+			),
+		);
+		const disabled = new Set(
+			this.settingsManager.getExtensionPaths().filter((entry) => entry.startsWith("-builtin:")),
+		);
+		return extensions.filter((extension) => {
+			const factory = factories.get(extension.path);
+			if (!factory) return true;
+			if (disabled.has(`-builtin:${factory.name}`)) return false;
+			if (!factory.replaceable) return true;
+			const toolName = factory.name.replaceAll("-", "_");
+			return !extensions.some(
+				(candidate) =>
+					candidate !== extension &&
+					!factories.has(candidate.path) &&
+					(candidate.commands.has(factory.name) || candidate.tools.has(toolName)),
+			);
+		});
+	}
+
 	private async loadExtensionFactories(runtime: ExtensionRuntime): Promise<{
 		extensions: Extension[];
 		errors: Array<{ path: string; error: string }>;
@@ -957,6 +983,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		for (const [index, input] of this.extensionFactories.entries()) {
 			const isNamed = typeof input !== "function";
 			const factory = isNamed ? input.factory : input;
+			if (isNamed && input.builtin && this.settingsManager.getExtensionPaths().includes(`-builtin:${input.name}`))
+				continue;
 			const extensionPath = `<inline:${isNamed ? input.name : index + 1}>`;
 			try {
 				const extension = await loadExtensionFromFactory(factory, this.cwd, this.eventBus, runtime, extensionPath);

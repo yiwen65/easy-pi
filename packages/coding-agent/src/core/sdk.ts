@@ -9,6 +9,7 @@ import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { createToolNameMatcher } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
@@ -61,6 +62,8 @@ export interface CreateAgentSessionOptions {
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
+	/** Disable MCP when creating the default resource loader. Custom loaders remain host-owned. */
+	noMcp?: boolean;
 	/**
 	 * Optional allowlist of tool names.
 	 *
@@ -204,6 +207,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settingsManager,
 			extensionFactories: createBuiltInExtensions(agentDir, {
 				collaboration: settingsManager.getSubagentEnabled(),
+				mcp: !options.noMcp,
 			}),
 		});
 		await resourceLoader.reload();
@@ -280,10 +284,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		: configuredDefaultToolNames;
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
-	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
+	const excludedToolNameMatcher = excludedToolNames ? createToolNameMatcher(excludedToolNames) : undefined;
 	const initialActiveToolNames = (
 		options.tools ?? (options.noTools ? [] : (effectiveConfiguredToolNames ?? defaultActiveToolNames))
-	).filter((name) => !excludedToolNameSet?.has(name));
+	).filter((name) => !excludedToolNameMatcher?.(name));
 
 	let agent: Agent;
 

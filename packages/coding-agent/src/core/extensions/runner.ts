@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
@@ -58,6 +59,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionShutdownEvent,
+	ToolAccess,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEvent,
@@ -302,6 +304,7 @@ export class ExtensionRunner {
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
+	private getToolAccessFn: () => ToolAccess = () => ({});
 	private isIdleFn: () => boolean = () => true;
 	private isProjectTrustedFn: () => boolean = () => true;
 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
@@ -321,6 +324,9 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	private reportedMcpServers = new Set<string>();
+	private sessionShutdownPromise: Promise<undefined> | undefined;
+	private readonly sessionShutdownContext = new AsyncLocalStorage<{ active: boolean }>();
 
 	constructor(
 		extensions: Extension[],
@@ -365,6 +371,7 @@ export class ExtensionRunner {
 		// Context actions (required)
 		this.getModel = contextActions.getModel;
 		this.getScopedModels = contextActions.getScopedModels;
+		this.getToolAccessFn = contextActions.getToolAccess ?? (() => ({}));
 		this.isIdleFn = contextActions.isIdle;
 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
 		this.getSignalFn = contextActions.getSignal;
@@ -375,6 +382,12 @@ export class ExtensionRunner {
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.getSystemPromptOptionsFn = contextActions.getSystemPromptOptions ?? (() => ({ cwd: this.cwd }));
+
+		// Factory registrations are read on session_start; later changes reach the connector immediately.
+		this.runtime.mcpServers.setChangeListener(() => {
+			void this.emit({ type: "mcp_servers_change", servers: this.runtime.mcpServers.list() });
+			this.reportUnhandledMcpServers();
+		});
 
 		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
@@ -592,6 +605,20 @@ export class ExtensionRunner {
 		}
 	}
 
+	/** Report registrations with no loaded connector. Call after installing the session error listener. */
+	reportUnhandledMcpServers(): void {
+		if (this.hasHandlers("mcp_servers_change")) return;
+		for (const server of this.runtime.mcpServers.list()) {
+			if (this.reportedMcpServers.has(server.name)) continue;
+			this.reportedMcpServers.add(server.name);
+			this.emitError({
+				extensionPath: server.extensionPath,
+				event: "register_mcp_server",
+				error: `MCP server "${server.name}" is registered, but no loaded extension connects MCP servers; another extension may have replaced the built-in MCP support`,
+			});
+		}
+	}
+
 	hasHandlers(eventType: string): boolean {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
@@ -745,6 +772,10 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.isProjectTrustedFn();
 			},
+			getToolAccess: () => {
+				runner.assertActive();
+				return structuredClone(runner.getToolAccessFn());
+			},
 			get signal() {
 				runner.assertActive();
 				return runner.getSignalFn();
@@ -824,7 +855,30 @@ export class ExtensionRunner {
 		);
 	}
 
-	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+	/** Whether this async call originates inside this runner's still-active shutdown dispatch. */
+	isInSessionShutdown(): boolean {
+		return this.sessionShutdownContext.getStore()?.active === true;
+	}
+
+	emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+		if (event.type !== "session_shutdown") return this.emitEvent(event);
+
+		const shutdownEvent: SessionShutdownEvent = event;
+		// Reserve the shared drain before callbacks can synchronously reenter emit().
+		this.sessionShutdownPromise ??= Promise.resolve().then(() => {
+			const dispatch = { active: true };
+			return this.sessionShutdownContext.run(dispatch, async () => {
+				try {
+					return await this.emitEvent(shutdownEvent);
+				} finally {
+					dispatch.active = false;
+				}
+			});
+		});
+		return this.sessionShutdownPromise as Promise<RunnerEmitResult<TEvent>>;
+	}
+
+	private async emitEvent<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | undefined;
 

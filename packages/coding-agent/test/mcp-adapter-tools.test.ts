@@ -1,0 +1,235 @@
+import { readFile, rm, stat } from "node:fs/promises";
+import { dirname } from "node:path";
+import { AgentToolError } from "@earendil-works/pi-agent-core";
+import { Type } from "typebox";
+import { describe, expect, it } from "vitest";
+import type { ExtensionContext, ToolExposure, ToolInfo } from "../src/core/extensions/types.ts";
+import { truncateMiddle, writeMcpOutputFile } from "../src/extensions/mcp/output.ts";
+import { createMcpResourceToolDefinitions, type McpResourceServer } from "../src/extensions/mcp/resources.ts";
+import {
+	convertMcpResult,
+	createMcpToolDefinition,
+	createMcpToolName,
+	MCP_OUTPUT_MAX_BYTES,
+} from "../src/extensions/mcp/tools.ts";
+import {
+	Bm25Ranker,
+	createToolSearchDocument,
+	createToolSearchToolDefinition,
+	tokenize,
+} from "../src/extensions/tool-search/tool.ts";
+
+const ctx = {} as ExtensionContext;
+
+function definition(call: () => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) {
+	return createMcpToolDefinition({
+		server: "docs",
+		tool: { name: "search", inputSchema: {}, annotations: { readOnlyHint: true, idempotentHint: true } },
+		name: "mcp__docs__search",
+		namespace: { name: "mcp__docs" },
+		exposure: "deferred",
+		timeoutMs: 50,
+		getClient: async () => ({ callTool: call }),
+	});
+}
+
+describe("MCP result adapter", () => {
+	it("uses provider-safe stable collision names", () => {
+		expect(createMcpToolName("my-server", "get.item/v2")).toBe("mcp__my_server__get_item_v2");
+		const long = createMcpToolName("server", "x".repeat(100));
+		expect(long).toHaveLength(64);
+		expect(createMcpToolName("server", `${"x".repeat(100)}y`)).not.toBe(long);
+		expect(createMcpToolName("s", "a-b", () => true)).toMatch(/^mcp__s__a_b_[0-9a-f]{8}$/);
+	});
+
+	it("bounds UTF-8 text including wrapper and saves full output without raw result details", async () => {
+		const full = `${"é😀".repeat(12000)}end`;
+		const saved: (string | Uint8Array)[] = [];
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		const result = await convertMcpResult(
+			"docs",
+			"search",
+			{
+				content: [{ type: "text", text: full }, image],
+				structuredContent: { private: "ignored" },
+				_meta: { trace: "ignored" },
+			},
+			{
+				saveOutput: async (value) => {
+					saved.push(value);
+					return "/tmp/full.txt";
+				},
+			},
+		);
+		const text = result.content[0];
+		expect(text.type).toBe("text");
+		if (text.type !== "text") throw new Error("expected text");
+		expect(Buffer.byteLength(text.text)).toBeLessThanOrEqual(MCP_OUTPUT_MAX_BYTES);
+		expect(text.text).not.toContain("\uFFFD");
+		expect(text.text).toContain("chars truncated");
+		expect(text.text).toContain("end\n\n[Full output: /tmp/full.txt");
+		expect(result.content[1]).toEqual(image);
+		expect(result.details).toEqual({ server: "docs", tool: "search", fullOutputPath: "/tmp/full.txt" });
+		expect(Object.keys(result)).toEqual(["content", "details"]);
+		expect(saved).toEqual([full]);
+	});
+
+	it("reports explicit MCP errors as confirmed and keeps bounded diagnostics", async () => {
+		const work = convertMcpResult(
+			"docs",
+			"search",
+			{ content: [{ type: "text", text: "no".repeat(15000) }], isError: true },
+			{ saveOutput: async () => "/tmp/error.txt" },
+		);
+		await expect(work).rejects.toBeInstanceOf(AgentToolError);
+		try {
+			await work;
+		} catch (error) {
+			if (!(error instanceof AgentToolError)) throw error;
+			expect(error.executionOutcome).toBe("confirmed");
+			expect(Buffer.byteLength(error.message)).toBeLessThanOrEqual(MCP_OUTPUT_MAX_BYTES);
+			expect(error.details).toEqual({ server: "docs", tool: "search", fullOutputPath: "/tmp/error.txt" });
+		}
+		await expect(convertMcpResult("docs", "search", { content: [], isError: true })).rejects.toThrow(
+			"MCP tool docs/search returned an error",
+		);
+	});
+
+	it("never promotes remote annotations into retry or certainty guarantees", async () => {
+		const timeout = new Error("sent then timed out");
+		const tool = definition(async () => {
+			throw timeout;
+		});
+		expect(tool.contract).toEqual({ sideEffects: "external" });
+		expect(tool.annotations).toEqual({ readOnlyHint: true, idempotentHint: true });
+		expect(tool).not.toHaveProperty("outputSchema");
+		await expect(tool.execute("id", {}, undefined, undefined, ctx)).rejects.toMatchObject({
+			name: "AgentToolError",
+			cause: timeout,
+			executionOutcome: "unknown",
+		});
+		const before = {
+			...tool,
+			...createMcpToolDefinition({
+				server: "docs",
+				tool: { name: "x", inputSchema: {} },
+				name: "x",
+				namespace: { name: "docs" },
+				exposure: "direct",
+				timeoutMs: 50,
+				getClient: async () => {
+					throw new Error("disabled");
+				},
+			}),
+		};
+		await expect(before.execute("id", {}, undefined, undefined, ctx)).rejects.toMatchObject({
+			executionOutcome: "not_started",
+		});
+	});
+
+	it("writes private output references and omits control metadata", async () => {
+		const path = await writeMcpOutputFile("complete", ".txt");
+		try {
+			expect(await readFile(path, "utf8")).toBe("complete");
+			expect((await stat(path)).mode & 0o777).toBe(0o600);
+		} finally {
+			await rm(dirname(path), { recursive: true, force: true });
+		}
+		expect(truncateMiddle("é".repeat(2000), 999).content).not.toContain("\uFFFD");
+		const result = await convertMcpResult(
+			"docs",
+			"x",
+			{
+				content: [
+					{ type: "resource_link", uri: "docs://guide", name: "guide" },
+					{ type: "audio", mimeType: "audio/wav", data: "" },
+				],
+			},
+			{ readableResources: true },
+		);
+		expect(result.content).toEqual([
+			{ type: "text", text: '[Resource docs://guide "guide". Read it with read_mcp_resource (server "docs")]' },
+			{ type: "text", text: "[audio audio/wav omitted]" },
+		]);
+	});
+});
+
+function info(name: string, exposure: ToolExposure): ToolInfo {
+	return {
+		name,
+		description: "Search issues",
+		exposure,
+		parameters: Type.Object({}),
+		sourceInfo: { path: "test", source: "builtin", scope: "temporary", origin: "top-level" },
+	};
+}
+
+describe("deferred BM25 discovery", () => {
+	it("stems plurals and ranks namespace and schema terms", () => {
+		expect(tokenize("listIssues for the GitHub_repo")).toEqual(["list", "issue", "git", "hub", "repo"]);
+		const document = createToolSearchDocument(
+			{
+				...info("x", "deferred"),
+				parameters: Type.Object({ project: Type.String({ description: "Kubernetes cluster" }) }),
+			},
+			{ name: "docs", description: "Deployments" },
+		);
+		expect(new Bm25Ranker().rank("kubernetes deployment", [document], 1)[0].name).toBe("x");
+	});
+	it("only additively activates inactive deferred tools from the host view", async () => {
+		let active = ["read", "already"];
+		const tool = createToolSearchToolDefinition({
+			tools: {
+				getActiveTools: () => active,
+				getAllTools: () => [
+					info("hidden", "hidden"),
+					info("model", "model-only"),
+					info("direct", "direct"),
+					info("already", "deferred"),
+					info("load", "deferred"),
+				],
+				setActiveTools: (names) => {
+					active = names;
+				},
+			},
+		});
+		const result = await tool.execute("id", { query: "issues" }, undefined, undefined, ctx);
+		expect(result.details.loaded).toEqual(["load"]);
+		expect(active).toEqual(["read", "already", "load"]);
+		await expect(tool.execute("id", { query: "issues", limit: 100 }, undefined, undefined, ctx)).rejects.toThrow(
+			"1 to 50",
+		);
+	});
+});
+
+describe("MCP resource adapter", () => {
+	it("filters App resources/icons/meta and enforces runtime server reach", async () => {
+		const resources = [
+			{ uri: "docs://a", name: "a", _meta: { private: true }, icons: [{ src: "x" }] },
+			{ uri: "ui://view", name: "app" },
+		];
+		const server: McpResourceServer = {
+			name: "docs",
+			timeoutMs: 100,
+			resourcesPage: async () => ({ resources, nextCursor: "next" }),
+			resourceTemplatesPage: async () => ({ resourceTemplates: [] }),
+			allResources: async () => resources,
+			allResourceTemplates: async () => [],
+			readResource: async (uri) => ({ contents: [{ uri, text: "read" }] }),
+		};
+		let available: McpResourceServer[] = [server];
+		const tools = createMcpResourceToolDefinitions({ exposure: "deferred", servers: () => available });
+		const result = await tools[0].execute("id", { server: "docs" }, undefined, undefined, ctx);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: '{"server":"docs","resources":[{"server":"docs","uri":"docs://a","name":"a"}],"nextCursor":"next"}',
+			},
+		]);
+		expect(result.details).toEqual({ server: "docs", tool: "list_mcp_resources" });
+		available = [];
+		await expect(
+			tools[2].execute("id", { server: "docs", uri: "docs://a" }, undefined, undefined, ctx),
+		).rejects.toThrow("has no resources");
+	});
+});

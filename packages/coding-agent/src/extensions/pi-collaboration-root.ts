@@ -4,7 +4,9 @@ import { CollaborationController } from "@easy-pi/subagent/collaboration-control
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
 import type { ChildSessionPermissions } from "@easy-pi/subagent/session-host";
 import type { ExtensionAPI, ExtensionContext } from "../core/extensions/types.ts";
+import { mcpNamespace } from "../core/mcp-servers.ts";
 import { GrokAgentsPanel } from "../modes/interactive-grok/components/grok-agents-panel.ts";
+import { getSessionMcpConfig } from "./mcp/index.ts";
 import { getNativeSession } from "./native-session-binding.ts";
 import { createPiChildSessionHost } from "./pi-child-session-host.ts";
 import { PiCollaborationMonitor } from "./pi-collaboration-monitor.ts";
@@ -60,7 +62,27 @@ export function registerPiCollaborationRoot(
 					shellPath: settings.getShellPath(),
 					shellCommandPrefix: settings.getShellCommandPrefix(),
 				},
-				getTools: () => session.getActiveToolNames(),
+				getTools: () => session.getDelegatableToolNames(),
+				getMcpConfig: (toolNames) => {
+					// Only the root's built-in MCP integration can supply its approved configuration.
+					if (
+						!session.resourceLoader
+							.getExtensions()
+							.extensions.some((extension) => extension.path === "<inline:mcp>")
+					)
+						return { servers: [], errors: [] };
+					const namespaces = new Set(
+						session
+							.getAllTools()
+							.filter((tool) => toolNames.includes(tool.name) && tool.name.startsWith("mcp__"))
+							.map((tool) => tool.namespace?.name),
+					);
+					const loaded = getSessionMcpConfig(ctx.sessionManager);
+					return {
+						servers: (loaded?.servers ?? []).filter((entry) => namespaces.has(mcpNamespace(entry.name))),
+						errors: [],
+					};
+				},
 				observeSession: (child, native) => monitor!.attach(child, native),
 				registerTools: (child, childPi, getSession) => {
 					registerPiCollaborationTools({

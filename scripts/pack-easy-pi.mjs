@@ -15,6 +15,7 @@ const product = join(root, "packages/coding-agent");
 const internal = [
 	["packages/ai", "@earendil-works/pi-ai"],
 	["packages/agent", "@earendil-works/pi-agent-core"],
+	["packages/mcp", "@earendil-works/pi-mcp"],
 	["packages/client", "@earendil-works/pi-client"],
 	["packages/grok-tui", "@easy-pi/grok-tui"],
 	["packages/protocol", "@earendil-works/pi-protocol"],
@@ -55,6 +56,7 @@ for (const [directory, name] of internal) {
 	writeFileSync(join(target, "package.json"), `${JSON.stringify({ ...manifest, private: undefined }, null, "\t")}\n`);
 	cpSync(join(root, "LICENSE"), join(target, "LICENSE"));
 	cpSync(join(source, "dist"), join(target, "dist"), { recursive: true });
+	if (existsSync(join(source, "LICENSES"))) cpSync(join(source, "LICENSES"), join(target, "LICENSES"), { recursive: true });
 	bundleNames.push(name);
 	for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
 		if (!internal.some(([, internalName]) => internalName === dependency)) {

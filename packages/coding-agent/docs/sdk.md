@@ -604,6 +604,10 @@ const { session } = await createAgentSession({
 
 > See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
 
+### MCP
+
+The default resource loader includes MCP and `tool_search`. Use `noMcp: true` to disable the built-in integration. Custom resource loaders remain host-owned; add `createMcpExtension({ agentDir })` and `createToolSearchExtension()` explicitly when needed. MCP respects the same strict `tools`/`excludeTools` grants, including `*` patterns. Deferred discovery changes declarations, never authorization. See [MCP servers](mcp.md) for configuration, OAuth, embedding factories, and child resource restrictions.
+
 ### Custom Tools
 
 ```typescript

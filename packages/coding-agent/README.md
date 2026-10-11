@@ -186,6 +186,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (file, ID, messages, tokens, cost) |
 | `/agents` | easy-pi: [watch and control native child sessions](docs/collaboration.md) in Grok-TUI |
+| `/mcp` | [Manage MCP servers](docs/mcp.md), sign in, reconnect, or change exposure |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/trust` | Save project trust decision for future sessions (restart required) |
 | `/fork` | Create a new session from a previous user message |
@@ -496,7 +497,7 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 Pi is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [pi packages](#pi-packages). This keeps the core minimal while letting you shape pi to fit how you work.
 
-**No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
+**MCP (this fork).** Connect stdio or Streamable HTTP servers with `epi mcp`, manage them with `/mcp`, and discover deferred tools with `tool_search`. Tool allowlists remain strict, including native children. See [MCP servers](docs/mcp.md). Codemode is not included.
 
 **No sub-agents.** There's many ways to do this. Spawn pi instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
 

@@ -16,6 +16,9 @@
 				"../ai/dist/*.d.ts",
 				"../ai/dist/providers/*.d.ts"
 			],
+			"@earendil-works/pi-mcp": ["../mcp/dist/index.d.ts"],
+			"@earendil-works/pi-mcp/oauth": ["../mcp/dist/oauth/index.d.ts"],
+			"@earendil-works/pi-mcp/testing": ["../mcp/dist/testing/index.d.ts"],
 			"@earendil-works/pi-client": [
 				"../client/dist/index.d.ts"
 			],

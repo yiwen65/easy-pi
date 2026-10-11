@@ -12,6 +12,7 @@
 				"@earendil-works/pi-agent-core": "^0.84.2",
 				"@earendil-works/pi-ai": "^0.84.2",
 				"@earendil-works/pi-client": "^0.84.2",
+				"@earendil-works/pi-mcp": "0.84.2",
 				"@easy-pi/grok-tui": "0.84.2",
 				"@earendil-works/pi-protocol": "^0.84.2",
 				"@earendil-works/pi-server": "^0.84.2",
@@ -40,6 +41,7 @@
 				"@mariozechner/clipboard": "0.3.9"
 			},
 			"bundleDependencies": [
+				"@earendil-works/pi-mcp",
 				"@easy-pi/grok-tui",
 				"@easy-pi/permissions",
 				"@easy-pi/subagent",
@@ -536,6 +538,17 @@
 			"engines": {
 				"node": ">=22.19.0"
 			}
+		},
+		"node_modules/@earendil-works/pi-mcp": {
+			"version": "0.84.2",
+			"license": "MIT",
+			"dependencies": {
+				"cross-spawn": "7.0.6"
+			},
+			"engines": {
+				"node": ">=22.19.0"
+			},
+			"inBundle": true
 		},
 		"node_modules/@earendil-works/pi-protocol": {
 			"version": "0.84.2",
