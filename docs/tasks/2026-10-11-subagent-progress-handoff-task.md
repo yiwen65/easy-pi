@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户确认“子代理编排与交付机制”，选择新增非终止进度回报，并确认执行契约。
 
 <!-- task-doc-section:background-goal -->
@@ -120,9 +120,9 @@ session 5d920d4c 的 codemode-core 在 52m18s 后被 root 主动中断。最后�
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 集成验证与限定提交
+### [x] T-004 — 集成验证与限定提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 复查因果路径、回归和共享 diff 后提交。
 - Inputs and prerequisites: T-001/T-002/T-003/T-005/T-006/T-007 全部已验收。
@@ -137,7 +137,7 @@ session 5d920d4c 的 codemode-core 在 52m18s 后被 root 主动中断。最后�
   - 无已知阻塞缺陷，其他会话的 staged/dirty changes 未混入。
 - Verification method:
   - targeted tests、npm run check、git diff --check 与 task document validator。
-- Validation evidence: 功能与定向验证通过；420 tests，npm run check exit0、无自动改写/index变化（task-16-9e5b4914.log + snapshot compare）。当前下一步仅限定 staged diff、commit与状态核对。
+- Validation evidence: 420 tests，npm run check exit0、无自动改写/index变化（task-16-9e5b4914.log + snapshot compare）；git diff --check、task validator通过。明确stage本任务18个文件，逐项核对无其他会话hunks；源码与测试提交6dff658b4成功。最终本段状态记录仅文档收尾。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -231,10 +231,11 @@ session 5d920d4c 的 codemode-core 在 52m18s 后被 root 主动中断。最后�
 - 2026-10-11: root 新 metadata-budget integration 先失败（task-9-7affb700）：写入前超限造成原 task needs_reconciliation。新增 T-007，host 只识别已有 AdmissionError 为 not_started，core 严格区分 precommit 与 SQL commit failure。宿主 worker 已交接并关闭，root 负责剩余 SDK type/边界验证。
 - 2026-10-11: 同毫秒回执另复现旧reason覆盖canonical终态（task-10-b0912c7a）；增加私有canonical-terminal标记，未增加wire ordinal。独立review报告已覆盖原distinct-timestamp问题，最终tie fix由root红绿tests验证。
 - 2026-10-11: 其他会话完成并提交codemode，HEAD更新到05d65c259，当前只剩本任务改动；未stage或重写其文件。最终验证420pass，npm check完整输出通过且snapshot/index零变化。同步既有LEARNS权限lesson的shutdown因果补充，无泛化权限恢复。T-001/T-003/T-005/T-006/T-007验收，T-004进入限定提交。
+- 2026-10-11: 限定18文件提交6dff658b4成功；全部源码/新tests/必要既有断言、docs与verified lesson已保留。T-004完成；仅本authority doc更新最终状态，无新增代码或范围扩展。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: 实施已验证：core7files182 + coding-agent8files220 + Grok18 =420pass；最终npm run check通过且无自动文件/index变化。提交与最终status核对尚待T-004完成。
+- Result: passed
+- Evidence: 所有T-001～T-007完成；core7files182 + coding-agent8files220 + Grok18 =420pass；最终npm run check通过且无自动文件/index变化。源码与测试已提交6dff658b4；document validator与限定diff review通过。
 - Limitations: Grok两个完整run已失败的既有toast/manual-recovery预期仍留存，18-case追加run明确skip，不声称完整Grok suite绿色；source-only，未重建安装包、未跑真实模型/API或物理terminal。原session不恢复或热更新，single long provider request仍可能没有即时回报。
