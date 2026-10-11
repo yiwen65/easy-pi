@@ -32,6 +32,7 @@ import type {
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	PrepareNextTurnContext,
+	PrepareRequest,
 	QueueMode,
 	ShouldStopAfterTurnContext,
 	StreamFn,
@@ -118,6 +119,7 @@ export interface AgentOptions {
 	admitToolCall?: AgentLoopConfig["admitToolCall"];
 	executionScheduler?: AgentLoopConfig["executionScheduler"];
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
+	prepareRequest?: PrepareRequest;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -220,6 +222,7 @@ export class Agent {
 		context: ShouldStopAfterTurnContext,
 		signal?: AbortSignal,
 	) => boolean | Promise<boolean>;
+	public prepareRequest?: PrepareRequest;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -265,6 +268,7 @@ export class Agent {
 		this.admitToolCall = runtimeOptions.admitToolCall;
 		this.executionScheduler = runtimeOptions.executionScheduler;
 		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
+		this.prepareRequest = runtimeOptions.prepareRequest;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -576,6 +580,7 @@ export class Agent {
 			shouldStopAfterTurn: shouldStopAfterTurn
 				? async (context) => await shouldStopAfterTurn(context, this.signal)
 				: undefined,
+			prepareRequest: this.prepareRequest,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {
@@ -588,6 +593,11 @@ export class Agent {
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getSystemPrompt: () => this._state.systemPrompt,
+			getRequestRouting: () => ({
+				promptCacheKey: this.promptCacheKey,
+				cacheAffinityId: this.cacheAffinityId,
+				transport: this.transport,
+			}),
 			onProviderContext: this.onProviderContext,
 			onExecutionEvent: this.onExecutionEvent,
 			onCompletedOutputItem: this.onCompletedOutputItem,

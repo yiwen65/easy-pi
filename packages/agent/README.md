@@ -145,6 +145,22 @@ const stream = agentLoop(
 
 When you use the `Agent` class, assistant `message_end` processing is treated as a barrier before tool preflight begins. That means `beforeToolCall` sees agent state that already includes the assistant message that requested the tool call.
 
+### Request preparation
+
+`prepareRequest` runs before every conversational provider request, including the first, `continue()` retries, and the request after recovered tools finish. Selected input messages have already been appended and their events awaited. With `Agent`, awaited subscribers can persist those inputs before preparation starts.
+
+```typescript
+agent.prepareRequest = async ({ context, model, thinkingLevel }, signal) => ({
+  context: { ...context, messages: await loadCanonicalMessages(signal) },
+  model,
+  thinkingLevel,
+});
+```
+
+The optional returned context, model, and thinking level replace the loop's values for this and later requests. `"off"` clears reasoning. Preparation runs **before** the step snapshot binds tool schemas and handlers; context transforms, message conversion, and provider-context observation still run afterwards. Agent-backed requests also resolve the live `agent.state.systemPrompt` after transforms. Cache routing (`promptCacheKey`, `cacheAffinityId`, and transport) is captured after preparation alongside the model, so input-boundary model changes can clear inherited routing. Native `sessionId` remains the identity captured for the run.
+
+This hook does not poll queues. Steering queued while it runs waits for the next normal poll. `prepareNextTurn` and `prepareNextTurnWithContext` retain their existing pre-input scheduling boundary, including the post-preparation steering poll. `shouldStopAfterTurn` is unchanged. Throwing from preparation prevents that request; `Agent` reports the failure through its normal error events.
+
 ### continue() Event Sequence
 
 `continue()` resumes from existing context without adding a new message. Use it for retries after errors.
@@ -227,6 +243,11 @@ const agent = new Agent({
     }
   },
 
+  // Refresh request state after selected input events, before every provider step.
+  prepareRequest: async ({ context }, signal) => ({
+    context: { ...context, messages: await loadCanonicalMessages(signal) },
+  }),
+
   // Stop gracefully after a completed turn, before queued messages are polled.
   shouldStopAfterTurn: async ({ context }, signal) => {
     return shouldCompactBeforeNextTurn(context.messages, signal);
@@ -297,6 +318,9 @@ agent.toolExecution = "sequential";
 agent.beforeToolCall = async ({ toolCall }) => undefined;
 agent.afterToolCall = async ({ toolCall, result }) => undefined;
 agent.shouldStopAfterTurn = async ({ context }) => shouldCompactBeforeNextTurn(context.messages);
+agent.prepareRequest = async ({ context }) => ({
+  context: { ...context, messages: await loadCanonicalMessages() },
+});
 agent.state.messages = newMessages; // top-level array is copied
 agent.state.messages.push(message);
 agent.reset();

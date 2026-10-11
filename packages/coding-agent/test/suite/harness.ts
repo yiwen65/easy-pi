@@ -82,6 +82,7 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	prepareRequest?: Agent["prepareRequest"];
 	/** Subsystem compaction config passthrough (default-on since EPIC-CCTX-001). */
 	hfCompaction?: Partial<HfCompactionConfig> & { mode: HfCompactionConfig["mode"] };
 	prepareNextTurnWithContext?: (
@@ -188,6 +189,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (!runner) return messages;
 			return runner.emitContext(messages);
 		},
+		prepareRequest: options.prepareRequest,
 		prepareNextTurnWithContext: options.prepareNextTurnWithContext,
 	});
 	const extensionsResult = options.extensionFactories

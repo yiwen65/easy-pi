@@ -33,7 +33,11 @@ There is no compaction artifact store, snapshot sidecar, recall catalog, `recall
 
 ## Runtime context boundary
 
-The checkpoint contains conversation messages only. The current system prompt, tool schemas, model, thinking level, permissions, environment, and extension configuration are rebuilt from current runtime state before every provider call. A historical compaction item cannot freeze or override those values. Entries added after the checkpoint supersede stale checkpoint statements.
+The checkpoint contains conversation messages only. The session's `prepareRequest` hook refreshes the persisted message projection and current system prompt, tools, model, and thinking level after selected input events and before the provider step binds its schemas and handlers. Retry/recovery failure artifacts intentionally removed from live context are not resurrected from durable history. Explicit next-turn context callbacks retain their in-flight context updates. Subsequent durable additions are merged from the captured branch-entry boundary, without restoring deliberately omitted older entries or duplicating selected inputs; a later checkpoint supersedes that override. Permissions, environment, and extension configuration remain current runtime authority; a historical compaction item cannot freeze or override them. Entries added after the checkpoint supersede stale checkpoint statements.
+
+When `AgentSession` chains an existing `agent.prepareRequest`, that callback receives the refreshed messages and live model, thinking level, system prompt, and tools. Returned context messages can be honored, but model, thinking level, system prompt, and tools remain session-authoritative and are refreshed again after the callback. A compaction projection activated during the callback supersedes its message override.
+
+Post-tool compaction keeps its existing pre-steering scheduling boundary, so steering queued during compaction can join the resumed request. Mailbox and background notification ingestion and extension context transforms still run once through the existing transform pipeline; request preparation does not drain them. That pipeline retains its compaction preflight. The canonical provider-context observer remains after transforms and before provider-specific serialization.
 
 ## Publication and continuation
 
