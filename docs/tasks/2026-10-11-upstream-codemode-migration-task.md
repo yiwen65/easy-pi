@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户“继续移植 codemode”；延续已交付 MCP 的 main 迁移。
 
 <!-- task-doc-section:background-goal -->
@@ -180,9 +180,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-007 — 独立安装产物与提交
+### [x] T-007 — 独立安装产物与提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 验证产品产物并提交本人内容。
 - Inputs and prerequisites: 集成验证通过。
@@ -196,7 +196,7 @@
   - 独立产品中真实 QuickJS+本地 MCP 编排正常；其他改动保留。
 - Verification method:
   - package smoke、git diff/status、文档 validator。
-- Validation evidence: 暂存树 offline build、pack 13 bundled deps、包外 npm --ignore-scripts 安装成功；实际 installed CLI help/version/MCP codemode add、SDK QuickJS worker + read/stdio/HTTP 编排、only 声明、structured metadata privacy、durable journal、分支 store 和 awaited transport cleanup 全通过（task-36）。tarball /tmp/easy-pi-codemode-delivery.BCTFgk/package/easy-pi-0.1.0-beta.1.tgz，npm shasum 5d3d7c60d83933136695a833b19a84430313bac2。提交尚未完成，不提前将本 task 标为 done。
+- Validation evidence: 暂存树 offline build、pack 13 bundled deps、包外 npm --ignore-scripts 安装成功；实际 installed CLI help/version/MCP codemode add、SDK QuickJS worker + read/stdio/HTTP 编排、only 声明、structured metadata privacy、durable journal、分支 store 和 awaited transport cleanup 全通过（task-36）。tarball /tmp/easy-pi-codemode-delivery.BCTFgk/package/easy-pi-0.1.0-beta.1.tgz，npm shasum 5d3d7c60d83933136695a833b19a84430313bac2。功能提交 a2fd4ac0d892b0c5f5d42ffb9876628c7dacd844 已完成（119 个本任务 paths/hunks）；提交后检查确认 index 清空，仅另一 progress/handoff 任务的修改留在 working tree。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -263,6 +263,7 @@
 - 2026-10-11: 新增 T-008，严格限于实际类型消费者适配。QuickJS runtime 的有界 license 调查确认 loose wasm 需要引擎/Unicode notices；保留 8 项 wrapper/engine/toolchain/libc 通知及来源，不声称完整 linked-object inventory。外部 binary 发布仍不在授权范围。
 - 2026-10-11: T-002 实施完成并经 coordinator 检查 diff 与定向复跑验收；文档子任务已检查 6 文件 diff，等待产品行为实证。初轮 MCP 3 文件/71 tests 通过。另一会话新增 83e46ae82 文档提交，不改变本任务源码所有权。
 - 2026-10-11: T-004、T-008 经源码/diff 与独立复跑验收。真实 child 剩余 production regression 捕获 RangeError，证明 controller 自己的 live getter 反查有效权限形成闭环；新增单独 ancestryToolAllowed composition callback，保持原 toolAllowed 全检查，包含 persisted self ceiling 和全部 live ancestors/root。child 4/4、subagent controller/lifecycle/extension 72 tests 通过。没有“遇到递归返回 true”之类放宽授权。
+- 2026-10-11: 提交 a2fd4ac0d 完成本轮功能；四个混合文件仅提交 ownership-only hunks，其他 progress/handoff 修改保留。T-007 done，final passed。LEARNS 合并 live authority 递归与隐藏 public manifest 预检经验，新增跨 VM terminal/metadata 全通道经验。
 - 2026-10-11: 纯树 pack 生成 13 bundled deps 的 Node tarball；包外 npm install --ignore-scripts 成功。installed SDK 实际执行 QuickJS/read/stdio/HTTP，证明 only、full structured public result、journal/store、awaited cleanup；installed CLI help/version/codemode exposure add 通过。所有 tests 均本地 faux/fixtures，不使用付费 API。
 - 2026-10-11: 四项 finding 已经原失败/邻接回归和 reviewer 连续复查闭环。共享 worktree 新出现 progress/handoff 的在途功能，影响最终 check；4 个 mixed files 从 HEAD 合成本任务 blobs，只暂存自身部分，未覆盖 working edits。checkout-index 快照首次漏复制隐藏 public data/.manifest.json，出现一个类型错误及 11 个导入失败；补齐该既有公开文件后纯树 check/build 全通过、185 sandbox 和 262 集成 tests 通过。T-009 done；T-006 从 blocked 解除并完成；T-007 开始纯树打包/包外 smoke。
 - 2026-10-11: 独立只读 review 不接受交付：协议 nested _meta 泄漏、live predicate 丢 wildcard 首次连接资格、Bun worker 入口缺失、return 绕过输出硬预算。coordinator 接受 findings 并建立 T-009；T-006 blocked，未将 check 全绿当作不存在缺口。terminal payload 4 tests 修复前全部红，metadata/wildcard 2 tests 修复前红；同时覆盖巨大 terminal error 同类通道。
@@ -274,6 +275,6 @@
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: T-001～T-006、T-008/T-009 已验证；纯树 check/build、185 sandbox/262 integration、72 subagent/9 server/4 pack 通过。T-007 包外安装与实际 worker/MCP/cleanup smoke 已通过，等待提交与最终文档收尾。
+- Result: passed
+- Evidence: T-001～T-009 全部经验收。纯本任务树 npm run check、offline build、185 sandbox/262 integration/72 subagent/9 server/4 pack tests 通过；另有 202 个恢复邻接 tests 通过。包外 npm --ignore-scripts 安装及实际 QuickJS/read/stdio/HTTP、only、metadata privacy、journal/store、awaited cleanup smoke 通过。功能已提交 a2fd4ac0d，文档 validator 通过；不把共享 worktree 的未完成并行功能纳入本次产物或全仓验证主张。
 - Limitations: 不使用真实 provider credentials、不发布或部署；Bun 未安装，仅静态 worker 入口验证，未验证编译二进制/人工 TUI/第三方 OAuth。随 wasm 保留已确认的 notices，不声称完整 linked-object 许可审计；外部发布仍需要专项复核。另一任务的并行 progress/handoff 修改不在本次提交树与产物中。
