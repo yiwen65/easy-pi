@@ -1840,7 +1840,9 @@ pi.registerProvider("corporate-ai", {
 });
 ```
 
-The object form accepts a complete pi-ai `Provider`, including native `auth`, `getModels`, `refreshModels`, `filterModels`, `stream`, and `streamSimple` behavior.
+The object form accepts a complete pi-ai `Provider`, including native `auth`, chat `getModels`/`filterModels`/stream behavior, mixed `getAllModels`/`filterAllModels`, `refreshModels` and optional `generateImages`.
+
+Providers can own chat and image generation. In config form, image definitions require `type: "image"` and image `output`, and adapters belong in `images: { [imageApi]: implementation }`. Provider-wide overlays preserve inherited images; an explicit `models` array replaces the whole chat/image catalog, including `[]`. `ctx.modelRegistry`, the session model and model scopes remain chat-only. See [image provider examples](custom-provider.md#image-providers) and the [breaking migration guide](model-operations.md).
 
 **Legacy config options:**
 - `name` - Display name for the provider in UI such as `/login`.
@@ -1849,7 +1851,8 @@ The object form accepts a complete pi-ai `Provider`, including native `auth`, `g
 - `api` - API type: `"anthropic-messages"`, `"openai-completions"`, `"openai-responses"`, etc.
 - `headers` - Custom headers to include in requests.
 - `authHeader` - If true, adds `Authorization: Bearer` header automatically.
-- `models` - Array of model definitions. If provided, replaces all existing models for this provider. Model definitions can set `baseUrl` to override the provider endpoint for that model.
+- `models` - Array of chat/image definitions. If provided, replaces the entire catalog for this provider, including an empty list. Image definitions must use `type: "image"`; legacy chat definitions may omit type.
+- `images` - Provider-local image adapters keyed by image API. Does not mutate the global image API registry. Model definitions can set `baseUrl` to override the provider endpoint for that model.
 - `refreshModels` - Async dynamic discovery callback. Its returned models replace extension-provided models. `context.stored` contains the persisted provider snapshot; use generation-checked `context.publish({ persist: entry })` only when updated catalog data should persist. Use `persist: null` to delete that snapshot.
 - `oauth` - OAuth provider config for `/login` support. When provided, the provider appears in the login menu.
 - `streamSimple` - Custom streaming implementation for non-standard APIs.
@@ -3003,6 +3006,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | **Providers** |||
 | `custom-provider-anthropic/` | Custom Anthropic proxy | `registerProvider` |
 | `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |
+| `custom-provider-images.ts` | Keyless local image generation | Native mixed `Provider`, image adapter |
 | **Messages & Communication** |||
 | `message-renderer.ts` | Custom message rendering | `registerMessageRenderer`, `sendMessage` |
 | `entry-renderer.ts` | TUI-only custom entry rendering | `registerEntryRenderer`, `appendEntry` |

@@ -7,6 +7,15 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const temporaryRoots: string[] = [];
+const expectedFetchUrls = [
+	"https://models.dev/api.json",
+	"https://openrouter.ai/api/v1/models",
+	"https://ai-gateway.vercel.sh/v1/models",
+	"https://openrouter.ai/api/v1/models?output_modalities=image",
+];
+function capturedFetchUrls(stdout: string): string[] {
+	return Array.from(stdout.matchAll(/^FETCH_URL (.+)$/gm), (match) => match[1]);
+}
 
 afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) rmSync(root, { force: true, recursive: true });
@@ -67,9 +76,10 @@ describe("strict model generation", () => {
 			preloadPath,
 			`const catalog = ${JSON.stringify(catalog)};\n` +
 				`globalThis.fetch = async (input) => {\n` +
-				`  const url = String(input);\n` +
+				`  const url = String(input); console.log('FETCH_URL ' + url);\n` +
 				`  if (url === "https://models.dev/api.json") return Response.json(catalog);\n` +
 				`  if (["https://openrouter.ai/api/v1/models", "https://ai-gateway.vercel.sh/v1/models"].includes(url)) return Response.json({ data: [] });\n` +
+				`  if (url === "https://openrouter.ai/api/v1/models?output_modalities=image") return Response.json({ data: [{ id: "fixture-image", name: "Image", architecture: { output_modalities: ["image"] } }] });\n` +
 				`  throw new Error(\`Unexpected fetch: \${url}\`);\n` +
 				`};\n`,
 		);
@@ -85,9 +95,10 @@ describe("strict model generation", () => {
 			{ cwd: isolatedPackageRoot, encoding: "utf8", timeout: 10_000 },
 		);
 		expect(result.status, result.stderr).toBe(0);
+		expect(capturedFetchUrls(result.stdout)).toEqual(expectedFetchUrls);
 		const values = JSON.parse(readFileSync(join(providersDir, "data/kimi-coding.json"), "utf8"));
-		expect(Object.keys(values["anthropic-messages"])).toEqual(["kimi-for-coding"]);
-		expect(values["anthropic-messages"]["kimi-for-coding"]).toMatchObject({
+		expect(Object.keys(values["anthropic-messages"])).toEqual(["chat:kimi-for-coding"]);
+		expect(values["anthropic-messages"]["chat:kimi-for-coding"]).toMatchObject({
 			provider: "kimi-coding",
 			baseUrl: "https://api.kimi.com/coding",
 			name: "Kimi CN",
@@ -122,8 +133,11 @@ describe("strict model generation", () => {
 			preloadPath,
 			`const catalog = ${JSON.stringify(catalog)};\n` +
 				`globalThis.fetch = async (input) => {\n` +
-				`  if (String(input) === "https://models.dev/api.json") return Response.json(catalog);\n` +
-				`  return Response.json({ data: [] });\n` +
+				`  const url = String(input); console.log('FETCH_URL ' + url);\n` +
+				`  if (url === "https://models.dev/api.json") return Response.json(catalog);\n` +
+				`  if (["https://openrouter.ai/api/v1/models", "https://ai-gateway.vercel.sh/v1/models"].includes(url)) return Response.json({ data: [] });\n` +
+				`  if (url === "https://openrouter.ai/api/v1/models?output_modalities=image") return Response.json({ data: [{ id: "fixture-image", name: "Image", architecture: { output_modalities: ["image"] } }] });\n` +
+				`  throw new Error(\`Unexpected fetch: \${url}\`);\n` +
 				`};\n`,
 		);
 		const outputDir = join(fixtureRoot, "catalog");
@@ -140,6 +154,7 @@ describe("strict model generation", () => {
 			{ cwd: isolatedPackageRoot, encoding: "utf8", timeout: 10_000 },
 		);
 		expect(result.status, result.stderr).toBe(0);
+		expect(capturedFetchUrls(result.stdout)).toEqual(expectedFetchUrls);
 		const values = JSON.parse(readFileSync(join(outputDir, "providers/together.json"), "utf8"));
 		expect(values[modelId].thinkingLevelMap).toEqual({
 			minimal: null,
@@ -187,6 +202,7 @@ describe("strict model generation", () => {
 			preloadPath,
 			`const catalog = ${JSON.stringify(catalog)};\n` +
 				`globalThis.fetch = async (input) => {\n` +
+				`  console.log('FETCH_URL ' + String(input));\n` +
 				`  if (String(input) === "https://models.dev/api.json") {\n` +
 				`    return new Response(JSON.stringify(catalog), { status: 200 });\n` +
 				`  }\n` +
@@ -214,6 +230,7 @@ describe("strict model generation", () => {
 		);
 
 		expect(result.status).toBe(1);
+		expect(capturedFetchUrls(result.stdout)).toEqual(["https://models.dev/api.json"]);
 		expect(`${result.stdout}\n${result.stderr}`).toContain(
 			"qwen-token-plan-individual model IDs do not match (missing: deepseek-v4-flash-0731)",
 		);

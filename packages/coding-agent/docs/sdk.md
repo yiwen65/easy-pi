@@ -417,6 +417,28 @@ If no model is provided:
 
 Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.pi/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
 
+#### Image and mixed-operation queries
+
+Ordinary `getModels()`, `getModel()`, `getAvailable()`, session selection and model scopes remain chat-only. Use typed queries for images, or all-operation queries for the `AnyModel` union:
+
+```typescript
+const images = modelRuntime.getModelsOfType("image", "openrouter");
+const availableImages = await modelRuntime.getAvailableOfType("image", "openrouter");
+const allModels = modelRuntime.getAllModels();
+const allAvailable = await modelRuntime.getAllAvailable();
+const image = modelRuntime.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image");
+if (image) {
+  const result = await modelRuntime.generateImages(image, {
+    input: [{ type: "text", text: "Draw a small tree" }],
+  }, { signal: AbortSignal.timeout(30_000) });
+  // Auth/endpoint/env/header configuration is applied by ModelRuntime.
+  // Errors and cancellation are encoded, not thrown.
+  if (result.stopReason !== "stop") console.warn(result.errorMessage);
+}
+```
+
+`getAuth()` also accepts image models. A same-ID chat/image pair remains distinct by operation; never pass an image to `createAgentSession({ model })` or a chat/deferred request. See [chat/image migration](model-operations.md) for removed public image collection APIs, extension registration and remote validator behavior. These examples make requests only when executed with configured auth; image generation is not part of startup or normal `/model` selection.
+
 To match CLI model parsing, use the exported resolver helpers:
 
 ```typescript

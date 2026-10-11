@@ -1,7 +1,9 @@
 import { dirname, join } from "node:path";
 import {
+	type AnyModel,
 	type Api,
 	type ApiStreamOptions,
+	type AssistantImages,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type AuthCheck,
@@ -17,6 +19,9 @@ import {
 	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
+	type ImageApi,
+	type ImageModel,
+	type ImagesContext,
 	lazyStream,
 	type Model,
 	type Models,
@@ -24,11 +29,14 @@ import {
 	type ModelsDeferredCancelOptions,
 	type ModelsDeferredFetchOptions,
 	ModelsError,
+	type ModelsImagesOptions,
 	type ModelsRefreshOptions,
 	type ModelsRefreshResult,
 	type ModelsRequestTransforms,
 	type ModelsSimpleStreamOptions,
 	type ModelsStore,
+	type ModelType,
+	type ModelTypeMap,
 	type MutableModels,
 	type Provider,
 	type ProviderHeaders,
@@ -37,6 +45,12 @@ import {
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
+import {
+	assertChatModel,
+	assertImageModel,
+	imageErrorResult,
+	isModelType,
+} from "@earendil-works/pi-ai/utils/model-operations";
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
@@ -420,6 +434,48 @@ export class ModelRuntime implements Models {
 		return this.models.getModel(providerId, modelId);
 	}
 
+	getModelsOfType<TType extends ModelType>(type: TType, providerId?: string): readonly ModelTypeMap[TType][] {
+		return this.models.getModelsOfType(type, providerId);
+	}
+
+	getModelOfType<TType extends ModelType>(
+		type: TType,
+		providerId: string,
+		modelId: string,
+	): ModelTypeMap[TType] | undefined {
+		return this.models.getModelOfType(type, providerId, modelId);
+	}
+
+	getAllModels(providerId?: string): readonly AnyModel[] {
+		return this.models.getAllModels(providerId);
+	}
+
+	async getAvailableOfType<TType extends ModelType>(
+		type: TType,
+		providerId?: string,
+		options?: AuthOperationOptions,
+	): Promise<readonly ModelTypeMap[TType][]> {
+		const available =
+			type === "chat"
+				? await this.getAvailable(providerId, options)
+				: await this.getAllAvailable(providerId, options);
+		return available.filter((model): model is ModelTypeMap[TType] => isModelType(model, type));
+	}
+
+	async getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
+		const errorSeq = ++this.availabilityErrorSeq;
+		try {
+			const available = await this.models.getAllAvailable(providerId, options);
+			if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
+			return available;
+		} catch (error) {
+			if (errorSeq === this.availabilityErrorSeq && !options?.signal?.aborted) {
+				this.availabilityError = error instanceof Error ? error.message : String(error);
+			}
+			throw error;
+		}
+	}
+
 	async checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
 		return this.models.checkAuth(providerId, options);
 	}
@@ -491,12 +547,13 @@ export class ModelRuntime implements Models {
 	}
 
 	getAuth(providerId: string, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;
-	getAuth(model: Model<Api>, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;
+	getAuth(model: AnyModel, overrides?: ModelRuntimeAuthOverrides): Promise<AuthResult | undefined>;
 	async getAuth(
-		providerOrModel: string | Model<Api>,
+		providerOrModel: string | AnyModel,
 		overrides: ModelRuntimeAuthOverrides = {},
 	): Promise<AuthResult | undefined> {
 		if (typeof providerOrModel === "string") return this.models.getAuth(providerOrModel, overrides);
+		const provider = this.models.getProvider(providerOrModel.provider);
 		const resolution = await this.models.getAuth(providerOrModel, overrides);
 		if (!resolution) return undefined;
 		const configuredHeaders = resolveConfiguredModelHeaders(
@@ -504,6 +561,7 @@ export class ModelRuntime implements Models {
 			this.config.getProvider(providerOrModel.provider),
 			this.extensionProviders.get(providerOrModel.provider),
 			{ ...(resolution.env ?? {}), ...(overrides.env ?? {}) },
+			provider,
 		);
 		return {
 			...resolution,
@@ -593,13 +651,16 @@ export class ModelRuntime implements Models {
 		return check ? { configured: true, source: "environment", label: check.source } : { configured: false };
 	}
 
-	private async prepareRequest<TOptions extends ProviderRequestOptions & ModelsRequestTransforms>(
-		model: Model<Api>,
+	private async prepareRequest<
+		TModel extends AnyModel,
+		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+	>(
+		model: TModel,
 		options: TOptions | undefined,
 	): Promise<{
 		provider: Provider;
-		model: Model<Api>;
-		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions;
+		model: TModel;
+		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 	}> {
 		const provider = this.models.getProvider(model.provider);
 		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
@@ -611,13 +672,14 @@ export class ModelRuntime implements Models {
 		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
-		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions;
+		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 		let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
 		if (transformHeaders) headers = await transformHeaders(headers ?? {});
 		const env =
 			resolution.env || providerOptions.env
 				? { ...(resolution.env ?? {}), ...(providerOptions.env ?? {}) }
 				: undefined;
+		options?.signal?.throwIfAborted();
 		return {
 			provider,
 			model: resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model,
@@ -626,7 +688,7 @@ export class ModelRuntime implements Models {
 				apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
 				headers,
 				env,
-			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions,
+			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>,
 		};
 	}
 
@@ -636,6 +698,7 @@ export class ModelRuntime implements Models {
 		options?: ModelsApiStreamOptions<TApi>,
 	): AssistantMessageEventStream {
 		return lazyStream(model, async () => {
+			assertChatModel(model);
 			const prepared = await this.prepareRequest(
 				model,
 				options as (StreamOptions & ModelsRequestTransforms) | undefined,
@@ -658,6 +721,7 @@ export class ModelRuntime implements Models {
 
 	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
 		return lazyStream(model, async () => {
+			assertChatModel(model);
 			const prepared = await this.prepareRequest(model, options);
 			return prepared.provider.streamSimple(prepared.model, context, prepared.options as SimpleStreamOptions);
 		});
@@ -673,6 +737,7 @@ export class ModelRuntime implements Models {
 		options?: ModelsDeferredFetchOptions,
 	): Promise<AssistantMessage> {
 		return lazyStream(model, async () => {
+			assertChatModel(model);
 			const prepared = await this.prepareRequest(model, options);
 			if (!prepared.provider.fetchDeferred) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
@@ -681,11 +746,35 @@ export class ModelRuntime implements Models {
 		}).result();
 	}
 
+	async generateImages(
+		model: ImageModel<ImageApi>,
+		context: ImagesContext,
+		options?: ModelsImagesOptions,
+	): Promise<AssistantImages> {
+		try {
+			assertImageModel(model);
+			const provider = this.models.getProvider(model.provider);
+			if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+			if (!provider.generateImages)
+				throw new ModelsError("provider", `Provider ${model.provider} does not support image generation`);
+			const signal = operationSignal(options?.signal);
+			const operation = (async () => {
+				const prepared = await this.prepareRequest(model, { ...options, signal });
+				// Defaults are already assembled; adapters must not resurrect deleted headers.
+				return provider.generateImages!({ ...prepared.model, headers: undefined }, context, prepared.options);
+			})();
+			return await raceWithAbortSignal(operation, signal);
+		} catch (error) {
+			return imageErrorResult(model, error, options?.signal?.aborted);
+		}
+	}
+
 	async cancelDeferred(
 		model: Model<Api>,
 		handle: DeferredHandle,
 		options?: ModelsDeferredCancelOptions,
 	): Promise<void> {
+		assertChatModel(model);
 		const prepared = await this.prepareRequest(model, options);
 		if (!prepared.provider.cancelDeferred) {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);

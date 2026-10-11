@@ -1,4 +1,12 @@
-import type { Api, Model, ModelsStoreEntry, Provider } from "@earendil-works/pi-ai";
+import {
+	type AnyModel,
+	getModelType,
+	isModelType,
+	type ModelsStoreEntry,
+	modelsAreEqual,
+	type Provider,
+} from "@earendil-works/pi-ai";
+import { hasKnownModelType } from "@earendil-works/pi-ai/utils/model-operations";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -7,17 +15,17 @@ const DEFAULT_CATALOG_BASE_URL = "https://pi.dev";
 const REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS = 4_000;
 export const REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
-function mergeModels(baseline: readonly Model<Api>[], dynamic: readonly Model<Api>[]): Model<Api>[] {
+function mergeModels(baseline: readonly AnyModel[], dynamic: readonly AnyModel[]): AnyModel[] {
 	const merged = [...baseline];
 	for (const model of dynamic) {
-		const index = merged.findIndex((entry) => entry.id === model.id);
+		const index = merged.findIndex((entry) => modelsAreEqual(entry, model));
 		if (index >= 0) merged[index] = model;
 		else merged.push(model);
 	}
 	return merged;
 }
 
-function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
+function parseCatalog(providerId: string, value: unknown): AnyModel[] {
 	const entries = Array.isArray(value)
 		? value
 		: typeof value === "object" && value !== null && "models" in value && Array.isArray(value.models)
@@ -27,18 +35,31 @@ function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
 				: undefined;
 	if (!entries) throw new Error(`Invalid model catalog for provider "${providerId}"`);
 	return entries
-		.filter((entry): entry is Model<Api> => typeof entry === "object" && entry !== null && "id" in entry)
+		.filter(
+			(entry): entry is AnyModel =>
+				typeof entry === "object" && entry !== null && "id" in entry && typeof entry.id === "string",
+		)
+		.filter(hasKnownModelType)
 		.map((model) => ({ ...model, provider: providerId }));
 }
 
 /** IDs of the generated (bundled) baseline models a remote overlay is merged onto. */
 type BaselineIds = ReadonlySet<string>;
 
+/** A validator only backs the exact all-operation request variant that fetched it. */
+interface RemoteCatalogEntry extends ModelsStoreEntry {
+	catalogType?: "all";
+}
+
+function operationKey(model: AnyModel): string {
+	return JSON.stringify([model.provider, getModelType(model), model.id]);
+}
+
 function remoteModels(
 	entry: ModelsStoreEntry | undefined,
 	localGeneratedAt: number | undefined,
 	baselineIds: BaselineIds,
-): readonly Model<Api>[] {
+): readonly AnyModel[] {
 	if (!entry) return [];
 	if (localGeneratedAt !== undefined && (entry.lastModified === undefined || entry.lastModified <= localGeneratedAt)) {
 		// The generated catalog is at least as new as this snapshot, so it wins
@@ -46,7 +67,7 @@ function remoteModels(
 		// built from a hand-maintained list while the remote catalog already added
 		// a model, for example), so models the generated catalog does not know
 		// remain visible instead of being dropped.
-		return entry.models.filter((model) => !baselineIds.has(model.id));
+		return entry.models.filter((model) => !baselineIds.has(operationKey(model)));
 	}
 	return entry.models;
 }
@@ -57,16 +78,22 @@ export function withRemoteCatalog(
 	catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL,
 	localGeneratedAt?: number,
 ): Provider {
-	let dynamicModels: readonly Model<Api>[] = [];
-	const baselineIds: BaselineIds = new Set(provider.getModels().map((model) => model.id));
+	let dynamicModels: readonly AnyModel[] = [];
+	const baseline = () => provider.getAllModels?.() ?? provider.getModels();
+	const baselineIds: BaselineIds = new Set(baseline().map(operationKey));
 
 	return {
 		...provider,
-		getModels: () => mergeModels(provider.getModels(), dynamicModels),
+		getModels: () =>
+			mergeModels(
+				provider.getModels(),
+				dynamicModels.filter((model) => isModelType(model, "chat")),
+			).filter((model) => isModelType(model, "chat")),
+		getAllModels: () => mergeModels(baseline(), dynamicModels),
 		refreshModels: async (context) => {
-			const stored = context.stored;
+			const stored = context.stored as Readonly<RemoteCatalogEntry> | undefined;
 			const restored = remoteModels(stored, localGeneratedAt, baselineIds).filter(
-				(model) => model.provider === provider.id,
+				(model) => model.provider === provider.id && hasKnownModelType(model),
 			);
 			if (
 				!(await context.publish({
@@ -80,7 +107,8 @@ export function withRemoteCatalog(
 			if (!context.allowNetwork || context.signal.aborted) return;
 			if (
 				!context.force &&
-				stored?.checkedAt !== undefined &&
+				stored?.catalogType === "all" &&
+				stored.checkedAt !== undefined &&
 				stored.lastModified !== undefined &&
 				Date.now() - stored.checkedAt < REMOTE_CATALOG_REFRESH_INTERVAL_MS
 			) {
@@ -89,8 +117,9 @@ export function withRemoteCatalog(
 
 			// Only revalidate when a cached body backs the validator, so a 304 can never
 			// leave the overlay empty.
-			const validator = stored?.models.length ? stored.etag : undefined;
+			const validator = stored?.catalogType === "all" && stored.models.length ? stored.etag : undefined;
 			const url = new URL(`/api/models/providers/${encodeURIComponent(provider.id)}`, catalogBaseUrl);
+			url.searchParams.set("type", "all");
 			const response = await fetchWithRetry(
 				url,
 				{
@@ -107,19 +136,21 @@ export function withRemoteCatalog(
 			const checkedAt = Date.now();
 			// Unchanged: dynamicModels already holds the stored overlay, so only the
 			// freshness window moves.
-			if (response.status === 304 && stored) {
+			if (response.status === 304) {
+				if (!stored || !validator)
+					throw new Error(`Model catalog returned 304 without an all-operation cached body for ${provider.id}`);
 				await context.publish({ persist: { ...stored, checkedAt } });
 				return;
 			}
 			if (response.status === 404 || response.status === 501) {
-				await context.publish({
-					persist: {
-						...(stored ?? { models: [] }),
-						checkedAt,
-						lastModified: 0,
-						etag: undefined,
-					},
-				});
+				const unavailable: RemoteCatalogEntry = {
+					...(stored ?? { models: [] }),
+					checkedAt,
+					lastModified: 0,
+					etag: undefined,
+					catalogType: "all",
+				};
+				await context.publish({ persist: unavailable });
 				return;
 			}
 			if (!response.ok) {
@@ -131,7 +162,8 @@ export function withRemoteCatalog(
 			const refreshed = parseCatalog(provider.id, await response.json());
 			const lastModified = Date.parse(response.headers.get("last-modified") ?? "");
 			if (context.signal.aborted) return;
-			const entry = {
+			const entry: RemoteCatalogEntry = {
+				catalogType: "all",
 				models: refreshed,
 				checkedAt,
 				lastModified: Number.isNaN(lastModified) ? 0 : lastModified,

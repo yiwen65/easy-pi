@@ -142,6 +142,9 @@ beforeAll(() => {
 	const fixtures = {
 		"https://models.dev/api.json": modelsDev,
 		"https://integrate.api.nvidia.com/v1/models": { data: [{ id: "tiered-fixture" }] },
+		"https://openrouter.ai/api/v1/models?output_modalities=image": {
+			data: [{ id: "fixture-image", name: "Image", architecture: { output_modalities: ["image"] } }],
+		},
 		"https://openrouter.ai/api/v1/models": {
 			data: [
 				openRouter("tiered-fixture", {
@@ -218,7 +221,7 @@ beforeAll(() => {
 			preloadPath,
 			`const fixtures = ${JSON.stringify(fixtures)};\n` +
 				`globalThis.fetch = async (input) => {\n` +
-				`  const url = String(input);\n` +
+				`  const url = String(input); console.log('FETCH_URL ' + url);\n` +
 				`  if (!Object.hasOwn(fixtures, url)) throw new Error(\`Unexpected fetch: \${url}\`);\n` +
 				`  return Response.json(fixtures[url]);\n` +
 				`};\n`,
@@ -243,6 +246,9 @@ beforeAll(() => {
 			{ cwd: isolatedPackageRoot, encoding: "utf8", timeout: 10000 },
 		);
 		expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+		expect(Array.from(result.stdout.matchAll(/^FETCH_URL (.+)$/gm), (match) => match[1]).sort()).toEqual(
+			Object.keys(fixtures).sort(),
+		);
 		return JSON.parse(readFileSync(join(outputDir, "models.json"), "utf8"));
 	};
 	catalog = generateCatalog();
@@ -513,8 +519,8 @@ describe("source-defined GPT-6.1 Sol through the offline generator", () => {
 			const model = catalog[provider]?.["gpt-6.1-sol"];
 			expect(model).toBeDefined();
 			expect(model.cost).toEqual(solCost);
-			structure[provider] = { [model.id]: model.api };
-			records[provider] = { [model.api]: { [model.id]: model } };
+			structure[provider] = { [`chat:${model.id}`]: model.api };
+			records[provider] = { [model.api]: { [`chat:${model.id}`]: model } };
 			files[`${provider}.json`] = `${JSON.stringify(records[provider])}\n`;
 			writeFileSync(join(dataDir, `${provider}.json`), files[`${provider}.json`]);
 		}

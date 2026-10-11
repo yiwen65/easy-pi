@@ -2,7 +2,7 @@
 
 Unified LLM API with provider collections, automatic auth resolution, token and cost tracking, and simple context persistence and hand-off to other models mid-session.
 
-**Note**: This library only includes models that support tool calling (function calling), as this is essential for agentic workflows.
+**Note**: Chat catalogs include models that support tool calling (function calling). Dedicated image-generation models share the same provider collections but use a separate operation.
 
 ## Table of Contents
 
@@ -271,7 +271,7 @@ Reads are synchronous and return the last-known lists:
 const providers = models.getProviders();           // registered Provider objects
 const provider = models.getProvider('anthropic');  // one provider
 
-const all = models.getModels();                    // every model across providers
+const all = models.getModels();                    // every chat model across providers
 const anthropicModels = models.getModels('anthropic');
 const model = models.getModel('anthropic', 'claude-sonnet-4-5');
 
@@ -296,6 +296,8 @@ if (m && hasApi(m, 'anthropic-messages')) {
 }
 ```
 
+Unqualified `getModels()`, `getModel()` and `getAvailable()` remain chat-only. Use `getModelsOfType('image', provider?)`, `getModelOfType('image', provider, id)` and `getAvailableOfType('image', provider?, options?)` for images; `getAllModels()` and `getAllAvailable()` return the `AnyModel` chat/image union. A provider can list the same upstream ID once for each operation without either entry overwriting the other. `getModelType()` treats existing chat models without `type` as chat, and `isModelType()` narrows the union. Unknown external operation types are skipped, not converted into chat.
+
 ### Static Catalog Reads
 
 For tooling that wants the generated built-in catalog with full literal typing (provider and model IDs auto-complete), independent of any collection:
@@ -307,6 +309,8 @@ const model = getBuiltinModel('openai', 'gpt-4o-mini'); // typed Model<'openai-r
 const providers = getBuiltinProviders();
 const anthropic = getBuiltinModels('anthropic');
 ```
+
+The same entrypoint exports `getBuiltinImageModel(provider, id)`, `getBuiltinImageModels(provider)` and `getAllBuiltinModels(provider)`. The first two expose the generated image projection; `getBuiltinModel`/`getBuiltinModels` continue to read only chat.
 
 ### Dynamic Providers
 
@@ -708,20 +712,18 @@ for (const block of response.content) {
 
 ## Image Generation
 
-Image generation uses a separate API surface from text/chat generation, mirroring the chat-side design: an `ImagesModels` collection holds `ImagesProvider`s, reads are sync, and auth resolves through the owning provider. Image generation is a one-shot API: `generateImages()` waits for the provider response and returns the final `AssistantImages` result — do not use the chat/stream APIs for it.
+Image generation shares the `Models` collection and `Provider` auth/storage lifecycle with chat. An `ImageModel<ImageApi>` has `type: 'image'` and image output modalities; it is not a chat model. `generateImages()` is a one-shot API returning `AssistantImages` — do not use the chat/stream APIs for it.
 
 ### Basic Image Generation
 
 ```typescript
-import { builtinImagesModels } from '@earendil-works/pi-ai/providers/all';
+import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 
-// Every built-in image-generation provider; accepts the same options as createModels()
-const imagesModels = builtinImagesModels();
+const models = builtinModels();
+const model = models.getModelOfType('image', 'openrouter', 'google/gemini-2.5-flash-image')!;
 
-const model = imagesModels.getModel('openrouter', 'google/gemini-2.5-flash-image')!;
-
-// Auth resolves through the provider (OPENROUTER_API_KEY here); explicit apiKey wins
-const result = await imagesModels.generateImages(model, {
+// Shared OpenRouter auth (OPENROUTER_API_KEY here); explicit apiKey wins
+const result = await models.generateImages(model, {
   input: [{ type: 'text', text: 'Generate a red circle on a plain white background.' }]
 });
 
@@ -735,7 +737,9 @@ for (const block of result.output) {
 }
 ```
 
-Like the chat side, you can build the collection from parts: `createImagesModels({ credentials?, authContext? })`, the `openrouterImagesProvider()` factory from `@earendil-works/pi-ai/providers/openrouter-images`, and `createImagesProvider({ id, auth, models, refreshModels?, api })` for custom image providers (with `imagesModels.refresh(provider?)` for dynamic lists). Failures never reject — they return an `AssistantImages` with `stopReason: "error"`. The collection's provider-scoped `getAuth(providerId)` works exactly like the chat-side one.
+For a smaller collection, register `openrouterProvider()` from `@earendil-works/pi-ai/providers/openrouter`; it owns both chat and image catalogs and lazily loads the image SDK implementation. Custom image-only or mixed providers use `createProvider({ id, auth, models, fetchModels?, images: { [imageApi]: implementation }, api? })`. At least one actual chat or image implementation is required; empty maps are rejected. Dynamic overlays merge by operation and ID and use the existing generation-checked `Models.refresh()`/`ModelsStore` publication boundary.
+
+Auth, endpoint overrides, model/request headers, env and `transformHeaders` are resolved once before image dispatch. Keyless auth must resolve `{ auth: {} }`; an unconfigured provider does not bypass auth. Failures return an `AssistantImages` with `stopReason: 'error'`, or `'aborted'` after cancellation. `ImagesContext`, `ImagesOptions`, `AssistantImages` and `ProviderImages` retain their names and shapes.
 
 The old global API (`getImageModel()` / `getImageModels()` / `getImageProviders()` / `generateImages()`) remains available on the [compat entrypoint](#migrating-from-the-old-global-api):
 
@@ -756,7 +760,7 @@ Some models also support image input:
 import { readFileSync } from 'fs';
 
 const imageBuffer = readFileSync('input.png');
-const result = await imagesModels.generateImages(model, {
+const result = await models.generateImages(model, {
   input: [
     { type: 'text', text: 'Create a variation of this image with a blue background.' },
     { type: 'image', data: imageBuffer.toString('base64'), mimeType: 'image/png' }
@@ -773,7 +777,7 @@ console.log(model.output);  // ['image'] or ['image', 'text']
 
 ### Notes and Limitations
 
-- Image models live in `ImagesModels` collections, chat models in `Models` collections; the two are separate surfaces.
+- Chat and image models share one collection. Ordinary model selection and unqualified queries still return only chat models.
 - Use `generateImages()`, not the chat/stream APIs.
 - Image-generation models do not participate in tool calling.
 - Outputs are returned in `AssistantImages.output` and can include both base64-encoded `ImageContent` blocks and `TextContent` blocks.
@@ -782,6 +786,12 @@ console.log(model.output);  // ['image'] or ['image', 'text']
 - Like the streaming APIs, image generation supports options such as `apiKey`, `signal`, `headers`, `onPayload`, and `onResponse`, and results may include `stopReason`, `responseId`, and `usage`.
 - If you want a model to analyze images in a conversation or call tools, use the regular chat APIs with a model that supports image input.
 - At the moment, image generation is available through only one provider, OpenRouter.
+
+### Migrating the Removed Image Collections
+
+The old `ImagesModels`/`MutableImagesModels`, `ImagesProvider`, `createImagesModels()`, `createImagesProvider()`, `builtinImagesModels()`, `builtinImagesProviders()` and `openrouterImagesProvider()` APIs were removed, not adapted. Replace them with `Models`/`MutableModels`, `Provider`, `createModels()`, `createProvider()` and `builtinModels()`/`openrouterProvider()`. Replace `ImagesModel`/`ImagesApi`/`KnownImagesApi` with `ImageModel`/`ImageApi`/`KnownImageApi`, set `type: 'image'`, and use the common `ProviderId` rather than the removed image-provider ID types. Move the old provider's `api` image implementation into `images: { [model.api]: implementation }` and its dynamic source into `fetchModels(context)`.
+
+The existing compat globals (`getImageModel`, `getImageModels`, `getImageProviders`, `generateImages`) and image API registry remain available. They read the new generated image projection; they are not adapters for the removed collections.
 
 ## Thinking/Reasoning
 
@@ -1591,6 +1601,20 @@ Compat is a strict superset of the root entrypoint, so a file can switch its imp
 
 ## Development
 
+### Replaying a Normalized Catalog Offline
+
+Use an explicit saved JSON snapshot `{ generatedAt: '<original ISO timestamp>', models: [/* explicit type: chat/image records */] }`:
+
+```bash
+node scripts/generate-models.ts --strict --normalized-input /path/to/snapshot.json
+node scripts/generate-models.ts --strict --normalized-input /path/to/snapshot.json --data-only
+node scripts/generate-models.ts --strict --normalized-input /path/to/snapshot.json --json-only --json-output /path/to/catalog
+```
+
+Snapshot mode validates before writing and never falls back to network, including missing/invalid inputs. Without `--normalized-input`, generation and hydration still fetch source catalogs; `PI_OFFLINE` alone does not turn those commands into snapshot replay. Do not use those network modes when preserving a historical catalog.
+
+Internal model-data schema 4 groups records by API using `chat:<id>`/`image:<id>` keys; each record retains its real `id`. Generated wrappers expose separate typed chat/image projections. Public `models.json` and `providers/<provider>.json` remain keyed chat projections; additive `models.all.json` and `providers/<provider>.all.json` are mixed-operation arrays. The public catalog schema remains version 1. Publication tooling must include both projections in revision/hash calculation, retaining chat counts and adding image/total counts.
+
 ### Adding a New Provider
 
 Adding a new LLM provider requires changes across multiple files. The layered layout: API implementations live in `src/api/`, provider factories in `src/providers/`, stable generated catalog wrappers live in `src/providers/<id>.models.ts`, and `src/models.generated.ts` registers them. This checklist covers all necessary steps:
@@ -1612,11 +1636,11 @@ Create a new API implementation file (for example `bedrock-converse-stream.ts`) 
 
 Add a lazy wrapper `src/api/<api-id>.lazy.ts` (`<name>Api()` via `lazyApi()`) so providers can reference the implementation without importing its SDK. Add any root-level `export type` re-exports in `src/index.ts` that should remain available from `@earendil-works/pi-ai`.
 
-#### 3. Model Generation (`scripts/generate-models.ts`, `scripts/generate-image-models.ts`)
+#### 3. Model Generation (`scripts/generate-models.ts`)
 
 - Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
 - Map chat/tool-capable provider model data to the standardized `Model` interface via `scripts/generate-models.ts`; hydration groups the ignored `src/providers/data/<id>.json` values by API, while stable `src/providers/<id>.models.ts` wrappers derive exact model/API types directly from those JSON keys
-- Map image-generation provider model data to the standardized `ImagesModel` interface via `scripts/generate-image-models.ts`
+- Map image-generation data to `ImageModel` in the same generator; OpenRouter image parsing preserves its floating-point rates and negative auto-router sentinel
 - Handle provider-specific quirks (pricing format, capability flags, model ID transformations)
 
 #### 4. Provider Factory (`src/providers/<id>.ts`)

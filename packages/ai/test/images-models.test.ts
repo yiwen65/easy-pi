@@ -1,263 +1,510 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "../src/auth/credential-store.ts";
-import type { AuthContext } from "../src/auth/types.ts";
-import { createImagesModels, createImagesProvider, type ImagesProvider } from "../src/images-models.ts";
-import { builtinImagesModels } from "../src/providers/all.ts";
-import type { AssistantImages, ImagesApi, ImagesContext, ImagesModel, ImagesOptions } from "../src/types.ts";
+import { createModels, createProvider, type Provider } from "../src/models.ts";
+import { InMemoryModelsStore } from "../src/models-store.ts";
+import { builtinModels } from "../src/providers/all.ts";
+import type {
+	AnyModel,
+	AssistantImages,
+	ImageApi,
+	ImageModel,
+	ImagesContext,
+	ImagesOptions,
+	Model,
+	ProviderStreams,
+} from "../src/types.ts";
+import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 
-function fakeAuthContext(env: Record<string, string>): AuthContext {
+function image(id = "same"): ImageModel<ImageApi> {
 	return {
-		env: async (name) => env[name],
-		fileExists: async () => false,
-	};
-}
-
-function testImageModel(provider: string, id: string): ImagesModel<ImagesApi> {
-	return {
+		type: "image",
 		id,
 		name: id,
 		api: "test-images",
-		provider,
+		provider: "p",
 		baseUrl: "https://example.test/v1",
 		input: ["text"],
 		output: ["image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	};
 }
-
-function okResult(model: ImagesModel<ImagesApi>): AssistantImages {
+function chat(id = "same"): Model<"test-chat"> {
+	return {
+		id,
+		name: id,
+		api: "test-chat",
+		provider: "p",
+		baseUrl: "https://example.test/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1000,
+		maxTokens: 100,
+	};
+}
+function ok(model: ImageModel<ImageApi>): AssistantImages {
 	return {
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
 		output: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
 		stopReason: "stop",
-		timestamp: Date.now(),
+		timestamp: 1,
 	};
 }
+const auth = { apiKey: { name: "Keyless", resolve: async () => ({ auth: {} }) } };
+const streams: ProviderStreams = {
+	stream: () => new AssistantMessageEventStream(),
+	streamSimple: () => new AssistantMessageEventStream(),
+};
+const context: ImagesContext = { input: [{ type: "text", text: "red circle" }] };
 
-interface GenerateCall {
-	model: ImagesModel<ImagesApi>;
-	options: ImagesOptions | undefined;
+function gate() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
 }
 
-function testProvider(input: {
-	id: string;
-	models?: ImagesModel<ImagesApi>[];
-	envVar?: string;
-	calls?: GenerateCall[];
-}): ImagesProvider {
-	return createImagesProvider({
-		id: input.id,
-		auth: {
-			apiKey: {
-				name: "Test key",
-				resolve: async ({ ctx, credential }) => {
-					if (!input.envVar) return { auth: {} };
-					const key = credential?.key ?? (await ctx.env(input.envVar));
-					return key ? { auth: { apiKey: key }, source: credential ? "stored" : input.envVar } : undefined;
+describe("unified Models image operations", () => {
+	it.each(["getAvailable", "getAllAvailable"] as const)(
+		"does not mix provider instances during gated auth (%s)",
+		async (method) => {
+			const started = gate();
+			const blocked = gate();
+			const models = createModels();
+			const checked = createProvider({
+				id: "p",
+				models: [chat("old")],
+				api: streams,
+				auth: {
+					apiKey: {
+						name: "Old keyless",
+						resolve: async () => ({ auth: {} }),
+						check: async () => {
+							started.resolve();
+							await blocked.promise;
+							return { type: "api_key" };
+						},
+					},
 				},
-			},
+			});
+			models.setProvider(checked);
+			const pending = models[method]("p");
+			await started.promise;
+			const replacement = createProvider({
+				id: "p",
+				models: [chat("replacement")],
+				api: streams,
+				auth: { apiKey: { name: "Unconfigured replacement", resolve: async () => undefined } },
+			});
+			models.setProvider(replacement);
+			blocked.resolve();
+			expect(await pending).toEqual([]);
+			expect(await models[method]("p")).toEqual([]);
 		},
-		models: input.models ?? [testImageModel(input.id, "model-a")],
-		api: {
-			generateImages: async (model, _context, options) => {
-				input.calls?.push({ model, options });
-				return okResult(model);
-			},
-		},
-	});
-}
+	);
 
-const context: ImagesContext = { input: [{ type: "text", text: "a red circle" }] };
-
-describe("ImagesModels", () => {
-	it("registers providers and reads models synchronously", () => {
-		const models = createImagesModels();
-		models.setProvider(testProvider({ id: "p1", models: [testImageModel("p1", "m1"), testImageModel("p1", "m2")] }));
-		models.setProvider(testProvider({ id: "p2", models: [testImageModel("p2", "m3")] }));
-
-		expect(models.getProviders().map((p) => p.id)).toEqual(["p1", "p2"]);
-		expect(models.getModels().map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
-		expect(models.getModels("p1").map((m) => m.id)).toEqual(["m1", "m2"]);
-		expect(models.getModel("p2", "m3")?.id).toBe("m3");
-		expect(models.getModel("p2", "missing")).toBeUndefined();
-
-		models.deleteProvider("p1");
-		expect(models.getProvider("p1")).toBeUndefined();
+	it("applies a filterAll-only policy to the ordinary chat projection", async () => {
+		const models = createModels();
+		const filterAllModels = vi.fn((list: readonly AnyModel[]) => list.filter((model) => model.type === "image"));
+		models.setProvider(createProvider({ id: "p", auth, models: [chat(), image()], api: streams, filterAllModels }));
+		expect(await models.getAvailable()).toEqual([]);
+		expect(filterAllModels).toHaveBeenCalledWith([chat(), image()], undefined);
+		expect(await models.getAllAvailable()).toEqual([image()]);
 	});
 
-	it("resolves auth through the provider and merges it into requests; explicit options win", async () => {
-		const calls: GenerateCall[] = [];
-		const models = createImagesModels({ authContext: fakeAuthContext({ TEST_KEY: "env-key" }) });
-		models.setProvider(testProvider({ id: "p1", envVar: "TEST_KEY", calls }));
-		const model = models.getModel("p1", "model-a")!;
-
-		expect((await models.getAuth(model))?.auth.apiKey).toBe("env-key");
-		expect((await models.getAuth(model.provider))?.auth.apiKey).toBe("env-key");
-		expect((await models.getAuth(model, { apiKey: "explicit-key" }))?.auth.apiKey).toBe("explicit-key");
-
-		const result = await models.generateImages(model, context);
-		expect(result.stopReason).toBe("stop");
-		expect(calls[0].options?.apiKey).toBe("env-key");
-
-		await models.generateImages(model, context, { apiKey: "explicit" });
-		expect(calls[1].options?.apiKey).toBe("explicit");
-	});
-
-	it("persists rotated OAuth credentials through the shared resolver after image auth cancellation", async () => {
-		const credentials = new InMemoryCredentialStore();
-		await credentials.modify("p1", async () => ({
-			type: "oauth",
-			access: "old",
-			refresh: "old-refresh",
-			expires: 0,
-		}));
-		let markStarted: (() => void) | undefined;
-		let finishRefresh: (() => void) | undefined;
-		const started = new Promise<void>((resolve) => {
-			markStarted = resolve;
-		});
-		const blocked = new Promise<void>((resolve) => {
-			finishRefresh = resolve;
-		});
-		let refreshSignal: AbortSignal | undefined;
-		const models = createImagesModels({ credentials, authContext: fakeAuthContext({}) });
+	it("uses the canonical all-filter rather than a conflicting legacy chat filter", async () => {
+		const models = createModels();
+		const filterModels = vi.fn((_list: readonly Model<string>[]) => []);
+		const filterAllModels = vi.fn((list: readonly AnyModel[]) => list.filter((model) => model.id === "allowed"));
 		models.setProvider(
-			createImagesProvider({
-				id: "p1",
+			createProvider({
+				id: "p",
+				auth,
+				models: [chat("allowed"), chat("denied"), image("allowed")],
+				api: streams,
+				filterModels,
+				filterAllModels,
+			}),
+		);
+		expect(await models.getAvailable()).toEqual([chat("allowed")]);
+		expect(await models.getAllAvailable()).toEqual([chat("allowed"), image("allowed")]);
+		expect(filterModels).not.toHaveBeenCalled();
+	});
+
+	it.each(["collection", "store", "fetch"] as const)("rejects explicit null operation records (%s)", async (stage) => {
+		const invalid = chat("null");
+		Object.defineProperty(invalid, "type", { value: null, enumerable: true });
+		if (stage === "collection") {
+			const models = createModels();
+			models.setProvider({
+				id: "p",
+				name: "p",
+				auth,
+				getModels: () => [chat(), invalid],
+				getAllModels: () => [chat(), invalid, image()],
+				...streams,
+			});
+			expect(models.getModels()).toEqual([chat()]);
+			expect(models.getAllModels()).toEqual([chat(), image()]);
+			expect(await models.getAvailable()).toEqual([chat()]);
+			expect(await models.getAllAvailable()).toEqual([chat(), image()]);
+			return;
+		}
+		const store = new InMemoryModelsStore();
+		if (stage === "store") await store.write("p", { models: [chat(), invalid, image()] });
+		const models = createModels({ modelsStore: store });
+		models.setProvider(
+			createProvider({
+				id: "p",
+				auth,
+				models: [],
+				api: streams,
+				fetchModels: async () => [chat("fetched"), invalid, image("fetched")],
+			}),
+		);
+		if (stage === "store") {
+			expect((await models.refresh({ allowNetwork: false })).errors.size).toBe(0);
+			expect(models.getAllModels()).toEqual([chat(), image()]);
+		} else {
+			expect((await models.refresh()).errors.size).toBe(0);
+			expect(models.getAllModels()).toEqual([chat("fetched"), image("fetched")]);
+			expect((await store.read("p"))?.models).toEqual([chat("fetched"), image("fetched")]);
+		}
+	});
+
+	it("keeps same-ID chat and image models separate through reads and availability", async () => {
+		const models = createModels();
+		models.setProvider(
+			createProvider({
+				id: "p",
+				auth,
+				models: [chat(), image()],
+				api: streams,
+				images: { "test-images": { generateImages: async (model) => ok(model) } },
+			}),
+		);
+		expect(models.getModels()).toEqual([chat()]);
+		expect(models.getModelsOfType("chat")).toEqual([chat()]);
+		expect(models.getAllModels()).toEqual([chat(), image()]);
+		expect(models.getModel("p", "same")).toEqual(chat());
+		expect(models.getModelOfType("image", "p", "same")).toEqual(image());
+		expect(await models.getAvailable()).toEqual([chat()]);
+		expect(await models.getAvailableOfType("image")).toEqual([image()]);
+		expect(await models.getAllAvailable()).toEqual([chat(), image()]);
+		expect(await models.generateImages(image(), context)).toMatchObject({ stopReason: "stop" });
+	});
+
+	it("accepts image-only providers but rejects empty or non-implementation maps", () => {
+		const provider = createProvider({
+			id: "p",
+			auth,
+			models: [image()],
+			images: { "test-images": { generateImages: async (model) => ok(model) } },
+		});
+		expect(provider.getModels()).toEqual([]);
+		expect(provider.getAllModels?.()).toEqual([image()]);
+		for (const input of [{}, { api: {} }, { images: {} }, { api: {}, images: { missing: undefined } }])
+			expect(() => createProvider({ id: "p", auth, models: [], ...input })).toThrow("at least one");
+	});
+
+	it("falls back to handwritten chat lists and keeps chat reads independent of throwing all-lists", async () => {
+		const provider: Provider = { id: "p", name: "p", auth, getModels: () => [chat()], ...streams };
+		const models = createModels();
+		models.setProvider(provider);
+		expect(models.getAllModels()).toEqual([chat()]);
+		provider.getAllModels = () => {
+			throw new Error("all unavailable");
+		};
+		expect(models.getAllModels()).toEqual([]);
+		expect(models.getModels()).toEqual([chat()]);
+		expect(await models.getAvailable()).toEqual([chat()]);
+	});
+
+	it("applies the old chat filter only to chat, and the new all-filter to mixed operations", async () => {
+		const filterModels = vi.fn((_models: readonly Model<string>[]) => []);
+		const models = createModels();
+		const provider = createProvider({ id: "p", auth, models: [chat(), image()], api: streams, filterModels });
+		models.setProvider(provider);
+		expect(await models.getAvailable()).toEqual([]);
+		expect(await models.getAllAvailable()).toEqual([image()]);
+		expect(filterModels.mock.calls[0][0]).toEqual([chat()]);
+		provider.filterAllModels = () => [];
+		expect(await models.getAllAvailable()).toEqual([]);
+	});
+
+	it("skips external unknown operation types without coercing them into legacy chat", async () => {
+		const unknown = { ...chat("unknown"), type: "classifier" } as unknown as AnyModel;
+		const models = createModels();
+		const provider: Provider = {
+			id: "p",
+			name: "p",
+			auth,
+			getModels: () => [chat(), unknown as Model<string>, image() as unknown as Model<string>],
+			getAllModels: () => [chat(), image(), unknown],
+			...streams,
+		};
+		models.setProvider(provider);
+		expect(models.getModels()).toEqual([chat()]);
+		expect(models.getAllModels()).toEqual([chat(), image()]);
+		expect(await models.getAllAvailable()).toEqual([chat(), image()]);
+	});
+
+	it("rejects duplicate operations across APIs while accepting the same ID across types", () => {
+		expect(() =>
+			createProvider<string>({ id: "p", auth, models: [chat(), { ...chat(), api: "other-api" }], api: streams }),
+		).toThrow("Duplicate model operation");
+		expect(() => createProvider({ id: "p", auth, models: [chat(), image()], api: streams })).not.toThrow();
+	});
+
+	it("rejects forced images in every chat/deferred path before auth or adapter dispatch", async () => {
+		const resolve = vi.fn(async () => ({ auth: {} }));
+		const stream = vi.fn(() => new AssistantMessageEventStream());
+		const cancelDeferred = vi.fn(async () => {});
+		const provider = createProvider({
+			id: "p",
+			auth: { apiKey: { name: "Test", resolve } },
+			models: [chat(), image()],
+			api: { stream, streamSimple: stream, fetchDeferred: stream, cancelDeferred },
+		});
+		const models = createModels();
+		models.setProvider(provider);
+		const forced = image() as unknown as Model<"test-chat">;
+		const handle = { provider: "p", modelId: "same", api: "test-images", id: "response" };
+		for (const result of [
+			models.stream(forced, { messages: [] }),
+			models.streamSimple(forced, { messages: [] }),
+			provider.stream(forced, { messages: [] }),
+			provider.streamSimple(forced, { messages: [] }),
+			provider.fetchDeferred!(forced, handle),
+		]) {
+			const events = [];
+			for await (const event of result) events.push(event.type);
+			expect(events).toEqual(["error"]);
+			expect(await result.result()).toMatchObject({
+				stopReason: "error",
+				errorMessage: expect.stringContaining("not a chat model"),
+			});
+		}
+		expect(await models.fetchDeferred(forced, handle)).toMatchObject({ stopReason: "error" });
+		await expect(models.cancelDeferred(forced, handle)).rejects.toThrow("not a chat model");
+		await expect(provider.cancelDeferred!(forced, handle)).rejects.toThrow("not a chat model");
+		expect(resolve).not.toHaveBeenCalled();
+		expect(stream).not.toHaveBeenCalled();
+		expect(cancelDeferred).not.toHaveBeenCalled();
+	});
+
+	it("resolves headers, endpoint, env and transform exactly once before image dispatch", async () => {
+		const resolve = vi.fn(async () => ({
+			auth: {
+				apiKey: "resolved",
+				baseUrl: "https://resolved.test",
+				headers: { "X-Shared": "auth", "x-auth": "auth" },
+			},
+			env: { SHARED: "auth", AUTH: "yes" },
+		}));
+		const generateImages = vi.fn(
+			async (model: ImageModel<ImageApi>, _context: ImagesContext, options?: ImagesOptions) => {
+				expect(model.baseUrl).toBe("https://resolved.test");
+				expect(model.headers).toBeUndefined();
+				expect(options?.apiKey).toBe("request");
+				expect(options?.env).toEqual({ AUTH: "yes", SHARED: "request", REQUEST: "yes" });
+				expect(options?.headers).toEqual({ "x-auth": "auth", "X-SHARED": "request", "x-transformed": "yes" });
+				expect(options).not.toHaveProperty("transformHeaders");
+				return ok(model);
+			},
+		);
+		const model = { ...image(), headers: { "x-shared": "model", "x-remove": "model" } };
+		const models = createModels();
+		models.setProvider(
+			createProvider({
+				id: "p",
+				auth: { apiKey: { name: "Test", resolve } },
+				models: [model],
+				images: { "test-images": { generateImages } },
+			}),
+		);
+		const transformHeaders = vi.fn(async (headers) => {
+			expect(headers).toEqual({ "x-auth": "auth", "x-remove": "model", "X-SHARED": "request" });
+			const { "x-remove": _removed, ...kept } = headers;
+			return { ...kept, "x-transformed": "yes" };
+		});
+		expect(
+			await models.generateImages(model, context, {
+				apiKey: "request",
+				headers: { "X-SHARED": "request" },
+				env: { SHARED: "request", REQUEST: "yes" },
+				transformHeaders,
+			}),
+		).toMatchObject({ stopReason: "stop" });
+		expect(resolve).toHaveBeenCalledOnce();
+		expect(transformHeaders).toHaveBeenCalledOnce();
+		expect(generateImages).toHaveBeenCalledOnce();
+		expect(model.headers["x-remove"]).toBe("model");
+	});
+
+	it("returns errors for unknown providers, wrong operation, missing adapter, unconfigured auth and throwing adapters", async () => {
+		const models = createModels();
+		expect(await models.generateImages(image(), context)).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("Unknown provider"),
+		});
+		models.setProvider(createProvider({ id: "p", auth, models: [image()], api: streams }));
+		expect(await models.generateImages(image(), context)).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("does not support image generation"),
+		});
+		expect(await models.generateImages(chat() as unknown as ImageModel<string>, context)).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("not an image model"),
+		});
+		const generateImages = vi.fn(async () => {
+			throw new Error("adapter failed");
+		});
+		models.setProvider(
+			createProvider({
+				id: "p",
+				auth: { apiKey: { name: "Missing", resolve: async () => undefined } },
+				models: [image()],
+				images: { "test-images": { generateImages } },
+			}),
+		);
+		expect(await models.generateImages(image(), context)).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("not configured"),
+		});
+		expect(generateImages).not.toHaveBeenCalled();
+		models.setProvider(
+			createProvider({ id: "p", auth, models: [image()], images: { "test-images": { generateImages } } }),
+		);
+		expect(await models.generateImages(image(), context)).toMatchObject({
+			stopReason: "error",
+			errorMessage: "adapter failed",
+		});
+		expect(await models.generateImages({ ...image(), api: "missing" }, context)).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("no image generation implementation"),
+		});
+	});
+
+	it("returns promptly from cancellation even when an image adapter ignores the signal", async () => {
+		const started = gate();
+		const blocked = gate();
+		const models = createModels();
+		models.setProvider(
+			createProvider({
+				id: "p",
+				auth,
+				models: [image()],
+				images: {
+					"test-images": {
+						generateImages: async (model) => {
+							started.resolve();
+							await blocked.promise;
+							return ok(model);
+						},
+					},
+				},
+			}),
+		);
+		const controller = new AbortController();
+		const pending = models.generateImages(image(), context, { signal: controller.signal });
+		await started.promise;
+		controller.abort();
+		expect(await pending).toMatchObject({ stopReason: "aborted" });
+		blocked.resolve();
+	});
+
+	it("persists rotated OAuth credentials after cancelled image auth waits", async () => {
+		const credentials = new InMemoryCredentialStore();
+		await credentials.modify("p", async () => ({ type: "oauth", access: "old", refresh: "old", expires: 0 }));
+		const started = gate();
+		const blocked = gate();
+		let refreshSignal: AbortSignal | undefined;
+		const models = createModels({ credentials });
+		models.setProvider(
+			createProvider({
+				id: "p",
+				models: [image()],
+				images: { "test-images": { generateImages: async (model) => ok(model) } },
 				auth: {
 					oauth: {
 						name: "Test OAuth",
 						login: async () => {
-							throw new Error("not used");
+							throw new Error("unused");
 						},
 						refresh: async (credential, signal) => {
 							refreshSignal = signal;
-							markStarted?.();
-							await blocked;
+							started.resolve();
+							await blocked.promise;
 							return { ...credential, access: "new", refresh: "rotated", expires: Date.now() + 60 * 60_000 };
 						},
 						toAuth: async (credential) => ({ apiKey: credential.access }),
 					},
 				},
-				models: [testImageModel("p1", "model-a")],
-				api: { generateImages: async (model) => okResult(model) },
 			}),
 		);
 		const controller = new AbortController();
-		const auth = models.getAuth("p1", { signal: controller.signal });
-		await started;
+		const pending = models.generateImages(image(), context, { signal: controller.signal });
+		await started.promise;
 		controller.abort();
-		await expect(auth).rejects.toMatchObject({ name: "AbortError" });
+		expect(await pending).toMatchObject({ stopReason: "aborted" });
 		expect(refreshSignal?.aborted).toBe(false);
-		finishRefresh?.();
-		await vi.waitFor(async () => {
-			const stored = await credentials.read("p1");
-			expect(stored?.type === "oauth" && stored.refresh === "rotated").toBe(true);
-		});
+		blocked.resolve();
+		await vi.waitFor(async () => expect(await credentials.read("p")).toMatchObject({ refresh: "rotated" }));
 	});
 
-	it("merges provider-resolved env into image options", async () => {
-		const calls: GenerateCall[] = [];
-		const models = createImagesModels();
-		models.setProvider(
-			createImagesProvider({
-				id: "p1",
-				auth: {
-					apiKey: {
-						name: "Test key",
-						resolve: async () => ({
-							auth: { apiKey: "provider-key" },
-							env: { PROVIDER_ONLY: "provider", SHARED: "provider" },
-						}),
-					},
-				},
-				models: [testImageModel("p1", "model-a")],
-				api: {
-					generateImages: async (model, _context, options) => {
-						calls.push({ model, options });
-						return okResult(model);
-					},
-				},
-			}),
-		);
-		const model = models.getModel("p1", "model-a")!;
-
-		await models.generateImages(model, context, {
-			apiKey: "request-key",
-			env: { REQUEST_ONLY: "request", SHARED: "request" },
-		});
-
-		expect(calls[0].options?.apiKey).toBe("request-key");
-		expect(calls[0].options?.env).toEqual({
-			PROVIDER_ONLY: "provider",
-			REQUEST_ONLY: "request",
-			SHARED: "request",
-		});
-	});
-
-	it("returns an error result for unknown providers and unconfigured auth rejections", async () => {
-		const models = createImagesModels({ authContext: fakeAuthContext({}) });
-		const ghost = await models.generateImages(testImageModel("ghost", "m"), context);
-		expect(ghost.stopReason).toBe("error");
-		expect(ghost.errorMessage).toContain("Unknown provider: ghost");
-
-		// unconfigured (resolve -> undefined) still dispatches; provider decides what to do
-		const calls: GenerateCall[] = [];
-		models.setProvider(testProvider({ id: "p1", envVar: "MISSING", calls }));
-		const model = models.getModel("p1", "model-a")!;
-		expect(await models.getAuth(model)).toBeUndefined();
-		await models.generateImages(model, context);
-		expect(calls[0].options?.apiKey).toBeUndefined();
-	});
-
-	it("supports dynamic providers via refresh with in-flight dedupe", async () => {
+	it("restores/fetches mixed stores with operation-specific overlay and rejects stale publication", async () => {
+		const store = new InMemoryModelsStore();
+		const unknown = { ...chat("unknown"), type: "future" } as unknown as AnyModel;
+		await store.write("p", { models: [image(), chat(), unknown], etag: '"saved"', lastModified: 12, checkedAt: 34 });
+		const firstStarted = gate();
+		const firstBlocked = gate();
 		let fetches = 0;
-		const provider = createImagesProvider({
-			id: "dyn",
-			auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
-			models: [],
-			refreshModels: async () => {
+		const provider = createProvider({
+			id: "p",
+			auth,
+			models: [{ ...chat(), name: "baseline" }],
+			api: streams,
+			fetchModels: async ({ stored }) => {
+				expect(stored?.etag).toBe('"saved"');
 				fetches++;
-				await new Promise((resolve) => setTimeout(resolve, 5));
-				return [testImageModel("dyn", "listed")];
+				const number = fetches;
+				if (number === 1) {
+					firstStarted.resolve();
+					await firstBlocked.promise;
+				}
+				return [{ ...image(), name: `image-${number}` }, { ...chat(), name: `chat-${number}` }, unknown];
 			},
-			api: { generateImages: async (model) => okResult(model) },
 		});
-		const models = createImagesModels();
+		const models = createModels({ modelsStore: store });
 		models.setProvider(provider);
-
-		expect(models.getModels("dyn")).toEqual([]);
-		await Promise.all([models.refresh("dyn"), models.refresh("dyn")]);
-		expect(fetches).toBe(1);
-		expect(models.getModel("dyn", "listed")).toBeDefined();
-
-		// failures reject with ModelsError for a single provider
-		models.setProvider(
-			createImagesProvider({
-				id: "flaky",
-				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
-				models: [],
-				refreshModels: async () => {
-					throw new Error("fetch failed");
-				},
-				api: { generateImages: async (model) => okResult(model) },
-			}),
-		);
-		await expect(models.refresh("flaky")).rejects.toMatchObject({ code: "model_source" });
-		await expect(models.refresh()).resolves.toBeUndefined();
+		expect((await models.refresh({ allowNetwork: false })).errors.size).toBe(0);
+		expect(models.getAllModels()).toEqual([chat(), image()]);
+		const first = models.refresh();
+		await firstStarted.promise;
+		expect((await models.refresh({ force: true })).errors.size).toBe(0);
+		await first;
+		firstBlocked.resolve();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(models.getModel("p", "same")?.name).toBe("chat-2");
+		expect(models.getModelOfType("image", "p", "same")?.name).toBe("image-2");
+		expect((await store.read("p"))?.models.map((model) => model.name)).toEqual(["image-2", "chat-2"]);
 	});
 
-	it("builtinImagesModels registers the openrouter provider with its catalog", async () => {
-		const models = builtinImagesModels({ authContext: fakeAuthContext({ OPENROUTER_API_KEY: "or-key" }) });
-		const providers = models.getProviders();
-		expect(providers.map((p) => p.id)).toEqual(["openrouter"]);
-
-		const list = models.getModels("openrouter");
-		expect(list.length).toBeGreaterThan(0);
-		expect(list.every((m) => m.api === "openrouter-images")).toBe(true);
-
-		expect((await models.getAuth(list[0]))?.auth.apiKey).toBe("or-key");
+	it("builtinModels owns OpenRouter chat and images with shared auth and unchanged default membership", async () => {
+		const models = builtinModels({
+			authContext: {
+				env: async (name) => (name === "OPENROUTER_API_KEY" ? "fixture-key" : undefined),
+				fileExists: async () => false,
+			},
+		});
+		expect(models.getProviders()).toHaveLength(39);
+		expect(models.getProvider("radius")).toBeUndefined();
+		expect(models.getModelsOfType("image", "openrouter")).toHaveLength(45);
+		expect(models.getModels("openrouter").every((model) => model.api === "openai-completions")).toBe(true);
+		expect((await models.getAuth(models.getModelsOfType("image")[0]))?.auth.apiKey).toBe("fixture-key");
 	});
 });

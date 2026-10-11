@@ -1,6 +1,7 @@
 import {
 	createModels,
 	createProvider,
+	type ImageModel,
 	InMemoryModelsStore,
 	type Model,
 	type ModelsPublication,
@@ -26,6 +27,11 @@ function model(id: string): Model<"openai-completions"> {
 		contextWindow: 1000,
 		maxTokens: 100,
 	};
+}
+
+function image(id: string): ImageModel<"test-images"> {
+	const { reasoning: _reasoning, contextWindow: _contextWindow, maxTokens: _maxTokens, ...base } = model(id);
+	return { ...base, type: "image", api: "test-images", output: ["image"] };
 }
 
 function testProvider(localGeneratedAt?: number) {
@@ -257,6 +263,120 @@ describe("remote catalog provider", () => {
 
 		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "newer"]);
 		expect((await store.read(provider.id))?.models.map((entry) => entry.id)).toEqual(["newer"]);
+	});
+
+	it("requests all operations, publishes mixed catalogs, and keeps legacy queries chat-only", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify([model("shared"), image("shared"), { ...model("unknown"), type: "video" }]), {
+				headers: { etag: '"all-1"' },
+			}),
+		);
+		const provider = testProvider();
+		const store = new InMemoryModelsStore();
+		await refreshProvider(provider, store);
+		expect(new URL(String(fetchSpy.mock.calls[0]?.[0])).searchParams.get("type")).toBe("all");
+		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "shared"]);
+		expect(provider.getAllModels?.().map((entry) => [entry.type ?? "chat", entry.id])).toEqual([
+			["chat", "static"],
+			["chat", "shared"],
+			["image", "shared"],
+		]);
+		expect((await store.read(provider.id))?.models).toHaveLength(2);
+	});
+
+	it("does not reuse a legacy chat validator or freshness window for the all-operation request", async () => {
+		const provider = testProvider();
+		const store = new InMemoryModelsStore();
+		await store.write(provider.id, {
+			models: [model("legacy")],
+			etag: '"chat-1"',
+			checkedAt: Date.now(),
+			lastModified: Date.now(),
+		});
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(
+				new Response(JSON.stringify([model("legacy"), image("legacy")]), { headers: { etag: '"all-1"' } }),
+			);
+		await refreshProvider(provider, store);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls[0]?.[1]?.headers).not.toHaveProperty("if-none-match");
+		expect(await store.read(provider.id)).toMatchObject({ catalogType: "all", etag: '"all-1"' });
+		expect(provider.getAllModels?.()).toHaveLength(3);
+	});
+
+	it("rejects an unsolicited 304 rather than treating an old chat body as an all-operation body", async () => {
+		const provider = testProvider();
+		const store = new InMemoryModelsStore();
+		await store.write(provider.id, { models: [model("legacy")], etag: '"chat-1"' });
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 304 }));
+		await expect(refreshProvider(provider, store)).rejects.toThrow("without an all-operation cached body");
+		expect(await store.read(provider.id)).not.toHaveProperty("catalogType");
+		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "legacy"]);
+	});
+
+	it("preserves mixed bodies and image overlays across all-operation revalidation and 304", async () => {
+		const responses = [
+			new Response(JSON.stringify([model("shared"), image("shared")]), { headers: { etag: '"all-1"' } }),
+			new Response(null, { status: 304 }),
+		];
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => responses.shift()!);
+		const provider = testProvider();
+		const store = new InMemoryModelsStore();
+		await refreshProvider(provider, store);
+		await refreshProvider(provider, store, { force: true });
+		expect(fetchSpy.mock.calls[1]?.[1]?.headers).toMatchObject({ "if-none-match": '"all-1"' });
+		expect(provider.getAllModels?.()).toHaveLength(3);
+		expect((await store.read(provider.id))?.models).toHaveLength(2);
+	});
+
+	it("restores mixed stale snapshots with type-aware collisions and skips unknown operations", async () => {
+		const provider = testProvider(1000);
+		const store = new InMemoryModelsStore();
+		await store.write(provider.id, {
+			models: [
+				{ ...model("static"), name: "Stale" },
+				image("static"),
+				{ ...model("unknown"), type: "video" } as unknown as Model<"openai-completions">,
+			],
+			lastModified: 500,
+		});
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		await refreshProvider(provider, store, { allowNetwork: false });
+		expect(provider.getModels()).toEqual([model("static")]);
+		expect(provider.getAllModels?.().map((entry) => [entry.type ?? "chat", entry.id])).toEqual([
+			["chat", "static"],
+			["image", "static"],
+		]);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("retains bundled image models when a legacy chat-only response overlays their ID", async () => {
+		const base = testProvider();
+		const provider = withRemoteCatalog(
+			{ ...base, getAllModels: () => [model("static"), image("shared")] },
+			"https://catalog.test",
+		);
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ shared: model("shared") })));
+		await refreshProvider(provider, new InMemoryModelsStore());
+		expect(provider.getAllModels?.().map((entry) => [entry.type ?? "chat", entry.id])).toEqual([
+			["chat", "static"],
+			["image", "shared"],
+			["chat", "shared"],
+		]);
+	});
+
+	it("does not publish mixed responses after caller cancellation", async () => {
+		const controller = new AbortController();
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			controller.abort();
+			return new Response(JSON.stringify([image("cancelled")]));
+		});
+		const provider = testProvider();
+		const store = new InMemoryModelsStore();
+		await expect(refreshProvider(provider, store, { signal: controller.signal })).resolves.toBeUndefined();
+		expect(await store.read(provider.id)).toBeUndefined();
+		expect(provider.getAllModels?.()).toEqual([model("static")]);
 	});
 
 	it("treats unimplemented pi.dev catalog routes as an unavailable overlay", async () => {

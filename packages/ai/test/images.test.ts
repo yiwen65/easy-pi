@@ -4,14 +4,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { getImageModel } from "../src/image-models.ts";
 import { generateImages } from "../src/images.ts";
-import type { ImageContent, ImagesContext, ImagesModel, ProviderImagesOptions } from "../src/types.ts";
+import type { ImageContent, ImageModel, ImagesContext, ProviderImagesOptions } from "../src/types.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 type ImagesOptionsWithExtras = ProviderImagesOptions & Record<string, unknown>;
 
-async function basicImageGeneration<TApi extends string>(model: ImagesModel<TApi>, options?: ImagesOptionsWithExtras) {
+async function basicImageGeneration<TApi extends string>(model: ImageModel<TApi>, options?: ImagesOptionsWithExtras) {
 	const context: ImagesContext = {
 		input: [{ type: "text", text: "Generate a simple red circle on a plain white background. No text." }],
 	};
@@ -25,7 +25,7 @@ async function basicImageGeneration<TApi extends string>(model: ImagesModel<TApi
 }
 
 async function handleTextAndImageOutput<TApi extends string>(
-	model: ImagesModel<TApi>,
+	model: ImageModel<TApi>,
 	options?: ImagesOptionsWithExtras,
 ) {
 	if (!model.output.includes("text")) {
@@ -44,7 +44,7 @@ async function handleTextAndImageOutput<TApi extends string>(
 	expect(response.output.some((item) => item.type === "text" && item.text.trim().length > 0)).toBe(true);
 }
 
-async function handleImageInput<TApi extends string>(model: ImagesModel<TApi>, options?: ImagesOptionsWithExtras) {
+async function handleImageInput<TApi extends string>(model: ImageModel<TApi>, options?: ImagesOptionsWithExtras) {
 	if (!model.input.includes("image")) {
 		console.log(`Skipping image input test - model ${model.id} doesn't support image input`);
 		return;

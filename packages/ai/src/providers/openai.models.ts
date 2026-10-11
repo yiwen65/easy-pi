@@ -2,7 +2,9 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import values from "./data/openai.json" with { type: "json" };
-import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";
+import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";
 
-export const OPENAI_MODELS: ModelCatalog<typeof values, "openai"> =
-	flattenModelCatalog("openai", values);
+export const OPENAI_MODELS: ChatModelCatalog<typeof values, "openai"> =
+	flattenChatModelCatalog("openai", values);
+export const OPENAI_IMAGE_MODELS: ImageModelCatalog<typeof values, "openai"> =
+	flattenImageModelCatalog("openai", values);

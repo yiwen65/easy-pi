@@ -2,7 +2,9 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import values from "./data/qwen-token-plan.json" with { type: "json" };
-import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";
+import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";
 
-export const QWEN_TOKEN_PLAN_MODELS: ModelCatalog<typeof values, "qwen-token-plan"> =
-	flattenModelCatalog("qwen-token-plan", values);
+export const QWEN_TOKEN_PLAN_MODELS: ChatModelCatalog<typeof values, "qwen-token-plan"> =
+	flattenChatModelCatalog("qwen-token-plan", values);
+export const QWEN_TOKEN_PLAN_IMAGE_MODELS: ImageModelCatalog<typeof values, "qwen-token-plan"> =
+	flattenImageModelCatalog("qwen-token-plan", values);

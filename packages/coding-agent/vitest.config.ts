@@ -25,6 +25,10 @@ export default mergeConfig(
 		resolve: {
 			alias: [
 				{
+					find: /^@earendil-works\/pi-ai\/utils\/model-operations$/,
+					replacement: fileURLToPath(new URL("../ai/src/utils/model-operations.ts", import.meta.url)),
+				},
+				{
 					find: /^@earendil-works\/pi-client$/,
 					replacement: fileURLToPath(new URL("../client/src/index.ts", import.meta.url)),
 				},

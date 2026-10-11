@@ -81,6 +81,9 @@ beforeAll(() => {
 				},
 			},
 			"https://openrouter.ai/api/v1/models": { data: [] },
+			"https://openrouter.ai/api/v1/models?output_modalities=image": {
+				data: [{ id: "fixture-image", name: "Image", architecture: { output_modalities: ["image"] } }],
+			},
 			"https://ai-gateway.vercel.sh/v1/models": { data: [] },
 		};
 		const preloadPath = join(fixtureRoot, "catalog-fixtures.mjs");
@@ -88,7 +91,7 @@ beforeAll(() => {
 			preloadPath,
 			`const fixtures = ${JSON.stringify(fixtures)};\n` +
 				`globalThis.fetch = async (input) => {\n` +
-				`  const url = String(input);\n` +
+				`  const url = String(input); console.log('FETCH_URL ' + url);\n` +
 				`  if (!Object.hasOwn(fixtures, url)) throw new Error(\`Unexpected fetch: \${url}\`);\n` +
 				`  return Response.json(fixtures[url]);\n` +
 				`};\n`,
@@ -108,6 +111,9 @@ beforeAll(() => {
 			{ cwd: isolatedPackageRoot, encoding: "utf8", timeout: 10000 },
 		);
 		expect(result.status, `${testCase.name}\n${result.stdout}\n${result.stderr}`).toBe(0);
+		expect(Array.from(result.stdout.matchAll(/^FETCH_URL (.+)$/gm), (match) => match[1]).sort()).toEqual(
+			Object.keys(fixtures).sort(),
+		);
 		catalogs[testCase.name] = JSON.parse(readFileSync(join(outputDir, "models.json"), "utf8"));
 	}
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseOpenRouterImageModels } from "../scripts/generate-image-models.ts";
+import { parseOpenRouterImageModels } from "../scripts/openrouter-images-catalog.ts";
 
 const validImageModel = {
 	id: "example/image-model",
@@ -33,6 +33,16 @@ describe("OpenRouter image model parsing", () => {
 				true,
 			),
 		).toThrow("no usable image models");
+	});
+
+	it("preserves floating-point image prices and negative auto-router sentinel rates", () => {
+		const [model] = parseOpenRouterImageModels(
+			{ data: [{ ...validImageModel, pricing: { prompt: "0.00000010000000000000002", completion: "-0.000001" } }] },
+			true,
+		);
+		expect(model.type).toBe("image");
+		expect(model.cost.input).toBe(parseFloat("0.00000010000000000000002") * 1_000_000);
+		expect(model.cost.output).toBe(-1);
 	});
 
 	it("parses a non-empty image model catalog", () => {

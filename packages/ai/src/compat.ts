@@ -33,6 +33,7 @@ import { azureOpenAIResponsesApi } from "./api/azure-openai-responses.lazy.ts";
 import { bedrockConverseStreamApi } from "./api/bedrock-converse-stream.lazy.ts";
 import { googleGenerativeAIApi } from "./api/google-generative-ai.lazy.ts";
 import { googleVertexApi } from "./api/google-vertex.lazy.ts";
+import { lazyStream } from "./api/lazy.ts";
 import { mistralConversationsApi } from "./api/mistral-conversations.lazy.ts";
 import { openAICodexResponsesApi } from "./api/openai-codex-responses.lazy.ts";
 import { openAICompletionsApi } from "./api/openai-completions.lazy.ts";
@@ -41,6 +42,7 @@ import { piMessagesApi } from "./api/pi-messages.lazy.ts";
 import { getEnvApiKey } from "./env-api-keys.ts";
 import type { ModelsApiStreamOptions } from "./models.ts";
 import { builtinModels, getBuiltinModel, getBuiltinModels, getBuiltinProviders } from "./providers/all.ts";
+import { assertChatModel, isModelType } from "./utils/model-operations.ts";
 
 export type { BuiltinProvider } from "./providers/all.ts";
 
@@ -252,6 +254,11 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
+	if (!isModelType(model, "chat"))
+		return lazyStream(model, async () => {
+			assertChatModel(model);
+			throw new Error("Invalid chat model");
+		});
 	const builtinProvider = getBuiltinProviderForModel(model);
 	if (builtinProvider) {
 		if (model.provider.startsWith("cloudflare-") && !hasResolvedCloudflareAuth(options)) {
@@ -277,6 +284,11 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
+	if (!isModelType(model, "chat"))
+		return lazyStream(model, async () => {
+			assertChatModel(model);
+			throw new Error("Invalid chat model");
+		});
 	const builtinProvider = getBuiltinProviderForModel(model);
 	if (builtinProvider) {
 		if (model.provider.startsWith("cloudflare-") && !hasResolvedCloudflareAuth(options)) {

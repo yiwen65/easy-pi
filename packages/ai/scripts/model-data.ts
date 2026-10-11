@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { AnyModel } from "../src/types.ts";
 
-export const MODEL_DATA_SCHEMA_VERSION = 3;
+export const MODEL_DATA_SCHEMA_VERSION = 4;
 export const MODEL_DATA_MANIFEST_FILE = ".manifest.json";
 
 export type ModelDataStructure = Record<string, Record<string, string>>;
@@ -15,7 +16,7 @@ export interface ModelDataManifest {
 }
 
 const MODEL_DATA_IMPORT_PATTERN =
-	/^import \{ [A-Z][A-Z0-9_]*_MODELS \} from "\.\/providers\/([^"/]+)\.models\.ts";$/gm;
+	/^import \{ [A-Z][A-Z0-9_]*_MODELS(?:, [A-Z][A-Z0-9_]*_IMAGE_MODELS)? \} from "\.\/providers\/([^"/]+)\.models\.ts";$/gm;
 
 function sha256(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
@@ -140,15 +141,20 @@ export function createModelDataManifest(
 function validateModelValue(
 	value: unknown,
 	providerId: string,
-	modelId: string,
+	modelKey: string,
 	expectedApi: string,
 	errors: string[],
 ): void {
-	const label = `${providerId}/${modelId}`;
+	const label = `${providerId}/${modelKey}`;
+	const separator = modelKey.indexOf(":");
+	const type = modelKey.slice(0, separator);
+	const modelId = modelKey.slice(separator + 1);
+	if (separator < 0 || (type !== "chat" && type !== "image") || !modelId) errors.push(`${label} has invalid operation key`);
 	if (!isRecord(value)) {
 		errors.push(`${label} must be an object`);
 		return;
 	}
+	if (value.type !== type) errors.push(`${label} has type ${JSON.stringify(value.type)}, expected ${JSON.stringify(type)}`);
 	if (value.id !== modelId) errors.push(`${label} has id ${JSON.stringify(value.id)}, expected ${JSON.stringify(modelId)}`);
 	if (value.provider !== providerId) {
 		errors.push(`${label} has provider ${JSON.stringify(value.provider)}, expected ${JSON.stringify(providerId)}`);
@@ -156,9 +162,11 @@ function validateModelValue(
 	if (value.api !== expectedApi) {
 		errors.push(`${label} has api ${JSON.stringify(value.api)}, expected ${JSON.stringify(expectedApi)}`);
 	}
+	const chatApis = ["openai-completions", "mistral-conversations", "openai-responses", "azure-openai-responses", "openai-codex-responses", "anthropic-messages", "bedrock-converse-stream", "google-generative-ai", "google-vertex", "pi-messages"];
+	if ((type === "chat" && expectedApi === "openrouter-images") || (type === "image" && chatApis.includes(expectedApi))) errors.push(`${label} has an API for the wrong operation`);
 	if (typeof value.name !== "string" || value.name.length === 0) errors.push(`${label} has no model name`);
 	if (typeof value.baseUrl !== "string") errors.push(`${label} has no baseUrl string`);
-	if (typeof value.reasoning !== "boolean") errors.push(`${label} has no reasoning boolean`);
+	if (type === "chat" && typeof value.reasoning !== "boolean") errors.push(`${label} has no reasoning boolean`);
 	if (
 		!Array.isArray(value.input) ||
 		value.input.length === 0 ||
@@ -166,11 +174,11 @@ function validateModelValue(
 	) {
 		errors.push(`${label} has invalid input modalities`);
 	}
-	if (typeof value.contextWindow !== "number" || !Number.isFinite(value.contextWindow) || value.contextWindow <= 0) {
-		errors.push(`${label} has invalid contextWindow`);
-	}
-	if (typeof value.maxTokens !== "number" || !Number.isFinite(value.maxTokens) || value.maxTokens <= 0) {
-		errors.push(`${label} has invalid maxTokens`);
+	if (type === "chat") {
+		if (typeof value.contextWindow !== "number" || !Number.isFinite(value.contextWindow) || value.contextWindow <= 0) errors.push(`${label} has invalid contextWindow`);
+		if (typeof value.maxTokens !== "number" || !Number.isFinite(value.maxTokens) || value.maxTokens <= 0) errors.push(`${label} has invalid maxTokens`);
+	} else if (type === "image" && (!Array.isArray(value.output) || !value.output.includes("image") || value.output.some((entry) => entry !== "text" && entry !== "image"))) {
+		errors.push(`${label} has invalid image output modalities`);
 	}
 	if (!isRecord(value.cost)) {
 		errors.push(`${label} has invalid cost metadata`);
@@ -181,7 +189,29 @@ function validateModelValue(
 				errors.push(`${label} has invalid cost.${field}`);
 			}
 		}
+		if (value.cost.tiers !== undefined) {
+			if (!Array.isArray(value.cost.tiers)) errors.push(`${label} has invalid cost.tiers`);
+			else for (const tier of value.cost.tiers) {
+				if (!isRecord(tier) || typeof tier.inputTokensAbove !== "number" || !Number.isFinite(tier.inputTokensAbove) || tier.inputTokensAbove < 0 || ["input", "output", "cacheRead", "cacheWrite"].some((field) => typeof tier[field] !== "number" || !Number.isFinite(tier[field]))) errors.push(`${label} has invalid cost tier`);
+			}
+		}
 	}
+}
+
+/** Validate normalized snapshot records before any filesystem mutation or network fallback. */
+export function validateNormalizedSnapshot(value: unknown): asserts value is { generatedAt: string; models: AnyModel[] } {
+	const errors: string[] = [];
+	if (!isRecord(value) || typeof value.generatedAt !== "string" || Number.isNaN(Date.parse(value.generatedAt)) || !Array.isArray(value.models) || value.models.length === 0) throw new Error("Invalid normalized snapshot: expected generatedAt and non-empty models array");
+	const seen = new Set<string>();
+	for (const model of value.models) {
+		if (!isRecord(model) || typeof model.provider !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(model.provider) || typeof model.api !== "string" || !model.api) { errors.push("Snapshot model has no provider or api"); continue; }
+		const key = `${model.type}:${model.id}`;
+		validateModelValue(model, model.provider, key, model.api, errors);
+		const identity = JSON.stringify([model.provider, model.type, model.id]);
+		if (seen.has(identity)) errors.push(`Duplicate snapshot model ${model.provider}/${key}`);
+		seen.add(identity);
+	}
+	if (errors.length > 0) throwValidationErrors(errors);
 }
 
 function throwValidationErrors(errors: string[]): never {
