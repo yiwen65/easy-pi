@@ -32,6 +32,62 @@ function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Add redundant scalar enum types for providers that require them, without changing input schemas. */
+function normalizeEnumTypes(schema: JsonSchemaObject): JsonSchemaObject {
+	let normalized = schema;
+	if (schema.type === undefined && Array.isArray(schema.enum) && schema.enum.length > 0) {
+		const first = schema.enum[0];
+		const type = first === null ? "null" : typeof first;
+		if (
+			["string", "number", "boolean", "null"].includes(type) &&
+			schema.enum.every((value) =>
+				type === "null" ? value === null : typeof value === type && (type !== "number" || Number.isFinite(value)),
+			)
+		) {
+			normalized = { ...normalized, type };
+		}
+	}
+
+	// Traverse schema positions only: defaults, examples and enum values are instance data.
+	for (const key of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]) {
+		const children = schema[key];
+		if (!isJsonSchemaObject(children)) continue;
+		let next = children;
+		for (const [name, child] of Object.entries(children)) {
+			if (!isJsonSchemaObject(child)) continue;
+			const converted = normalizeEnumTypes(child);
+			if (converted !== child) next = { ...next, [name]: converted };
+		}
+		if (next !== children) normalized = { ...normalized, [key]: next };
+	}
+	for (const key of [
+		"items",
+		"anyOf",
+		"oneOf",
+		"allOf",
+		"prefixItems",
+		"additionalProperties",
+		"unevaluatedProperties",
+		"unevaluatedItems",
+		"contains",
+		"propertyNames",
+		"not",
+		"if",
+		"then",
+		"else",
+	]) {
+		const child = schema[key];
+		if (Array.isArray(child)) {
+			const converted = child.map((entry) => (isJsonSchemaObject(entry) ? normalizeEnumTypes(entry) : entry));
+			if (converted.some((entry, index) => entry !== child[index])) normalized = { ...normalized, [key]: converted };
+		} else if (isJsonSchemaObject(child)) {
+			const converted = normalizeEnumTypes(child);
+			if (converted !== child) normalized = { ...normalized, [key]: converted };
+		}
+	}
+	return normalized;
+}
+
 function isStructuredSchema(schema: unknown): boolean {
 	if (!isJsonSchemaObject(schema)) return false;
 	const types = typeof schema.type === "string" ? [schema.type] : Array.isArray(schema.type) ? schema.type : [];
@@ -115,7 +171,7 @@ function makeJsonSchemaNodeStrict(schema: unknown): void {
 
 /** Convert a tool schema to the strict subset expected by provider constrained sampling. */
 export function makeStrictJsonSchema(schema: Tool["parameters"]): Record<string, unknown> {
-	const cloned: unknown = structuredClone(schema);
+	const cloned: unknown = structuredClone(isJsonSchemaObject(schema) ? normalizeEnumTypes(schema) : schema);
 	if (!isJsonSchemaObject(cloned)) {
 		throw new UnsupportedStrictJsonSchemaError("root schema must have type object");
 	}
@@ -129,7 +185,7 @@ export function makeStrictJsonSchema(schema: Tool["parameters"]): Record<string,
 export function getJsonSchemaToolParameters(tool: Tool, strict: boolean | undefined): Tool["parameters"] {
 	if (strict === true) return makeStrictJsonSchema(tool.parameters) as Tool["parameters"];
 
-	const schema = tool.parameters as JsonSchemaObject;
+	const schema = normalizeEnumTypes(tool.parameters as JsonSchemaObject);
 	// Object unions already exclude non-objects, but some providers require an explicit root type.
 	// Keep branch constraints intact rather than flattening their properties and required fields.
 	if (
@@ -138,9 +194,9 @@ export function getJsonSchemaToolParameters(tool: Tool, strict: boolean | undefi
 		schema.anyOf.length > 0 &&
 		schema.anyOf.every((variant) => isJsonSchemaObject(variant) && variant.type === "object")
 	) {
-		return { ...tool.parameters, type: "object" } as Tool["parameters"];
+		return { ...schema, type: "object" } as Tool["parameters"];
 	}
-	return tool.parameters;
+	return schema as Tool["parameters"];
 }
 
 export interface GrammarConstrainedSampling {
