@@ -39,6 +39,7 @@
 
 - Fixed base: `6f935c952e21956d1e5de1c751ef5834c64d09aa`。
 - Phase1 commit: `14164effe`；authorized baseline-price commit: `6bb392b2a6b6c20c36deaf3ac06db932f3dfd19b`。
+- Phase2 commit: `bd7b5a681b7c4268338575fd94afd3d5cdbe617c`。
 - 交付前还需对 original 忽略模型数据与初始baseline-provider-catalogs.json逐文件SHA核对；数据被其他session更新也应停止，不覆盖更新。
 - Upstream reference: `e37cdc420669e48b4df4bbce0fb2617fc3c71328`（本轮不更新它）。
 - Worktree: `/tmp/easy-pi-selective-migration-20261011`。
@@ -154,9 +155,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-005 — TS7/Node 工具链实现
+### [x] T-005 — TS7/Node 工具链实现
 
-- Status: in_progress
+- Status: done
 - Owner: /root/migrate-typescript7
 - Objective: 升级经 T-004 核验的工具链并适配本地源码运行/编译/check。
 - Inputs and prerequisites: T-003、T-004 门禁已通过。
@@ -166,13 +167,13 @@
 - Execution steps: 精确依赖更新并 --ignore-scripts；先测试检查器/入口；适配 compiler API/build；审查 class fields 和 module syntax 的实际影响。
 - Acceptance criteria: Node 最低支持不抬高；不删 jiti/shrinkwrap；无无关依赖/锁清理。
 - Verification method: V-003/V-005/V-006，锁语义对照。
-- Validation evidence: Not run.
+- Validation evidence: child0ac9b0c2完成25owned files，父代理读实际核心diff、完整resolver/checker/newtests及报告。官方TS7实际安装；child新node tests10/10、coding66/66、rootcheck1416 No fixes、source CLI与source/built jiti/faux、offline build通过。20native dev记录新增/9旧compiler记录移除/5声明变化，四处无关锁记录恢复；shrink/install-lock字节未改。479classes继承字段审查唯一cause显式赋值。仅Node24运行验证；仍须T-006独立gate/pack/install/提交。
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-006 — 工具链阶段构建、打包门禁和提交
+### [x] T-006 — 工具链阶段构建、打包门禁和提交
 
-- Status: pending
+- Status: done
 - Owner: coordinator
 - Objective: 验证 source 与构建/打包隔离消费者，完成第二阶段提交。
 - Inputs and prerequisites: T-005。
@@ -182,7 +183,7 @@
 - Execution steps: 根检查；源码 help/version/offline model list；offline build；临时包/install smoke；保留 shrinkwrap/identity；explicit stage。
 - Acceptance criteria: 不依赖原 worktree/dist；打包后的 epi 正确，不请求真实模型。
 - Verification method: V-003/V-005/V-006。
-- Validation evidence: Not run.
+- Validation evidence: parent149新node tests10/10+TS7 version7.0.2；150 coding66/66；151锁语义20+/9-/5changes、runtime locks byte-identical、零facades、完整rootcheck1416 No fixes及offline build；e9134c31独立只读review无actionable。152 pack11bundles/2643files，初始153offline cache ETARGET经154官方version确认/155正常2-day公共npm缓存hydration后160全新目录offline --ignore-scripts安装成功；161仓库外CLIhelp/version/list及bare easy-pi SDK/faux/jiti/singleton烟测通过。临时helper首次误导入非公开AuthStorage后读真实exports改用AI InMemoryCredentialStore，不改产品。162 explicit25paths、PI_ALLOW_LOCKFILE_CHANGE=1提交bd7b5a681。Node22/Windows未实测且未重试旧操作。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -204,14 +205,14 @@
 
 ### [ ] T-008 — AI chat/image 类型、Provider、Models 与目录迁移
 
-- Status: pending
-- Owner: unassigned
+- Status: in_progress
+- Owner: /root/migrate-chat-image-ai
 - Objective: 实现统一模型基础设施和必要生成/离线目录工具，替换旧 image collection。
 - Inputs and prerequisites: T-006、T-007。
 - Scope or files: packages/ai 相关类型/models/providers/compat/生成脚本/目录工具/tests；必要根生成命令。
 - Expected output: 类型隔离的 chat/image model operations，受控刷新/持久化和回归。
 - Dependencies: T-006, T-007.
-- Execution steps: 编码类型/错误操作/同ID/auth/cancel/publication guard；最小 forward-port；通过脚本/fixture 生成数据，不手改 models.generated.ts；保持非迁移目录语义。
+- Execution steps: 编码类型/错误操作/同ID/auth/cancel/publication guard；最小 forward-port；通过脚本/fixture 生成数据，不手改 models.generated.ts；保持非迁移目录语义。固定chat/image-only BaseModel/AnyModel、旧collection/factory删除而既有compat globals重接；离线normalized snapshot统一写出；内部schema3->4按chat:/image:键防碰撞，manifest.generatedAt原值；原公开models.json为chat投影，additive models.all.json/per-provider.all.json表达mixed，public catalog version1不变。
 - Acceptance criteria: 普通 getModels/getModel/getAvailable 只 chat；同 provider+type+id 索引；chat usage/cache/prices/defaults 保留；无旧 collection 适配层。
 - Verification method: V-004，类型检查，离线 catalog 验证和语义对照。
 - Validation evidence: Not run.
@@ -361,10 +362,13 @@
 - 2026-10-11: T-012来源核实发现0断言过时，不应把现有目录3改0。普通browser和直连公共DNS guard读取不可用，随后经现有网络代理进行匿名官方文档GET（不带认证/cookie），显式301官方重定向后HTTP200并全文读取两份Markdown。保存F-008；只修限定默认5min生成/断言，无汇率/长TTL/其他费用迁移。T-012与T-014owned源码不重叠，可以并行；根formatter/check由任务owner/协调者错峰核对范围。
 - 2026-10-11: T-014与T-012通过父代理当前验证/源审查，标done；请求最终review c46c5009无新增actionable issue。父task-143价格124pass/4既有skip、task-145核心交互198pass、task-144根check1416 No fixes。T-003准备分别提交请求阶段与已授权价格修复，未进行TS7/schema实施或原目录交付。
 - 2026-10-11: task-146请求阶段提交14164effe，T-003done；task-147已授权Moonshot补丁单独提交6bb392b2a，只有authority untracked。T-005移交migrate-typescript7，严格保留jiti/shrinkwrap/epi与原cli入口。T-012先于schema完成，1523chat/45image原数据仍完全不变。
+- 2026-10-11: T-005 child0ac9b0c2返回，父代理读实际25路径及新checker/resolver/guards；标实现done，T-006 in_progress。Node24上nativecompiler/source与实际offline构建已运行，未取得Node22/Windows实测；旧Node22操作未重试。开始独立代码/锁语义/包消费者验证，不把child报告自动当提交验收。
+- 2026-10-11: T-006独立门禁完成；parent151 rootcheck1416 No fixes+offlinebuild、149 10tests、150 66tests、e9134c31 staticreview无actionable；仓库外安装初次缺公共npmcache，明确failure后官方metadata确认/正常2-day --ignore-scripts补cache，160新目录完全offline安装、161 CLI/public SDK/faux/jiti烟测通过，无任何repo runtime dep变化。节点22旧下载没有重复；记录Node22/Windows未测试。
+- 2026-10-11: task-162 toolchain25ownedpaths提交bd7b5a681，T-006done；T-008交给migrate-chat-image-ai。固定内部最小schema4和原publicchat投影/additive混合数组；价格/SDK/default数据语义维持，classifier/Transcript字段排除，后续coding消费任务严格串行等AI接口冻结。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: 隔离/基线、请求准备实现/独立review修复与phase1提交、工具链/schema静态设计、Moonshot最小价格修复/独立提交已完成；工具链实施开始，schema和最终交付尚未完成。
-- Limitations: TS7/schema实施与build/pack/smoke未执行；Node22获取旧操作仍未确认且未重试；无 provider API/凭证、push/release行为。
+- Evidence: 隔离/基线、phase1请求准备实现/独立review修复与提交、Moonshot最小价格修复/提交、phase2 TS7/Node实现与独立check/build/外部包gate及提交均完成；schema AI实现开始，消费者/综合验收/最终交付尚未完成。
+- Limitations: phase3仍在实施，原目录尚未交付；Node22旧获取操作未确认且未重试，Node22/Windows实际运行未验证；无 provider API/凭证、push/release行为。
