@@ -15,6 +15,7 @@
 	},
 	"files": ["dist"],
 	"scripts": {
+		"clean": "shx rm -rf dist",
 		"test": "node test/run.mjs"
 	},
 	"engines": {

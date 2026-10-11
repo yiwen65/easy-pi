@@ -52,6 +52,7 @@
 		"dist/session-host.*"
 	],
 	"scripts": {
+		"clean": "shx rm -rf dist",
 		"build": "tsc -p tsconfig.build.json"
 	},
 	"engines": {
