@@ -22,6 +22,7 @@ type Message = {
 
 export interface RenderedPage extends ScanResult {
 	blockedRequests: number;
+	fakeIpDelegated: boolean;
 }
 
 async function browserExecutable(): Promise<string> {
@@ -214,6 +215,18 @@ class BrowserPipe {
 	}
 }
 
+/** Fixed, credential-free explanation for a fake-ip refusal; never echoes resolver or page data. */
+function fakeIpNote(proxy: PublicProxy | undefined): string {
+	if (!proxy?.fakeIpBlocked) return "";
+	return " At least one hostname was answered with an address in 198.18.0.0/15, the range local proxy clients return in fake-ip DNS mode; Web Fetch pins DNS to the resolved public addresses and cannot verify a fake one. Switch that client to real-IP DNS resolution, or add the target host to its fake-ip filter.";
+}
+
+/** Fixed, credential-free note that the destination was chosen by a local fake-ip DNS client. */
+function delegatedNote(proxy: PublicProxy | undefined): string {
+	if (!proxy?.fakeIpDelegated) return "";
+	return " At least one hostname was answered with a 198.18.0.0/15 fake-ip address, so the destination was routed by that local DNS client instead of a pinned public IP.";
+}
+
 export async function readPage(requestedUrl: string, callerSignal?: AbortSignal): Promise<RenderedPage> {
 	if (callerSignal?.aborted) throw new WebError("Web request cancelled.");
 	publicTarget(requestedUrl);
@@ -275,23 +288,29 @@ export async function readPage(requestedUrl: string, callerSignal?: AbortSignal)
 						? "navigation reason unavailable"
 						: "missing main frame";
 			throw new WebError(
-				`Could not load the webpage (${reason}). Public-network guard rejected ${proxy.blockedRequests} request(s); these may be unrelated to navigation.`,
+				`Could not load the webpage (${reason}). Public-network guard rejected ${proxy.blockedRequests} request(s); these may be unrelated to navigation.${fakeIpNote(proxy)}${delegatedNote(proxy)}`,
 			);
 		}
 		const result = await scanner.scan(mainFrame, requestedUrl);
 		if (scanner.status >= 400)
-			throw new WebError(`Webpage returned HTTP ${scanner.status}; anonymous content could not be read.`);
+			throw new WebError(
+				`Webpage returned HTTP ${scanner.status}; anonymous content could not be read.${fakeIpNote(proxy)}`,
+			);
 		if (!result.text.trim())
 			throw new WebError(
 				"No visible webpage text was returned. The page may require login, block automation, or still be loading.",
 			);
-		return { ...result, blockedRequests: proxy.blockedRequests };
+		return { ...result, blockedRequests: proxy.blockedRequests, fakeIpDelegated: proxy.fakeIpDelegated };
 	} catch (error) {
 		if (callerSignal?.aborted) throw new WebError("Web request cancelled.");
 		if (deadline.aborted) {
 			const partial = scanner?.result("timeout");
 			if (partial?.text.trim() && scanner!.status < 400)
-				return { ...partial, blockedRequests: proxy?.blockedRequests ?? 0 };
+				return {
+					...partial,
+					blockedRequests: proxy?.blockedRequests ?? 0,
+					fakeIpDelegated: proxy?.fakeIpDelegated ?? false,
+				};
 			throw new WebError("Webpage read timed out after 90 seconds.");
 		}
 		if (error instanceof WebError) throw error;

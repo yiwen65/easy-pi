@@ -22,10 +22,10 @@ easy-pi 内置的两个跨模型工具：**搜索用 Tavily，指定网页读取
 - 浏览器读取时限 **90 秒**，另加少量退出清理时间。先等待初始渲染，再按视口的 70% 小步滚动，保存每一步的文本；到末尾仍等待 2 秒稳定。嵌套滚动区先于父区；标准 `<details>` 全部展开（包括互斥 `name` 分组）。不把一次文本稳定当作全文。
 - 每次最多 160 次滚动、24 个 frame（含主页面）；每个 frame 最多 24 个滚动区、128 个 details、50,000 个节点/次采样、12,000 个文本块。无限滚动、超时、受限 frame 或预算耗尽时保留已捕获正文并标记不完整；用户取消仍报取消并清理，不返回伪成功。
 - `details.scan_complete` 表示**在预算内扫描完可发现的渲染文字**，不是绝对全文证明。`incomplete_reasons` 报告 `timeout`、`scroll_limit`、`capture_limit`、`frame_unavailable` 等原因；`frames_read`/`scroll_steps` 提供扫描范围。`next_offset=null` 只表示捕获文本已翻到末尾，不能推断文档已抓全；`truncated` 仍表示输出分页或捕获截断，与扫描未完成分开。
-- 连接使用该次读取已完整校验的 DNS 地址快照，优先 IPv4；首地址拒绝或停滞时尝试其他已批准地址，非末次 TCP 尝试等待 250ms。保留代理连接 15 秒空闲上限及页面总时限；不重新查 DNS、不重试已发送的 HTTP/TLS 请求。
+- 连接使用该次读取已校验的 DNS 地址快照，优先 IPv4；首地址拒绝或停滞时尝试其他已批准地址，非末次 TCP 尝试等待 250ms。保留代理连接 15 秒空闲上限及页面总时限；不重新查 DNS、不重试已发送的 HTTP/TLS 请求。若解析器返回的是本机 DNS 代理的 fake-ip 地址（`198.18.0.0/15`），则不做本地目标校验，直接连接该地址并交由该客户端的 TUN 选路，输出标注 `dns_mode=local_fake_ip_client`。
 - 虚拟化内容按稳定块/行标识、否则按容器内位置合并，不全局去重文字，以免丢失合法重复段落。同源、跨源及 srcdoc frame 单独读取，其文字以 `[Embedded frame text]` 分区附在主页面之后，不保证 frame 与父页面的行内排版顺序；隐藏的认证/预载 frame 被跳过。
 - 不读取图片/OCR、PDF/附件、音视频、子链接、需任意按钮才能展开的内容；发现开放 Shadow DOM 会标记未覆盖。站点特有虚拟化、动态布局、延迟超过观察窗口或未暴露的内容仍可能遗漏/重复，不能保证任意网站绝对全文。它不是 Markdown 转换器或模型摘要。
-- 输出包含请求 URL、最终 URL、标题、获取时间、捕获/分页限制；时间不是网页发布日期。可见密码表单会提示可能处于认证页面，而不把整个站点武断归为必须登录。
+- 输出包含请求 URL、最终 URL、标题、获取时间、捕获/分页限制；时间不是网页发布日期。`details.dns_mode` 说明该次读取是钉扎公网 IP（`pinned_public_ip`）还是交由本机 fake-ip 客户端选路（`local_fake_ip_client`）。可见密码表单会提示可能处于认证页面，而不把整个站点武断归为必须登录。
 - 导航失败时保留经过格式和长度校验的 Chromium `net::ERR_*` 错误码，并单独报告网络防护拒绝次数；子资源拒绝可能与导航失败无关，不能据此认定是防护或登录要求导致。未知错误文本不会原样回显。
 - `web_search` 的 `details.credits` 仅是供应商返回的 credit 数，不是美元或 LLM token。`web_fetch` 不带 Tavily credits。
 
@@ -40,6 +40,12 @@ export PI_WEB_FETCH_BROWSER='/Applications/Google Chrome.app/Contents/MacOS/Goog
 ```
 
 路径只用于选择受信任的本地可执行文件，不从模型的 URL 参数获取。优先使用独立 Chrome for Testing/Chromium；没有浏览器时会明确报错，不退回 Tavily。只验证过本机 macOS Chrome，其他系统的启动依赖需要自行确认。
+
+若本机 DNS 代理使用 fake-ip（TUN 模式把所有公网域名应答为 `198.18.0.0/15`），读取默认改由该客户端选路，并在输出里标注 `dns_mode=local_fake_ip_client`。需要保持“只连已校验公网 IP”的严格策略时：
+
+```sh
+PI_WEB_FETCH_FAKE_IP_DNS=block
+```
 
 修改内置源码或启动环境后，应**重启实际 easy-pi 进程**。旧进程里的 `/new` 或 `/reload` 不会重新导入静态内置模块，也不会导入另一个终端的环境变量。
 
@@ -95,7 +101,7 @@ node test/live.mjs 'https://docs.python.org/3/' 'Python'
 
 ## 安全边界
 
-- `web_fetch` 的页面和子资源只允许公开 HTTP(S) 域名的标准端口 80/443。DNS 返回任何私网/保留地址时拒绝；实际 TCP 连接使用已验证的 IP，不在连接时重新解析，防止 DNS 检查与实际连接脱节。
+- `web_fetch` 的页面和子资源只允许公开 HTTP(S) 域名的标准端口 80/443。DNS 返回任何私网/保留地址时拒绝；实际 TCP 连接使用已验证的 IP，不在连接时重新解析，防止 DNS 检查与实际连接脱节。唯一例外是本机 DNS 代理在 fake-ip 模式下返回的 `198.18.0.0/15`：这类地址只能经该客户端的 TUN 到达，本地无法验证真实目标，因此默认放行并由该客户端选路（HTTPS 仍由证书校验把页面绑定到其域名，HTTP 没有这层保护），同时 `dns_mode` 如实标注；设 `PI_WEB_FETCH_FAKE_IP_DNS=block` 可恢复一律拒绝。
 - 每次读取创建临时 loopback 出站代理，只在该次读取期间存活，覆盖浏览器重定向和子资源。不提供持久、对外 HTTP 服务，也不代理用户的正常浏览器。
 - Chrome 强制使用该代理，关闭 loopback 自动绕过、QUIC 和非代理 WebRTC UDP；保留 TLS 校验和 Chromium sandbox。不加入 `--no-sandbox` 或忽略证书错误的开关。
 - Chromium 使用独立临时 HOME/配置目录、空登录状态和最小环境，不继承 API keys、用户代理变量、NODE_OPTIONS、个人浏览器 Cookie/扩展/密码。CDP 使用进程 pipe，不开放调试端口；下载被禁止。

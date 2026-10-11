@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { Duplex } from "node:stream";
 import { afterEach, beforeEach, test } from "node:test";
 import tls from "node:tls";
 import { pathToFileURL } from "node:url";
@@ -38,6 +39,15 @@ for (const method of ["spawn", "spawnSync", "exec", "execSync", "execFile", "exe
 syncBuiltinESMExports();
 
 const FAKE_KEY = "tvly-offline-only-not-a-real-key";
+
+// The guard pipes its client and upstream sockets bidirectionally. Real sockets send
+// bytes to the network; in-memory PassThroughs would echo them back and forth forever,
+// so tunnel stubs accept writes and never push data back.
+class SilentSocket extends Duplex {
+	_read() {}
+	_write(_chunk, _encoding, done) { done(); }
+	setTimeout() { return this; }
+}
 const PROVIDER_SECRET = `synthetic-provider-private-data:${FAKE_KEY}`;
 const PAGE_URL = "https://docs.python.org/3/";
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -605,6 +615,49 @@ test("navigation diagnostics report guard rejections as separate, potentially un
 		}
 	} });
 	await rejectsSafe(execute("web_fetch", { url: PAGE_URL }), /Public-network guard rejected 1 request\(s\); these may be unrelated to navigation/);
+});
+
+test("a fake-ip DNS refusal is reported as the cause instead of only a tunnel error", async (t) => {
+	const previous = process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+	process.env.PI_WEB_FETCH_FAKE_IP_DNS = "block";
+	t.after(() => {
+		if (previous === undefined) delete process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+		else process.env.PI_WEB_FETCH_FAKE_IP_DNS = previous;
+	});
+	t.mock.method(dns, "lookup", async () => [{ address: "198.18.0.191", family: 4 }]);
+	const client = { destroyed: false, write() {}, end() {}, destroy() {}, on() {}, pipe() { return this; } };
+	const mock = mockBrowser(t, { navigationError: "net::ERR_TUNNEL_CONNECTION_FAILED", onCommand(command) {
+		if (command.method !== "Page.enable") return;
+		mock.servers[0].emit("connect", { url: "docs.python.org:443" }, client, Buffer.alloc(0));
+	} });
+	await rejectsSafe(
+		execute("web_fetch", { url: PAGE_URL }),
+		/\(net::ERR_TUNNEL_CONNECTION_FAILED\)[\s\S]*fake-ip DNS mode[\s\S]*real-IP DNS resolution/,
+	);
+});
+
+test("a fake-ip DNS answer is delegated to the local client and disclosed in the result", async (t) => {
+	delete process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+	t.mock.method(dns, "lookup", async () => [{ address: "198.18.0.191", family: 4 }]);
+	// Real tunnel sockets would echo through the guard's bidirectional pipes in memory,
+	// so these stubs accept writes and never push data back.
+	const upstreams = [];
+	t.mock.method(net, "connect", options => {
+		assert.equal(options.host, "docs.python.org");
+		const socket = new SilentSocket();
+		upstreams.push(socket);
+		options.lookup(options.host, { all: true }, () => socket.emit("connect"));
+		return socket;
+	});
+	const mock = mockBrowser(t, { onCommand(command) {
+		if (command.method !== "Page.enable") return;
+		mock.servers[0].emit("connect", { url: "docs.python.org:443" }, new SilentSocket(), Buffer.alloc(0));
+	} });
+	const result = await execute("web_fetch", { url: PAGE_URL });
+	assert.equal(upstreams.length, 1, "The guard must dial the client's fake-ip address instead of refusing");
+	assert.equal(result.details.dns_mode, "local_fake_ip_client");
+	assert.equal(result.details.blocked_requests, 0, "Delegating is not a rejection");
+	assert.match(text(result), /fake-ip DNS client \(198\.18\.0\.0\/15\)/);
 });
 
 test("capture bounds and password-form warnings are explicit rather than a false complete-document claim", async (t) => {

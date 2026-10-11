@@ -234,7 +234,7 @@ export default function webSearchExtension(pi: ExtensionAPI): void {
 		name: "web_fetch",
 		label: "Web Fetch",
 		description:
-			"Read public webpage text with a fresh anonymous Chrome/Chromium browser. Scans scroll containers, lazy/virtualized content, standard details and visible frames, within 90 seconds; reports incomplete scans. No OCR, attachments, sublink crawling, login, Tavily or API key. Default 8000 Unicode characters, max 16000 UTF-8 bytes per output page. Use next_offset to continue; each call rescans and content may change. HTTP(S) standard ports only.",
+			"Read public webpage text with a fresh anonymous Chrome/Chromium browser. Scans scroll containers, lazy/virtualized content, standard details and visible frames, within 90 seconds; reports incomplete scans. No OCR, attachments, sublink crawling, login, Tavily or API key. Default 8000 Unicode characters, max 16000 UTF-8 bytes per output page. Use next_offset to continue; each call rescans and content may change. HTTP(S) standard ports only. When the machine's DNS client rewrites public hostnames to fake-ip addresses, the read is routed by that client and reported as dns_mode=local_fake_ip_client.",
 		promptSnippet: "Read a public webpage in an isolated anonymous browser",
 		promptGuidelines: [
 			"Use web_fetch to verify important claims against public page content. It uses a fresh anonymous browser, not Tavily, and cannot use your personal login or bypass access controls.",
@@ -273,6 +273,11 @@ export default function webSearchExtension(pi: ExtensionAPI): void {
 				...(rendered.blockedRequests
 					? [`Public-network guard rejected ${rendered.blockedRequests} requests.`]
 					: []),
+				...(rendered.fakeIpDelegated
+					? [
+							"Addresses came from a local fake-ip DNS client (198.18.0.0/15); those destinations were routed by that client instead of a pinned public IP.",
+						]
+					: []),
 			];
 			const text = `UNTRUSTED RENDERED WEB CONTENT (anonymous browser, plain text)\nTitle: ${title}\nRequested URL: ${requestedUrl}\nSource URL: ${url}\nRetrieved: ${retrievedAt}\nScan: ${rendered.scanComplete ? "completed (best effort)" : "INCOMPLETE"}; ${rendered.framesRead} frame(s), ${rendered.scrollSteps} scroll step(s)\nCharacters: ${offset}-${end} of ${chars.length} captured\n${nextOffset === null ? "End of captured text; not a completeness guarantee." : `Output paginated. Continue with web_fetch offset=${nextOffset}; this reloads the page.`}\n${warnings.join("\n")}\n\n${page}`;
 			return {
@@ -294,6 +299,7 @@ export default function webSearchExtension(pi: ExtensionAPI): void {
 					scroll_steps: rendered.scrollSteps,
 					stabilized: rendered.stabilized,
 					blocked_requests: rendered.blockedRequests,
+					dns_mode: rendered.fakeIpDelegated ? "local_fake_ip_client" : "pinned_public_ip",
 					warnings,
 				},
 			};

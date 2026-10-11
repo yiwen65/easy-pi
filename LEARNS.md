@@ -575,3 +575,21 @@
 - Correct approach: prelude.done 在跨桥接前按已有输出加 serialized terminal payload 计量，return 计一个 item，超限改有界诊断且不报告 storeWrites；MCP 按协议定义剥离 result/block/resource 位置的 _meta，保留 business structuredContent 的同名数据字段。
 - Prevention: bridge 测试同时覆盖大 return、输出加 return、item 上限加 return、巨大 throw，以及 successful/error MCP 的各 protocol metadata 位置。不要用递归删所有 _meta 损坏应用数据。
 - Verified by: 2026-10-11 terminal-output-budget.test.ts 四项修复前全部红、修复后与 sandbox 合计 160 项通过；真实 QuickJS MCP metadata/wildcard 红测修复后及 unit/native-child/nested 4 文件 42 项通过。
+
+## `packages/pi-web-search` 离线 harness——隧道桩不能用内存 PassThrough,计时不能用 Date.now()
+
+- Wrong approach: 在 offline 测试里用两个 `new PassThrough()` 充当守卫隧道两端,并依赖生产代码的 `client.pipe(upstream); upstream.pipe(client)`;同时用 `Date.now()` 打时间戳判断各阶段耗时。
+- Why it failed: 内存 PassThrough 互相对向 pipe 会自我回声(写入→读出→再写回),形成无限循环把 CPU 占满约 15s,表象酷似"事件循环被阻塞"或"存在 15s 定时器";而该 harness 用 `t.mock.method(Date, "now")` + 伪 `timers.setTimeout`,所有 `Date.now()` 差值读的是假时钟,阶段耗时结论完全不可信。
+- Recognition signal: 单个用例耗时逼近 `--test-timeout=15000`;自加的 `Date.now()` 阶段日志自相矛盾(如"execute 5s"但用例总时长 14.8s);`--cpu-prof` 顶部是 `Transform._write`/`writeOrBuffer`/`onwrite` 且采样间没有空档(在跑,不是在等);`process._getActiveHandles()` 只有 stdio 三个 Socket。
+- Correct approach: 隧道桩换成"只写不回声"的 Duplex——`class SilentSocket extends Duplex { _read(){} _write(c,e,cb){cb();} setTimeout(){return this;} }`;真实耗时一律用 `process.hrtime.bigint()`,并以 node:test 报告的用例时长为准。
+- Prevention: 给 pi-web-search 写涉及守卫出网的用例时不要用 PassThrough 表示隧道 socket;该 harness 内不要用 `Date.now()` 计时;单用例超过约 1s 先按 harness 假象排查(先怀疑桩与 mock,而不是产品回归)。
+- Verified by: 2026-10-11 fake-ip 兼容任务;同一用例从 14.8s 降到 2.25ms,88/88 通过;回声循环由 CPU profile 定位。
+
+## 本机 fake-ip DNS——DNS 钉扎类工具(web_fetch)整体失效而 curl 正常
+
+- Wrong approach: 见 `web_fetch` 报 `net::ERR_TUNNEL_CONNECTION_FAILED` 就去查 Chrome/CDP/守卫代理实现,或怀疑 127.0.0.1:7890 代理不通。
+- Why it failed: 本机 Shadowrocket 以 TUN + fake-ip 模式运行,系统解析器是 198.18.0.2(utun),所有公网域名返回 `198.18.0.0/15`;pi-web-search 守卫原先把该段当保留地址一律拒绝 → 对 CONNECT 回 403 → Chromium 上报隧道错误,报文只谈"公网守卫",看不出真因是 DNS。
+- Recognition signal: 同一 URL `curl`(直连或走代理)200 但 web_fetch 必失败;`scutil --dns` 的 nameserver 是 198.18.0.2;`node -e 'dns.lookup("example.com",{all:true},console.log)'` 返回 198.18.x.x 或 `::ffff:0:c612:*`;报错里的 rejected 计数只是重试次数。
+- Correct approach: fake-ip 现默认被放行——守卫直连该 fake IP 交由本机 TUN 选路,并在 `details.dns_mode=local_fake_ip_client` 与 warnings 中披露;要恢复"只连已校验公网 IP"设 `PI_WEB_FETCH_FAKE_IP_DNS=block`;若想让工具改用真实 IP,则打开 Shadowrocket 的「总是真实IP」(`always-real-ip`)。连通性实测:直连 fake IP 的 TLS 仍通过证书校验(SNI 匹配),HTTPS 多一层保护,HTTP 没有。
+- Prevention: 遇到"浏览器能上网但某个 DNS 相关工具失败"先跑 `scutil --dns` + 上面的 dns.lookup 确认 fake-ip;改 `packages/pi-web-search/src` 后必须 `node scripts/build-easy-pi-product.mjs` 重建 dist,并重启 pi 进程才会生效(会话内已加载的旧模块不会更新)。
+- Verified by: 反证实验——只把 `dns.lookup` 换成公共解析器的真实 A 记录,未改动的 `readPage` 立即成功(911 字符、blocked=0);放行落地后 dist 路径 example.com 911 字符、iana.org 1245 字符,blocked 仅剩 1 个非标准端口拒绝;`PI_WEB_FETCH_FAKE_IP_DNS=block` 仍按原样拒绝。

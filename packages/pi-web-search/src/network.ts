@@ -4,7 +4,14 @@ import http from "node:http";
 import net from "node:net";
 import type { Duplex } from "node:stream";
 
-export class WebError extends Error {}
+export class WebError extends Error {
+	/** Stable reason code: only fixed literals are assigned, so callers can explain a refusal safely. */
+	readonly code: string;
+	constructor(message: string, code = "web-error") {
+		super(message);
+		this.code = code;
+	}
+}
 
 export function publicUrl(value: unknown): string {
 	if (typeof value !== "string" || value.length > 2048) throw new WebError("Expected a public HTTP(S) URL.");
@@ -72,6 +79,31 @@ export function isPublicAddress(address: string): boolean {
 	return family === 6 && globalV6.check(address, "ipv6") && !nonPublic.check(address, "ipv6");
 }
 
+// 198.18.0.0/15 is the benchmarking range local proxy clients answer with in fake-ip
+// mode. Those addresses are routable only through that client's TUN interface, so a
+// DNS-pinned read cannot verify the real destination; the range is recognised to name
+// refusals and to report delegation, never as proof that a host is public.
+const fakeIp = new net.BlockList();
+fakeIp.addSubnet("198.18.0.0", 15, "ipv4");
+fakeIp.addSubnet("::ffff:198.18.0.0", 112, "ipv6");
+// A local client returned AAAA answers embedded as ::ffff:0:<198.18/15> (observed on macOS).
+fakeIp.addSubnet("::ffff:0:c612:0", 112, "ipv6");
+
+export function isFakeIpAddress(address: string): boolean {
+	const family = net.isIP(address);
+	if (family === 4) return fakeIp.check(address, "ipv4");
+	return family === 6 && fakeIp.check(address, "ipv6");
+}
+
+/**
+ * Fake-ip answers keep web_fetch usable on machines whose DNS client rewrites every
+ * public hostname, at the cost of the destination being chosen by that client instead
+ * of a pinned public IP. `PI_WEB_FETCH_FAKE_IP_DNS=block` restores the strict refusal.
+ */
+function allowsFakeIpDns(): boolean {
+	return process.env.PI_WEB_FETCH_FAKE_IP_DNS !== "block";
+}
+
 export function publicTarget(value: string): URL {
 	const url = new URL(publicUrl(value));
 	if (url.port) throw new WebError("Web Fetch only supports standard HTTP/HTTPS ports (80/443).");
@@ -85,7 +117,14 @@ export async function resolvePublicHost(host: string): Promise<LookupAddress[]> 
 	} catch {
 		throw new WebError("Public webpage DNS lookup failed.");
 	}
-	if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) {
+	const nonPublic = addresses.filter(({ address }) => !isPublicAddress(address));
+	const fakeIp = nonPublic.filter(({ address }) => isFakeIpAddress(address));
+	if (!addresses.length || (nonPublic.length && !(allowsFakeIpDns() && fakeIp.length === nonPublic.length))) {
+		if (fakeIp.length && fakeIp.length === nonPublic.length)
+			throw new WebError(
+				"Web Fetch blocked a hostname answered with 198.18.0.0/15 fake-ip DNS addresses.",
+				"fake-ip-dns",
+			);
 		throw new WebError("Web Fetch blocked a hostname resolving to private or reserved addresses.");
 	}
 	// Keep the whole approved snapshot: an unreachable first IP must not strand
@@ -96,6 +135,10 @@ export async function resolvePublicHost(host: string): Promise<LookupAddress[]> 
 export interface PublicProxy {
 	url: string;
 	blockedRequests: number;
+	/** True when a refusal was caused by a fake-ip DNS answer, so callers can name the cause. */
+	fakeIpBlocked: boolean;
+	/** True when a hostname was answered with a fake-ip address, so that client routed the read. */
+	fakeIpDelegated: boolean;
 	close(): Promise<void>;
 }
 
@@ -112,6 +155,10 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 		socket.once("close", () => sockets.delete(socket));
 		return socket;
 	};
+	const refuse = (error: unknown): void => {
+		proxy.blockedRequests++;
+		if (error instanceof WebError && error.code === "fake-ip-dns") proxy.fakeIpBlocked = true;
+	};
 	const addressFor = async (url: URL) => {
 		if (closed || ++connections > 512) throw new WebError("Webpage connection limit reached.");
 		let address = hosts.get(url.hostname);
@@ -122,6 +169,7 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 		}
 		const result = await address;
 		if (closed) throw new WebError("Web request cancelled.");
+		if (result.some(({ address }) => isFakeIpAddress(address))) proxy.fakeIpDelegated = true;
 		return result;
 	};
 	const connectTo = (url: URL, addresses: LookupAddress[]) => {
@@ -169,8 +217,8 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 				});
 				response.once("close", () => upstream.destroy());
 				request.pipe(upstream);
-			} catch {
-				proxy.blockedRequests++;
+			} catch (error) {
+				refuse(error);
 				response.writeHead(403, { "Content-Type": "text/plain" });
 				response.end("Web Fetch public-network policy blocked this request.");
 			}
@@ -202,8 +250,8 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 				});
 				upstream.once("close", () => client.destroy());
 				client.once("close", () => upstream.destroy());
-			} catch {
-				proxy.blockedRequests++;
+			} catch (error) {
+				refuse(error);
 				client.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
 			}
 		})();
@@ -212,6 +260,8 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 	const proxy: PublicProxy = {
 		url: "",
 		blockedRequests: 0,
+		fakeIpBlocked: false,
+		fakeIpDelegated: false,
 		close() {
 			if (closing) return closing;
 			closed = true;

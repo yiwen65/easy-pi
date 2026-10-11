@@ -12,7 +12,7 @@ dns.lookup = deny;
 net.connect = deny;
 net.Server.prototype.listen = deny;
 http.request = deny;
-const { isPublicAddress, publicTarget, resolvePublicHost, startPublicProxy } = await import("../src/network.ts");
+const { isFakeIpAddress, isPublicAddress, publicTarget, resolvePublicHost, startPublicProxy } = await import("../src/network.ts");
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 class Socket extends Duplex {
@@ -81,6 +81,68 @@ test("DNS rejects empty answers and any mixed public/private answer without echo
 	}
 	t.mock.method(dns, "lookup", async () => { throw new Error("SENSITIVE_DNS_CAUSE"); });
 	await assert.rejects(resolvePublicHost("docs.python.org"), error => error.message === "Public webpage DNS lookup failed." && !error.cause);
+});
+
+test("fake-ip DNS answers are refused in block mode with a named cause", async (t) => {
+	for (const address of ["198.18.0.0", "198.18.0.191", "198.19.255.255", "::ffff:198.18.0.191", "::ffff:0:c612:bf"]) {
+		assert.equal(isFakeIpAddress(address), true, address);
+	}
+	for (const address of ["198.17.255.255", "198.20.0.1", "8.8.8.8", "93.184.216.34", "::1", "2606:4700:4700::1111", "::ffff:8.8.8.8"]) {
+		assert.equal(isFakeIpAddress(address), false, address);
+	}
+
+	const previous = process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+	process.env.PI_WEB_FETCH_FAKE_IP_DNS = "block";
+	t.after(() => {
+		if (previous === undefined) delete process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+		else process.env.PI_WEB_FETCH_FAKE_IP_DNS = previous;
+	});
+
+	t.mock.method(dns, "lookup", async () => [{ address: "198.18.0.191", family: 4 }, { address: "::ffff:0:c612:bf", family: 6 }]);
+	await assert.rejects(resolvePublicHost("docs.python.org"), error => error.message.includes("fake-ip") && error.cause === undefined);
+
+	const fixture = await proxyFixture(t);
+	const client = fixture.connect("docs.python.org:443");
+	await flush();
+	assert.match(client.writes.join(""), /403 Forbidden/);
+	assert.equal(fixture.proxy.blockedRequests, 1);
+	assert.equal(fixture.proxy.fakeIpBlocked, true, "A fake-ip refusal must be nameable by callers");
+	assert.equal(fixture.proxy.fakeIpDelegated, false);
+});
+
+test("fake-ip DNS answers are delegated to the local TUN client by default and reported", async (t) => {
+	delete process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+	const answers = [{ address: "198.18.0.191", family: 4 }, { address: "::ffff:0:c612:bf", family: 6 }];
+	t.mock.method(dns, "lookup", async () => answers);
+	assert.deepEqual(await resolvePublicHost("docs.python.org"), answers, "Delegation keeps the client's own answers, IPv4 first");
+
+	const fixture = await proxyFixture(t);
+	const upstreams = [];
+	t.mock.method(net, "connect", options => {
+		assert.equal(options.host, "docs.python.org");
+		assert.equal(options.port, 443);
+		const socket = new Socket();
+		upstreams.push(socket);
+		options.lookup(options.host, { all: true }, (error, addresses) => {
+			assert.equal(error, null);
+			assert.deepEqual(addresses, answers);
+			socket.emit("connect");
+		});
+		return socket;
+	});
+	const client = fixture.connect("docs.python.org:443", Buffer.from("tunnel-head"));
+	await flush();
+	assert.match(client.writes.join(""), /200 Connection Established/);
+	assert.equal(fixture.proxy.blockedRequests, 0);
+	assert.equal(fixture.proxy.fakeIpBlocked, false);
+	assert.equal(fixture.proxy.fakeIpDelegated, true, "Delegation must be visible to callers, never silent");
+	assert.equal(upstreams[0].writes.join(""), "tunnel-head");
+});
+
+test("mixed fake-ip and private answers are still refused", async (t) => {
+	delete process.env.PI_WEB_FETCH_FAKE_IP_DNS;
+	t.mock.method(dns, "lookup", async () => [{ address: "198.18.0.191", family: 4 }, { address: "10.0.0.5", family: 4 }]);
+	await assert.rejects(resolvePublicHost("docs.python.org"), /private or reserved addresses/);
 });
 
 test("CONNECT pins public DNS to TCP and reuses only the approved snapshot within the read", async (t) => {
