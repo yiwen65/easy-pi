@@ -2,7 +2,9 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import values from "./data/github-copilot.json" with { type: "json" };
-import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";
+import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";
 
-export const GITHUB_COPILOT_MODELS: ModelCatalog<typeof values, "github-copilot"> =
-	flattenModelCatalog("github-copilot", values);
+export const GITHUB_COPILOT_MODELS: ChatModelCatalog<typeof values, "github-copilot"> =
+	flattenChatModelCatalog("github-copilot", values);
+export const GITHUB_COPILOT_IMAGE_MODELS: ImageModelCatalog<typeof values, "github-copilot"> =
+	flattenImageModelCatalog("github-copilot", values);

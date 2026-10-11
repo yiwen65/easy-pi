@@ -2,7 +2,9 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import values from "./data/nvidia.json" with { type: "json" };
-import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";
+import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";
 
-export const NVIDIA_MODELS: ModelCatalog<typeof values, "nvidia"> =
-	flattenModelCatalog("nvidia", values);
+export const NVIDIA_MODELS: ChatModelCatalog<typeof values, "nvidia"> =
+	flattenChatModelCatalog("nvidia", values);
+export const NVIDIA_IMAGE_MODELS: ImageModelCatalog<typeof values, "nvidia"> =
+	flattenImageModelCatalog("nvidia", values);

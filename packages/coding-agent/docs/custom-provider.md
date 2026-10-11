@@ -21,6 +21,7 @@ See these complete provider examples:
 - [Override Existing Provider](#override-existing-provider)
 - [Register New Provider](#register-new-provider)
 - [Unregister Provider](#unregister-provider)
+- [Image Providers](#image-providers)
 - [OAuth Support](#oauth-support)
 - [Custom Streaming API](#custom-streaming-api)
 - [Context Overflow Errors](#context-overflow-errors)
@@ -116,7 +117,7 @@ pi.registerProvider("google", {
 });
 ```
 
-When only `baseUrl` and/or `headers` are provided (no `models`), all existing models for that provider are preserved with the new endpoint.
+When only provider-wide configuration such as `baseUrl` and/or `headers` is provided (no `models`), all existing chat and image models and inherited image-generation capability are preserved.
 
 ## Register New Provider
 
@@ -181,7 +182,7 @@ pi.registerProvider("my-llm", {
 });
 ```
 
-When `models` is provided, it **replaces** all existing models for that provider.
+When `models` is provided, it **replaces the entire chat/image catalog**, including when the list is empty. Model identity is provider + operation type + ID; same-ID chat and image definitions coexist. Re-registration continues merging defined config fields over the previous registration; omitted fields remain unchanged.
 
 `apiKey` and custom header values use the same config value syntax as `models.json`: `!command` at the start executes a command for the whole value, `$ENV_VAR` and `${ENV_VAR}` interpolate environment variables, `$$` emits a literal `$`, and `$!` emits a literal `!`.
 
@@ -282,6 +283,37 @@ pi.registerProvider("custom-api", {
 ```
 
 The key is resolved for each request. An explicit request `Authorization` header takes precedence over the generated value.
+
+## Image Providers
+
+A provider can own image generation alone or alongside chat. See the complete, offline-tested [custom-provider-images.ts](../examples/extensions/custom-provider-images.ts) extension for a keyless local server adapter. Its factory registers a native `createProvider({ auth, models, images })` without contacting the server. The adapter honors injected fetch, cancellation, payload/response hooks and configured model endpoints. Its sample response format is a local extension contract, not an OpenRouter API.
+
+For native providers, return `{ auth: {} }` from the auth resolver when a keyless server is configured; return `undefined` when it is unavailable/unconfigured. At least one actual chat `api` or `images` adapter is required. Use `getAllModels`/`filterAllModels` for mixed catalogs; `getModels`/`filterModels` remain chat-only.
+
+The config form also accepts image definitions and provider-local adapters:
+
+```typescript
+import type { ProviderImages } from "@earendil-works/pi-ai";
+
+// Your implementation of the ProviderImages contract; no global registration needed.
+const adapter: ProviderImages = localImageAdapter;
+pi.registerProvider("local-images", {
+  baseUrl: "http://localhost:8080/v1",
+  apiKey: "local", // synthetic placeholder for this config-form local server
+  images: { "local-images": adapter },
+  models: [{
+    type: "image",
+    id: "local-draw",
+    name: "Local Draw",
+    api: "local-images",
+    input: ["text", "image"],
+    output: ["image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }],
+});
+```
+
+Images require explicit `type: "image"`, an image API and image `output`. Chat API/defaults and model headers cannot leak into a same-ID image definition. Legacy OAuth `modifyModels()` sees only chat; images survive its projection. `models.json` model definitions/overrides and `ctx.modelRegistry` remain chat-only. SDK hosts use `ModelRuntime.getModelOfType("image", provider, id)` and `generateImages()` for configured generation. See the [breaking migration guide](model-operations.md) for removed image-only collections/types.
 
 ## OAuth Support
 
@@ -681,7 +713,10 @@ interface ProviderConfig {
   /** If true, adds Authorization: Bearer header with the resolved API key. */
   authHeader?: boolean;
 
-  /** Models to register. If provided, replaces all existing models for this provider. */
+  /** Image adapters keyed by image API; scoped to this provider. */
+  images?: Partial<Record<ImageApi, ProviderImages>>;
+
+  /** Mixed models. If provided, replaces the entire catalog, including []. */
   models?: ProviderModelConfig[];
 
   /** OAuth provider for /login support. */
@@ -697,7 +732,9 @@ interface ProviderConfig {
 ## Model Definition Reference
 
 ```typescript
-interface ProviderModelConfig {
+interface ProviderChatModelConfig {
+  type?: "chat";
+
   /** Model ID (e.g., "claude-sonnet-4-20250514"). */
   id: string;
 
@@ -771,6 +808,8 @@ interface ProviderModelConfig {
   };
 }
 ```
+
+`ProviderModelConfig` is the union of the chat definition above and an image definition with common `id`, `name`, optional `api`/`baseUrl`, `input`, `cost`, optional `headers`, required `type: "image"` and `output: ("text" | "image")[]`. Images do not have chat reasoning/context/max-token/compat fields. The exported type is shared with runtime composition.
 
 `openrouter` sends `reasoning: { effort }`. `deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `together` sends `reasoning: { enabled }` and also `reasoning_effort` when `supportsReasoningEffort` is enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking` and need `preserve_thinking`. Use `chat-template` for configurable `chat_template_kwargs`, for example DeepSeek V3.x behind vLLM with `chatTemplateKwargs: { "thinking": { "$var": "thinking.enabled" } }`. Use `thinkingFormat: "baseten"` with `chatTemplateArgs` when the provider expects toggle values under `chat_template_args` and optionally supports top-level `reasoning_effort`.
 `thinkingTokenBudgetField` sends a clamped per-level thinking budget as a top-level request field (`thinking_token_budget` on vLLM, `thinking_budget` on Qwen/SGLang, `thinking_budget_tokens` on llama.cpp). `supportsThinkingTokenBudget: true` is an alias for the vLLM field name. Do not combine it with `reasoning_effort` on DashScope Qwen models.

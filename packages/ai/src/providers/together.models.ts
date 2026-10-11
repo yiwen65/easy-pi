@@ -2,7 +2,9 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import values from "./data/together.json" with { type: "json" };
-import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";
+import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";
 
-export const TOGETHER_MODELS: ModelCatalog<typeof values, "together"> =
-	flattenModelCatalog("together", values);
+export const TOGETHER_MODELS: ChatModelCatalog<typeof values, "together"> =
+	flattenChatModelCatalog("together", values);
+export const TOGETHER_IMAGE_MODELS: ImageModelCatalog<typeof values, "together"> =
+	flattenImageModelCatalog("together", values);

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
+	type AssistantMessage,
 	type Context,
 	fauxAssistantMessage,
 	fauxToolCall,
@@ -72,9 +73,12 @@ function seed(manager: SessionManager, ids: string[], stopReason: "toolUse" | "l
 	journal.start([user]);
 	manager.appendMessage(user, journal.state!.promptEntryIds[0]);
 	const calls = ids.map((id) => fauxToolCall("effect", { value: id }, { id }));
-	const assistant = fauxAssistantMessage(calls, { stopReason });
+	const assistant = fauxAssistantMessage(
+		stopReason === "length" ? [{ type: "text", text: "truncated response body" }, ...calls] : calls,
+		{ stopReason },
+	);
 	journal.beginStep(assistant);
-	for (const [index, call] of calls.entries()) journal.completeItem(index, call, assistant);
+	for (const [index, block] of assistant.content.entries()) journal.completeItem(index, block, assistant);
 	journal.commitAssistant(assistant, manager.appendMessage(assistant));
 	journal.update((state) => {
 		state.status = "interrupted";
@@ -227,14 +231,47 @@ describe("b824062c: recovery driver, accounting, and branch queue contracts", ()
 				hfCompaction: { mode: "off" },
 			});
 			harnesses.push(harness);
-			harness.setResponses([fauxAssistantMessage("fresh provider step")]);
+			let providerContext: Context | undefined;
+			harness.setResponses([
+				(context) => {
+					providerContext = context;
+					return fauxAssistantMessage("fresh provider step");
+				},
+			]);
 			await harness.session.resumeTask();
 			expect(execute).not.toHaveBeenCalled();
 			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(harness.faux.state.callCount).toBe(1);
 			expect(harness.session.taskRecovery?.status).toBe("completed");
-			const results = harness.sessionManager
-				.buildSessionContext()
-				.messages.filter((message) => message.role === "toolResult");
+			const canonical = harness.sessionManager.buildSessionContext().messages;
+			const canonicalLength = canonical.filter(
+				(message): message is AssistantMessage => message.role === "assistant" && message.stopReason === "length",
+			);
+			expect(canonicalLength).toHaveLength(1);
+			expect(getMessageText(canonicalLength[0])).toBe("truncated response body");
+			expect(providerContext).toBeDefined();
+			const outgoingTruncated = providerContext?.messages.filter(
+				(message) => message.role === "assistant" && getMessageText(message) === "truncated response body",
+			);
+			if (ids.length === 0) {
+				expect(JSON.stringify(providerContext?.messages)).not.toContain("truncated response body");
+				expect(outgoingTruncated).toEqual([]);
+			} else {
+				// Late results may normalize the wire stop reason; preserve the real exchange.
+				expect(outgoingTruncated).toHaveLength(1);
+				expect(outgoingTruncated?.[0]).toMatchObject({ content: canonicalLength[0].content });
+				expect(
+					harness.session.messages.filter(
+						(message) => message.role === "assistant" && message.stopReason === "length",
+					),
+				).toEqual(canonicalLength);
+				expect(
+					providerContext?.messages
+						.filter((message) => message.role === "toolResult")
+						.map((message) => message.toolCallId),
+				).toEqual(ids);
+			}
+			const results = canonical.filter((message) => message.role === "toolResult");
 			expect(harness.session.taskRecovery?.tools.filter((tool) => tool.dispatched)).toEqual([]);
 			expect(results.map((message) => message.toolCallId)).toEqual(ids);
 			expect(results.every((message) => message.isError && getMessageText(message).includes("not executed"))).toBe(
@@ -242,8 +279,49 @@ describe("b824062c: recovery driver, accounting, and branch queue contracts", ()
 			);
 			await harness.session.resumeTask();
 			expect(execute).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(1);
 		},
 	);
+
+	it("keeps an omitted late length artifact out of owned next-turn provider context", async () => {
+		const execute = vi.fn<EffectTool["execute"]>(async () => ({ content: [], details: {} }));
+		const truncated = fauxAssistantMessage("late truncated response body", { stopReason: "length" });
+		const harness = await createHarness({
+			tools: [effectTool(execute)],
+			hfCompaction: { mode: "off" },
+			prepareNextTurnWithContext: ({ context }) => ({
+				context: {
+					...context,
+					messages: [...context.messages, { role: "user", content: "owned request marker", timestamp: 1 }],
+				},
+			}),
+		});
+		harnesses.push(harness);
+		harness.session.agent.subscribe(async (event) => {
+			if (event.type !== "message_end") return;
+			if (event.message.role === "toolResult") await harness.session.steer("queued continuation");
+			if (event.message.role === "user" && getMessageText(event.message) === "queued continuation") {
+				// This recovery artifact commits after the owned-context boundary but stays absent live.
+				harness.sessionManager.appendMessage(truncated);
+			}
+		});
+		let providerContext: Context | undefined;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("effect", { value: "complete" }), { stopReason: "toolUse" }),
+			(context) => {
+				providerContext = context;
+				return fauxAssistantMessage("fresh provider step");
+			},
+		]);
+		await harness.session.prompt("start tool turn");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(execute).toHaveBeenCalledOnce();
+		expect(providerContext?.messages.map(getMessageText)).toContain("owned request marker");
+		expect(providerContext?.messages.map(getMessageText)).toContain("queued continuation");
+		expect(JSON.stringify(providerContext?.messages)).not.toContain("late truncated response body");
+		expect(harness.session.messages).not.toContain(truncated);
+		expect(harness.sessionManager.buildSessionContext().messages).toContain(truncated);
+	});
 
 	it("publishes every verified journal-only result in source call order before replacing an intent", async () => {
 		const manager = SessionManager.inMemory();

@@ -162,6 +162,22 @@ export interface AgentLoopTurnUpdate {
 	thinkingLevel?: ThinkingLevel;
 }
 
+/** Runtime state available after selected input events and before a conversational provider step is bound. */
+export interface PrepareRequestContext {
+	context: AgentContext;
+	model: Model<Api>;
+	thinkingLevel: ThinkingLevel;
+}
+
+/** Replacement context, model, and thinking level for this and later requests in the run. */
+export type AgentRequestUpdate = AgentLoopTurnUpdate;
+
+/** Called before every conversational request, including initial, retry, and recovery continuations. */
+export type PrepareRequest = (
+	request: PrepareRequestContext,
+	signal?: AbortSignal,
+) => AgentRequestUpdate | void | Promise<AgentRequestUpdate | undefined> | Promise<void>;
+
 export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -229,6 +245,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getSystemPrompt?: () => string;
 
+	/**
+	 * Snapshot cache routing after request preparation, alongside the prepared model.
+	 * Explicit undefined cache keys clear inherited routing. Native sessionId stays run-scoped.
+	 */
+	getRequestRouting?: () => Pick<SimpleStreamOptions, "promptCacheKey" | "cacheAffinityId" | "transport">;
+
 	/** Observe the exact logical context after transforms and immediately before the provider call. */
 	onProviderContext?: (model: Model<any>, context: Context) => void;
 
@@ -293,6 +315,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+
+	/**
+	 * Called after selected messages have been appended and their events awaited, before every
+	 * conversational provider request (including the first) and before model/tool step binding.
+	 * Returned state replaces the runtime values for this and later requests. Does not poll queues.
+	 * Throwing prevents the request and interrupts the low-level loop.
+	 */
+	prepareRequest?: PrepareRequest;
 
 	/**
 	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.

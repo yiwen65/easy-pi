@@ -17,7 +17,9 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/api/cloudflare.ts";
+import { fetchOpenRouterImageModels } from "./openrouter-images-catalog.ts";
 import type {
+	AnyModel,
 	AnthropicMessagesCompat,
 	Api,
 	KnownProvider,
@@ -34,6 +36,7 @@ import {
 	readModelDataProviderIds,
 	validateGeneratedModelData,
 	validateModelDataDirectory,
+	validateNormalizedSnapshot,
 } from "./model-data.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,7 +49,9 @@ function readGeneratorOptions(args: string[]): {
 	jsonOnly: boolean;
 	jsonOutputDir: string | undefined;
 	pretty: boolean;
+	normalizedInput: string | undefined;
 } {
+	let normalizedInput: string | undefined;
 	let strict = false;
 	let dataOnly = false;
 	let jsonOnly = false;
@@ -71,6 +76,12 @@ function readGeneratorOptions(args: string[]): {
 			pretty = true;
 			continue;
 		}
+		if (arg === "--normalized-input") {
+			const value = args[++index];
+			if (!value || value.startsWith("--")) throw new Error("--normalized-input requires a file");
+			normalizedInput = resolve(value);
+			continue;
+		}
 		if (arg === "--json-output") {
 			const value = args[++index];
 			if (!value) throw new Error("--json-output requires a directory");
@@ -82,7 +93,7 @@ function readGeneratorOptions(args: string[]): {
 
 	if (jsonOnly && !jsonOutputDir) throw new Error("--json-only requires --json-output");
 	if (dataOnly && (jsonOnly || jsonOutputDir)) throw new Error("--data-only cannot be combined with JSON catalog output");
-	return { strict, dataOnly, jsonOnly, jsonOutputDir, pretty };
+	return { strict, dataOnly, jsonOnly, jsonOutputDir, pretty, normalizedInput };
 }
 
 const generatorOptions = readGeneratorOptions(process.argv.slice(2));
@@ -2044,7 +2055,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						input: m.cost?.input || (isKimiK3 ? KIMI_K3_COST.input : 0),
 						output: m.cost?.output || (isKimiK3 ? KIMI_K3_COST.output : 0),
 						cache_read: m.cost?.cache_read || (isKimiK3 ? KIMI_K3_COST.cacheRead : 0),
-						cache_write: m.cost?.cache_write || (isKimiK3 ? KIMI_K3_COST.cacheWrite : 0),
+						// Moonshot's default 5min K3 cache writes cost the input rate, unlike Kimi Coding's implied cost.
+						// https://platform.kimi.ai/docs/pricing/chat (CN: https://platform.kimi.com/docs/pricing/chat)
+						cache_write: m.cost?.cache_write || (isKimiK3 ? KIMI_K3_COST.input : 0),
 					}),
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
@@ -2192,6 +2205,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 }
 
 async function generateModels() {
+	if (generatorOptions.normalizedInput !== undefined) {
+		const snapshot: unknown = JSON.parse(readFileSync(generatorOptions.normalizedInput, "utf8"));
+		validateNormalizedSnapshot(snapshot);
+		writeModelCatalog(snapshot.models, snapshot.generatedAt);
+		return;
+	}
 	// Fetch models from both sources
 	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
 	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
@@ -2711,26 +2730,38 @@ async function generateModels() {
 		applyOpenAIExplicitPromptCacheMetadata(model);
 	}
 
-	// Group by provider and deduplicate by model ID
-	const providers: Record<string, Record<string, Model<any>>> = {};
+	const imageModels = await fetchOpenRouterImageModels(generatorOptions.strict);
+	writeModelCatalog([...allModels.map((model) => ({ ...model, type: "chat" as const })), ...imageModels], new Date().toISOString());
+}
+
+function writeModelCatalog(allModels: readonly AnyModel[], generatedAt: string): void {
+	// Identity is (provider, operation, id), never API or bare id alone.
+	const providers: Record<string, Record<string, AnyModel>> = Object.create(null);
 	for (const model of allModels) {
 		if (!providers[model.provider]) {
-			providers[model.provider] = {};
+			providers[model.provider] = Object.create(null);
 		}
-		// Use model ID as key to automatically deduplicate
-		// Only add if not already present (models.dev takes priority over OpenRouter)
-		if (!providers[model.provider][model.id]) {
-			providers[model.provider][model.id] = model;
-		}
+		const key = `${model.type ?? "chat"}:${model.id}`;
+		const previous = providers[model.provider][key];
+		if (previous && previous.api !== model.api) throw new Error(`Duplicate model operation across APIs: ${model.provider}/${key}`);
+		// Preserve source priority for repeated entries from the same API.
+		if (!previous) providers[model.provider][key] = model;
 	}
 
+	validateNormalizedSnapshot({ generatedAt, models: Object.values(providers).flatMap((models) => Object.values(models)) });
 	const sortedProviderIds = Object.keys(providers).sort();
-	const jsonProviders: Record<string, Record<string, Model<any>>> = {};
+	const jsonProviders: Record<string, Record<string, AnyModel>> = Object.create(null);
+	const chatProviders: Record<string, Record<string, Model<Api>>> = Object.create(null);
+	const allProviders: Record<string, AnyModel[]> = Object.create(null);
 	for (const providerId of sortedProviderIds) {
-		jsonProviders[providerId] = {};
-		for (const modelId of Object.keys(providers[providerId]).sort()) {
-			jsonProviders[providerId][modelId] = providers[providerId][modelId];
+		jsonProviders[providerId] = Object.create(null);
+		chatProviders[providerId] = Object.create(null);
+		for (const modelKey of Object.keys(providers[providerId]).sort()) {
+			const model = providers[providerId][modelKey];
+			jsonProviders[providerId][modelKey] = model;
+			if (model.type !== "image") chatProviders[providerId][model.id] = model;
 		}
+		allProviders[providerId] = Object.values(jsonProviders[providerId]);
 	}
 
 	const serializeJson = (value: unknown) => `${JSON.stringify(value, null, generatorOptions.pretty ? 2 : undefined)}\n`;
@@ -2744,12 +2775,12 @@ async function generateModels() {
 	}
 
 	// Only the ignored internal data is grouped by API for type derivation. Public JSON catalog output stays flat.
-	const generatedDataProviders: Record<string, Record<string, Record<string, Model<Api>>>> = {};
-	const modelDataStructure: ModelDataStructure = {};
+	const generatedDataProviders: Record<string, Record<string, Record<string, AnyModel>>> = Object.create(null);
+	const modelDataStructure: ModelDataStructure = Object.create(null);
 	for (const providerId of generatedDataProviderIds) {
 		const models = jsonProviders[providerId];
-		generatedDataProviders[providerId] = {};
-		modelDataStructure[providerId] = {};
+		generatedDataProviders[providerId] = Object.create(null);
+		modelDataStructure[providerId] = Object.create(null);
 		const apiIds = Array.from(new Set(Object.values(models).map((model) => model.api))).sort();
 		for (const api of apiIds) {
 			generatedDataProviders[providerId][api] = {};
@@ -2761,8 +2792,8 @@ async function generateModels() {
 		}
 	}
 
-	const generatedAt = new Date().toISOString();
-
+	let rollbackInternal: (() => void) | undefined;
+	let cleanupInternal: (() => void) | undefined;
 	if (!generatorOptions.jsonOnly) {
 		// Stage and validate all provider values before replacing the current generated data.
 		const providersDir = join(packageRoot, "src/providers");
@@ -2814,9 +2845,11 @@ async function generateModels() {
 				for (const providerId of sortedProviderIds) {
 					let output = generatedHeader;
 					output += `import values from "./data/${providerId}.json" with { type: "json" };\n`;
-					output += `import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";\n\n`;
-					output += `export const ${catalogConstName(providerId)}: ModelCatalog<typeof values, ${JSON.stringify(providerId)}> =\n`;
-					output += `\tflattenModelCatalog(${JSON.stringify(providerId)}, values);\n`;
+					output += `import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";\n\n`;
+					output += `export const ${catalogConstName(providerId)}: ChatModelCatalog<typeof values, ${JSON.stringify(providerId)}> =\n`;
+					output += `\tflattenChatModelCatalog(${JSON.stringify(providerId)}, values);\n`;
+					output += `export const ${catalogConstName(providerId).replace(/_MODELS$/, "_IMAGE_MODELS")}: ImageModelCatalog<typeof values, ${JSON.stringify(providerId)}> =\n`;
+					output += `\tflattenImageModelCatalog(${JSON.stringify(providerId)}, values);\n`;
 					const filename = `${providerId}.models.ts`;
 					generatedShardFiles.add(filename);
 					writeFileSync(join(providersDir, filename), output);
@@ -2826,8 +2859,10 @@ async function generateModels() {
 				}
 
 				let output = generatedHeader;
+				const imageProviderIds = sortedProviderIds.filter((id) => allProviders[id].some((model) => model.type === "image"));
 				for (const providerId of sortedProviderIds) {
-					output += `import { ${catalogConstName(providerId)} } from "./providers/${providerId}.models.ts";\n`;
+					const imageImport = imageProviderIds.includes(providerId) ? `, ${catalogConstName(providerId).replace(/_MODELS$/, "_IMAGE_MODELS")}` : "";
+					output += `import { ${catalogConstName(providerId)}${imageImport} } from "./providers/${providerId}.models.ts";\n`;
 				}
 				output += `\nexport const MODELS: {\n`;
 				for (const providerId of sortedProviderIds) {
@@ -2837,6 +2872,11 @@ async function generateModels() {
 				for (const providerId of sortedProviderIds) {
 					output += `\t${JSON.stringify(providerId)}: ${catalogConstName(providerId)},\n`;
 				}
+				output += `};\n`;
+				output += `\nexport const IMAGE_MODELS: {\n`;
+				for (const providerId of imageProviderIds) output += `\treadonly ${JSON.stringify(providerId)}: typeof ${catalogConstName(providerId).replace(/_MODELS$/, "_IMAGE_MODELS")};\n`;
+				output += `} = {\n`;
+				for (const providerId of imageProviderIds) output += `\t${JSON.stringify(providerId)}: ${catalogConstName(providerId).replace(/_MODELS$/, "_IMAGE_MODELS")},\n`;
 				output += `};\n`;
 				writeFileSync(aggregatorPath, output);
 				console.log("Generated provider catalogs and src/models.generated.ts");
@@ -2852,38 +2892,74 @@ async function generateModels() {
 				if (hadPreviousData && existsSync(previousDataDir)) renameSync(previousDataDir, dataDir);
 				throw error;
 			}
-			restoreGeneratedCatalog = undefined;
+			// Retain the internal backup until the optional public projection commits too.
+			rollbackInternal = () => {
+				rmSync(dataDir, { recursive: true, force: true });
+				if (hadPreviousData && existsSync(previousDataDir)) renameSync(previousDataDir, dataDir);
+				restoreGeneratedCatalog?.();
+			};
+			cleanupInternal = () => rmSync(stagingRoot, { recursive: true, force: true });
 			console.log(
 				generatorOptions.dataOnly
 					? "Hydrated JSON model values under src/providers/data/"
 					: "Generated JSON model values under src/providers/data/",
 			);
 		} catch (error) {
-			restoreGeneratedCatalog?.();
+			if (rollbackInternal) {
+				rollbackInternal();
+				rollbackInternal = undefined;
+			} else restoreGeneratedCatalog?.();
 			throw error;
 		} finally {
-			rmSync(stagingRoot, { recursive: true, force: true });
+			if (!rollbackInternal) rmSync(stagingRoot, { recursive: true, force: true });
 		}
 	}
 
-	if (generatorOptions.jsonOutputDir) {
-		const providerOutputDir = join(generatorOptions.jsonOutputDir, "providers");
-		rmSync(generatorOptions.jsonOutputDir, { recursive: true, force: true });
-		mkdirSync(providerOutputDir, { recursive: true });
-		writeJson(join(generatorOptions.jsonOutputDir, "models.json"), jsonProviders);
-		writeJson(join(generatorOptions.jsonOutputDir, "providers.json"), sortedProviderIds);
-		for (const providerId of sortedProviderIds) {
-			writeJson(join(providerOutputDir, `${providerId}.json`), jsonProviders[providerId]);
+	try {
+		if (generatorOptions.jsonOutputDir) {
+			const outputDir = generatorOptions.jsonOutputDir;
+			mkdirSync(dirname(outputDir), { recursive: true });
+			const stagingRoot = mkdtempSync(join(dirname(outputDir), ".catalog-generation-"));
+			const stagedOutputDir = join(stagingRoot, "catalog");
+			const previousOutputDir = join(stagingRoot, "previous-catalog");
+			const hadPrevious = existsSync(outputDir);
+			try {
+				const providerOutputDir = join(stagedOutputDir, "providers");
+				mkdirSync(providerOutputDir, { recursive: true });
+				writeJson(join(stagedOutputDir, "models.json"), chatProviders);
+				writeJson(join(stagedOutputDir, "models.all.json"), Object.values(allProviders).flat());
+				writeJson(join(stagedOutputDir, "providers.json"), sortedProviderIds);
+				for (const providerId of sortedProviderIds) {
+					writeJson(join(providerOutputDir, `${providerId}.json`), chatProviders[providerId]);
+					writeJson(join(providerOutputDir, `${providerId}.all.json`), allProviders[providerId]);
+				}
+				if (hadPrevious) renameSync(outputDir, previousOutputDir);
+				try {
+					renameSync(stagedOutputDir, outputDir);
+					// Joint commit: cleanup errors must not roll back only the internal projection.
+					rollbackInternal = undefined;
+				} catch (error) {
+					if (hadPrevious) renameSync(previousOutputDir, outputDir);
+					throw error;
+				}
+			} finally {
+				rmSync(stagingRoot, { recursive: true, force: true });
+			}
+			console.log(`Generated JSON model catalog under ${outputDir}`);
 		}
-		console.log(`Generated JSON model catalog under ${generatorOptions.jsonOutputDir}`);
+	} catch (error) {
+		rollbackInternal?.();
+		throw error;
+	} finally {
+		cleanupInternal?.();
 	}
 
 	// Print statistics
 	const totalModels = allModels.length;
-	const reasoningModels = allModels.filter(m => m.reasoning).length;
+	const reasoningModels = allModels.filter((m) => m.type !== "image" && m.reasoning).length;
 
 	console.log(`\nModel Statistics:`);
-	console.log(`  Total tool-capable models: ${totalModels}`);
+	console.log(`  Total models: ${totalModels}`);
 	console.log(`  Reasoning-capable models: ${reasoningModels}`);
 
 	for (const [provider, models] of Object.entries(providers)) {

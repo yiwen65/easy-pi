@@ -9,9 +9,9 @@ import type {
 import type {
 	AssistantImages,
 	ImageContent,
+	ImageModel,
 	ImagesContext,
 	ImagesFunction,
-	ImagesModel,
 	ImagesOptions,
 	ProviderHeaders,
 	TextContent,
@@ -38,7 +38,7 @@ type OpenRouterImageGenerationResponse = ChatCompletion & {
 };
 
 export const generateImages: ImagesFunction<"openrouter-images", ImagesOptions> = async (
-	model: ImagesModel<"openrouter-images">,
+	model: ImageModel<"openrouter-images">,
 	context: ImagesContext,
 	options?: ImagesOptions,
 ) => {
@@ -115,7 +115,7 @@ export const generateImages: ImagesFunction<"openrouter-images", ImagesOptions> 
 };
 
 function createClient(
-	model: ImagesModel<"openrouter-images">,
+	model: ImageModel<"openrouter-images">,
 	apiKey: string,
 	optionsHeaders?: ProviderHeaders,
 	fetch?: typeof globalThis.fetch,
@@ -133,7 +133,7 @@ type OpenRouterImagesCreateParams = Omit<ChatCompletionCreateParamsNonStreaming,
 	modalities: Array<"image" | "text">;
 };
 
-function buildParams(model: ImagesModel<"openrouter-images">, context: ImagesContext): OpenRouterImagesCreateParams {
+function buildParams(model: ImageModel<"openrouter-images">, context: ImagesContext): OpenRouterImagesCreateParams {
 	const content: ChatCompletionContentPart[] = context.input.map((item): ChatCompletionContentPart => {
 		if (item.type === "text") {
 			return {
@@ -168,7 +168,7 @@ function parseUsage(
 		completion_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 	},
-	model: ImagesModel<"openrouter-images">,
+	model: ImageModel<"openrouter-images">,
 ) {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const reportedCachedTokens = rawUsage.prompt_tokens_details?.cached_tokens || 0;

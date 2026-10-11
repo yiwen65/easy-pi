@@ -27,7 +27,7 @@ import { OPENAI_MODELS } from "./providers/openai.models.ts";
 import { OPENAI_CODEX_MODELS } from "./providers/openai-codex.models.ts";
 import { OPENCODE_MODELS } from "./providers/opencode.models.ts";
 import { OPENCODE_GO_MODELS } from "./providers/opencode-go.models.ts";
-import { OPENROUTER_MODELS } from "./providers/openrouter.models.ts";
+import { OPENROUTER_MODELS, OPENROUTER_IMAGE_MODELS } from "./providers/openrouter.models.ts";
 import { QWEN_TOKEN_PLAN_MODELS } from "./providers/qwen-token-plan.models.ts";
 import { QWEN_TOKEN_PLAN_CN_MODELS } from "./providers/qwen-token-plan-cn.models.ts";
 import { QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS } from "./providers/qwen-token-plan-individual.models.ts";
@@ -121,4 +121,10 @@ export const MODELS: {
 	"xiaomi-token-plan-sgp": XIAOMI_TOKEN_PLAN_SGP_MODELS,
 	"zai": ZAI_MODELS,
 	"zai-coding-cn": ZAI_CODING_CN_MODELS,
+};
+
+export const IMAGE_MODELS: {
+	readonly "openrouter": typeof OPENROUTER_IMAGE_MODELS;
+} = {
+	"openrouter": OPENROUTER_IMAGE_MODELS,
 };

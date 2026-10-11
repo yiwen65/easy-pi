@@ -16,7 +16,7 @@
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json",
+		"build": "tsc -p tsconfig.build.json",
 		"test": "node --test --test-reporter=dot --test-reporter-destination=stdout test/*.test.ts",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
@@ -42,6 +42,6 @@
 	"devDependencies": {
 		"@types/node": "24.12.4",
 		"shx": "0.4.0",
-		"typescript": "5.9.3"
+		"typescript": "7.0.2"
 	}
 }

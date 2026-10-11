@@ -91,6 +91,12 @@ describe("pi-ai protocol bridge", () => {
 		expect(result.supportedThinkingLevels).toContain("off");
 	});
 
+	test("keeps protocol v1 chat metadata identical for explicit and legacy operation types", () => {
+		const result = toProtocolModelMetadata({ ...model, type: "chat" }, true);
+		expect(result).toEqual(toProtocolModelMetadata(model, true));
+		expect(result).not.toHaveProperty("type");
+	});
+
 	test("exhaustively maps assistant content and stop reasons", () => {
 		const message = {
 			role: "assistant",

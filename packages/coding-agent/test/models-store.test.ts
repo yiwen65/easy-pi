@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { ImageModel, Model, ModelsStoreEntry } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { FileModelsStore } from "../src/core/models-store.ts";
@@ -51,6 +51,33 @@ describe("FileModelsStore", () => {
 		await reloaded.delete("one");
 		expect(await reloaded.read("one")).toBeUndefined();
 		expect((await reloaded.read("two"))?.models.map((entry) => entry.id)).toEqual(["m2"]);
+	});
+
+	it("round-trips same-ID mixed catalogs and operation-specific remote validator metadata", async () => {
+		const store = new FileModelsStore(sharedModelsPath);
+		const image: ImageModel<"test-images"> = {
+			id: "same",
+			name: "Image",
+			type: "image",
+			provider: "mixed",
+			api: "test-images",
+			baseUrl: "https://example.test/v1",
+			input: ["text"],
+			output: ["image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		const entry: ModelsStoreEntry & { catalogType: "all" } = {
+			models: [model("mixed", "same"), image],
+			catalogType: "all",
+			etag: '"all-1"',
+			checkedAt: 100,
+		};
+		await store.write("mixed", entry);
+		const reloaded = new FileModelsStore(sharedModelsPath);
+		expect(await reloaded.read("mixed")).toEqual(entry);
+		const read = await reloaded.read("mixed");
+		if (read) read.models[0].name = "caller mutation";
+		expect((await reloaded.read("mixed"))?.models[0].name).toBe("same");
 	});
 
 	it("coalesces file reloads across concurrent readers and interleaved storage instances", async () => {

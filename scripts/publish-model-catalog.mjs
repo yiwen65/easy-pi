@@ -1,17 +1,11 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
-import {
-	mkdtempSync,
-	readFileSync,
-	readdirSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { isDeepStrictEqual } from "node:util";
+import { pathToFileURL } from "node:url";
+import { readModelCatalog } from "./model-catalog.mjs";
 
 const CATALOG_SCHEMA_VERSION = 1;
 const CATALOG_PREFIX = `models/v${CATALOG_SCHEMA_VERSION}`;
@@ -65,72 +59,15 @@ function readJson(path) {
 	return JSON.parse(readFileSync(path, "utf8"));
 }
 
-function validateBundle(inputDir) {
-	const modelsPath = join(inputDir, "models.json");
-	const providerIndexPath = join(inputDir, "providers.json");
-	const providersDir = join(inputDir, "providers");
-	const modelsBytes = readFileSync(modelsPath);
-	const models = JSON.parse(modelsBytes.toString("utf8"));
-	const providerIds = readJson(providerIndexPath);
-
-	if (typeof models !== "object" || models === null || Array.isArray(models)) {
-		throw new Error("models.json must contain an object");
-	}
-	if (!Array.isArray(providerIds) || !providerIds.every((value) => typeof value === "string")) {
-		throw new Error("providers.json must contain an array of provider IDs");
-	}
-
-	const expectedProviderIds = Object.keys(models).sort();
-	if (!isDeepStrictEqual(providerIds, expectedProviderIds)) {
-		throw new Error("providers.json does not match the sorted providers in models.json");
-	}
+export function validateBundle(inputDir) {
+	const bundle = readModelCatalog(inputDir);
 	for (const providerId of REQUIRED_PROVIDERS) {
-		if (!Object.hasOwn(models, providerId)) throw new Error(`Required provider is missing: ${providerId}`);
+		if (!bundle.providerIds.includes(providerId)) throw new Error(`Required provider is missing: ${providerId}`);
 	}
-
-	let modelCount = 0;
-	for (const providerId of providerIds) {
-		const providerModels = models[providerId];
-		if (typeof providerModels !== "object" || providerModels === null || Array.isArray(providerModels)) {
-			throw new Error(`Provider catalog must be an object: ${providerId}`);
-		}
-		const providerFile = readJson(join(providersDir, `${providerId}.json`));
-		if (!isDeepStrictEqual(providerFile, providerModels)) {
-			throw new Error(`Provider shard does not match models.json: ${providerId}`);
-		}
-		for (const [modelId, model] of Object.entries(providerModels)) {
-			if (
-				typeof model !== "object" ||
-				model === null ||
-				Array.isArray(model) ||
-				model.id !== modelId ||
-				model.provider !== providerId
-			) {
-				throw new Error(`Invalid model entry: ${providerId}/${modelId}`);
-			}
-			modelCount++;
-		}
+	if (bundle.modelCount < MINIMUM_MODEL_COUNT) {
+		throw new Error(`Refusing to publish only ${bundle.modelCount} models; expected at least ${MINIMUM_MODEL_COUNT}`);
 	}
-
-	const shardFiles = readdirSync(providersDir).filter((name) => name.endsWith(".json")).sort();
-	const expectedShardFiles = providerIds.map((providerId) => `${providerId}.json`).sort();
-	if (!isDeepStrictEqual(shardFiles, expectedShardFiles)) {
-		throw new Error("Provider shard files do not match providers.json");
-	}
-	if (modelCount < MINIMUM_MODEL_COUNT) {
-		throw new Error(`Refusing to publish only ${modelCount} models; expected at least ${MINIMUM_MODEL_COUNT}`);
-	}
-
-	const digest = createHash("sha256").update(modelsBytes).digest("hex");
-	return {
-		modelsPath,
-		providerIndexPath,
-		providersDir,
-		providerIds,
-		providerCount: providerIds.length,
-		modelCount,
-		revision: `sha256-${digest}`,
-	};
+	return bundle;
 }
 
 function gitSourceCommit() {
@@ -220,7 +157,7 @@ function comparePiVersions(left, right) {
 	return left.localeCompare(right);
 }
 
-function buildIndex(existingIndex, publication) {
+export function buildIndex(existingIndex, publication) {
 	const entry = {
 		minimumPiVersion: MINIMUM_PI_VERSION,
 		revision: publication.revision,
@@ -228,6 +165,8 @@ function buildIndex(existingIndex, publication) {
 		publishedAt: new Date().toISOString(),
 		providerCount: publication.providerCount,
 		modelCount: publication.modelCount,
+		imageModelCount: publication.imageModelCount,
+		totalModelCount: publication.totalModelCount,
 	};
 	const catalogs = (existingIndex?.catalogs || [])
 		.filter((catalog) => catalog.minimumPiVersion !== MINIMUM_PI_VERSION)
@@ -251,6 +190,8 @@ async function main() {
 		sourceCommit: options.sourceCommit || gitSourceCommit(),
 		providerCount: bundle.providerCount,
 		modelCount: bundle.modelCount,
+		imageModelCount: bundle.imageModelCount,
+		totalModelCount: bundle.totalModelCount,
 	};
 	writeFileSync(join(inputDir, "publication.json"), `${JSON.stringify(publication, null, 2)}\n`);
 
@@ -274,22 +215,8 @@ async function main() {
 		}
 
 		const revisionPrefix = `${CATALOG_PREFIX}/revisions/${bundle.revision}`;
-		uploadJson(options.bucket, options.endpoint, bundle.modelsPath, `${revisionPrefix}/models.json`, IMMUTABLE_CACHE_CONTROL);
-		uploadJson(
-			options.bucket,
-			options.endpoint,
-			bundle.providerIndexPath,
-			`${revisionPrefix}/providers.json`,
-			IMMUTABLE_CACHE_CONTROL,
-		);
-		for (const providerId of bundle.providerIds) {
-			uploadJson(
-				options.bucket,
-				options.endpoint,
-				join(bundle.providersDir, `${providerId}.json`),
-				`${revisionPrefix}/providers/${providerId}.json`,
-				IMMUTABLE_CACHE_CONTROL,
-			);
+		for (const file of bundle.files) {
+			uploadJson(options.bucket, options.endpoint, join(inputDir, file), `${revisionPrefix}/${file}`, IMMUTABLE_CACHE_CONTROL);
 		}
 
 		const nextIndex = buildIndex(currentIndex, publication);
@@ -302,7 +229,9 @@ async function main() {
 	}
 }
 
-main().catch((error) => {
-	console.error(error instanceof Error ? error.message : error);
-	process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+	main().catch((error) => {
+		console.error(error instanceof Error ? error.message : error);
+		process.exitCode = 1;
+	});
+}

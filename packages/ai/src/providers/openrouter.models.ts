@@ -2,7 +2,9 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import values from "./data/openrouter.json" with { type: "json" };
-import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";
+import { flattenChatModelCatalog, flattenImageModelCatalog, type ChatModelCatalog, type ImageModelCatalog } from "../model-catalog.ts";
 
-export const OPENROUTER_MODELS: ModelCatalog<typeof values, "openrouter"> =
-	flattenModelCatalog("openrouter", values);
+export const OPENROUTER_MODELS: ChatModelCatalog<typeof values, "openrouter"> =
+	flattenChatModelCatalog("openrouter", values);
+export const OPENROUTER_IMAGE_MODELS: ImageModelCatalog<typeof values, "openrouter"> =
+	flattenImageModelCatalog("openrouter", values);

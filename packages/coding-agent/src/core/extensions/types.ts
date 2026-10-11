@@ -23,12 +23,14 @@ import type {
 	AssistantMessageEventStream,
 	ConstrainedSamplingConfig,
 	Context,
+	ImageApi,
 	ImageContent,
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	Provider,
 	ProviderHeaders,
+	ProviderImages,
 	RefreshModelsContext,
 	SimpleStreamOptions,
 	TextContent,
@@ -58,6 +60,10 @@ import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "..
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { ProviderModelConfig } from "../provider-composer.ts";
+
+export type { ProviderModelConfig } from "../provider-composer.ts";
+
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -1590,7 +1596,9 @@ export interface ProviderConfig {
 	headers?: Record<string, string>;
 	/** If true, adds Authorization: Bearer header with the resolved API key. */
 	authHeader?: boolean;
-	/** Models to register. If provided, replaces all existing models for this provider. */
+	/** Provider-local image adapters, keyed by image API. */
+	images?: Partial<Record<ImageApi, ProviderImages>>;
+	/** Models to register. If provided, replaces the entire chat/image catalog, including an empty list. */
 	models?: ProviderModelConfig[];
 	/**
 	 * Refresh this provider's model list. The returned list replaces extension-provided models.
@@ -1614,34 +1622,6 @@ export interface ProviderConfig {
 		/** Legacy synchronous credential-dependent model projection. */
 		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
 	};
-}
-
-/** Configuration for a model within a provider. */
-export interface ProviderModelConfig {
-	/** Model ID (e.g., "claude-sonnet-4-20250514"). */
-	id: string;
-	/** Display name (e.g., "Claude 4 Sonnet"). */
-	name: string;
-	/** API type override for this model. */
-	api?: Api;
-	/** API endpoint URL override for this model. */
-	baseUrl?: string;
-	/** Whether the model supports extended thinking. */
-	reasoning: boolean;
-	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
-	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
-	/** Supported input types. */
-	input: ("text" | "image")[];
-	/** Per-million-token cost rates and optional request-wide input pricing tiers. */
-	cost: Model<Api>["cost"];
-	/** Maximum context window size in tokens. */
-	contextWindow: number;
-	/** Maximum output tokens. */
-	maxTokens: number;
-	/** Custom headers for this model. */
-	headers?: Record<string, string>;
-	/** OpenAI compatibility settings. */
-	compat?: Model<Api>["compat"];
 }
 
 /** Extension factory function type. Supports both sync and async initialization. */

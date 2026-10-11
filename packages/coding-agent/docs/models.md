@@ -1,6 +1,8 @@
 # Custom Models
 
-Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.pi/agent/models.json`.
+Add custom providers and chat models (Ollama, vLLM, LM Studio, proxies) via `~/.pi/agent/models.json`.
+
+`models` and `modelOverrides` are chat-only. Provider-wide endpoint, auth and header settings also apply to inherited image models, but a same-ID chat override cannot change an image. Register image definitions and adapters through an [extension](custom-provider.md#image-providers); see the [chat/image migration guide](model-operations.md).
 
 ## Table of Contents
 

@@ -1,7 +1,6 @@
-import { createImagesModels, type ImagesProvider, type MutableImagesModels } from "../images-models.ts";
-import { MODELS } from "../models.generated.ts";
+import { IMAGE_MODELS, MODELS } from "../models.generated.ts";
 import { type CreateModelsOptions, createModels, type MutableModels, type Provider } from "../models.ts";
-import type { Api, Model } from "../types.ts";
+import type { AnyModel, Api, ImageApi, ImageModel, Model } from "../types.ts";
 import { amazonBedrockProvider } from "./amazon-bedrock.ts";
 import { antLingProvider } from "./ant-ling.ts";
 import { anthropicProvider } from "./anthropic.ts";
@@ -30,7 +29,6 @@ import { openaiCodexProvider } from "./openai-codex.ts";
 import { opencodeProvider } from "./opencode.ts";
 import { opencodeGoProvider } from "./opencode-go.ts";
 import { openrouterProvider } from "./openrouter.ts";
-import { openrouterImagesProvider } from "./openrouter-images.ts";
 import { qwenTokenPlanProvider } from "./qwen-token-plan.ts";
 import { qwenTokenPlanCnProvider } from "./qwen-token-plan-cn.ts";
 import { qwenTokenPlanIndividualProvider } from "./qwen-token-plan-individual.ts";
@@ -85,6 +83,38 @@ export function getBuiltinModels<TProvider extends BuiltinProvider>(
 		: [];
 }
 
+type BuiltinImageProvider = keyof typeof IMAGE_MODELS;
+type CatalogApi<TEntry> = TEntry extends { api: infer TApi extends string } ? TApi : never;
+
+/** Typed read of one generated image model; ordinary built-in getters remain chat-only. */
+export function getBuiltinImageModel<
+	TProvider extends BuiltinImageProvider,
+	TModelId extends keyof (typeof IMAGE_MODELS)[TProvider],
+>(provider: TProvider, modelId: TModelId): ImageModel<CatalogApi<(typeof IMAGE_MODELS)[TProvider][TModelId]>> {
+	return (IMAGE_MODELS as Record<string, Record<string, ImageModel<ImageApi>> | undefined>)[provider]?.[
+		modelId as string
+	] as ImageModel<CatalogApi<(typeof IMAGE_MODELS)[TProvider][TModelId]>>;
+}
+
+export function getBuiltinImageModels<TProvider extends BuiltinProvider>(
+	provider: TProvider,
+): ImageModel<
+	TProvider extends BuiltinImageProvider
+		? CatalogApi<(typeof IMAGE_MODELS)[TProvider][keyof (typeof IMAGE_MODELS)[TProvider]]>
+		: ImageApi
+>[] {
+	const models = (IMAGE_MODELS as Record<string, Record<string, ImageModel<ImageApi>> | undefined>)[provider];
+	return Object.values(models ?? {}) as ImageModel<
+		TProvider extends BuiltinImageProvider
+			? CatalogApi<(typeof IMAGE_MODELS)[TProvider][keyof (typeof IMAGE_MODELS)[TProvider]]>
+			: ImageApi
+	>[];
+}
+
+export function getAllBuiltinModels(provider: BuiltinProvider): AnyModel[] {
+	return [...getBuiltinModels(provider), ...getBuiltinImageModels(provider)];
+}
+
 /** All built-in providers, freshly constructed. */
 export function builtinProviders(): Provider[] {
 	return [
@@ -137,20 +167,6 @@ export function builtinProviders(): Provider[] {
 export function builtinModels(options?: CreateModelsOptions): MutableModels {
 	const models = createModels(options);
 	for (const provider of builtinProviders()) {
-		models.setProvider(provider);
-	}
-	return models;
-}
-
-/** All built-in image-generation providers, freshly constructed. */
-export function builtinImagesProviders(): ImagesProvider[] {
-	return [openrouterImagesProvider()];
-}
-
-/** An `ImagesModels` collection with every built-in image-generation provider registered. */
-export function builtinImagesModels(options?: CreateModelsOptions): MutableImagesModels {
-	const models = createImagesModels(options);
-	for (const provider of builtinImagesProviders()) {
 		models.setProvider(provider);
 	}
 	return models;

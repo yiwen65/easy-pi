@@ -324,8 +324,9 @@ export function registerPiCollaborationTools(options: {
 								context: args.context,
 								tools: args.tools,
 							});
-							const available = delegatableTools(session)
-								.filter((name) => controller.toolAllowed(identity, name));
+							const available = delegatableTools(session).filter((name) =>
+								controller.toolAllowed(identity, name),
+							);
 							// Names are already namespace-normalized by validateDelegation.
 							const tools =
 								delegation.capabilities.tools === "inherit" ? available : delegation.capabilities.tools;
@@ -397,15 +398,14 @@ export function registerPiCollaborationTools(options: {
 								tools: args.tools,
 								context: current.delegation?.context ?? { mode: "fork", turns: "all", prefix: "rebuild" },
 							});
-							const available = delegatableTools(session)
-								.filter(
-									(name) =>
-										controller.toolAllowed(identity, name) &&
-										controller.toolAllowed(
-											{ rootSessionId: identity.rootSessionId, agentPath: current.path },
-											name,
-										),
-								);
+							const available = delegatableTools(session).filter(
+								(name) =>
+									controller.toolAllowed(identity, name) &&
+									controller.toolAllowed(
+										{ rootSessionId: identity.rootSessionId, agentPath: current.path },
+										name,
+									),
+							);
 							// Capabilities are namespace-normalized inside validateDelegation already.
 							const tools =
 								delegation.capabilities.tools === "inherit" ? available : delegation.capabilities.tools;

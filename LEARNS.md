@@ -556,3 +556,11 @@
 - Prevention: 区分“当前核验任务完成”与“原副作用已确认”，同时观察 executionOutcome、original/suspended state 与真实 RPC 次数，避免为了错误断言禁用恢复功能。
 - Verified by: 2026-10-11 agent-session-mcp-migration.test.ts unknown-drop：outcome unknown、两次 dispatch 尝试但一次 RPC、原任务无 terminal result；协调端回归通过。
 
+## ESM CLI main guard——比较 canonical 路径，并验证实际产物
+
+- Wrong approach: 直接比较 `import.meta.url` 与 `pathToFileURL(process.argv[1])`，用 exit0 判断目录工具已执行。
+- Why it failed: Node 会将模块路径解析到真实位置，而 argv 可保留 symlink 地址；macOS `/tmp` 与 `/private/tmp` 不相等，main 被跳过，进程无输出且没有 publication 产物。
+- Recognition signal: CLI exit0，但预期日志/输出文件不存在；通过绝对 symlink 调用才能复现，普通路径单元测试仍通过。
+- Correct approach: CLI main guard 对 argv 用 `realpathSync()` 后再转 file URL；仅做同一性比较，不改写操作对象的 I/O 地址。
+- Prevention: import-safe `.mjs` CLI 同时测试普通路径与绝对 symlink 启动，断言实际日志、输出内容及副作用，而非只断言退出码。
+- Verified by: 2026-10-11 catalog publisher/diff 两项 symlink guards先RED（静默跳过），canonical guard修复后53项工具测试及完整1523chat/45image离线bundle dry-run/diff通过；源码归档补充后父61/61通过。

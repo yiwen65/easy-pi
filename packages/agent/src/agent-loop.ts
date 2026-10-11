@@ -308,7 +308,39 @@ async function runLoop(
 				currentContext.systemPrompt = resolveSystemPrompt(currentContext.systemPrompt, config);
 			}
 
-			// Bind the exact context, model, and tool handlers for this provider step.
+			const requestUpdate = await config.prepareRequest?.(
+				{
+					context: currentContext,
+					model: config.model,
+					thinkingLevel: config.reasoning ?? "off",
+				},
+				signal,
+			);
+			if (requestUpdate) {
+				currentContext = requestUpdate.context ?? currentContext;
+				config = {
+					...config,
+					model: requestUpdate.model ?? config.model,
+					reasoning:
+						requestUpdate.thinkingLevel === undefined
+							? config.reasoning
+							: requestUpdate.thinkingLevel === "off"
+								? undefined
+								: requestUpdate.thinkingLevel,
+				};
+			}
+
+			const routing = config.getRequestRouting?.();
+			if (routing) {
+				config = {
+					...config,
+					promptCacheKey: routing.promptCacheKey,
+					cacheAffinityId: routing.cacheAffinityId,
+					transport: routing.transport,
+				};
+			}
+
+			// Bind the exact context, model, and tool handlers only after request preparation.
 			const stepSnapshot = createStepSnapshot(currentContext, config, ++stepNumber);
 			currentContext = stepSnapshot.context;
 			config = {

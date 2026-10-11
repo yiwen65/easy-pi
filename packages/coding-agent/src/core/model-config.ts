@@ -156,6 +156,7 @@ const ModelCostSchema = Type.Object({
 });
 
 const ModelDefinitionSchema = Type.Object({
+	type: Type.Optional(Type.Literal("chat")),
 	id: Type.String({ minLength: 1 }),
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
@@ -172,6 +173,7 @@ const ModelDefinitionSchema = Type.Object({
 });
 
 const ModelOverrideSchema = Type.Object({
+	type: Type.Optional(Type.Literal("chat")),
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),

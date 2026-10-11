@@ -41,11 +41,12 @@ function createFixture(): {
 
 	const structure: ModelDataStructure = {
 		"test-provider": {
-			"model-a": "openai-completions",
+			"chat:model-a": "openai-completions",
 		},
 	};
 	const values: Record<string, unknown> = {
-		"model-a": {
+		"chat:model-a": {
+			type: "chat",
 			id: "model-a",
 			name: "Model A",
 			api: "openai-completions",
@@ -108,7 +109,7 @@ describe("generated model data validation", () => {
 		["api", "anthropic-messages", "has api"],
 	] as const)("rejects a wrong model %s", (field, value, expectedMessage) => {
 		const fixture = createFixture();
-		const model = fixture.values["model-a"] as Record<string, unknown>;
+		const model = fixture.values["chat:model-a"] as Record<string, unknown>;
 		model[field] = value;
 		writeFixtureData(fixture.dataDir, fixture.structure, fixture.values);
 		expect(() => validateModelDataDirectory(fixture.structure, fixture.dataDir)).toThrow(expectedMessage);
@@ -155,6 +156,18 @@ describe("generated model data validation", () => {
 		manifest.structureHash = "stale";
 		writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
 		expect(() => validateModelDataDirectory(fixture.structure, fixture.dataDir)).toThrow("generation stamp");
+	});
+
+	it.each([
+		["type", "image", "has type"],
+		["reasoning", "yes", "reasoning boolean"],
+		["maxTokens", 0, "maxTokens"],
+	])("rejects operation/chat metadata mismatch (%s)", (field, value, expectedMessage) => {
+		const fixture = createFixture();
+		const model = fixture.values["chat:model-a"] as Record<string, unknown>;
+		model[field] = value;
+		writeFixtureData(fixture.dataDir, fixture.structure, fixture.values);
+		expect(() => validateModelDataDirectory(fixture.structure, fixture.dataDir)).toThrow(String(expectedMessage));
 	});
 
 	it("rejects an invalid generation timestamp", () => {

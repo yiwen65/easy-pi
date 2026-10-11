@@ -1,14 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { openrouterImagesApi } from "../src/api/openrouter-images.lazy.ts";
 import { generateImages } from "../src/images.ts";
-import type { ImagesContext, ImagesModel } from "../src/types.ts";
+import { createModels, createProvider } from "../src/models.ts";
+import type { ImageModel, ImagesContext } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
+	lastClientOptions: undefined as unknown,
 	lastParams: undefined as unknown,
 	lastRequestOptions: undefined as unknown,
 }));
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
+		constructor(options: unknown) {
+			mockState.lastClientOptions = options;
+		}
 		chat = {
 			completions: {
 				create: (params: unknown, requestOptions?: unknown) => {
@@ -60,12 +66,14 @@ vi.mock("openai", () => {
 
 describe("openrouter images", () => {
 	beforeEach(() => {
+		mockState.lastClientOptions = undefined;
 		mockState.lastParams = undefined;
 		mockState.lastRequestOptions = undefined;
 	});
 
 	it("returns text plus images in final output", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
 			id: "google/gemini-3.1-flash-image-preview",
 			name: "Gemini 3.1 Flash Image Preview",
 			api: "openrouter-images",
@@ -97,7 +105,8 @@ describe("openrouter images", () => {
 	});
 
 	it("passes through abort signal and returns aborted result", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
 			id: "black-forest-labs/flux.2-pro",
 			name: "FLUX.2 Pro",
 			api: "openrouter-images",
@@ -119,8 +128,66 @@ describe("openrouter images", () => {
 		expect(mockState.lastRequestOptions).toMatchObject({ signal: controller.signal });
 	});
 
+	it("dispatches unified auth/header transforms once without resurrecting removed SDK defaults", async () => {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
+			id: "fixture",
+			name: "Fixture",
+			api: "openrouter-images",
+			provider: "fixture",
+			baseUrl: "https://original.test",
+			input: ["text"],
+			output: ["image"],
+			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+			headers: { "x-remove": "original", "x-shared": "model" },
+		};
+		const resolve = vi.fn(async () => ({
+			auth: { apiKey: "resolved", baseUrl: "https://resolved.test", headers: { "x-shared": "auth" } },
+		}));
+		const models = createModels();
+		models.setProvider(
+			createProvider({
+				id: "fixture",
+				models: [model],
+				auth: { apiKey: { name: "Test", resolve } },
+				images: { "openrouter-images": openrouterImagesApi() },
+			}),
+		);
+		const transformHeaders = vi.fn((headers) => {
+			const { "x-remove": _remove, ...remaining } = headers;
+			return { ...remaining, "x-transformed": "once" };
+		});
+		const onPayload = vi.fn();
+		const onResponse = vi.fn();
+		const result = await models.generateImages(
+			model,
+			{ input: [{ type: "text", text: "draw" }] },
+			{
+				headers: { "X-SHARED": "request" },
+				transformHeaders,
+				onPayload,
+				onResponse,
+				timeoutMs: 1234,
+				maxRetries: 0,
+			},
+		);
+		expect(result.stopReason).toBe("stop");
+		expect(resolve).toHaveBeenCalledOnce();
+		expect(transformHeaders).toHaveBeenCalledOnce();
+		expect(onPayload).toHaveBeenCalledOnce();
+		expect(onResponse).toHaveBeenCalledOnce();
+		expect(mockState.lastClientOptions).toMatchObject({
+			apiKey: "resolved",
+			baseURL: "https://resolved.test",
+			defaultHeaders: { "X-SHARED": "request", "x-transformed": "once" },
+		});
+		expect((mockState.lastClientOptions as { defaultHeaders: object }).defaultHeaders).not.toHaveProperty("x-remove");
+		expect(mockState.lastRequestOptions).toMatchObject({ timeout: 1234, maxRetries: 0 });
+	});
+
 	it("generateImages resolves the final assistant images result", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
 			id: "black-forest-labs/flux.2-pro",
 			name: "FLUX.2 Pro",
 			api: "openrouter-images",

@@ -3,13 +3,12 @@ import { describe, expect, it } from "vitest";
 import { buildBaseOptions } from "../src/api/simple-options.ts";
 import { generateImages } from "../src/images.ts";
 import { registerImagesApiProvider } from "../src/images-api-registry.ts";
-import { createImagesModels, createImagesProvider } from "../src/images-models.ts";
 import { createModels, createProvider } from "../src/models.ts";
 import type {
 	Context,
 	DeferredHandle,
+	ImageModel,
 	ImagesContext,
-	ImagesModel,
 	Model,
 	ProviderRequestOptions,
 } from "../src/types.ts";
@@ -32,7 +31,8 @@ const model: Model<"telemetry-test"> = {
 	maxTokens: 100,
 };
 
-const imageModel: ImagesModel<"telemetry-test-images"> = {
+const imageModel: ImageModel<"telemetry-test-images"> = {
+	type: "image",
 	id: "image-model",
 	name: "Image Model",
 	api: "telemetry-test-images",
@@ -137,7 +137,7 @@ describe("ProviderRequestOptions.telemetryContext", () => {
 		expect(observed.every((value) => value === telemetryContext)).toBe(true);
 	});
 
-	it("survives direct and ImagesModels image dispatch", async () => {
+	it("survives direct and Models image dispatch", async () => {
 		const observed: Array<TelemetryContext | undefined> = [];
 		registerImagesApiProvider({
 			api: imageModel.api,
@@ -155,23 +155,25 @@ describe("ProviderRequestOptions.telemetryContext", () => {
 		});
 		await generateImages(imageModel, imagesContext, { telemetryContext });
 
-		const models = createImagesModels();
+		const models = createModels();
 		models.setProvider(
-			createImagesProvider({
+			createProvider({
 				id: imageModel.provider,
 				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
 				models: [imageModel],
-				api: {
-					generateImages: async (requestModel, _context, options) => {
-						observed.push(options?.telemetryContext);
-						return {
-							api: requestModel.api,
-							provider: requestModel.provider,
-							model: requestModel.id,
-							output: [],
-							stopReason: "stop",
-							timestamp: 0,
-						};
+				images: {
+					[imageModel.api]: {
+						generateImages: async (requestModel, _context, options) => {
+							observed.push(options?.telemetryContext);
+							return {
+								api: requestModel.api,
+								provider: requestModel.provider,
+								model: requestModel.id,
+								output: [],
+								stopReason: "stop",
+								timestamp: 0,
+							};
+						},
 					},
 				},
 			}),

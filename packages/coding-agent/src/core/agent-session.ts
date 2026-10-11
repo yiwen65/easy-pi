@@ -132,6 +132,7 @@ import {
 	getLatestCompactionEntry,
 	reclaimSessionAppendLock,
 	type SessionHeader,
+	sessionEntryToContextMessages,
 } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { buildSkillPromptExpansion } from "./skill-invocations.ts";
@@ -480,7 +481,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installTaskRecoveryHooks();
-		this._installAgentNextTurnRefresh();
+		this._installAgentRequestPreparation();
 		this._installBackgroundTaskNotificationTransform();
 
 		// Default-on (EPIC-CCTX-001): the subsystem is pi's default compaction.
@@ -941,7 +942,7 @@ export class AgentSession {
 			});
 	}
 
-	private _installAgentNextTurnRefresh(): void {
+	private _installAgentRequestPreparation(): void {
 		const previousTransformContext = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
 			const compacted = await this._compactProviderContextIfNeeded(messages);
@@ -992,6 +993,69 @@ export class AgentSession {
 			this._nextProviderContextChangeReason = undefined;
 		};
 
+		// Keep pre-steering compaction at the existing scheduling seam. Moving it into
+		// prepareRequest would delay steering queued during compaction by one request.
+		// Explicit next-turn context updates retain ownership of their in-flight
+		// messages for that run; otherwise requests use the live persisted projection.
+		let preparedContextBoundary: { signal: AbortSignal; entryId: string | null } | undefined;
+		const reconcilePreparedMessages = (contextMessages: AgentMessage[], signal?: AbortSignal): AgentMessage[] => {
+			if (preparedContextBoundary && preparedContextBoundary.signal !== signal) preparedContextBoundary = undefined;
+			// Retry/recovery exclude failed or truncated responses from live context without deleting history.
+			const liveMessages = new Set(this.agent.state.messages);
+			const messages = this.sessionManager
+				.buildSessionContext()
+				.messages.filter(
+					(message) =>
+						message.role !== "assistant" ||
+						(message.stopReason !== "error" &&
+							message.stopReason !== "aborted" &&
+							message.stopReason !== "length") ||
+						liveMessages.has(message),
+				);
+			if (!preparedContextBoundary) return messages;
+			const branch = this.sessionManager.getBranch();
+			const capturedEntryId = preparedContextBoundary.entryId;
+			const index = capturedEntryId === null ? -1 : branch.findIndex((entry) => entry.id === capturedEntryId);
+			if (capturedEntryId !== null && index < 0) {
+				throw new Error("Prepared request context anchor is not on the active branch");
+			}
+			const additions = branch.slice(index + 1);
+			if (additions.some((entry) => entry.type === "compaction")) {
+				preparedContextBoundary = undefined;
+				return messages;
+			}
+			// Preserve caller omissions before the captured entry. Only merge new
+			// durable items, excluding selected inputs already emitted into the loop.
+			const selectedInputs = new Map(
+				contextMessages.flatMap((message) => {
+					const id = this._taskInputIds.get(message);
+					return id ? [[id, message] as const] : [];
+				}),
+			);
+			const merged = contextMessages.slice();
+			let insertAt = merged.length;
+			// Work backwards so late transform notices stay before the following
+			// already-emitted assistant/result, not after it.
+			for (const entry of additions.reverse()) {
+				const existing = entry.type === "message" ? entry.message : selectedInputs.get(entry.id);
+				const existingIndex = existing ? merged.indexOf(existing) : -1;
+				if (existingIndex >= 0) {
+					insertAt = existingIndex;
+					continue;
+				}
+				const added = sessionEntryToContextMessages(entry).filter(
+					(message) =>
+						message.role !== "assistant" ||
+						(message.stopReason !== "error" &&
+							message.stopReason !== "aborted" &&
+							message.stopReason !== "length") ||
+						liveMessages.has(message),
+				);
+				merged.splice(insertAt, 0, ...added);
+			}
+			preparedContextBoundary.entryId = this.sessionManager.getLeafId();
+			return merged;
+		};
 		const previousPrepareNextTurnWithContext =
 			this.agent.prepareNextTurnWithContext ??
 			(this.agent.prepareNextTurn
@@ -1003,8 +1067,15 @@ export class AgentSession {
 				preparedMessages === turn.context.messages ? turn.context : { ...turn.context, messages: preparedMessages };
 			if (this._agentLoopProjectionRevision !== this._providerContextProjectionRevision) {
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
+				preparedContextBoundary = undefined;
 				preparedContext = { ...preparedContext, messages: this.agent.state.messages.slice() };
 			}
+			// Reconcile the old boundary before a recurring callback can capture a
+			// new leaf. Any omissions from this fresh input are then intentional.
+			preparedContext = {
+				...preparedContext,
+				messages: reconcilePreparedMessages(preparedContext.messages, signal),
+			};
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(
 				{ ...turn, context: preparedContext },
 				signal,
@@ -1016,13 +1087,48 @@ export class AgentSession {
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			}
 
-			const baseSystemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
+			if (projectionChangedDuringCallback) preparedContextBoundary = undefined;
+			else if (previousSnapshot?.context && signal) {
+				preparedContextBoundary = { signal, entryId: this.sessionManager.getLeafId() };
+			}
 			return {
 				...previousSnapshot,
 				context: {
 					...previousContext,
 					messages: projectionChangedDuringCallback ? this.agent.state.messages.slice() : previousContext.messages,
-					systemPrompt: baseSystemPrompt,
+				},
+			};
+		};
+
+		const previousPrepareRequest = this.agent.prepareRequest;
+		this.agent.prepareRequest = async (request, signal) => {
+			const projectionChanged = this._agentLoopProjectionRevision !== this._providerContextProjectionRevision;
+			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
+			if (projectionChanged) preparedContextBoundary = undefined;
+			// Input listeners can rebuild state before selected input commits. Repeat
+			// the same reconciliation after all selected input events have settled.
+			const context = {
+				...request.context,
+				messages: reconcilePreparedMessages(request.context.messages, signal),
+				systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
+				tools: this.agent.state.tools.slice(),
+				toolPlan: undefined,
+			};
+			const previousUpdate = await previousPrepareRequest?.(
+				{ context, model: this.agent.state.model, thinkingLevel: this.agent.state.thinkingLevel },
+				signal,
+			);
+			const preparedContext = previousUpdate?.context ?? context;
+			const projectionChangedDuringCallback =
+				this._agentLoopProjectionRevision !== this._providerContextProjectionRevision;
+			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
+			if (projectionChangedDuringCallback) preparedContextBoundary = undefined;
+			return {
+				...previousUpdate,
+				context: {
+					...preparedContext,
+					messages: projectionChangedDuringCallback ? this.agent.state.messages.slice() : preparedContext.messages,
+					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
 					tools: this.agent.state.tools.slice(),
 					toolPlan: undefined,
 				},
@@ -1244,6 +1350,15 @@ export class AgentSession {
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
+			// A message_end extension can rebuild state before this input commits (setModel).
+			// Keep the accepted input visible in live state as well as the request projection.
+			if (
+				appendedEntryId &&
+				(event.message.role === "user" || event.message.role === "custom") &&
+				!this.agent.state.messages.includes(event.message)
+			) {
+				this.agent.state.messages.push(event.message);
+			}
 			if (appendedEntryId) this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
 			if (appendedEntryId && event.message.role === "assistant")
 				this._taskRecovery.commitAssistant(event.message, appendedEntryId);

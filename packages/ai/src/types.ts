@@ -28,9 +28,9 @@ export type KnownApi =
 
 export type Api = KnownApi | (string & {});
 
-export type KnownImagesApi = "openrouter-images";
+export type KnownImageApi = "openrouter-images";
 
-export type ImagesApi = KnownImagesApi | (string & {});
+export type ImageApi = KnownImageApi | (string & {});
 
 export type KnownProvider =
 	| "amazon-bedrock"
@@ -74,10 +74,6 @@ export type KnownProvider =
 	| "xiaomi-token-plan-ams"
 	| "xiaomi-token-plan-sgp";
 export type ProviderId = KnownProvider | string;
-
-export type KnownImagesProvider = "openrouter";
-
-export type ImagesProviderId = KnownImagesProvider | string;
 
 export type ToolChoice = "auto" | "none";
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -301,13 +297,13 @@ export interface ProviderStreams {
  */
 export interface ProviderImages {
 	generateImages(
-		model: ImagesModel<ImagesApi>,
+		model: ImageModel<ImageApi>,
 		context: ImagesContext,
 		options?: ImagesOptions,
 	): Promise<AssistantImages>;
 }
 
-export interface ImagesOptions extends ProviderRequestOptions<ImagesModel<ImagesApi>> {
+export interface ImagesOptions extends ProviderRequestOptions<ImageModel<ImageApi>> {
 	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
@@ -346,8 +342,8 @@ export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOption
 	options?: TOptions,
 ) => AssistantMessageEventStream;
 
-export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends ImagesOptions = ImagesOptions> = (
-	model: ImagesModel<TApi>,
+export type ImagesFunction<TApi extends ImageApi = ImageApi, TOptions extends ImagesOptions = ImagesOptions> = (
+	model: ImageModel<TApi>,
 	context: ImagesContext,
 	options?: TOptions,
 ) => Promise<AssistantImages>;
@@ -489,8 +485,8 @@ export interface ImagesContext {
 export type ImagesStopReason = "stop" | "error" | "aborted";
 
 export interface AssistantImages {
-	api: ImagesApi;
-	provider: ImagesProviderId;
+	api: ImageApi;
+	provider: ProviderId;
 	model: string;
 	output: ImagesOutputContent[];
 	responseId?: string;
@@ -838,26 +834,30 @@ export interface ModelCost extends ModelCostRates {
 	tiers?: ModelCostTier[];
 }
 
-// Model interface for the unified model system
-export interface Model<TApi extends Api> {
+export interface BaseModel<TApi extends string> {
 	id: string;
 	name: string;
 	api: TApi;
 	provider: ProviderId;
 	baseUrl: string;
+	input: ("text" | "image")[];
+	cost: ModelCost;
+	headers?: Record<string, string>;
+}
+
+// Missing type preserves existing handwritten chat models.
+export interface Model<TApi extends Api> extends BaseModel<TApi> {
+	type?: "chat";
 	reasoning: boolean;
 	/**
 	 * Maps pi thinking levels to provider/model-specific values.
 	 * Missing keys use provider defaults. null marks a level as unsupported.
 	 */
 	thinkingLevelMap?: ThinkingLevelMap;
-	input: ("text" | "image")[];
-	cost: ModelCost;
 	contextWindow: number;
 	maxTokens: number;
 	/** Default sampling parameters for this model. See {@link StreamOptions.samplingParams}; per-request keys override these. */
 	samplingParams?: Record<string, unknown>;
-	headers?: Record<string, string>;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"
 		? OpenAICompletionsCompat
@@ -870,9 +870,16 @@ export interface Model<TApi extends Api> {
 					: never;
 }
 
-export interface ImagesModel<TApi extends ImagesApi>
-	extends Omit<Model<Api>, "api" | "provider" | "reasoning" | "contextWindow" | "maxTokens" | "compat"> {
-	api: TApi;
-	provider: ImagesProviderId;
+export interface ImageModel<TApi extends ImageApi> extends BaseModel<TApi> {
+	type: "image";
+	/** Image generation must include image output. */
 	output: ("text" | "image")[];
 }
+
+export interface ModelTypeMap {
+	chat: Model<Api>;
+	image: ImageModel<ImageApi>;
+}
+
+export type ModelType = keyof ModelTypeMap;
+export type AnyModel = ModelTypeMap[ModelType];
