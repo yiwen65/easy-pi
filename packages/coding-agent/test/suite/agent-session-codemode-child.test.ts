@@ -157,8 +157,10 @@ return (await tools.${echoTool}({query:"child"})).content[0].text;
 			),
 		]);
 		expect(await child.run("Use only the delegated script target")).toMatchObject({ status: "completed" });
-		expect(declared).toEqual([["deliver_result", "codemode"]]);
-		expect(native.getDelegatableToolNames().sort()).toEqual(["deliver_result", "codemode", echoTool].sort());
+		expect(declared).toEqual([["deliver_result", "report_progress", "codemode"]]);
+		expect(native.getDelegatableToolNames().sort()).toEqual(
+			["deliver_result", "report_progress", "codemode", echoTool].sort(),
+		);
 		const result = native.messages.find(
 			(message) => message.role === "toolResult" && message.toolName === "codemode",
 		);
@@ -356,7 +358,7 @@ return { matches, description: description ?? null, namespace: namespace ?? null
 				reason: "terminal",
 				result: { turn: { status: "completed" } },
 			});
-			expect(declared.sort(), scriptOutput).toEqual(["deliver_result", "codemode"].sort());
+			expect(declared.sort(), scriptOutput).toEqual(["deliver_result", "report_progress", "codemode"].sort());
 			expect(scriptError, scriptOutput).toBe(false);
 			const call = readAudit(auditPath).find(
 				(record) => record.method === "tools/call" && record.params?.arguments?.query === name,
