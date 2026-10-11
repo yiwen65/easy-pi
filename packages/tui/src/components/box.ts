@@ -1,5 +1,5 @@
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
+import { visibleWidth } from "../utils.ts";
 
 type RenderCache = {
 	childLines: string[];
@@ -79,12 +79,13 @@ export class Box implements Component {
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const leftPad = " ".repeat(this.paddingX);
 
-		// Render all children
+		// Keep child lines unpadded so cache hits do not allocate padded strings
+		// and compare their contents on every frame.
 		const childLines: string[] = [];
 		for (const child of this.children) {
 			const lines = child.render(contentWidth);
 			for (const line of lines) {
-				childLines.push(leftPad + line);
+				childLines.push(line);
 			}
 		}
 
@@ -110,7 +111,7 @@ export class Box implements Component {
 
 		// Content
 		for (const line of childLines) {
-			result.push(this.applyBg(line, width));
+			result.push(this.applyBg(leftPad + line, width));
 		}
 
 		// Bottom padding
@@ -129,9 +130,7 @@ export class Box implements Component {
 		const padNeeded = Math.max(0, width - visLen);
 		const padded = line + " ".repeat(padNeeded);
 
-		if (this.bgFn) {
-			return applyBackgroundToLine(padded, width, this.bgFn);
-		}
-		return padded;
+		// Already padded to width; applying the background needs no second measurement.
+		return this.bgFn ? this.bgFn(padded) : padded;
 	}
 }
