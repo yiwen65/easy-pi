@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /tmp/easy-pi-my-pi-integration-20261011
 - Mode: execute
-- Overall status: in_progress
+- Overall status: blocked
 - Source: 用户新请求「合并到 my-pi」，覆盖上一轮仅隔离交付的决定；不授权丢弃/代提交其他 session 的未提交改动。
 
 <!-- task-doc-section:background-goal -->
@@ -111,9 +111,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 独立审查与candidate提交
+### [x] T-004 — 独立审查与candidate提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 接受独立审查并提交明确merge candidate。
 - Inputs and prerequisites: T-003 gates、source冻结完整冲突解法。
@@ -123,7 +123,7 @@
 - Execution steps: read-only allowlist独立审查，检查actual findings/补guard，父重跑有效最小gate，commit有两parent且无额外stage。
 - Acceptance criteria: 两branch ancestry保留；无未解决review defect、无混入其他owner未提交路径。
 - Verification method: 源码/diff/review/gates、git show parents/status、doc validator。
-- Validation evidence: Not run.
+- Validation evidence: 只read工具independent seam3e4fe671+continuity71f7896b和toolingdf351cf4+continuitya384c3c9完成，唯一length交互已T-006因果修复、无剩余actionable。父全tests/check/build/pack/outsideSDK+MCP+images门禁T-003真实GREEN，最终两个parentdiff和resolverfix patch更新不再用旧snapshot。explicit仅5owned integration修复/formatter路径+新authority补入Git自动merge index，PI_ALLOW_LOCKFILE_CHANGE=1提交144paths merge674320ff78d0284bbb92c3f6d726368c084d9d8c；两个parents为精确83e46/59faf，ancestor gates通过，privateclean。源码归档两次actualarchived-validator+cmp通过，SHA171bd4d653c9d9882b6b0440fe1ca0d8a2a8e45f792c4a19cd3adc0b52801060；从未stage原未提交CodeMode。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -139,8 +139,8 @@
 - Execution steps: 原fresh状态核对；如有新commits先保留整合/补测；dirty时停；clean精确head/data gates后ff-only及必需runtime smoke/check。
 - Acceptance criteria: 原未提交工作没有被stash/覆盖/代提交；数据refresh没有丢失；实际更新才done。
 - Verification method: readonly fresh gate、ff输出、original runtime关键check及source/data/lock proofs。
-- Validation evidence: F-004原dirty且继续变化，第二次观察新增runner/wrapper/task-recovery修改；不能在该现场merge或hydrate。
-- Blocker: 并发CodeMode owner未完成/提交，原dirty；T-004也未完成。
+- Validation evidence: finalreadonly original-delivery-gate.json：HEAD仍83e46/my-pi、71dirty paths（继续变化），40公开ignored模型JSON逐文件SHA与初始baseline完全相同，无读取错误，originalWritten=false。candidate674320ff及两parents已verified，code/全部gates完成；但clean gate不满足，未执行原merge/ff/hydration。
+- Blocker: 并发CodeMode owner未完成/提交，原71dirty路径与agent/session/types/deps/build/SDK等重叠，不能覆盖或代提交。
 - Unblock condition: 并发owner提交并稳定原树，固定最新已提交base并纳入candidate/重测，然后clean/HEAD/public-data gate全部通过。
 
 ### [x] T-006 — 自动合并的text-only length恢复投影回归
@@ -211,9 +211,11 @@
 
 - 2026-10-11: T-003done：新candidate各包定向tests/check/build/data/class audit/12bundlepack/全新offlineinstall/outsideSDK+MCP/image smoke全部通过。T-004in_progress，独立seam/continuity和tooling review均无未解决finding，finalpatch已重捕获（旧patch源resolver遗漏的证据gap已更正）。readonlyoriginal仍83e46且未提交CodeMode路径继续增多/重叠，T-005保持blocked；不能把privatecandidate成功说成my-pi已更新。
 
+- 2026-10-11: T-004done，merge候选674320ff双parents83e46+59faf已提交并privateclean；包含目标MCP/recovery和源三阶段全部内容，仅2逻辑/入口交互最小修复。actual源码归档2次validator+cmp通过。最终originalreadonly仍83e46/my-pi/71dirty且继续变化，公开40data baseline hashes相同；原写入/ff/hydration均未执行，T-005仍blocked。候选可交付但不虚称my-pi已合并，overall blocked / final partial，等并发owner提交并稳定后重新固定target和补测。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: baseline/isolation已完成；新candidate merge/验证/提交尚未完成；原交付T-005因并发dirty工作blocked。
-- Limitations: 尚未真正合并到my-pi；不重试Node22、无真实provider/credentials/push/release。
+- Evidence: T-001/002/003/004/006/007全部done；verified merge candidate674320ff78d0284bbb92c3f6d726368c084d9d8c在branch integrate/selective-migration-my-pi-20261011 / worktree /tmp/easy-pi-my-pi-integration-20261011。AI444pass/3credential skip、coding902、agent175、MCP43、scripts74、root1479No fixes、offlinebuild、data1523/45全保真、outside2-day/ignore-scripts完全offlineinstall及CLI/SDK/faux/image/dynamicheaders/helper/compat/jiti/MCPin-memory/license smoke均通过；actual源码归档deterministic。仅T-005因original71dirty CodeMode未交付。
+- Limitations: my-pi仍83e46且未更新，不stash/reset/覆盖/代提交并发工作；后续owner提交后须固定新base纳入candidate/重测，再clean/HEAD/data gate ff-only。Node22未知下载paused未重试，22/Windows/Bun/liveprovider/liveMCPserver未实测；无真实provider凭证/API/paidmodel或push/release。旧完整迁移authority是已完成历史，新状态仅本文。
