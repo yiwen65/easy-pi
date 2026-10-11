@@ -57,7 +57,7 @@ test.each(["dark", "light"])("subagent marker and name use a distinct purple col
 	const color = theme.getFgAnsi("customMessageLabel");
 	for (const other of ["warning", "accent", "success"] as const) expect(color).not.toBe(theme.getFgAnsi(other));
 	const row = group.render(120)[0];
-	expect(row).toContain(theme.fg("customMessageLabel", "↳ "));
+	expect(row).toContain(theme.fg("customMessageLabel", "↳ 1 · "));
 	expect(row).toContain(theme.fg("customMessageLabel", "worker"));
 	group.setExpanded(true);
 	expect(group.render(120)[0]).toContain(theme.fg("customMessageLabel", "↳ 1"));

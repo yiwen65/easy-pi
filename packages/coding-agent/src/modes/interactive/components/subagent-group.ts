@@ -691,11 +691,15 @@ export class SubagentGroupComponent extends Container {
 	}
 
 	/** A non-mutating compact preview, also used by the parent turn aggregate. */
-	overviewLine(width: number): string {
-		return this.headerLine(width, Date.now(), true);
+	overviewLine(width: number, count?: string): string {
+		return this.headerLine(width, Date.now(), true, count);
 	}
 
-	private headerLine(width: number, now: number, showPreview = !this.expanded): string {
+	isRunning(): boolean {
+		return this.established && this.state === "running";
+	}
+
+	private headerLine(width: number, now: number, showPreview = !this.expanded, count?: string): string {
 		const queryOnly =
 			!this.established &&
 			this.activities.length > 0 &&
@@ -726,7 +730,7 @@ export class SubagentGroupComponent extends Container {
 					? "!incomplete"
 					: "!invalid"
 			: undefined;
-		const prefix = theme.fg("customMessageLabel", "↳ ");
+		const prefix = theme.fg("customMessageLabel", count ? `↳ ${count} · ` : "↳ ");
 		const metadata =
 			theme.fg("muted", `${separator}${stateLabel}`) +
 			(outcome ? theme.fg("warning", `${separator}${outcome}`) : "") +
@@ -997,11 +1001,13 @@ export class SubagentTurnGroupComponent extends Container {
 	}
 
 	private overviewLine(width: number): string {
-		if (this.expanded) return truncateToWidth(theme.fg("customMessageLabel", `↳ ${this.agentCount}`), width, "");
-		const suffix = this.agentCount > 1 ? theme.fg("muted", ` · ${this.agentCount}`) : "";
-		const head =
-			this.latest?.overviewLine(Math.max(1, width - visibleWidth(suffix))) ?? theme.fg("customMessageLabel", "↳");
-		return truncateToWidth(head + suffix, width, "");
+		const running = this.children.filter(
+			(child) => child instanceof SubagentGroupComponent && child.isRunning(),
+		).length;
+		const count = running > 0 ? `${running}/${this.agentCount}` : `${this.agentCount}`;
+		const marker = theme.fg("customMessageLabel", `↳ ${count}`);
+		if (this.expanded) return truncateToWidth(marker, width, "");
+		return this.latest?.overviewLine(width, count) ?? truncateToWidth(marker, width, "");
 	}
 
 	handleOverviewClick(localRow: number, width: number): boolean {
