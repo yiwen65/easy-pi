@@ -3,7 +3,7 @@
 - Created: 2026-10-11
 - Workspace: /tmp/easy-pi-selective-migration-20261011
 - Mode: execute
-- Overall status: blocked
+- Overall status: done
 - Source: 用户要求按建议选择性迁移，并逐项确认三阶段全部实施、替换旧图片公开接口及本文件所列执行/构建权限。
 
 <!-- task-doc-section:background-goal -->
@@ -46,6 +46,7 @@
 - Worktree: `/tmp/easy-pi-selective-migration-20261011`。
 - Branch: `integrate/selective-migration-20261011`。
 - Evidence: `/tmp/pi-selective-migration-evidence-20261011/`；不是第二份任务/状态源。
+- 最终Q-005只交付以上隔离成果；原目录门禁记录是阻止覆盖的证据，不构成本轮原目录写入授权。
 - 依赖、忽略模型数据和构建产物只在私有 worktree 准备；不得通过原目录 node_modules/生成数据链接污染其运行环境。交付前严格核验原 HEAD/分支/改动；再次漂移或目标冲突停止确认，不自动重基、覆盖或丢弃并发改动。
 
 <!-- task-doc-section:facts-evidence -->
@@ -62,6 +63,7 @@
 | F-007 | 补充 AI 基线已有一项 Moonshot Kimi K3 cacheWrite 不匹配：忽略目录为3，已有 providers.test.ts 断言为0；发生于任何 AI/schema生产修改前。 | task-128：8文件101pass/1fail/3显式skip；完整读取 providers.test.ts；moonshotai及moonshotai-cn JSON目前cacheWrite3；不可把此既有失败归因迁移或自动改价。 |
 | F-008 | 官方现价证明原0断言过时：国际K3默认5min cacheWrite USD3/1M，与input3相同；1h为6。国内5min写入与未命中输入同为CNY20，1h40。本轮保留既有USD归一数据3，不引入汇率转换/1h计费迁移。 | 官方Moonshot URL 301到platform.kimi.ai/.com；task-141/142匿名无认证Markdown GET均HTTP200，4630/4257bytes且全文读取，kimi-*-pricing-public.md。browser web_fetch遇Tunnel/guard失败，非完整DOM扫描；不用摘录冒充全文。 |
 | F-009 | 原目录已漂移到11067598d（比固定base新增3提交），并有大量未提交recovery/MCP等改动，含AgentSession、SDK/扩展、依赖/锁、build/pack，和迁移目标重叠。不能按旧HEAD/clean门禁交付。 | 本轮readonly original git status、rev-parse及log 6f935..HEAD：612f54ace、95d2e3161、11067598d；未编辑/合并其任何内容。 |
+| F-010 | 最终用户选择只交付隔离成果，不要求或授权本轮写入原目录。 | request_user_input migration_delivery_choice答复「仅交付隔离成果」；Q-005。 |
 
 <!-- task-doc-section:assumptions-questions -->
 ## Assumptions and open questions
@@ -71,7 +73,8 @@
 - Decision Q-002: 旧图片 API 替换，不增加用户未要求的长期兼容层；chat API 的默认行为保留。
 - Decision Q-003: 保留 shrinkwrap/jiti/easy-pi 产品路线；允许必要工具链依赖锁改动与离线构建/临时包验收。
 - Decision Q-004: 用户选择并确认核实后最小修复Moonshot两提供商Kimi K3价格失配；可信来源不足/冲突时停止，不猜价格；不得改其他价格或削弱校验。
-- Open question Q-005: 三阶段已在隔离分支完成验证；原my-pi仍HEAD11067598d且127条dirty paths，与迁移重叠。请用户选择仅交付隔离成果，或等待并发owner提交/settle后保留新baseline重新集成并重测。T-011当前blocked，未获得原目录写入/重基新授权。
+- Decision Q-005: 用户对最终交付明确选择「仅交付隔离成果」。本轮交付止于已验证隔离分支/worktree/临时打包和源码归档，原my-pi不合入、不重基、不覆盖；未来重新集成须新的明确授权。
+- Open questions: None.
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -253,21 +256,21 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-011 — 漂移门禁、交付和任务闭环
+### [x] T-011 — 漂移门禁、交付和任务闭环
 
-- Status: blocked
+- Status: done
 - Owner: coordinator
-- Objective: 在保留并发改动前提下交付已验证提交，并记录最终状态。
-- Inputs and prerequisites: T-010，固定原分支/base 门禁。
-- Scope or files: 原目录 fast-forward、必要依赖/生成目录 hydration、本文。
-- Expected output: 原 my-pi 安全交付或明确 blocked；任务文档 final evidence。
+- Objective: 按用户Q-005只交付隔离已验证成果并闭环，保留原目录并发现场。
+- Inputs and prerequisites: T-010、Q-005/F-010明确只交付isolated选择。
+- Scope or files: 隔离branch/worktree/package/sourcearchive与本文；原目录严格readonly，无ff/hydration/rebase授权。
+- Expected output: 隔离成果清楚可定位、已验证证据与限制齐全，任务文档passed。
 - Dependencies: T-010.
-- Execution steps: 再核验 original HEAD/branch/status；非预期漂移立即停；ff-only；安全准备必要依赖/生成数据；关键 smoke/check；提交最终文档。
-- Acceptance criteria: 所有任务 done、文档 validator 通过、原交付实际运行环境验证；不丢失他人提交/改动。
+- Execution steps: 原门禁readonly核对并停止旧ff路线；记录用户onlyisolated决定；保留已验证提交和自包含artifacts；验文档并提交最终记录。
+- Acceptance criteria: 所有任务done、文档validator通过、隔离交付真实build/pkg/sdk/sourcearchive验证；原目录无写入，限制明确。
 - Verification method: V-005/关键 runtime smoke、git log/status、task_document.py validate。
-- Validation evidence: original-delivery-gate-final.json当前readonly original HEAD11067598d、my-pi、3新增提交、127dirty paths，旧fixedbase6f935 clean/HEAD gate不满足；40public ignored data逐文件SHA与baseline相同、无read错误。隔离T-010全部完成/commit817d3d782；originalWritten=false，不把观测hash当未来稳定承诺。
-- Blocker: 原目录漂移且其他任务未提交，不能ff/覆盖/自动重基或隐含把MCP/recovery工作并入本轮。
-- Unblock condition: 并发owner完成/提交其改动后，用户明确批准保留新基线重新集成/重测，或选择仅交付isolated成果；重新固定original门禁及ignoreddata哈希后才能实际写入。
+- Validation evidence: readonly原门禁HEAD11067598d/my-pi/3新增提交/127dirty、40public data baseline SHA相同；originalWritten=false。用户Q-005选择onlyisolated，解除交付目标阻塞而不是绕过原门禁。branch integrate/selective-migration-20261011、worktree /tmp/easy-pi-selective-migration-20261011；sourcecommit817d3d782与T-010全部actualgates通过，源码归档source-1.tar.gz包含原ignoreddata并valid，easy-pi beta tar及全新offline consumer烟测通过；最终doc/LEARNS commit3e49aefcf后privateclean且validator通过。只有本authority closing记录待最后doc提交，不变source/runtime。
+- Blocker: None.
+- Unblock condition: None.
 
 ### [x] T-012 — 既有 Moonshot 目录定价基线处置
 
@@ -404,7 +407,7 @@
 - 上游模型提交还含 classifier/新字段/别的迁移，本轮只 forward-port chat/image 必要行为；生成链不可凭空补价格或整批网络刷新。
 - npm lock regeneration可能清理无关旧记录；若发生，精确识别并恢复无关语义，不扩大清理范围。
 - 独立worktree也有全队共享状态；owned路径/生成/lock/delivery必须串行，不将子代理报告自动视为通过。
-- 原 my-pi 继续并发推进时，最终 gate 会阻断交付；届时记录完整已完成成果和明确决策。
+- 原my-pi漂移阻断了原写入路线；本轮按Q-005只隔离交付。未来原目录集成须新的授权、固定新baseline/clean与ignoreddata hashes，并重测受影响路径。
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -453,9 +456,11 @@
 
 - 2026-10-11: T-010done，188提交phase3 817d3d782、189whole-source archive twice validate+byte-identical通过；仅LEARNS/authority未提交，全部实现/审查children已关闭。readonly原门禁仍HEAD11067598d/my-pi/127dirty、40public data baseline hashes相同，T-011保持blocked并提出Q-005；不ff/重基/覆盖/stash/reset或写原ignoreddata，未push/release。overall blocked / final partial，等待用户交付选择。
 
+- 2026-10-11: 用户Q-005明确选择仅交付隔离成果，T-011blocked->in_progress->done：原写入/重基路线未获授权且未执行，保留其127dirty现场。交付已验证branch/worktree、easy-pi beta tar与自包含源码归档；privateclean/source817d3d782/closingdocs3e49aefcf和文档validator实证齐全。overall done / final passed，只补最终decision记录doc commit。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: 三阶段分别提交14164effe、bd7b5a681、817d3d782，授权Moonshot修复独立6bb392b2a。T-001..T-010与T-012..T-018全部done，定向回归/独立review/root check/offlinebuild/数据保真/仓库外包SDK/实际确定性源码归档均通过；仅T-011因original漂移和未提交并发工作blocked，等待Q-005。
+- Result: passed
+- Evidence: 三阶段分别提交14164effe、bd7b5a681、817d3d782，授权Moonshot修复独立6bb392b2a。T-001..T-018全部done，定向回归/独立review/root check/offlinebuild/数据保真/仓库外包SDK/实际确定性源码归档均通过；T-011按用户Q-005只交付隔离成果完成，原目录未写入。交付branch integrate/selective-migration-20261011；worktree /tmp/easy-pi-selective-migration-20261011；tar /tmp/pi-selective-migration-evidence-20261011/phase3-artifacts/pack/easy-pi-0.1.0-beta.1.tgz；含完整模型JSON的源码包 /tmp/pi-selective-migration-evidence-20261011/phase3-artifacts/source-1.tar.gz。
 - Limitations: 原目录未交付或改写；Node22旧获取操作未确认且未重试，Node22/Windows实际运行未验证；无provider真实API/凭证/paid模型、真实typed目录server支持、push/release。临时npm cache hydration正常2-day/ignore-scripts；3image E2E credential skip如实记录；独立generator已有19严格typing诊断未范围外清理；cleanup失败一致性是in-process合同而非crash-durable协议。
