@@ -194,6 +194,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
+		getSettings: notInitialized,
 		getActiveTools: notInitialized,
 		getAllTools: notInitialized,
 		setActiveTools: notInitialized,
@@ -269,8 +270,16 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			runtime.assertActive();
-			if (tool.exposure !== undefined && !["direct", "model-only", "deferred", "hidden"].includes(tool.exposure)) {
-				throw new Error(`Invalid exposure for tool "${tool.name}": use direct, model-only, deferred, or hidden`);
+			if (
+				tool.exposure !== undefined &&
+				!["direct", "model-only", "codemode", "deferred", "hidden"].includes(tool.exposure)
+			) {
+				throw new Error(
+					`Invalid exposure for tool "${tool.name}": use direct, model-only, codemode, deferred, or hidden`,
+				);
+			}
+			if (tool.orchestratesTools && tool.executionResource) {
+				throw new Error(`Orchestrator "${tool.name}" must leave execution resources to its nested tools`);
 			}
 			extension.tools.set(tool.name, {
 				definition: tool,
@@ -372,6 +381,11 @@ function createExtensionAPI(
 		exec(command: string, args: string[], options?: ExecOptions) {
 			runtime.assertActive();
 			return execCommand(command, args, options?.cwd ?? cwd, options);
+		},
+
+		getSettings() {
+			runtime.assertActive();
+			return structuredClone(runtime.getSettings());
 		},
 
 		getActiveTools(): string[] {

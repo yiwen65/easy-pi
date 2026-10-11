@@ -57,6 +57,8 @@ export interface McpServerEntry {
 }
 
 export interface LoadedMcpConfig {
+	/** Activate an authorized codemode tool for script-only servers. Default: true. */
+	autoEnableCodemode?: boolean;
 	servers: McpServerEntry[];
 	errors: string[];
 	/** The project `mcp.json` when the project is trusted, where `/mcp` saves project overrides. */
@@ -75,6 +77,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface McpConfigState {
+	autoEnableCodemode?: boolean;
 	servers: Map<string, McpServerEntry>;
 	errors: string[];
 }
@@ -93,10 +96,8 @@ function readConfigFile(path: string, scope: "global" | "project", state: McpCon
 		errors.push(`${path}: expected an object with an "mcpServers" object`);
 		return;
 	}
-	if (parsed.autoEnableCodemode !== undefined) {
-		errors.push(`${path}: autoEnableCodemode is not supported; use deferred exposure and tool_search`);
-		return;
-	}
+	if (typeof parsed.autoEnableCodemode === "boolean") state.autoEnableCodemode = parsed.autoEnableCodemode;
+	else if (parsed.autoEnableCodemode !== undefined) errors.push(`${path}: autoEnableCodemode must be a boolean`);
 	for (const [name, value] of Object.entries(parsed.mcpServers ?? {})) {
 		if (scope === "project" && isRecord(value) && isOverride(value)) {
 			const base = servers.get(name);
@@ -137,6 +138,7 @@ export function loadMcpConfig(options: { agentDir: string; cwd: string; projectT
 	const projectConfig = options.projectTrusted ? join(options.cwd, CONFIG_DIR_NAME, "mcp.json") : undefined;
 	if (projectConfig) readConfigFile(projectConfig, "project", state);
 	return {
+		...(state.autoEnableCodemode === undefined ? {} : { autoEnableCodemode: state.autoEnableCodemode }),
 		servers: [...state.servers.values()],
 		errors: state.errors,
 		...(projectConfig ? { projectConfig } : {}),

@@ -52,6 +52,7 @@ export function registerPiCollaborationRoot(
 				settings: {
 					...settings.getGlobalSettings(),
 					...settings.getProjectSettings(),
+					codemode: settings.getSettings().codemode,
 					compaction: settings.getCompactionSettings(),
 					retry: { ...settings.getRetrySettings(), provider: settings.getProviderRetrySettings() },
 					transport: settings.getTransport(),
@@ -79,6 +80,9 @@ export function registerPiCollaborationRoot(
 					);
 					const loaded = getSessionMcpConfig(ctx.sessionManager);
 					return {
+						...(loaded?.autoEnableCodemode === undefined
+							? {}
+							: { autoEnableCodemode: loaded.autoEnableCodemode }),
 						servers: (loaded?.servers ?? []).filter((entry) => namespaces.has(mcpNamespace(entry.name))),
 						errors: [],
 					};

@@ -33,10 +33,10 @@ export function isMcpToolName(name: string): boolean {
 	return name.startsWith("mcp__") || MCP_RESOURCE_TOOLS.has(name);
 }
 
-/** Deferred tools require discovery; direct tools are declared immediately; hidden tools are unreachable. */
-export type McpExposure = "deferred" | "direct" | "hidden";
+/** Codemode tools are script-only; deferred tools require discovery; hidden tools are unreachable. */
+export type McpExposure = "deferred" | "direct" | "codemode" | "hidden";
 
-const MCP_EXPOSURES: readonly string[] = ["deferred", "direct", "hidden"] satisfies McpExposure[];
+const MCP_EXPOSURES: readonly string[] = ["deferred", "direct", "codemode", "hidden"] satisfies McpExposure[];
 
 interface McpServerConfigBase {
 	/** Default: `deferred`. */

@@ -244,9 +244,11 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `defaultTools` | string[] | - | Built-in tools enabled initially. When omitted, Pi uses its standard defaults |
+| `defaultTools` | string[] | - | Built-in tools enabled initially; include `codemode` to activate it. When omitted, Pi uses its standard defaults |
+| `codemode.mode` | string | `"on"` | While codemode is active, `"on"` keeps active direct tools declared; `"only"` omits their provider declarations and calls them through scripts |
+| `codemode.inlineBudget` | number | `3000` | Non-negative estimated-token budget for tool declarations in the codemode description |
 
-`defaultTools` selects the standard built-in tools enabled at startup. Extension and SDK custom tools remain enabled. V2 profile selection is no longer supported:
+`defaultTools` selects the standard built-in tools enabled at startup and can opt into the inactive built-in `codemode` tool. Other extension and SDK custom tools retain their registration defaults. V2 profile selection is no longer supported:
 
 ```json
 {
@@ -255,6 +257,19 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 ```
 
 An empty array starts with no built-in tools while preserving extension and SDK custom tools. `--tools` replaces this behavior with a strict allowlist for all tools, `--no-tools` disables all tools, and `--no-builtin-tools` disables the built-in defaults. `--exclude-tools` filters the resulting list. A project `defaultTools` array replaces the global array.
+
+For codemode, keep target tools enabled as well:
+
+```json
+{
+  "defaultTools": ["read", "bash", "edit", "write", "codemode"],
+  "codemode": { "mode": "only", "inlineBudget": 3000 }
+}
+```
+
+In easy-pi, these files are `~/.epi/agent/settings.json` and trusted `.epi/settings.json` by default; use the configured product directories when overridden. `codemode.mode` only changes provider-facing declarations. It does not grant tools, activate explicitly disabled targets, or weaken `--tools`/`excludeTools`. For example, `epi --tools codemode` authorizes no target tools. See [Codemode](codemode.md) for scripts, discovery, branch-local store, and recovery behavior.
+
+MCP's `autoEnableCodemode` belongs to `mcp.json`, not `settings.json`; see [MCP servers](mcp.md#discovery-and-strict-authorization).
 
 ### Sessions
 

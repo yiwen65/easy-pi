@@ -1618,7 +1618,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 				assertSubagentToolRequestSize(rawParams);
 				const params = parseSubagentToolRequest(rawParams, parameters);
 				try {
-					const inheritedChildModel = parentModelSelection(ctx as ExtensionCommandContext);
+					const inheritedChildModel = parentModelSelection(ctx);
 					const childModel = options.childModel ?? inheritedChildModel;
 					let effectiveBudget: number;
 					try {
@@ -1646,11 +1646,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions) {
 							{ cause: error },
 						);
 					}
-					const childModels = resolveModelsForContext(
-						ctx as ExtensionCommandContext,
-						preferences,
-						options,
-					).childModels;
+					const childModels = resolveModelsForContext(ctx, preferences, options).childModels;
 					const request = {
 						...compiled,
 						...(childModel ? { childModel } : {}),

@@ -409,7 +409,7 @@ describe("tool exposure interface", () => {
 			}));
 		runner.bindCore({ ...actions, refreshTools: refresh, getAllTools }, contextActions);
 		expect(api.getAllTools()[0].exposure).toBe("direct");
-		for (const exposure of ["direct", "model-only", "deferred", "hidden"] satisfies ToolExposure[]) {
+		for (const exposure of ["direct", "model-only", "codemode", "deferred", "hidden"] satisfies ToolExposure[]) {
 			api.registerTool({
 				...tool,
 				exposure,
@@ -424,12 +424,12 @@ describe("tool exposure interface", () => {
 				annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 			});
 		}
-		expect(refresh).toHaveBeenCalledTimes(4);
+		expect(refresh).toHaveBeenCalledTimes(5);
 		expect(runner.getToolDefinition("search")?.contract).toEqual({ readOnly: true, sideEffects: "none" });
 		expect(runner.getToolDefinition("search")?.executionResource).toEqual({ key: "docs", mode: "shared" });
 	});
 
-	it("rejects codemode exposure even when a JavaScript extension bypasses TypeScript", async () => {
+	it("rejects unsupported exposure aliases even when a JavaScript extension bypasses TypeScript", async () => {
 		const runtime = createExtensionRuntime();
 		let api!: ExtensionAPI;
 		await loadExtensionFromFactory(
@@ -440,6 +440,8 @@ describe("tool exposure interface", () => {
 			createEventBus(),
 			runtime,
 		);
-		expect(() => api.registerTool({ ...tool, exposure: "codemode" as ToolExposure })).toThrow("Invalid exposure");
+		expect(() => api.registerTool({ ...tool, exposure: "codemode-deferred" as ToolExposure })).toThrow(
+			"Invalid exposure",
+		);
 	});
 });

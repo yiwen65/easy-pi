@@ -11,10 +11,12 @@
 import type {
 	AgentMessage,
 	AgentTool,
+	AgentToolCallOutcome,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ThinkingLevel,
 	ToolExecutionMode,
+	ToolExecutionOutcome,
 } from "@earendil-works/pi-agent-core";
 import type { BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import type {
@@ -66,6 +68,7 @@ import type {
 	SessionEntry,
 	SessionManager,
 } from "../session-manager.ts";
+import type { Settings } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -357,6 +360,20 @@ export interface ExtensionContext {
 	getSystemPrompt(): string;
 }
 
+/** Options for a nested call; its signal is always combined with the parent invocation. */
+export interface ExecuteToolOptions {
+	signal?: AbortSignal;
+	onUpdate?: AgentToolUpdateCallback;
+}
+
+/** Session-backed tool context. Nested results are journaled, not published as orphan messages. */
+export interface ExtensionToolContext extends ExtensionContext {
+	readonly tools: readonly AgentTool[];
+	executeTool(name: string, args: unknown, options?: ExecuteToolOptions): Promise<AgentToolCallOutcome>;
+	/** Drain host calls before committing state. Unknown outcomes cannot be hidden by script catch. */
+	waitForNestedTools(): Promise<ToolExecutionOutcome>;
+}
+
 /**
  * Extended context for command handlers.
  * Includes session control methods only safe in user-initiated commands.
@@ -458,9 +475,10 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
  * How a tool is exposed to the model. Direct (the default) and model-only tools are
  * declared while active; deferred tools require discovery/activation; hidden tools
  * remain registered but cannot be activated. Model-only is reserved for orchestration
- * and interactive tools; no nested tool execution API is provided.
+ * and interactive tools, and cannot be called by scripts. Codemode tools are callable
+ * by scripts without direct declarations. Exposure never grants authorization.
  */
-export type ToolExposure = "direct" | "model-only" | "deferred" | "hidden";
+export type ToolExposure = "direct" | "model-only" | "codemode" | "deferred" | "hidden";
 
 /** Unverified author hints, not an execution contract or authorization grant. */
 export interface ToolAnnotations {
@@ -476,6 +494,21 @@ export interface ToolNamespace {
 	description?: string;
 	/** Longer usage guidance, such as MCP server instructions. */
 	instructions?: string;
+}
+
+/** Access-filtered tool view presented to active loadout transformers. */
+export interface ToolLoadout {
+	readonly declared: readonly AgentTool[];
+	readonly callable: readonly AgentTool[];
+	readonly registered: readonly AgentTool[];
+	getExposure(name: string): ToolExposure;
+	getNamespace(name: string): ToolNamespace | undefined;
+	getPromptGuidelines(name: string): readonly string[];
+}
+
+export interface ToolLoadoutChanges {
+	descriptions?: Readonly<Record<string, string>>;
+	hiddenDeclarations?: readonly string[];
 }
 
 /**
@@ -494,6 +527,14 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	promptGuidelines?: string[];
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
+	/** Schema of structuredContent, passed to scripts independently of display text. */
+	outputSchema?: TSchema;
+	/** Register inactive unless selected explicitly. */
+	defaultActive?: boolean;
+	/** Presentation only: does not activate tools or expand their grants. */
+	prepareLoadout?: (loadout: ToolLoadout) => ToolLoadoutChanges | undefined;
+	/** Orchestrators leave scheduler slots to nested tools; incompatible with executionResource. */
+	orchestratesTools?: boolean;
 	/** Optional provider-side constrained sampling request for this tool. Set false to explicitly disable it, equivalent to leaving it undefined. */
 	constrainedSampling?: false | ConstrainedSamplingConfig;
 	/** Controls whether ToolExecutionComponent renders the standard colored shell or the tool renders its own framing. */
@@ -529,7 +570,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		params: Static<TParams>,
 		signal: AbortSignal | undefined,
 		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
-		ctx: ExtensionContext,
+		ctx: ExtensionToolContext,
 	): Promise<AgentToolResult<TDetails>>;
 
 	/** Custom rendering for tool call display */
@@ -835,6 +876,7 @@ export interface MessageEndEvent {
 
 /** Fired when a tool starts executing */
 export interface ToolExecutionStartEvent {
+	parentToolCallId?: string;
 	type: "tool_execution_start";
 	toolCallId: string;
 	toolName: string;
@@ -843,6 +885,7 @@ export interface ToolExecutionStartEvent {
 
 /** Fired during tool execution with partial/streaming output */
 export interface ToolExecutionUpdateEvent {
+	parentToolCallId?: string;
 	type: "tool_execution_update";
 	toolCallId: string;
 	toolName: string;
@@ -852,6 +895,7 @@ export interface ToolExecutionUpdateEvent {
 
 /** Fired when a tool finishes executing */
 export interface ToolExecutionEndEvent {
+	parentToolCallId?: string;
 	type: "tool_execution_end";
 	toolCallId: string;
 	toolName: string;
@@ -926,6 +970,7 @@ export type InputEventResult =
 // ============================================================================
 
 interface ToolCallEventBase {
+	parentToolCallId?: string;
 	type: "tool_call";
 	toolCallId: string;
 }
@@ -988,6 +1033,8 @@ export type ToolCallEvent =
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
+	parentToolCallId?: string;
+	structuredContent?: unknown;
 	type: "tool_result";
 	toolCallId: string;
 	input: Record<string, unknown>;
@@ -1197,6 +1244,7 @@ export type UserBashEventResult =
 	  };
 
 export interface ToolResultEventResult {
+	structuredContent?: unknown;
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
 	isError?: boolean;
@@ -1453,6 +1501,9 @@ export interface ExtensionAPI {
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 
+	/** Detached effective settings snapshot. */
+	getSettings(): Settings;
+
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
@@ -1708,7 +1759,7 @@ export type GetActiveToolsHandler = () => string[];
 /** Tool metadata with resolved exposure (direct when omitted in the definition). */
 export type ToolInfo = Pick<
 	ToolDefinition,
-	"name" | "description" | "parameters" | "promptGuidelines" | "namespace" | "annotations"
+	"name" | "description" | "parameters" | "outputSchema" | "promptGuidelines" | "namespace" | "annotations"
 > & {
 	exposure: ToolExposure;
 	sourceInfo: SourceInfo;
@@ -1735,6 +1786,7 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	getSettings: () => Settings;
 	flagValues: Map<string, boolean | string>;
 	/** Servers registered by extensions; core does not connect them. */
 	mcpServers: McpServerRegistry;
@@ -1764,6 +1816,7 @@ export interface ExtensionRuntimeState {
  * Provided to runner.initialize(), copied into the shared runtime.
  */
 export interface ExtensionActions {
+	getSettings?: () => Settings;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
@@ -1785,6 +1838,13 @@ export interface ExtensionActions {
  * Required by all modes.
  */
 export interface ExtensionContextActions {
+	getCallableTools?: () => readonly AgentTool[];
+	executeTool?: (
+		parentToolCallId: string,
+		name: string,
+		args: unknown,
+		options: ExecuteToolOptions,
+	) => Promise<AgentToolCallOutcome>;
 	getModel: () => Model<any> | undefined;
 	getToolAccess?: () => ToolAccess;
 	getScopedModels: () => readonly ScopedModel[];
@@ -1830,7 +1890,7 @@ export interface ExtensionCommandContextActions {
  * Full runtime = state + actions.
  * Created by loader with throwing action stubs, completed by runner.initialize().
  */
-export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {}
+export interface ExtensionRuntime extends ExtensionRuntimeState, Omit<ExtensionActions, "getSettings"> {}
 
 /** Loaded extension with all registered items. */
 export interface Extension {

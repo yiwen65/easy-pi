@@ -41,6 +41,7 @@ import {
 	SessionManager,
 } from "../core/session-manager.ts";
 import { type Settings, SettingsManager } from "../core/settings-manager.ts";
+import { createCodemodeExtension } from "./codemode/index.ts";
 import { createEasyPiHarness } from "./easy-pi.ts";
 import type { LoadedMcpConfig } from "./mcp/config.ts";
 import { createMcpExtension } from "./mcp/index.ts";
@@ -236,6 +237,7 @@ export function createPiChildSessionHost(options: {
 				extensionFactories: [
 					// Registration matches the root; getTools/toolAllowed still bound the active set.
 					{ name: "web-search", factory: webSearchExtension, hidden: true },
+					{ name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
 					...(options.getMcpConfig
 						? [
 								{ name: "tool-search", factory: toolSearchExtension, builtin: true, replaceable: true },
@@ -317,6 +319,7 @@ export function createPiChildSessionHost(options: {
 				throw new CollaborationError("invalid_arguments", "Child extensions failed to load");
 			// The protocol tool is structural; delegated tool names never include it.
 			const tools = options.getTools ? currentTools() : undefined;
+			const ancestryToolAllowed = request.ancestryToolAllowed ?? request.toolAllowed;
 			let session: AgentSession;
 			({ session } = await createAgentSession({
 				cwd,
@@ -328,6 +331,11 @@ export function createPiChildSessionHost(options: {
 				sessionManager: manager,
 				resourceLoader: loader,
 				tools,
+				liveToolAccessCheck: (name) =>
+					name === DELIVER_RESULT_TOOL_NAME ||
+					(!resourceTools.has(name) &&
+						(!ancestryToolAllowed || ancestryToolAllowed(name)) &&
+						(!options.getTools || options.getTools().includes(name))),
 			}));
 			boundSession = session;
 			const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
@@ -427,7 +435,10 @@ export function createPiChildSessionHost(options: {
 					if (options.getTools) session.setToolAccessByName(allowed);
 					session.setActiveToolsByName([
 						...session.getActiveToolNames().filter((name) => allowed.includes(name)),
-						...allowed.filter((name) => session.getToolDefinition(name)?.exposure !== "deferred"),
+						...allowed.filter(
+							(name) =>
+								!["deferred", "codemode"].includes(session.getToolDefinition(name)?.exposure ?? "direct"),
+						),
 					]);
 					const operation = async (): Promise<ChildTurnResult> => {
 						if (closed || interrupted) return { status: "interrupted", text: "" };

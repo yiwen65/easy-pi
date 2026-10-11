@@ -1,6 +1,6 @@
 # MCP servers
 
-Easy Pi connects to Model Context Protocol servers over **stdio** or **Streamable HTTP**. MCP tools run through the normal tool hooks, permissions and task-recovery pipeline. Codemode, legacy SSE, MCP Apps, sampling and MCP tasks are not supported.
+Easy Pi connects to Model Context Protocol servers over **stdio** or **Streamable HTTP**. MCP tools run through the normal tool hooks, permissions and task-recovery pipeline, including when called from [codemode](codemode.md) scripts. Legacy SSE, MCP Apps, sampling and MCP tasks are not supported.
 
 ## Setup
 
@@ -49,8 +49,9 @@ Tools are named `mcp__<server>__<tool>`, with provider-safe sanitization and a h
 
 | Exposure | Behavior |
 | --- | --- |
-| `deferred` (default) | `tool_search` finds and loads allowed tools; their schemas appear on the next model call. |
-| `direct` | Tools are declared as soon as the server connects. |
+| `deferred` (default) | `tool_search` finds and loads allowed tools; their schemas appear on the next model call. Authorized codemode scripts can also call them without loading a direct declaration. |
+| `direct` | Tools are declared as soon as the server connects and are callable from authorized codemode scripts. |
+| `codemode` | Tools are callable from authorized scripts, but are not declared as direct model tools. |
 | `hidden` | Tools cannot be discovered, declared or called. |
 
 `toolExposure` overrides individual tools by exact name or `*` pattern. Exact names win, then the first matching pattern:
@@ -66,7 +67,7 @@ Tools are named `mcp__<server>__<tool>`, with provider-safe sanitization and a h
 }
 ```
 
-`--tools` and SDK `tools` are **strict allowlists**, including MCP. Unlike upstream's convenience behavior, naming only `tool_search` does not authorize all MCP tools:
+`--tools` and SDK `tools` are **strict allowlists**, including MCP. Unlike upstream's convenience behavior, naming only `tool_search` or `codemode` does not authorize all MCP tools:
 
 ```bash
 # No MCP tools are authorized or connected.
@@ -75,11 +76,27 @@ epi --tools read,tool_search
 # Discovery may expose only this server's allowed tools.
 epi --tools 'read,tool_search,mcp__docs__*' --exclude-tools 'mcp__docs__delete_*'
 
+# Scripts may call only this server's allowed tools.
+epi --tools 'codemode,mcp__docs__*' --exclude-tools 'mcp__docs__delete_*'
+
 # Disable the built-in integration for one run.
 epi --no-mcp
 ```
 
 Search, late registration, resume, reload and branch navigation never add authorization. Loaded deferred tools are restored from the active branch when their server reconnects, subject to current grants and exclusions. Hidden or withdrawn tools remain unavailable.
+
+The top-level `autoEnableCodemode` option in `mcp.json` defaults to `true`: for enabled, authorized servers with `codemode` exposure, the integration can activate an already-authorized `codemode` tool. Set it to `false` to keep activation manual; a trusted project value overrides the global one. It never grants `codemode` or MCP targets outside the current allowlist:
+
+```json
+{
+  "autoEnableCodemode": false,
+  "mcpServers": {
+    "docs": { "url": "https://example.com/mcp", "exposure": "codemode" }
+  }
+}
+```
+
+The default exposure remains `deferred`; selecting `codemode` is explicit. See [Codemode](codemode.md) for script discovery and `on`/`only` presentation modes.
 
 ## Management and OAuth
 
@@ -108,13 +125,13 @@ OAuth supports PKCE, dynamic registration, loopback callbacks, scope upgrades an
 
 Text and images reach the model. Text over 20 KB is shortened, with the full output saved to a temporary file; binary resources are also saved to files. Server log notifications are written to `<agentDir>/mcp.log` with bounded rotation.
 
-A returned MCP `isError` is a known tool error. A connection drop, timeout or cancellation after dispatch can leave the remote effect **unknown**: Easy Pi pauses for verification instead of automatically replaying the call. Remote `readOnlyHint` and `idempotentHint` are metadata, not retry guarantees.
+A returned MCP `isError` is a known tool error. In codemode, an MCP call resolves to its structured `CallToolResult`, including this flag and any `structuredContent`; inspect `isError` before using the payload. A connection drop, timeout or cancellation after dispatch can leave the remote effect **unknown**: Easy Pi pauses for verification instead of automatically replaying the call. A script catching that failure does not confirm the remote outcome or make its store writes safe to commit. Remote `readOnlyHint` and `idempotentHint` are metadata, not retry guarantees.
 
 ## Resources and native children
 
 Root sessions can use `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource`. Resource tools obey the same grants and exposure controls. MCP App resources are omitted.
 
-Native children receive only the root's approved MCP configuration for concretely delegated tools, never fresh global/project discovery. Each session owns its transport; closing one child does not close the root's connections. Live parent and ancestry restrictions apply to search and execution, including follow-up turns.
+Native children receive only the root's approved MCP configuration for concretely delegated tools, never fresh global/project discovery. Each session owns its transport; closing one child does not close the root's connections. Live parent and ancestry restrictions apply to search and execution, including follow-up turns and codemode discovery or nested calls. Delegating `codemode` alone does not delegate any MCP target.
 
 The first-phase delegation API does not express resource-server scopes. Consequently, generic MCP resource tools are **not delegated to children**, even with `tools: "inherit"`. Granting a server tool does not grant that server's entire resource catalog. Children cannot start browser OAuth login; authenticate from the root/user first.
 

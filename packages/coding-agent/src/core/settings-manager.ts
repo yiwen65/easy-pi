@@ -9,6 +9,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -88,7 +89,16 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
+export type CodemodeMode = "on" | "only";
+
+export interface CodemodeSettings {
+	mode?: CodemodeMode;
+	/** Estimated token budget for inline tool declarations. Default: 3000. */
+	inlineBudget?: number;
+}
+
 export interface Settings {
+	codemode?: CodemodeSettings;
 	lastChangelogVersion?: string;
 	/** Last tmux keyboard setup warning already shown; suppresses repeats of the same message. */
 	tmuxKeyboardWarningShown?: string;
@@ -459,6 +469,22 @@ export class SettingsManager {
 		}
 
 		return settings as Settings;
+	}
+
+	/** Detached merged settings, including trusted project settings and host overrides. */
+	getSettings(): Settings {
+		return structuredClone(this.settings);
+	}
+
+	getCodemodeMode(): CodemodeMode {
+		return this.settings.codemode?.mode === "only" ? "only" : SETTINGS_DEFAULTS.codemode.mode;
+	}
+
+	getCodemodeInlineBudget(): number {
+		const budget = this.settings.codemode?.inlineBudget;
+		return typeof budget === "number" && Number.isFinite(budget) && budget >= 0
+			? budget
+			: SETTINGS_DEFAULTS.codemode.inlineBudget;
 	}
 
 	getGlobalSettings(): Settings {

@@ -40,6 +40,10 @@ export interface ChildSessionCreateOptions extends ChildSessionIdentity {
 	prefix?: ChildRequestPrefix;
 	/** Live ancestry restriction; rechecked for every tool call, including nested delegation. */
 	toolAllowed?: (name: string) => boolean;
+	/** Compose local native authority without recursively reading its own controller binding.
+	 * Still checks this child's persisted grant and every live ancestor/root restriction.
+	 */
+	ancestryToolAllowed?: (name: string) => boolean;
 	/** Trusted synchronous refresh, before control-plane observers see an authority mutation. */
 	subscribeAuthority?: (refresh: () => void) => () => void;
 	/** Storage ownership and historical session validation belong to the team store. */

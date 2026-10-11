@@ -23,6 +23,8 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolCall,
+	AgentToolCallOutcome,
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
@@ -88,6 +90,7 @@ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
 	type ContextUsage,
+	type ExecuteToolOptions,
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
 	type ExtensionMode,
@@ -97,6 +100,7 @@ import {
 	type MessageEndEvent,
 	type MessageStartEvent,
 	type MessageUpdateEvent,
+	type RegisteredTool,
 	type ReplacedSessionContext,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
@@ -108,10 +112,11 @@ import {
 	type ToolExecutionStartEvent,
 	type ToolExecutionUpdateEvent,
 	type ToolInfo,
+	type ToolLoadout,
 	type TreePreparation,
 	type TurnEndEvent,
 	type TurnStartEvent,
-	wrapRegisteredTools,
+	wrapRegisteredTool,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { createToolNameMatcher } from "./mcp-servers.ts";
@@ -233,6 +238,8 @@ export interface AgentSessionConfig {
 	allowedToolNames?: string[];
 	/** Optional denylist of tool names. When provided, these tool names are not exposed. */
 	excludedToolNames?: string[];
+	/** Trusted live ancestor/host authority, intersected with this session's creation ceiling. */
+	liveToolAccessCheck?: (name: string) => boolean;
 	/**
 	 * Override base tools (useful for custom runtimes).
 	 *
@@ -411,6 +418,7 @@ export class AgentSession {
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: string[];
 	private _excludedToolNames?: string[];
+	private _liveToolAccessCheck?: (name: string) => boolean;
 	private _matchesAllowedToolName?: (name: string) => boolean;
 	private _matchesExcludedToolName?: (name: string) => boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
@@ -437,6 +445,24 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	private _toolBindingRunner?: ExtensionRunner;
+	private _toolBindings = new Map<
+		string,
+		{
+			definition: ToolDefinition;
+			signature: string;
+			execute: ToolDefinition["execute"];
+			prepareArguments: ToolDefinition["prepareArguments"];
+			tool: AgentTool;
+		}
+	>();
+	/** True activation state, independent of loadout-hidden provider declarations. */
+	private _activeToolNames: string[] = [];
+	private readonly _executingTools = new Map<string, AgentTool>();
+	private readonly _nestedCallOrdinals = new Map<string, number>();
+	private readonly _nestedAllocatedIds = new Set<string>();
+	private readonly _nestedQueueHolders = new Set<string>();
+	private _nestedQueueTail: Promise<void> = Promise.resolve();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -466,6 +492,7 @@ export class AgentSession {
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? [...config.allowedToolNames] : undefined;
 		this._excludedToolNames = config.excludedToolNames ? [...config.excludedToolNames] : undefined;
+		this._liveToolAccessCheck = config.liveToolAccessCheck;
 		this._matchesAllowedToolName = this._allowedToolNames ? createToolNameMatcher(this._allowedToolNames) : undefined;
 		this._matchesExcludedToolName = this._excludedToolNames
 			? createToolNameMatcher(this._excludedToolNames)
@@ -595,16 +622,20 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+		this.agent.beforeToolCall = async ({ toolCall, args, parentToolCallId }, signal) => {
 			const runner = this._extensionRunner;
 			if (runner.hasHandlers("tool_call")) {
 				try {
-					const hookResult = await runner.emitToolCall({
-						type: "tool_call",
-						toolName: toolCall.name,
-						toolCallId: toolCall.id,
-						input: args as Record<string, unknown>,
-					});
+					const hookResult = await runner.emitToolCall(
+						{
+							type: "tool_call",
+							toolName: toolCall.name,
+							toolCallId: toolCall.id,
+							parentToolCallId,
+							input: args as Record<string, unknown>,
+						},
+						signal,
+					);
 					if (hookResult?.block) {
 						return hookResult;
 					}
@@ -619,19 +650,24 @@ export class AgentSession {
 			return undefined;
 		};
 
-		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+		this.agent.afterToolCall = async ({ toolCall, args, result, isError, parentToolCallId }, signal) => {
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
-				? await runner.emitToolResult({
-						type: "tool_result",
-						toolName: toolCall.name,
-						toolCallId: toolCall.id,
-						input: args as Record<string, unknown>,
-						content: result.content,
-						details: result.details,
-						isError,
-						usage: result.usage,
-					})
+				? await runner.emitToolResult(
+						{
+							type: "tool_result",
+							toolName: toolCall.name,
+							toolCallId: toolCall.id,
+							parentToolCallId,
+							structuredContent: result.structuredContent,
+							input: args as Record<string, unknown>,
+							content: result.content,
+							details: result.details,
+							isError,
+							usage: result.usage,
+						},
+						signal,
+					)
 				: undefined;
 
 			const content = hookResult?.content ?? result.content ?? [];
@@ -645,6 +681,7 @@ export class AgentSession {
 
 			return {
 				content: normalizedContent,
+				structuredContent: hookResult?.structuredContent,
 				details: hookResult?.details,
 				isError: hookResult?.isError ?? isError,
 				usage: hookResult?.usage,
@@ -817,13 +854,26 @@ export class AgentSession {
 			if (this._taskRecovery.state?.status === "needs_reconciliation")
 				throw new Error("Task requires reconciliation before further tool dispatch");
 			await previousDispatch?.(context);
+			if (
+				!this._isToolAllowed(context.tool.name) ||
+				this._toolDefinitions.get(context.tool.name)?.definition.exposure === "hidden"
+			)
+				throw new Error(`Tool ${context.tool.name} is no longer authorized`);
+			if (
+				context.parentToolCallId &&
+				this._getCallableTools().find((tool) => tool.name === context.tool.name) !== context.tool
+			)
+				throw new Error(`Nested tool ${context.tool.name} is no longer callable or its binding changed`);
 			const contract = context.tool.contract;
 			this._taskRecovery.dispatch(
 				context.toolCall,
 				context.args,
-				contract?.readOnly === true || contract?.idempotent === true || contract?.sideEffects === "none",
+				!context.tool.orchestratesTools &&
+					(contract?.readOnly === true || contract?.idempotent === true || contract?.sideEffects === "none"),
 				JSON.stringify({ name: context.tool.name, parameters: context.tool.parameters, contract }),
+				context.parentToolCallId,
 			);
+			this._executingTools.set(context.toolCall.id, context.tool);
 		};
 		const previousResult = this.agent.onToolResult;
 		this.agent.onToolResult = async (message, context) => {
@@ -832,8 +882,13 @@ export class AgentSession {
 				context.toolCall,
 				context.terminate,
 				context.executionOutcome === "unknown",
+				context.parentToolCallId,
 			);
-			await previousResult?.(message, context);
+			try {
+				await previousResult?.(message, context);
+			} finally {
+				this._executingTools.delete(context.toolCall.id);
+			}
 		};
 	}
 
@@ -1023,7 +1078,7 @@ export class AgentSession {
 					...previousContext,
 					messages: projectionChangedDuringCallback ? this.agent.state.messages.slice() : previousContext.messages,
 					systemPrompt: baseSystemPrompt,
-					tools: this.agent.state.tools.slice(),
+					tools: this.agent.state.tools.filter((tool) => this._isToolAllowed(tool.name)),
 					toolPlan: undefined,
 				},
 				model: this.agent.state.model,
@@ -1165,6 +1220,8 @@ export class AgentSession {
 			event.message.stopReason !== "aborted" &&
 			!event.message.isResponseCheckpoint
 		) {
+			this._nestedCallOrdinals.clear();
+			this._nestedAllocatedIds.clear();
 			this._taskRecovery.beginStep(event.message);
 		}
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
@@ -1375,6 +1432,7 @@ export class AgentSession {
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
+				parentToolCallId: event.parentToolCallId,
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_update") {
@@ -1384,6 +1442,7 @@ export class AgentSession {
 				toolName: event.toolName,
 				args: event.args,
 				partialResult: event.partialResult,
+				parentToolCallId: event.parentToolCallId,
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_end") {
@@ -1393,6 +1452,7 @@ export class AgentSession {
 				toolName: event.toolName,
 				result: event.result,
 				isError: event.isError,
+				parentToolCallId: event.parentToolCallId,
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		}
@@ -1530,19 +1590,111 @@ export class AgentSession {
 	 * Returns the names of tools currently set on the agent.
 	 */
 	getActiveToolNames(): string[] {
-		return this.agent.state.tools.map((t) => t.name);
+		return this._activeToolNames.filter((name) => this._isToolAllowed(name));
+	}
+
+	private _getCallableTools(): AgentTool[] {
+		const active = new Set(this._activeToolNames);
+		return [...this._toolRegistry.values()].filter((tool) => {
+			if (!this._isToolAllowed(tool.name) || this._explicitlyInactiveToolNames.has(tool.name)) return false;
+			const exposure = this._toolDefinitions.get(tool.name)?.definition.exposure ?? "direct";
+			return exposure === "codemode" || exposure === "deferred" || (exposure === "direct" && active.has(tool.name));
+		});
+	}
+
+	private async _executeNestedToolCall(
+		parentToolCallId: string,
+		name: string,
+		args: unknown,
+		options: ExecuteToolOptions,
+	): Promise<AgentToolCallOutcome> {
+		let ordinal = (this._nestedCallOrdinals.get(parentToolCallId) ?? 0) + 1;
+		const task = this._taskRecovery.state;
+		const reserved = new Set([
+			...(task ? this._taskRecovery.plannedCalls(task).map((call) => call.id) : []),
+			...(task?.tools.map((tool) => tool.call.id) ?? []),
+			...this._nestedAllocatedIds,
+		]);
+		while (reserved.has(`${parentToolCallId}/${ordinal}`)) ordinal++;
+		this._nestedCallOrdinals.set(parentToolCallId, ordinal);
+		const id = `${parentToolCallId}/${ordinal}`;
+		this._nestedAllocatedIds.add(id);
+		const toolCall: AgentToolCall = {
+			type: "toolCall",
+			id,
+			name,
+			arguments: (args ?? {}) as AgentToolCall["arguments"],
+		};
+		const caller = this._executingTools.get(parentToolCallId);
+		if (!caller || (this.agent.executionScheduler && !caller.orchestratesTools)) {
+			return {
+				toolCall,
+				result: {
+					content: [
+						{
+							type: "text",
+							text: caller
+								? "A scheduled tool must declare orchestratesTools before awaiting nested tools"
+								: "Nested call has no active parent invocation",
+						},
+					],
+					details: {},
+				},
+				isError: true,
+				executionOutcome: "not_started",
+			};
+		}
+		const tools = this._getCallableTools().filter((tool) => tool.name !== caller.name);
+		const exclusive =
+			!this._nestedQueueHolders.has(parentToolCallId) &&
+			(this.agent.toolExecution === "sequential" ||
+				tools.find((tool) => tool.name === name)?.executionMode === "sequential");
+		let release: (() => void) | undefined;
+		if (exclusive) {
+			const previous = this._nestedQueueTail;
+			this._nestedQueueTail = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			await previous;
+		}
+		if (exclusive || this._nestedQueueHolders.has(parentToolCallId)) this._nestedQueueHolders.add(toolCall.id);
+		try {
+			return await this.agent.runToolCall(toolCall, tools, parentToolCallId, options.signal, options.onUpdate);
+		} finally {
+			this._nestedQueueHolders.delete(toolCall.id);
+			release?.();
+		}
 	}
 
 	/** Detached effective access filters, including patterns, for extension connection policy. */
 	getToolAccess(): { allowlist?: readonly string[]; excluded?: readonly string[] } {
 		return {
-			allowlist: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+			// Connection eligibility cannot enumerate a server before its first tools/list.
+			// Keep the configured pattern ceiling; concrete catalogs and dispatch still
+			// apply the live predicate, and native children retain their server policy.
+			allowlist: this._allowedToolNames
+				? this._allowedToolNames.filter(
+						(name) => !this._liveToolAccessCheck || name.includes("*") || this._isToolAllowed(name),
+					)
+				: undefined,
 			excluded: this._excludedToolNames ? [...this._excludedToolNames] : undefined,
 		};
 	}
 
+	/** Install trusted live authority without widening the session's configured ceiling. */
+	setLiveToolAccessCheck(check: ((name: string) => boolean) | undefined): void {
+		this._liveToolAccessCheck = check;
+		this._refreshToolRegistry();
+	}
+
 	/** Replace the host allowlist without changing the denylist or auto-declaring deferred tools. */
 	setToolAccessByName(toolNames: readonly string[]): void {
+		if (
+			this._allowedToolNames &&
+			this._allowedToolNames.length === toolNames.length &&
+			this._allowedToolNames.every((name, index) => name === toolNames[index])
+		)
+			return;
 		this._allowedToolNames = [...toolNames];
 		this._matchesAllowedToolName = createToolNameMatcher(this._allowedToolNames);
 		this._refreshToolRegistry();
@@ -1556,7 +1708,12 @@ export class AgentSession {
 					(name) => this._isToolAllowed(name) && this._toolDefinitions.get(name)?.definition.exposure !== "hidden",
 				),
 				...Array.from(this._toolDefinitions.values())
-					.filter(({ definition }) => definition.exposure === "deferred" && this._isToolAllowed(definition.name))
+					.filter(
+						({ definition }) =>
+							(definition.exposure === "deferred" || definition.exposure === "codemode") &&
+							this._isToolAllowed(definition.name) &&
+							(definition.exposure === "deferred" || !this._explicitlyInactiveToolNames.has(definition.name)),
+					)
 					.map(({ definition }) => definition.name),
 			]),
 		];
@@ -1564,20 +1721,23 @@ export class AgentSession {
 
 	/** Get the access-filtered registry, including exposure, namespace, and author hints. */
 	getAllTools(): ToolInfo[] {
-		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
-			name: definition.name,
-			description: definition.description,
-			parameters: definition.parameters,
-			promptGuidelines: definition.promptGuidelines,
-			exposure: definition.exposure ?? "direct",
-			namespace: definition.namespace,
-			annotations: definition.annotations,
-			sourceInfo,
-		}));
+		return Array.from(this._toolDefinitions.values())
+			.filter(({ definition }) => this._isToolAllowed(definition.name))
+			.map(({ definition, sourceInfo }) => ({
+				name: definition.name,
+				description: definition.description,
+				parameters: definition.parameters,
+				outputSchema: definition.outputSchema,
+				promptGuidelines: definition.promptGuidelines,
+				exposure: definition.exposure ?? "direct",
+				namespace: definition.namespace,
+				annotations: definition.annotations,
+				sourceInfo,
+			}));
 	}
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
-		return this._toolDefinitions.get(name)?.definition;
+		return this._isToolAllowed(name) ? this._toolDefinitions.get(name)?.definition : undefined;
 	}
 
 	/**
@@ -1588,8 +1748,15 @@ export class AgentSession {
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		const previousActiveToolNames = this.getActiveToolNames();
-		this._applyActiveToolNames(toolNames);
-		const active = new Set(this.getActiveToolNames());
+		const active = new Set(
+			toolNames.filter(
+				(name) =>
+					this._toolRegistry.has(name) &&
+					this._isToolAllowed(name) &&
+					this._toolDefinitions.get(name)?.definition.exposure !== "hidden" &&
+					this._toolDefinitions.get(name)?.definition.exposure !== "codemode",
+			),
+		);
 		for (const name of active) this._explicitlyInactiveToolNames.delete(name);
 		for (const name of previousActiveToolNames) {
 			if (active.has(name)) continue;
@@ -1599,6 +1766,7 @@ export class AgentSession {
 				this._pendingDeferredToolNames.delete(name);
 			}
 		}
+		this._applyActiveToolNames(toolNames);
 	}
 
 	private _applyActiveToolNames(toolNames: string[]): void {
@@ -1606,16 +1774,37 @@ export class AgentSession {
 		const validToolNames: string[] = [];
 		for (const name of new Set(toolNames)) {
 			const tool = this._toolRegistry.get(name);
-			if (tool && this._isToolAllowed(name) && this._toolDefinitions.get(name)?.definition.exposure !== "hidden") {
+			const exposure = this._toolDefinitions.get(name)?.definition.exposure;
+			if (tool && this._isToolAllowed(name) && exposure !== "hidden" && exposure !== "codemode") {
 				tools.push(tool);
 				validToolNames.push(name);
 				this._inactiveDeferredToolNames.delete(name);
 			}
 		}
-		this.agent.state.tools = tools;
+		this._activeToolNames = validToolNames;
+		const loadout: ToolLoadout = {
+			declared: tools,
+			callable: this._getCallableTools(),
+			registered: [...this._toolRegistry.values()].filter((tool) => this._isToolAllowed(tool.name)),
+			getExposure: (name) => this._toolDefinitions.get(name)?.definition.exposure ?? "direct",
+			getNamespace: (name) => this._toolDefinitions.get(name)?.definition.namespace,
+			getPromptGuidelines: (name) => this._toolPromptGuidelines.get(name) ?? [],
+		};
+		const hidden = new Set<string>();
+		const descriptions: Record<string, string> = {};
+		for (const name of validToolNames) {
+			const changes = this._toolDefinitions.get(name)?.definition.prepareLoadout?.(loadout);
+			for (const hiddenName of changes?.hiddenDeclarations ?? []) hidden.add(hiddenName);
+			Object.assign(descriptions, changes?.descriptions);
+		}
+		this.agent.state.tools = tools
+			.filter((tool) => !hidden.has(tool.name))
+			.map((tool) =>
+				descriptions[tool.name] === undefined ? tool : { ...tool, description: descriptions[tool.name] },
+			);
 
-		// Rebuild base system prompt with new tool set
-		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
+		// Only declared tools contribute prompt snippets, without deactivating hidden capabilities.
+		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames.filter((name) => !hidden.has(name)));
 		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
 	}
 
@@ -1976,7 +2165,7 @@ export class AgentSession {
 					throw new Error("Recovery assistant is missing from the active branch");
 				const calls = assistant.content.filter((block) => block.type === "toolCall");
 				if (calls.length === 0 && !assistant.isResponseCheckpoint) return;
-				const results = task.tools.flatMap((tool) => (tool.result ? [tool.result] : []));
+				const results = task.tools.flatMap((tool) => (tool.result && !tool.parentToolCallId ? [tool.result] : []));
 				for (const result of results) {
 					if (
 						!this.agent.state.messages.some(
@@ -2052,7 +2241,9 @@ export class AgentSession {
 						...task.tools.filter((tool) => !calls.some((call) => call.id === tool.call.id)),
 					];
 					return tools.flatMap((tool) =>
-						tool.result ? [{ assistantEntryId: task.step?.assistantEntryId, result: tool.result }] : [],
+						tool.result && !tool.parentToolCallId
+							? [{ assistantEntryId: task.step?.assistantEntryId, result: tool.result }]
+							: [],
 					);
 				},
 			);
@@ -3730,6 +3921,7 @@ export class AgentSession {
 				setLabel: (entryId, label) => {
 					this.sessionManager.appendLabelChange(entryId, label);
 				},
+				getSettings: () => this.settingsManager.getSettings(),
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
@@ -3746,6 +3938,8 @@ export class AgentSession {
 			{
 				getScopedModels: () => this._scopedModels,
 				getToolAccess: () => this.getToolAccess(),
+				getCallableTools: () => this._getCallableTools(),
+				executeTool: (parent, name, args, options) => this._executeNestedToolCall(parent, name, args, options),
 				getModel: () => this.model,
 				isIdle: () => this.isIdle,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
@@ -3795,7 +3989,9 @@ export class AgentSession {
 
 	private _isToolAllowed(name: string): boolean {
 		return (
-			(!this._matchesAllowedToolName || this._matchesAllowedToolName(name)) && !this._matchesExcludedToolName?.(name)
+			(!this._matchesAllowedToolName || this._matchesAllowedToolName(name)) &&
+			!this._matchesExcludedToolName?.(name) &&
+			(!this._liveToolAccessCheck || this._liveToolAccessCheck(name))
 		);
 	}
 
@@ -3880,16 +4076,50 @@ export class AgentSession {
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
 		const runner = this._extensionRunner;
-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
-		const wrappedBuiltInTools = wrapRegisteredTools(
+		const nextBindings: typeof this._toolBindings = new Map();
+		const wrapTools = (registered: RegisteredTool[]): AgentTool[] =>
+			registered.map((registeredTool) => {
+				const definition = registeredTool.definition;
+				const signature = JSON.stringify({
+					name: definition.name,
+					label: definition.label,
+					description: definition.description,
+					parameters: definition.parameters,
+					outputSchema: definition.outputSchema,
+					contract: definition.contract,
+					executionMode: definition.executionMode,
+					executionResource: definition.executionResource,
+					orchestratesTools: definition.orchestratesTools,
+				});
+				const previous = this._toolBindings.get(definition.name);
+				const tool =
+					this._toolBindingRunner === runner &&
+					previous?.definition === definition &&
+					previous.signature === signature &&
+					previous.execute === definition.execute &&
+					previous.prepareArguments === definition.prepareArguments
+						? previous.tool
+						: wrapRegisteredTool(registeredTool, runner);
+				nextBindings.set(definition.name, {
+					definition,
+					signature,
+					execute: definition.execute,
+					prepareArguments: definition.prepareArguments,
+					tool,
+				});
+				return tool;
+			});
+		const wrappedBuiltInTools = wrapTools(
 			Array.from(this._baseToolDefinitions.values())
 				.filter((definition) => isAllowedTool(definition.name))
 				.map((definition) => ({
 					definition,
 					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
 				})),
-			runner,
 		);
+		const wrappedExtensionTools = wrapTools(allCustomTools);
+		this._toolBindings = nextBindings;
+		this._toolBindingRunner = runner;
 
 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
@@ -3902,8 +4132,16 @@ export class AgentSession {
 		).filter((name) => isAllowedTool(name));
 
 		const autoActivate = (name: string): void => {
-			const exposure = definitionRegistry.get(name)?.definition.exposure;
-			if (exposure !== "hidden" && exposure !== "deferred" && !this._explicitlyInactiveToolNames.has(name)) {
+			const definition = definitionRegistry.get(name)?.definition;
+			const exposure = definition?.exposure;
+			const selected = this._matchesAllowedToolName?.(name) === true;
+			if (
+				exposure !== "hidden" &&
+				exposure !== "deferred" &&
+				exposure !== "codemode" &&
+				(selected || definition?.defaultActive !== false) &&
+				!this._explicitlyInactiveToolNames.has(name)
+			) {
 				nextActiveToolNames.push(name);
 			}
 		};
@@ -3916,7 +4154,12 @@ export class AgentSession {
 		} else if (!options?.activeToolNames) {
 			for (const name of this._toolRegistry.keys()) {
 				const previousExposure = previousDefinitions.get(name)?.definition.exposure;
-				if (!previousRegistryNames.has(name) || previousExposure === "deferred" || previousExposure === "hidden") {
+				if (
+					!previousRegistryNames.has(name) ||
+					previousExposure === "deferred" ||
+					previousExposure === "codemode" ||
+					previousExposure === "hidden"
+				) {
 					autoActivate(name);
 				}
 			}
@@ -4099,7 +4342,12 @@ export class AgentSession {
 			options.activeToolNames ??
 			defaultActiveToolNames.filter((name) => {
 				const exposure = this._baseToolDefinitions.get(name)?.exposure;
-				return exposure !== "deferred" && exposure !== "hidden";
+				return (
+					exposure !== "deferred" &&
+					exposure !== "hidden" &&
+					exposure !== "codemode" &&
+					this._baseToolDefinitions.get(name)?.defaultActive !== false
+				);
 			});
 		this._taskRecovery.retireRemovedComputerCaptures(
 			new Set([

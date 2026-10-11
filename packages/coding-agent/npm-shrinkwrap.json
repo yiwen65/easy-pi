@@ -13,6 +13,7 @@
 				"@earendil-works/pi-ai": "^0.84.2",
 				"@earendil-works/pi-client": "^0.84.2",
 				"@earendil-works/pi-mcp": "0.84.2",
+				"@earendil-works/pi-codemode": "0.84.2",
 				"@easy-pi/grok-tui": "0.84.2",
 				"@earendil-works/pi-protocol": "^0.84.2",
 				"@earendil-works/pi-server": "^0.84.2",
@@ -42,6 +43,7 @@
 			},
 			"bundleDependencies": [
 				"@earendil-works/pi-mcp",
+				"@earendil-works/pi-codemode",
 				"@easy-pi/grok-tui",
 				"@easy-pi/permissions",
 				"@easy-pi/subagent",
@@ -538,6 +540,17 @@
 			"engines": {
 				"node": ">=22.19.0"
 			}
+		},
+		"node_modules/@earendil-works/pi-codemode": {
+			"version": "0.84.2",
+			"license": "MIT",
+			"dependencies": {
+				"quickjs-wasi": "3.6.2"
+			},
+			"engines": {
+				"node": ">=22.19.0"
+			},
+			"inBundle": true
 		},
 		"node_modules/@earendil-works/pi-mcp": {
 			"version": "0.84.2",
@@ -1707,6 +1720,12 @@
 				"node": ">=12.0.0"
 			},
 			"hasInstallScript": true
+		},
+		"node_modules/quickjs-wasi": {
+			"version": "3.6.2",
+			"resolved": "https://registry.npmjs.org/quickjs-wasi/-/quickjs-wasi-3.6.2.tgz",
+			"integrity": "sha512-FCqGtGOrMgzUiIrMNMA2YnsOxCNwo31dzqXvclXUC6xeT35NJLKXQJsvbeCTjvoFAwZgEAPg8U6+KAPDGXn8Mg==",
+			"license": "MIT"
 		},
 		"node_modules/retry": {
 			"version": "0.13.1",

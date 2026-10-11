@@ -459,6 +459,22 @@ export interface AssistantMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+/** Bounded display metadata; durable execution authority lives in the host journal. */
+export interface NestedToolCallRecord {
+	id: string;
+	name: string;
+	arguments?: Record<string, JsonValue>;
+	argumentsBytes?: number;
+	status: "ok" | "error" | "unfinished";
+	durationMs?: number;
+	error?: string;
+}
+
+export interface NestedToolCalls {
+	calls: NestedToolCallRecord[];
+	complete: boolean;
+}
+
 export interface ToolResultMessage<TDetails = any> {
 	role: "toolResult";
 	toolCallId: string;
@@ -473,6 +489,11 @@ export interface ToolResultMessage<TDetails = any> {
 	 * other providers ignore it and use `Context.tools` normally.
 	 */
 	addedToolNames?: string[];
+	/** Host-owned structured tool output, independent of display content. */
+	structuredContent?: unknown;
+	nestedCalls?: NestedToolCalls;
+	/** A confirmed outer process exit does not establish unresolved nested effects. */
+	nestedExecutionOutcome?: "unknown";
 	isError: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
 }

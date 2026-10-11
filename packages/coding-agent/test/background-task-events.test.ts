@@ -182,13 +182,13 @@ describe("background task session events", () => {
 				const taskId = await startSilentTask(harness, "waited");
 				const waitFor = harness.session.getToolDefinition("wait_for");
 				if (!waitFor) throw new Error("wait_for unavailable");
-				await waitFor.execute(
-					"consume",
-					{ task_id: taskId },
-					undefined,
-					undefined,
-					harness.session.extensionRunner.createContext(),
-				);
+				const runner = harness.session.extensionRunner;
+				const context = runner.createToolContext("consume");
+				try {
+					await waitFor.execute("consume", { task_id: taskId }, undefined, undefined, context);
+				} finally {
+					await runner.finishToolContext(context);
+				}
 				return fauxAssistantMessage("consumed by wait_for");
 			},
 		]);

@@ -345,13 +345,17 @@ export class CollaborationController {
 
 	/** A live deny anywhere in the creation ancestry also denies descendant execution. */
 	toolAllowed(caller: ChildSessionIdentity, name: string): boolean {
+		return this.checkToolAuthority(caller, name, true);
+	}
+
+	private checkToolAuthority(caller: ChildSessionIdentity, name: string, includeCallerBinding: boolean): boolean {
 		this.assertReady();
 		const records = this.store.readAuthority();
 		this.assertCaller(caller, records);
 		let path = caller.agentPath;
 		while (path !== "/root") {
 			const live = this.liveTools.get(path);
-			if (live && !live().includes(name)) return false;
+			if (live && (includeCallerBinding || path !== caller.agentPath) && !live().includes(name)) return false;
 			const record = records.find((agent) => agent.path === path);
 			if (!record || record.status === "closed" || (record.tools && !record.tools.includes(name))) return false;
 			path = record.parent;
@@ -771,6 +775,10 @@ export class CollaborationController {
 			prefix,
 			toolAllowed: (name) =>
 				this.toolAllowed({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name),
+			// Native local grants compose with ancestors, rather than reading their own bound
+			// effective getter again. The ordinary execution callback above remains fully restrictive.
+			ancestryToolAllowed: (name) =>
+				this.checkToolAuthority({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name, false),
 			subscribeAuthority: (refresh) => {
 				this.authorityObservers.add(refresh);
 				return () => this.authorityObservers.delete(refresh);

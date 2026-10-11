@@ -62,7 +62,7 @@ describe("MCP config and shell commands", () => {
 		expect(await runMcpCommand(["remove", "docs"], options)).toBe(0);
 		expect(await runMcpCommand(["remove", "docs"], options)).toBe(1);
 	});
-	it("rejects unsupported codemode/provider auth/CIMD instead of silently adapting", async () => {
+	it("accepts codemode but rejects unsupported exposure aliases/provider auth/CIMD", async () => {
 		const options = setup();
 		writeFileSync(
 			join(options.agentDir, "mcp.json"),
@@ -76,18 +76,19 @@ describe("MCP config and shell commands", () => {
 			}),
 		);
 		const loaded = loadMcpConfig({ ...options, projectTrusted: false });
-		expect(loaded.servers).toEqual([]);
-		expect(loaded.errors).toHaveLength(4);
+		expect(loaded.servers.map((server) => server.name)).toEqual(["code"]);
+		expect(loaded.errors).toHaveLength(3);
 		expect(
 			await runMcpCommand(["add", "legacy", "--url", "https://example.test/mcp", "--exposure", "codemode"], options),
-		).toBe(1);
+		).toBe(0);
 		writeFileSync(
 			join(options.agentDir, "mcp.json"),
 			JSON.stringify({ autoEnableCodemode: true, mcpServers: { docs: { command: "unused" } } }),
 		);
 		expect(loadMcpConfig({ ...options, projectTrusted: false })).toMatchObject({
-			servers: [],
-			errors: [expect.stringContaining("autoEnableCodemode is not supported")],
+			autoEnableCodemode: true,
+			servers: [expect.objectContaining({ name: "docs" })],
+			errors: [],
 		});
 	});
 	it("keeps project overrides narrow and uses deferred as the removable default", () => {

@@ -22,6 +22,8 @@ const driverOwners = new WeakSet<SessionManager>();
 
 export interface RecoveryTool {
 	call: AgentToolCall;
+	/** Nested calls belong to the parent's response occurrence and are never transcript exchanges. */
+	parentToolCallId?: string;
 	safe: boolean;
 	args?: unknown;
 	dispatched: boolean;
@@ -231,6 +233,7 @@ export class TaskRecoveryJournal {
 						!message ||
 						message.role !== "toolResult" ||
 						message.toolCallId !== tool.call.id ||
+						message.nestedExecutionOutcome === "unknown" ||
 						!hasConfirmedBashExit(message.toolName, message.details) ||
 						message.details.command !== tool.call.arguments.command
 					)
@@ -367,6 +370,8 @@ export class TaskRecoveryJournal {
 		if (matches.length !== 1) throw new Error(`No unique unknown tool call ${toolCallId}`);
 		const state = matches[0];
 		const tool = state.tools.find((tool) => tool.call.id === toolCallId)!;
+		if (resolution.kind === "retry" && tool.parentToolCallId)
+			throw new Error("Nested operations cannot be independently retried; inspect their external outcome");
 		if (resolution.kind === "retry") tool.dispatched = false;
 		else {
 			if (resolution.result.toolCallId !== toolCallId || resolution.result.toolName !== tool.call.name)
@@ -548,7 +553,7 @@ export class TaskRecoveryJournal {
 		});
 	}
 
-	dispatch(call: AgentToolCall, args: unknown, safe: boolean, definition?: string): void {
+	dispatch(call: AgentToolCall, args: unknown, safe: boolean, definition?: string, parentToolCallId?: string): void {
 		const pending = this.suspendedTasks
 			.flatMap((task) => task.state.tools)
 			.find(
@@ -574,10 +579,13 @@ export class TaskRecoveryJournal {
 				call,
 				false,
 				false,
+				parentToolCallId,
 			);
 			throw new Error(text);
 		}
 		const previous = this.state?.tools.find((tool) => tool.call.id === call.id);
+		if (previous && (previous.call.name !== call.name || previous.parentToolCallId !== parentToolCallId))
+			throw new Error(`Tool call ${call.id} belongs to a different execution occurrence`);
 		if (
 			previous?.dispatched &&
 			!previous.result &&
@@ -596,19 +604,38 @@ export class TaskRecoveryJournal {
 		}
 		this.update((state) => {
 			if (state.status !== "running") throw new Error(`Task is ${state.status}; tool dispatch is paused`);
+			if (parentToolCallId) {
+				let parentId: string | undefined = parentToolCallId;
+				while (parentId) {
+					const parent = state.tools.find((tool) => tool.call.id === parentId);
+					if (!parent?.dispatched || parent.result)
+						throw new Error("Nested dispatch has no active parent occurrence");
+					// A composed execution cannot promise safe replay of the complete script.
+					parent.safe = false;
+					parentId = parent.parentToolCallId;
+				}
+			}
 			const old = state.tools.find((tool) => tool.call.id === call.id);
 			if (old?.result) throw new Error(`Tool ${call.id} already has a committed result`);
 			if (old?.dispatched && !old.safe) throw new Error(`Tool ${call.id} requires reconciliation before retry`);
 			state.tools = [
 				...state.tools.filter((tool) => tool.call.id !== call.id),
-				{ call, args, safe, definition, dispatched: true },
+				{ call, args, safe, definition, dispatched: true, ...(parentToolCallId ? { parentToolCallId } : {}) },
 			];
 		});
 	}
 
-	result(message: ToolResultMessage, call: AgentToolCall, terminate: boolean, uncertain: boolean): void {
+	result(
+		message: ToolResultMessage,
+		call: AgentToolCall,
+		terminate: boolean,
+		uncertain: boolean,
+		parentToolCallId?: string,
+	): void {
 		this.update((state) => {
 			const old = state.tools.find((tool) => tool.call.id === call.id);
+			if (old && (old.call.name !== call.name || old.parentToolCallId !== parentToolCallId))
+				throw new Error(`Tool result ${call.id} does not match its dispatch owner`);
 			if (uncertain && old?.dispatched && !old.safe && !old.result) {
 				if (state.status !== "cancelled") state.status = "needs_reconciliation";
 				return;
@@ -618,6 +645,7 @@ export class TaskRecoveryJournal {
 				{
 					...old,
 					call,
+					...(parentToolCallId ? { parentToolCallId } : {}),
 					safe: old?.safe ?? false,
 					dispatched: old?.dispatched ?? false,
 					result: message,
@@ -660,7 +688,7 @@ export class TaskRecoveryJournal {
 		const tool = task?.tools.find(
 			(tool) => tool.call.id === message.toolCallId && tool.call.name === message.toolName,
 		);
-		if (!tool?.result) return;
+		if (!tool?.result || tool.parentToolCallId) return;
 		tool.result = message;
 		const receipt = resultEntryId ?? tool.resultEntryId;
 		// An ancestor can reserve a receipt later consumed on another branch.
