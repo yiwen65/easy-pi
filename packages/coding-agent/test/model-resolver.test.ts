@@ -709,6 +709,44 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider["ant-ling"]).toBe("Ring-2.6-1T");
 	});
 
+	describe.each([
+		["fireworks", "accounts/fireworks/models/kimi-k3"],
+		["opencode-go", "kimi-k3"],
+		["together", "moonshotai/Kimi-K3"],
+	] as const)("%s Kimi K3 default", (provider, defaultId) => {
+		test("tracks the catalogued model", () => {
+			expect(defaultModelPerProvider[provider]).toBe(defaultId);
+		});
+
+		test.each(["builtin", "cli", "saved", "scoped"] as const)(
+			"findInitialModel preserves %s selection priority",
+			async (selection) => {
+				const kimi = getBuiltinModels(provider).find((model) => model.id === defaultId);
+				expect(kimi).toBeDefined();
+				if (!kimi) throw new Error(`Kimi K3 must exist in the ${provider} catalog`);
+				const custom = { ...kimi, id: `custom-${provider}-model`, name: "Custom model" };
+				const available = [custom, kimi];
+				const registry = {
+					getModels: () => available,
+					getAvailableSnapshot: () => available,
+					getModel: (requestedProvider: string, id: string) =>
+						available.find((model) => model.provider === requestedProvider && model.id === id),
+					hasConfiguredAuth: (requestedProvider: string) => requestedProvider === provider,
+				} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+
+				const result = await findInitialModel({
+					scopedModels: selection === "scoped" ? [{ model: custom }] : [],
+					isContinuing: false,
+					modelRuntime: registry,
+					...(selection === "cli" ? { cliProvider: provider, cliModel: custom.id } : {}),
+					...(selection === "saved" ? { defaultProvider: provider, defaultModelId: custom.id } : {}),
+				});
+
+				expect(result.model).toBe(selection === "builtin" ? kimi : custom);
+			},
+		);
+	});
+
 	test("built-in defaults exist in generated provider catalogs", () => {
 		for (const provider of getBuiltinProviders()) {
 			const defaultId = defaultModelPerProvider[provider];
