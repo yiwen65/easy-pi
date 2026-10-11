@@ -16,6 +16,7 @@ import {
 } from "../src/terminal-image.ts";
 import { Container } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { visibleWidth } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -1158,6 +1159,123 @@ describe("TuiAltScreen", () => {
 
 		assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("foo\x1b[27m")));
 		tui.stop();
+	});
+
+	for (const { name, line, prefix, cellOffset = 0, expected } of [
+		{
+			name: "slash-separated path",
+			line: "extensions/starline/fixed-editor/compositor.ts",
+			prefix: "extensions/",
+			expected: "extensions/starline/fixed-editor/compositor.ts",
+		},
+		{ name: "kebab-case", line: "earendil-works/pi-tui", prefix: "earendil-", expected: "earendil-works/pi-tui" },
+		{ name: "clicked slash", line: "/alpha/beta/", prefix: "/alpha", expected: "/alpha/beta/" },
+		{ name: "clicked hyphen", line: "alpha-beta", prefix: "alpha", expected: "alpha-beta" },
+		{ name: "consecutive joiners", line: "foo-/bar", prefix: "foo-", expected: "foo-/bar" },
+		{
+			name: "ANSI CJK path and combining mark after a ZWJ emoji",
+			line: "👩‍💻 \x1b[31m路径/界/é-file.ts\x1b[0m! after",
+			prefix: "👩‍💻 ",
+			cellOffset: 1,
+			expected: "路径/界/é-file.ts",
+		},
+		{ name: "emoji boundary", line: "alpha/👩‍💻-beta", prefix: "alpha/", cellOffset: 1, expected: "👩‍💻" },
+		{
+			name: "punctuation boundary",
+			line: "(alpha/beta-gamma), delta-epsilon",
+			prefix: "(alpha/",
+			expected: "alpha/beta-gamma",
+		},
+		{
+			name: "internal punctuation boundary",
+			line: "alpha/beta!gamma-delta",
+			prefix: "alpha/beta!",
+			expected: "gamma-delta",
+		},
+		{ name: "whitespace boundary", line: "alpha  /beta", prefix: "", expected: "alpha" },
+		{ name: "joiner after whitespace", line: "alpha  /beta", prefix: "alpha  ", expected: "/beta" },
+		{ name: "non-joiner dash", line: "alpha—beta", prefix: "alpha—", expected: "beta" },
+	]) {
+		it(`double-click selects the terminal word at a ${name}`, async () => {
+			const copied: string[] = [];
+			const terminal = new RecordingTerminal(80, 1);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async (text) => {
+					copied.push(text);
+					return true;
+				},
+			});
+			tui.addChild(new Text(line, 0, 0));
+			tui.start();
+			try {
+				await terminal.waitForRender();
+				const column = visibleWidth(prefix) + cellOffset + 1;
+				for (let click = 0; click < 2; click++) {
+					terminal.sendInput(`\x1b[<0;${column};1M`);
+					terminal.sendInput(`\x1b[<0;${column};1m`);
+				}
+				await terminal.waitForRender();
+
+				assert.deepStrictEqual(copied, [expected]);
+				assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")));
+			} finally {
+				tui.stop();
+			}
+		});
+	}
+
+	it("extends whole path word drags in both directions with OSC 52", async () => {
+		const terminal = new RecordingTerminal(80, 3);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("before left/path  right-token after", 0, 0));
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			for (const [start, end] of [
+				[14, 21],
+				[21, 14],
+			]) {
+				terminal.sendInput(`\x1b[<0;${start};1M`);
+				terminal.sendInput(`\x1b[<0;${start};1m`);
+				terminal.sendInput(`\x1b[<0;${start};1M`);
+				terminal.sendInput(`\x1b[<32;${end};1M`);
+				terminal.sendInput(`\x1b[<3;${end};1m`);
+				await terminal.waitForRender();
+			}
+			const expected = `\x1b]52;c;${Buffer.from("left/path  right-token").toString("base64")}\x07`;
+			assert.strictEqual(
+				terminal.events.filter((event) => event.type === "write" && event.data.includes(expected)).length,
+				2,
+			);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("counts clicks across joined path segments and still triple-clicks the whole line", async () => {
+		const copied: string[] = [];
+		const terminal = new RecordingTerminal(80, 1);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		const line = "before left/path-token after";
+		tui.addChild(new Text(line, 0, 0));
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			// Different slash/hyphen-separated segments are one click target.
+			for (const column of [9, 13, 20]) {
+				terminal.sendInput(`\x1b[<0;${column};1M`);
+				terminal.sendInput(`\x1b[<0;${column};1m`);
+			}
+			await terminal.waitForRender();
+			assert.deepStrictEqual(copied, ["left/path-token", line]);
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("highlights a complete whitespace segment during a word drag", async () => {
