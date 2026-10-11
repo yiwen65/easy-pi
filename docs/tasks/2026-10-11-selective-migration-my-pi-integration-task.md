@@ -9,7 +9,7 @@
 <!-- task-doc-section:background-goal -->
 ## Background and goal
 
-将已验收三阶段架构迁移集成到当前 my-pi，保留目标分支已提交的 MCP、恢复 certainty/branch ownership 和工作流改动；同时不影响正在写入原目录的 CodeMode 工作。本文件是此新集成执行的唯一 authority。上一轮 docs/tasks/2026-10-11-selective-architecture-migration-task.md 保持已完成历史记录，不改写其验收结果。
+将已验收三阶段架构迁移集成到当前 my-pi，保留目标分支已提交的 MCP、恢复 certainty/branch ownership、CodeMode/nested authority、subagent progress/interrupt 和工作流改动；未提交并发工作不得覆盖或代提交。本文件是此新集成执行的唯一 authority。上一轮 docs/tasks/2026-10-11-selective-architecture-migration-task.md 保持已完成历史记录，不改写其验收结果。
 
 <!-- task-doc-section:scope-non-goals -->
 ## Scope and non-goals
@@ -193,9 +193,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-009 — 新target跨合同验证、审查与提交
+### [x] T-009 — 新target跨合同验证、审查与提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 40610+三阶段合并后实际验证nestedCodeMode/subagentprogress与请求/恢复/模型/工具链并提交。
 - Inputs and prerequisites: T-008candidate、T-012精确protocol fixture修正。
@@ -205,7 +205,7 @@
 - Execution steps: modified/new指定offline tests和相关回归；rootcheck范围；source/built/offlinebuild和installedSDK/CodeMode/MCP/image/progress必要subset；read-only工具独立review；保留parents commit。
 - Acceptance criteria: 当下code实际gates通过，不复用83e46旧902tests作为新base证据；所有target/source核心合同保留。
 - Verification method: V-001..V-004 affected subset、parentdiff/ancestry/stage/dataproofs、docvalidator。
-- Validation evidence: latesttarget最终private coding49files718、CodeMode6files185、agent13files147、subagent7files182、AI21files375+3credential skip、MCP5files43、server1file10、scripts77全部实际GREEN；root1521 No fixes/deps/shrinkwrap/install-lock/TS7/browser、offlinebuild、data1523/45/39全部non-type/stamp/hash保真、519/238class inheritedfield audit无新shadow、13bundle2893filepack/外部normal2dayignore-scripts install122packages/CLI+SDK+images+MCP+CodeMode实际worker/portableWASM/store/licenses/jiti smoke通过。freshreadonlyrequestea96a158/toolchain671e5450/fixtured81a3d18 review无剩余actionable，ownedcomposition/snapshot/diffcheck通过；candidate Git commit/ancestry与sourcearchive待执行，不提前done。
+- Validation evidence: latesttarget最终private coding49files718、CodeMode6files185、agent13files147、subagent7files182、AI21files375+3credential skip、MCP5files43、server1file10、scripts77全部实际GREEN；root1521 No fixes/deps/shrinkwrap/install-lock/TS7/browser、offlinebuild、data1523/45/39全部non-type/stamp/hash保真、519/238class inheritedfield audit无新shadow、13bundle2893filepack/外部normal2dayignore-scripts install122packages/CLI+SDK+images+MCP+CodeMode实际worker/portableWASM/store/licenses/jiti smoke通过。freshreadonlyrequestea96a158/toolchain671e5450/fixtured81a3d18 review无剩余actionable，ownedcomposition/snapshot/diffcheck通过；candidate mergec47951f65acfe11dcee387e122321630bc5e9dac已actualcommit，双parents537aeae5+40610、source59faf/target40610 ancestor gates通过，privateclean。源码归档由archived真实validator通过2次且cmp byte-identical，SHA67d6d8eb73f946b570727c47f8b42371b11ee63a6000af72cc445d9e0cd67ede；证据artifacts/easy-pi-source-c47951f65.tar.gz。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -327,9 +327,11 @@
 
 - 2026-10-11: T-013done，父final49files718GREEN/root1521No fixes、freeze cmp和exactunionproof通过，freshreadonlyfixtured81a3d18无actionable。T-009所有newtarget运行门禁/pack/outsideinstalledsyntheticchecks已完成，进入explicitownedstage与二parentmergecommit/源码归档；T-005仍最终fresh gate/ff/hydration前，original从未写。历史paused Node22仍无terminalrecord，read-only interruptedbatches亦不假定原call已完成，不使用缺失当reconciliation证据。
 
+- 2026-10-11: T-009done，explicit仅本session10paths追加自动已提交targetmergeindex，PI_ALLOW_LOCKFILE_CHANGE=1正常commitc47951f65（parents537aeae5/40610），Git source59faf/latesttarget40610祖先gate与privateclean通过。newsourcearchive2次已归档实际validator+cmp byte-identical/hash67d6d8eb通过，不复用旧83e46archive。仅T-005最终original clean/HEAD/public40data复核、ff-only和runtimehydration待做；私有最终验收记录另docscommit后再交付，不提前声称my-pi已更新。
+
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
 - Result: partial
-- Evidence: 历史T-001/002/003/004/006/007done与firstcandidate674320ff保持已完成；新T-008/010/011/012done。当前private537aeae5+MERGE_HEAD40610冲突全解决、exactunion/compilerlock/runtime/data proof通过，root1521No fixes/offlinebuild/codeMode185/agent147/subagent182/AI375+3credential skip/MCP43/server10/scripts77通过；13bundle2893filepack及新outside正常2-day/ignore-scripts install122packages、CLI/SDK/faux/image/static+dynamicheaders/MCPin-memory/CodeMode实际publicworker+portable WASM/store/licenses/jiti smoke通过。T-013已验收done（child54/parent49coding718/independentreview）且最终rootcheckNo fixes通过；T-009candidate commit/ancestry/源码归档待完成，T-005最终original gate/ff/hydration未执行。
+- Evidence: 历史T-001/002/003/004/006/007done与firstcandidate674320ff保持已完成；新T-008/010/011/012done。当前private537aeae5+MERGE_HEAD40610冲突全解决、exactunion/compilerlock/runtime/data proof通过，root1521No fixes/offlinebuild/codeMode185/agent147/subagent182/AI375+3credential skip/MCP43/server10/scripts77通过；13bundle2893filepack及新outside正常2-day/ignore-scripts install122packages、CLI/SDK/faux/image/static+dynamicheaders/MCPin-memory/CodeMode实际publicworker+portable WASM/store/licenses/jiti smoke通过。T-013已验收done（child54/parent49coding718/independentreview）且最终rootcheckNo fixes通过；T-009已done：mergec47951f65双parents/source+target ancestry/privateclean及新源码归档2次actual validator+cmp通过；仅T-005最终original gate/ff/hydration未执行。
 - Limitations: original my-pi最后只读40610clean且public40data不变，仍未更新。新candidate不能复用firstcandidate旧902tests/源码归档证据；offlineinstall首次quickjsmetadata ENOTCACHED后normalage install通过，烟测本身无provider网络，不能宣称这次安装完全离线。Node22未知下载paused不重试，22/Windows/Bun/liveprovider/liveexternalMCP未实测；无真实provider凭证/API/paidmodel、push/release。历史完整迁移authority不改写，本文件唯一当前状态。
