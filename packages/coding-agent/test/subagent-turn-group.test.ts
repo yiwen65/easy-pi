@@ -55,7 +55,7 @@ test("several children collapse to one newest preview, and expand in two levels"
 	expect(aggregate.agentCount).toBe(3);
 	expect(aggregate.render(120)).toHaveLength(1);
 	expect(stripAnsi(aggregate.render(120)[0])).toContain("TASK_c");
-	expect(stripAnsi(aggregate.render(120)[0])).toContain(" · 3");
+	expect(stripAnsi(aggregate.render(120)[0])).toMatch(/^↳ 3\/3 · /);
 	expect(stripAnsi(aggregate.render(120)[0])).not.toMatch(/Subagent|[▸▾]/);
 	expect(aggregate.handleOverviewClick(0, 120)).toBe(true);
 	expect(aggregate.render(120)).toHaveLength(4);
@@ -86,6 +86,36 @@ test("expanded aggregate does not repeat the latest child's summary", () => {
 	expect(lines[0]).toBe("↳ 2");
 	aggregate.handleOverviewClick(0, 200);
 	expect(stripAnsi(aggregate.render(200)[0])).toContain("RESULT_client-auth-review");
+});
+
+test("aggregate count follows running children and becomes a total when all settle", () => {
+	const router = new SubagentTranscriptRouter(new Container(), () => false);
+	for (const name of ["a", "b", "c"]) {
+		const args = { task_name: name, task: { objective: name } };
+		const component = tool("spawn_agent", args);
+		router.handleTool("spawn_agent", args, component);
+		result(component, { turn_id: name });
+	}
+	const aggregate = router.turnGroups()[0];
+	expect(stripAnsi(aggregate.render(120)[0])).toMatch(/^↳ 3\/3 · /);
+	router.handleMailboxMessage(mailbox("/root/a", "a", "done"));
+	expect(stripAnsi(aggregate.render(120)[0])).toMatch(/^↳ 2\/3 · /);
+	aggregate.handleOverviewClick(0, 120);
+	expect(stripAnsi(aggregate.render(120)[0])).toBe("↳ 2/3");
+	router.handleMailboxMessage(mailbox("/root/b", "b", "done"));
+	router.handleMailboxMessage(mailbox("/root/c", "c", "done"));
+	expect(stripAnsi(aggregate.render(120)[0])).toBe("↳ 3");
+	aggregate.handleOverviewClick(0, 120);
+	expect(stripAnsi(aggregate.render(120)[0])).toMatch(/^↳ 3 · /);
+	router.clear();
+});
+
+test("query-only children do not count as running", () => {
+	const router = new SubagentTranscriptRouter(new Container(), () => false);
+	const args = { target: "/root/a" };
+	router.handleTool("get_agent_result", args, tool("get_agent_result", args));
+	expect(stripAnsi(router.turnGroups()[0].render(120)[0])).toMatch(/^↳ 1 · /);
+	router.clear();
 });
 
 test("aggregate preview never changes a child's expansion or diagnostics", () => {
