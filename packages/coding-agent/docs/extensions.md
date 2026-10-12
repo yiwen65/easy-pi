@@ -1758,6 +1758,8 @@ pi.events.on("my:event", (data) => { ... });
 pi.events.emit("my:event", { ... });
 ```
 
+Subscriptions made with `pi.events.on` belong to the session's extension instance: reload and session replacement drop them when the old instance becomes stale, and quitting (`dispose()`/`shutdown()`) drops them when shutdown starts, before the `session_shutdown` handlers run. Long-lived listeners therefore do not survive a session, and an extension emitting on the bus from a `session_shutdown` handler does not reach its own session's listeners.
+
 ### pi.registerProvider(name, config)
 
 Register or override a model provider dynamically. Useful for proxies, custom endpoints, or team-wide model configurations.

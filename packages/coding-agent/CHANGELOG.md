@@ -25,7 +25,7 @@
 
 ### Fixed
 
-- Fixed `find` failing every search outside a git repository on fd builds older than 8.7.0: the tool now probes `fd --help` once per binary and omits `--no-require-git` when the flag is unavailable instead of letting fd reject the argument.
+- Fixed `find` failing every search outside a git repository on fd builds older than 8.7.0: the tool now probes `fd --help` once per binary and omits `--no-require-git` when the flag is unavailable instead of letting fd reject the argument, and it reports in the result that `.gitignore` files outside git repositories are not applied in that case.
 - Disposing a session now stops delivering host event-bus events to its extensions immediately, instead of only after the asynchronous shutdown drain completed.
 - Fixed `bindExtensions` throwing `Wait for the current session operation before recovery` when a `session_start` handler started a run: task recovery is now skipped while the session is already busy.
 - A cloned or forked session that later runs on a different model now leaves the inherited cache lineage behind instead of sending another model's cache routing key, which could only miss. The recorded lineage also names the model its cached prefix belongs to, so reopening a session under another model no longer restores it.

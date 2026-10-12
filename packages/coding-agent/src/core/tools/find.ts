@@ -275,6 +275,10 @@ export function createFindToolDefinition(
 						// every search outside a repo, so fall back to their default (no .gitignore
 						// handling outside repos) instead of erroring out.
 						let insideGitRepo = false;
+						// fd applies .gitignore files outside git repositories only since 8.7.0. Older
+						// builds reject `--no-require-git`, so the search falls back to fd's default and
+						// has to say so: the tool description promises .gitignore handling.
+						let appliesGitignoreOutsideRepo = true;
 						for (let current = searchPath; ; ) {
 							if (await pathExists(path.join(current, ".git"))) {
 								insideGitRepo = true;
@@ -284,7 +288,10 @@ export function createFindToolDefinition(
 							if (parent === current) break;
 							current = parent;
 						}
-						if (!insideGitRepo && (await fdSupportsNoRequireGit(fdPath))) args.push("--no-require-git");
+						if (!insideGitRepo) {
+							appliesGitignoreOutsideRepo = await fdSupportsNoRequireGit(fdPath);
+							if (appliesGitignoreOutsideRepo) args.push("--no-require-git");
+						}
 						args.push("--max-results", String(effectiveLimit));
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path
@@ -376,6 +383,11 @@ export function createFindToolDefinition(
 							if (truncation.truncated) {
 								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
 								details.truncation = truncation;
+							}
+							if (!appliesGitignoreOutsideRepo) {
+								notices.push(
+									`${fdPath} predates fd 8.7.0: .gitignore files outside git repositories are not applied`,
+								);
 							}
 							if (notices.length > 0) {
 								resultOutput += `\n\n[${notices.join(". ")}]`;
