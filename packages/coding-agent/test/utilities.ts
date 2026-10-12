@@ -23,7 +23,9 @@ import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/ex
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { fdSupportsNoRequireGit } from "../src/core/tools/find.ts";
 import { createCodingTools } from "../src/index.ts";
+import { ensureTool } from "../src/utils/tools-manager.ts";
 
 /**
  * API key for authenticated tests. Tests using this should be wrapped in
@@ -318,4 +320,19 @@ export function buildTestTree(
 	}
 
 	return ids;
+}
+
+/**
+ * Skip reason for tests that need fd to apply .gitignore rules outside a git repository, or
+ * undefined when the resolved fd can. The find tool passes fd's `--no-require-git` for search
+ * paths outside a repository, but that flag only exists since fd 8.7.0 and older builds reject it,
+ * so the tool omits it there and fd then ignores .gitignore files entirely.
+ */
+export async function fdGitignoreSkipReason(): Promise<string | undefined> {
+	const fdPath = await ensureTool("fd");
+	if (fdPath === undefined) return "fd is not available and could not be downloaded";
+	if (!(await fdSupportsNoRequireGit(fdPath))) {
+		return `${fdPath} is too old: it lacks --no-require-git (added in fd 8.7.0) and cannot apply .gitignore rules outside a git repository`;
+	}
+	return undefined;
 }

@@ -15,6 +15,7 @@ import {
 	createWriteTool,
 } from "../src/index.ts";
 import * as shellModule from "../src/utils/shell.ts";
+import { fdGitignoreSkipReason } from "./utilities.ts";
 
 const readTool = createReadTool(process.cwd());
 const writeTool = createWriteTool(process.cwd());
@@ -903,7 +904,9 @@ describe("Coding Agent Tools", () => {
 			expect(outputLines).toContain(".secret/hidden.txt");
 		});
 
-		it("should respect .gitignore", async () => {
+		it("should respect .gitignore", async (ctx) => {
+			const skipReason = await fdGitignoreSkipReason();
+			ctx.skip(skipReason !== undefined, skipReason);
 			writeFileSync(join(testDir, ".gitignore"), "ignored.txt\n");
 			writeFileSync(join(testDir, "ignored.txt"), "ignored");
 			writeFileSync(join(testDir, "kept.txt"), "kept");

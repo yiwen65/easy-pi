@@ -596,6 +596,11 @@ export class ExtensionRunner {
 		}
 	}
 
+	/** Stop delivering host events to this session's extensions without invalidating their contexts. */
+	releaseEventBusSubscriptions(): void {
+		this.runtime.releaseEventBusSubscriptions();
+	}
+
 	private assertActive(): void {
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);

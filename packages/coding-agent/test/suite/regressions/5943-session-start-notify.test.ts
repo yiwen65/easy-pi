@@ -81,6 +81,7 @@ type RebindContext = {
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
 	subscribeToAgent: () => void;
+	subscribeToBackgroundTasks: () => void;
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
 	updateTerminalTitle: () => void;
@@ -297,6 +298,7 @@ describe("regression #5943: session_start transient UI", () => {
 					});
 				},
 				subscribeToAgent: () => events.push("subscribe"),
+				subscribeToBackgroundTasks: () => events.push("background"),
 				updateAvailableProviderCount: async () => {},
 				updateEditorBorderColor: () => {},
 				updateTerminalTitle: () => {},
@@ -304,7 +306,7 @@ describe("regression #5943: session_start transient UI", () => {
 
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
 
-			expect(events).toEqual(["apply", "render", "subscribe", "bind", "notify:Hello Error"]);
+			expect(events).toEqual(["apply", "render", "subscribe", "bind", "notify:Hello Error", "background"]);
 		} finally {
 			harness.cleanup();
 		}
@@ -337,6 +339,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
+				subscribeToBackgroundTasks: () => events.push("background"),
 				subscribeToAgent: () => {
 					events.push("subscribe");
 					harness.session.subscribe((event) => {
@@ -359,6 +362,7 @@ describe("regression #5943: session_start transient UI", () => {
 				"bind",
 				"message_start:custom:custom from start",
 				"message_end:custom:custom from start",
+				"background",
 			]);
 		} finally {
 			harness.cleanup();
@@ -389,6 +393,7 @@ describe("regression #5943: session_start transient UI", () => {
 						mode: "tui",
 					});
 				},
+				subscribeToBackgroundTasks: () => events.push("background"),
 				subscribeToAgent: () => {
 					events.push("subscribe");
 					harness.session.subscribe((event) => {

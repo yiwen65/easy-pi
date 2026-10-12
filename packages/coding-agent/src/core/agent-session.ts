@@ -1645,6 +1645,9 @@ export class AgentSession {
 			} catch {
 				// Shutdown must continue even if an abort hook throws.
 			}
+			// Extensions keep a valid context for the session_shutdown event emitted after the drain,
+			// but a session that is shutting down must stop observing host events immediately.
+			this._extensionRunner.releaseEventBusSubscriptions();
 		}
 		// A callback must not wait on the emission awaiting that same callback.
 		// Per-runner async scope keeps other sessions and outside callers on the full drain.
@@ -3876,7 +3879,10 @@ export class AgentSession {
 						(message) => message.role === "toolResult" && message.toolCallId === tool.call.id,
 					),
 			);
-		if (recovery?.status === "running" || recoveredFailure) {
+		// Recovery continues a task left running by an earlier run. A task that is already executing in
+		// this session (for example one started by a session_start handler during the emission above)
+		// is not recoverable and must not be resumed.
+		if ((recovery?.status === "running" || recoveredFailure) && this.isIdle && !this.isCompacting) {
 			try {
 				if (this._taskRecovery.unknownTools.length > 0) {
 					await this._runAgentPrompt({

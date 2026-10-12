@@ -65,6 +65,38 @@ const defaultFindOperations: FindOperations = {
 	glob: () => [],
 };
 
+const noRequireGitProbeByFdPath = new Map<string, Promise<boolean>>();
+
+/** Check whether fd help output lists `--no-require-git`. */
+export function fdHelpListsNoRequireGit(helpOutput: string): boolean {
+	return helpOutput.includes("--no-require-git");
+}
+
+/**
+ * fd only supports applying .gitignore rules outside git repositories since v8.7.0, which added
+ * `--no-require-git`. Older builds reject the unknown flag, so probe `fd --help` once per binary
+ * per process and cache the answer. The probe is asynchronous: it must not block the session's
+ * event loop, and it shares no state with the search that requested it.
+ */
+export function fdSupportsNoRequireGit(fdPath: string): Promise<boolean> {
+	const cached = noRequireGitProbeByFdPath.get(fdPath);
+	if (cached) return cached;
+	const probe = new Promise<boolean>((resolve) => {
+		let helpOutput = "";
+		const child = spawn(fdPath, ["--help"], { stdio: ["ignore", "pipe", "pipe"] });
+		child.stdout.on("data", (chunk: Buffer) => {
+			helpOutput += chunk.toString();
+		});
+		child.stderr.on("data", (chunk: Buffer) => {
+			helpOutput += chunk.toString();
+		});
+		child.on("error", () => resolve(false));
+		child.on("close", () => resolve(fdHelpListsNoRequireGit(helpOutput)));
+	});
+	noRequireGitProbeByFdPath.set(fdPath, probe);
+	return probe;
+}
+
 export interface FindToolOptions {
 	/** Custom operations for find. Default: local filesystem plus fd */
 	operations?: FindOperations;
@@ -239,6 +271,9 @@ export function createFindToolDefinition(
 						// there. Inside repos, use fd's default git-aware behavior so parent
 						// .gitignore rules stop at nested repo boundaries:
 						// https://github.com/earendil-works/pi/issues/5960
+						// The flag only exists since fd 8.7.0; older builds reject it and would fail
+						// every search outside a repo, so fall back to their default (no .gitignore
+						// handling outside repos) instead of erroring out.
 						let insideGitRepo = false;
 						for (let current = searchPath; ; ) {
 							if (await pathExists(path.join(current, ".git"))) {
@@ -249,7 +284,7 @@ export function createFindToolDefinition(
 							if (parent === current) break;
 							current = parent;
 						}
-						if (!insideGitRepo) args.push("--no-require-git");
+						if (!insideGitRepo && (await fdSupportsNoRequireGit(fdPath))) args.push("--no-require-git");
 						args.push("--max-results", String(effectiveLimit));
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path

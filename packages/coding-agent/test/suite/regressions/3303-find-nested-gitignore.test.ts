@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
+import { createFindToolDefinition, fdHelpListsNoRequireGit } from "../../../src/core/tools/find.ts";
+import { fdGitignoreSkipReason } from "../../utilities.ts";
 
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/3303
@@ -49,7 +50,9 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 			writeFileSync(join(tempRoot, "root.txt"), "");
 		});
 
-		it("applies a/.gitignore only inside a/ and leaves b/ untouched", async () => {
+		it("applies a/.gitignore only inside a/ and leaves b/ untouched", async (ctx) => {
+			const skipReason = await fdGitignoreSkipReason();
+			ctx.skip(skipReason !== undefined, skipReason);
 			const files = await runFind("**/*.txt");
 			expect(files).toEqual(["a/kept.txt", "b/ignored.txt", "b/kept.txt", "root.txt"]);
 		});
@@ -72,12 +75,28 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 			writeFileSync(join(tempRoot, "root.txt"), "");
 		});
 
-		it("scopes each .gitignore to its own subtree", async () => {
+		it("scopes each .gitignore to its own subtree", async (ctx) => {
+			const skipReason = await fdGitignoreSkipReason();
+			ctx.skip(skipReason !== undefined, skipReason);
 			const files = await runFind("**/*.txt");
 			// a/.gitignore ignores 'ignored.txt' within a/ and a/deep/.
 			// a/deep/.gitignore additionally ignores 'secret.txt' within a/deep/.
 			// b/ is untouched by either.
 			expect(files).toEqual(["a/deep/kept.txt", "a/kept.txt", "b/ignored.txt", "b/kept.txt", "root.txt"]);
+		});
+	});
+
+	describe("fd --no-require-git capability probe", () => {
+		it("detects the flag in help output of fd 8.7.0+", () => {
+			expect(
+				fdHelpListsNoRequireGit(
+					"        --no-require-git\n            Also respect ignore files even when the search path is not in a git repository",
+				),
+			).toBe(true);
+		});
+
+		it("does not match help output without the flag (fd < 8.7.0)", () => {
+			expect(fdHelpListsNoRequireGit("    -I, --no-ignore\n    --no-ignore-vcs\n")).toBe(false);
 		});
 	});
 });

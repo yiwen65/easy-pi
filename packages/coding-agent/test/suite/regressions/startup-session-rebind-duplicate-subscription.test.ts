@@ -8,6 +8,7 @@ type RebindContext = {
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
 	subscribeToAgent: () => void;
+	subscribeToBackgroundTasks: () => void;
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
 	updateTerminalTitle: () => void;
@@ -34,6 +35,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 		});
 
 		const subscribeToAgent = vi.fn();
+		const subscribeToBackgroundTasks = vi.fn();
 		const updateTerminalTitle = vi.fn();
 		let bindCount = 0;
 
@@ -46,6 +48,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 				return bindCount === 1 ? startupBind : replacementBind;
 			},
 			subscribeToAgent,
+			subscribeToBackgroundTasks,
 			updateAvailableProviderCount: async () => {},
 			updateEditorBorderColor: () => {},
 			updateTerminalTitle,
@@ -72,6 +75,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 		await replacementRebind;
 
 		expect(subscribeToAgent).toHaveBeenCalledTimes(1);
+		expect(subscribeToBackgroundTasks).toHaveBeenCalledTimes(1);
 		expect(updateTerminalTitle).toHaveBeenCalledTimes(1);
 	});
 });
