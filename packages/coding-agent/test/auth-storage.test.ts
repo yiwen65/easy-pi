@@ -116,7 +116,10 @@ describe("AuthStorage", () => {
 	test("keeps a coalesced reload alive while another credential reader is waiting", async () => {
 		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
 		const storage = AuthStorage.create(authJsonPath);
-		writeAuthJson({ anthropic: { type: "api_key", key: "new" } });
+		// Credential reads skip reloading while dev:ino:size:mtimeNs:ctimeNs is unchanged. A same-length
+		// rewrite inside one filesystem timestamp tick keeps that fingerprint identical, so write a longer
+		// value to make the external change observable and this test deterministic.
+		writeAuthJson({ anthropic: { type: "api_key", key: "new-value" } });
 		let grantLock: (() => void) | undefined;
 		const lockGranted = new Promise<void>((resolve) => {
 			grantLock = resolve;
@@ -134,9 +137,37 @@ describe("AuthStorage", () => {
 		firstController.abort();
 		await expect(first).rejects.toMatchObject({ name: "AbortError" });
 		grantLock?.();
-		await expect(second).resolves.toEqual({ type: "api_key", key: "new" });
+		await expect(second).resolves.toEqual({ type: "api_key", key: "new-value" });
 		expect(lockSpy).toHaveBeenCalledTimes(1);
 		expect(release).toHaveBeenCalledTimes(1);
+	});
+
+	test("aborts a coalesced reload once its last reader goes away and reloads for the next reader", async () => {
+		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
+		const storage = AuthStorage.create(authJsonPath);
+		writeAuthJson({ anthropic: { type: "api_key", key: "new-value" } });
+		let grantLock: (() => void) | undefined;
+		const lockGranted = new Promise<void>((resolve) => {
+			grantLock = resolve;
+		});
+		const release = vi.fn(async () => {});
+		const lockSpy = vi.spyOn(lockfile, "lock").mockImplementation(async () => {
+			await lockGranted;
+			return release;
+		});
+		const controller = new AbortController();
+		const abandoned = storage.read("anthropic", { signal: controller.signal });
+
+		controller.abort();
+		await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+		grantLock?.();
+		// Let the abandoned acquisition settle before accounting for its lock handoff.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(release).toHaveBeenCalledTimes(1);
+
+		await expect(storage.read("anthropic")).resolves.toEqual({ type: "api_key", key: "new-value" });
+		expect(lockSpy).toHaveBeenCalledTimes(2);
+		expect(release).toHaveBeenCalledTimes(2);
 	});
 
 	test("modify persists a credential while preserving unrelated external edits", async () => {
