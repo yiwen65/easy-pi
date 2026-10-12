@@ -15,7 +15,13 @@ interface Event {
 	parentToolCallId?: string;
 	isError?: boolean;
 	result?: { details?: { calls?: Array<{ name: string; status: string }> } };
-	message?: { role?: string; toolName?: string; details?: { calls?: Array<{ name: string; status: string }> } };
+	message?: {
+		role?: string;
+		toolName?: string;
+		stopReason?: string;
+		errorMessage?: string;
+		details?: { calls?: Array<{ name: string; status: string }> };
+	};
 }
 
 async function runProbe(
@@ -26,6 +32,9 @@ async function runProbe(
 	// All credential setup stays inside the explicitly gated test body.
 	const cwd = await realpath(await mkdtemp(join(tmpdir(), "epi-codemode-real-")));
 	const agentDir = join(cwd, "agent");
+	const events: Event[] = [];
+	let stderrText = "";
+	let failed = false;
 	try {
 		await mkdir(agentDir);
 		const source = process.env.PI_AGENT_DIR ?? join(homedir(), ".epi", "agent");
@@ -71,7 +80,6 @@ async function runProbe(
 		const env: NodeJS.ProcessEnv = { ...process.env, EASY_PI_CODING_AGENT_DIR: agentDir };
 		delete env.PI_OFFLINE;
 		const child = spawn("bash", args, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-		const events: Event[] = [];
 		let buffer = "";
 		let stderrBytes = 0;
 		let stdoutBytes = 0;
@@ -111,6 +119,7 @@ async function runProbe(
 		});
 		child.stderr.on("data", (data: Buffer) => {
 			stderrBytes += data.length;
+			stderrText = (stderrText + data.toString()).slice(-16000);
 		});
 		try {
 			const code = await new Promise<number | null>((done, fail) => {
@@ -121,6 +130,15 @@ async function runProbe(
 			if (buffer.trim()) events.push(JSON.parse(buffer) as Event);
 			expect(timedOut, `CLI timeout; stderr bytes=${stderrBytes}`).toBe(false);
 			expect(code, `CLI failed; stderr bytes=${stderrBytes}`).toBe(0);
+			expect(
+				events.filter(
+					(event) =>
+						event.type === "message_end" &&
+						event.message?.role === "assistant" &&
+						(event.message.stopReason === "error" || event.message.stopReason === "aborted"),
+				),
+				"Assistant error/abort is a failure even when JSON CLI exits zero",
+			).toEqual([]);
 			expect(events.some((event) => event.type === "tool_execution_start" && event.toolName === "codemode")).toBe(
 				true,
 			);
@@ -139,8 +157,26 @@ async function runProbe(
 			clearTimeout(timer);
 			kill("SIGKILL");
 		}
+	} catch (error) {
+		failed = true;
+		const diagnosticEvents = events.filter(
+			(event) =>
+				event.type === "message_end" ||
+				event.type === "tool_execution_start" ||
+				event.type === "tool_execution_end",
+		);
+		const redact = (value: string) =>
+			value.replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]").replace(/\bsk-[A-Za-z0-9_-]+/g, "[REDACTED]");
+		await writeFile(
+			join(cwd, "diagnostic.json"),
+			redact(JSON.stringify({ events: diagnosticEvents, stderr: stderrText }, null, 2)),
+			{ mode: 0o600 },
+		);
+		console.error(`Codemode failure diagnostics retained at ${join(cwd, "diagnostic.json")}`);
+		throw error;
 	} finally {
-		await rm(cwd, { recursive: true, force: true });
+		// Never retain credential/model symlinks alongside failure artifacts.
+		await rm(failed ? agentDir : cwd, { recursive: true, force: true });
 	}
 }
 

@@ -111,13 +111,14 @@
 - Execution steps:
   1. PI_REAL_MODEL_EVAL=1，显式 gpt-6.1-sol / medium 运行指定文件。
   2. 记录实际结果，不自动重复付费用例。
+  3. 用户后续明确授权补充诊断并将两个失败用例各重跑一次；保留安全事件与 stderr，失败保留产物但删除认证/model 链接。
 - Acceptance criteria:
   - 3 项通过；否则诚实记录失败或阻塞。
 - Verification method:
   - 指定 vitest 实际退出结果。
-- Validation evidence: PI_REAL_MODEL_EVAL=1 PI_REAL_CODEMODE_PROVIDER=openai-codex PI_REAL_CODEMODE_MODEL=gpt-6.1-sol PI_REAL_CODEMODE_EFFORT=medium node ../../node_modules/vitest/dist/cli.js --run test/codemode-real-provider.test.ts；85.26s，1 passed / 2 failed，exit 1。部分失败保留成功结果用例通过；批量用例无 codemode tool_execution_start；MCP 发现用例缺少服务端审计文件。未自动重试。
-- Blocker: 两项真实模型验收失败，当前 harness 清理了事件/产物，现有输出不足以确定原因。
-- Unblock condition: 补充安全诊断留存并获准再次执行失败的真实模型用例，或用户接受本轮失败报告。
+- Validation evidence: 首轮完整文件 85.26s，1 passed / 2 failed。用户授权诊断后仅 -t 'batches reads|discovers an undeclared' 复跑一次，119.41s，批量 passed，MCP failed，部分失败用例 skipped。MCP message_end 为 stopReason:error、Codex request processing error，工具事件为空、stderr 为空，但 CLI exit0；请求 ID 83df9228-0649-4510-a2fa-fdc8cdfa1638。npm run check 通过。诊断信息保留在临时 diagnostic.json，认证/model 链接已删除。
+- Blocker: 本次 MCP 模型请求在工具执行前失败；服务端内部原因不可见，原首轮详细事件已删除，无法证明首轮同因。
+- Unblock condition: provider 请求问题解决或另获授权进行受控实验；本轮授权次数已用完，不再调用 API。
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -137,9 +138,11 @@
 - 2026-10-12: 最终文档验证并显式路径提交。
 - 2026-10-12: 用户明确授权真实模型运行，恢复本文档，启动 T-004；不自动重试付费用例。
 - 2026-10-12: T-004 首轮 85.26s 完成，1 passed / 2 failed，未重试；缺乏保留的详细事件，阻塞通过验收。
+- 2026-10-12: 只读检查确认 JSON 模式退出码不检查 assistant error/abort，测试未保留失败证据。用户授权诊断修改和两个失败用例各复跑一次；诊断代码 npm run check 通过，启动定向复跑。
+- 2026-10-12: 复跑批量通过，MCP 在工具执行前发生 Codex 请求错误；新 assistant error 断言正确捕获，JSON exit0 掩盖错误路径已由运行观察确认。未修改产品功能，未再次重试。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 - Result: failed
 - Evidence: 目标 5 文件 35 passed / 3 skipped；npm run check、fixture 语法检查、git diff --check 和任务文档 validator 通过。
-- Limitations: 真实模型本轮 1 passed / 2 failed，未通过整体验收；失败原因尚未定位且没有自动重试。live child/ancestor 撤权和兄弟分支隔离由既有 suite 验证，未复制为 CLI 进程用例；显式脚本 deadline 未新增独立进程用例，已验证 RPC abort。
+- Limitations: 首轮 1 passed / 2 failed；授权诊断复跑批量通过、MCP 请求失败。已定位本次失败在 provider response 前于工具调用，无法解释服务端内部错误或证明首轮同因。live child/ancestor 撤权和兄弟分支隔离由既有 suite 验证，未复制为 CLI 进程用例；显式脚本 deadline 未新增独立进程用例，已验证 RPC abort。
