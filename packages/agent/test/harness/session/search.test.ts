@@ -12,7 +12,7 @@ import {
 	type SessionMetadata,
 	type SessionStorage,
 } from "../../../src/harness/session/index.ts";
-import { listJsonlSessionMetadata, loadJsonlSessionStorage } from "../../../src/harness/session/jsonl/repo.ts";
+import { listJsonlSessionMetadata, readJsonlSessionStorage } from "../../../src/harness/session/jsonl/repo.ts";
 import { createScanningSessionSearch } from "../../../src/search/index.ts";
 import type { AgentMessage } from "../../../src/types.ts";
 
@@ -50,7 +50,7 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 
 async function* jsonlReadables(options: JsonlSessionRepoOptions, query: JsonlSessionListOptions = {}) {
 	for (const metadata of await listJsonlSessionMetadata(options, query)) {
-		yield loadJsonlSessionStorage(options, metadata);
+		yield readJsonlSessionStorage(options, metadata);
 	}
 }
 
@@ -121,5 +121,20 @@ describe("session search", () => {
 			]),
 		);
 		expect(await collect(search.search("disk"))).toMatchObject([{ sessionId: "jsonl", entryId }]);
+
+		// Scanning must read sessions without claiming, releasing, or stealing their writer lease:
+		// the repository still owns both sessions, and read-only loads reject writes.
+		const ownedMetadata = await other.getMetadata();
+		const readOnly = await readJsonlSessionStorage(options, ownedMetadata);
+		await expect(readOnly.setName("must not write")).rejects.toMatchObject({
+			code: "storage",
+			message: "JSONL session is read-only",
+		});
+		await expect(repository.open(ownedMetadata)).rejects.toMatchObject({ code: "storage" });
+		await other.appendMessage(message("owner still active"));
+		await session.release();
+		await other.release();
+		const reopened = await repository.open(ownedMetadata);
+		await reopened.release();
 	});
 });

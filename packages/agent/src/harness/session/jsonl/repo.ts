@@ -102,6 +102,20 @@ export async function loadJsonlSessionStorage(
 	return storage;
 }
 
+/**
+ * Read a session without claiming its writer, so scanning sources can inspect sessions that a
+ * harness currently owns. Use `loadJsonlSessionStorage` when the caller needs to append.
+ */
+export async function readJsonlSessionStorage(
+	options: JsonlSessionRepoOptions,
+	metadata: JsonlSessionMetadata,
+): Promise<JsonlSessionStorage> {
+	if (!fileResult(await options.fs.exists(metadata.path), `Failed to check session ${metadata.path}`)) {
+		throw new SessionError("not_found", `Session not found: ${metadata.id}`);
+	}
+	return JsonlSessionStorage.openReadOnly(options.fs, metadata.path, metadata.id);
+}
+
 function sessionFileName(createdAt: number, id: string): string {
 	const timestamp = new Date(createdAt).toISOString().replace(/[:.]/g, "-");
 	return `${timestamp}_${id}.jsonl`;

@@ -14,6 +14,7 @@
 - Persisted complete stream items and individual parallel tool results before further effects; added tool-batch recovery and explicit reconciliation, and cancelled timed-out tools without treating unknown outcomes as completed failures.
 - Fixed proxy thinking completion snapshots to update the accumulated thinking text.
 - Preserved confirmed completed output items after retryable model stream failures, collected completed tool-call results before recovery, and allowed continuation from interrupted text checkpoints without replaying incomplete calls.
+- Fixed JSONL scanning search to read sessions through a read-only load path instead of claiming writer ownership, so scanning works while a harness still owns the session.
 
 ## [0.84.2] - 2026-08-14
 

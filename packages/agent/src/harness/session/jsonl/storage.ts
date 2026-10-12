@@ -72,11 +72,25 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 		}
 	}
 
-	static async inspect(fs: JsonlSessionRepoFileSystem, path: string, expectedId: string): Promise<{ name?: string }> {
+	/**
+	 * Open a session for reading without claiming writer ownership. The returned storage rejects
+	 * writes, so sessions that a harness currently owns can still be scanned without taking or
+	 * releasing that writer lease.
+	 */
+	static async openReadOnly(
+		fs: JsonlSessionRepoFileSystem,
+		path: string,
+		expectedId: string,
+	): Promise<JsonlSessionStorage> {
 		const storage = await JsonlSessionStorage.loadOwned(fs, path, undefined);
 		if ((await storage.getMetadata()).id !== expectedId) {
 			throw new SessionError("invalid_entry", `Session id does not match header: ${expectedId}`);
 		}
+		return storage;
+	}
+
+	static async inspect(fs: JsonlSessionRepoFileSystem, path: string, expectedId: string): Promise<{ name?: string }> {
+		const storage = await JsonlSessionStorage.openReadOnly(fs, path, expectedId);
 		return { name: await storage.getName() };
 	}
 

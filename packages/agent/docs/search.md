@@ -94,7 +94,7 @@ JSONL does not need a separate public search adapter. JSONL-backed code can keep
 ```ts
 async function* jsonlReadables(jsonl: JsonlSessionRepoOptions, query: JsonlSessionListOptions = {}) {
   for (const metadata of await listJsonlSessionMetadata(jsonl, query)) {
-    yield loadJsonlSessionStorage(jsonl, metadata);
+    yield readJsonlSessionStorage(jsonl, metadata);
   }
 }
 
@@ -150,7 +150,7 @@ import {
 // JSONL-backed code can provide this locally from existing JSONL list/load helpers.
 async function* jsonlReadables(jsonl: JsonlSessionRepoOptions, options: { cwd?: string } = {}) {
   for (const metadata of await listJsonlSessionMetadata(jsonl, options)) {
-    yield loadJsonlSessionStorage(jsonl, metadata);
+    yield readJsonlSessionStorage(jsonl, metadata);
   }
 }
 
