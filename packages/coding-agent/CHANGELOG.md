@@ -19,6 +19,10 @@
 - Added inlined output (last ≤4KB) to single-task failure, timeout, and stall notices so the model can diagnose without a second tool call.
 - Added resource bounds for background tasks: `backgroundBashMaxTasks` (default 8 concurrent, `0` = no cap) and `backgroundBashMaxLogBytes` (default 64MB per task log, `0` = unlimited; a capped log ends with a truncation marker and `task_output` warns).
 
+### Changed
+
+- The interactive TUI now defaults to `fullscreen` (alternate screen) layout; pass `--tui-mode regular` or set `tuiMode` to `"regular"` in `/settings` to keep the inline layout with terminal-owned scrollback.
+
 ### Fixed
 
 - A cloned or forked session that later runs on a different model now leaves the inherited cache lineage behind instead of sending another model's cache routing key, which could only miss. The recorded lineage also names the model its cached prefix belongs to, so reopening a session under another model no longer restores it.
