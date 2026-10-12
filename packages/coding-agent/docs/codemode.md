@@ -27,7 +27,7 @@ Tool names in `--tools` and SDK `tools` are strict grants. **`--tools codemode` 
 }
 ```
 
-MCP tools default to `codemode` exposure, so a session with configured servers uses `codemode` to reach them. The top-level `autoEnableCodemode` option in `mcp.json` controls automatic activation for enabled, authorized servers; it defaults to `true`, but activation still requires authority for `codemode`, and it never grants the server's tools. See [MCP servers](mcp.md#discovery-and-strict-authorization).
+MCP servers default to `deferred` exposure, so `tool_search` finds their tools; servers configured with `codemode` exposure use `codemode` scripts instead. The top-level `autoEnableCodemode` option in `mcp.json` controls automatic activation for enabled, authorized servers; it defaults to `true`, but activation still requires authority for `codemode`, and it never grants the server's tools. See [MCP servers](mcp.md#discovery-and-strict-authorization).
 
 Use `noCodemode: true` to omit the built-in registration from the SDK's default loader. Custom SDK resource loaders remain host-owned; add `createCodemodeExtension()` explicitly when needed. See [SDK](sdk.md#codemode).
 

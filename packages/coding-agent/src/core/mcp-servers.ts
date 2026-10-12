@@ -39,7 +39,7 @@ export type McpExposure = "deferred" | "direct" | "codemode" | "hidden";
 const MCP_EXPOSURES: readonly string[] = ["deferred", "direct", "codemode", "hidden"] satisfies McpExposure[];
 
 /** Exposure of an MCP server's tools when neither the entry nor `toolExposure` selects one. */
-export const DEFAULT_MCP_EXPOSURE: McpExposure = "codemode";
+export const DEFAULT_MCP_EXPOSURE: McpExposure = "deferred";
 
 interface McpServerConfigBase {
 	/** Default: {@link DEFAULT_MCP_EXPOSURE}. */

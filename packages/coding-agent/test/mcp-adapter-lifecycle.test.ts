@@ -245,10 +245,7 @@ describe("MCP adapter lifecycle", () => {
 		await createToolSearchExtension()(h.pi);
 		await createMcpExtension({
 			agentDir: h.agentDir,
-			loadConfig: () => ({
-				servers: [{ name: "docs", config: { command: "unused", exposure: "deferred" }, source: "test" }],
-				errors: [],
-			}),
+			loadConfig: () => ({ servers: [{ name: "docs", config: { command: "unused" }, source: "test" }], errors: [] }),
 			createTransport: () => pair.client,
 		})(h.pi);
 		expect(pair.methods).toEqual([]);

@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `codemode` is now a default tool and MCP servers default to `codemode` exposure, so MCP tools are called from scripts unless a server sets `"exposure": "deferred"` or `"exposure": "direct"`. Drop `codemode` from `defaultTools`, use `--exclude-tools codemode`, or select an exposure explicitly to keep the previous behavior.
+- `codemode` is now a default tool and ships active in every new session. Drop `codemode` from `defaultTools`, use `--tools`, or use `--exclude-tools codemode` to keep it off. MCP exposure defaults are unchanged.
 - Network interruptions and provider availability failures now respect `retry.maxRetries` instead of retrying indefinitely. The default is 10 retries after the initial request; explicit budgets are retained. Retry events no longer include `unlimited`.
 
 ### Added
@@ -22,7 +22,6 @@
 
 ### Changed
 
-- The MCP exposure default moved from `deferred` to `codemode`; `/mcp` and `epi mcp list` report the effective exposure, and `updateMcpServerConfig` removes the key when it is set to the default again.
 - The interactive TUI now defaults to `fullscreen` (alternate screen) layout; pass `--tui-mode regular` or set `tuiMode` to `"regular"` in `/settings` to keep the inline layout with terminal-owned scrollback.
 
 ### Fixed

@@ -91,7 +91,7 @@ describe("MCP config and shell commands", () => {
 			errors: [],
 		});
 	});
-	it("keeps project overrides narrow and uses codemode as the removable default", () => {
+	it("keeps project overrides narrow and uses deferred as the removable default", () => {
 		const options = setup();
 		const global = join(options.agentDir, "mcp.json");
 		const project = join(options.cwd, CONFIG_DIR_NAME, "mcp.json");
@@ -103,20 +103,20 @@ describe("MCP config and shell commands", () => {
 		expect(loadMcpConfig({ ...options, projectTrusted: true }).errors[0]).toContain(
 			"only set enabled, exposure, toolExposure",
 		);
-		writeFileSync(project, JSON.stringify({ mcpServers: { docs: { enabled: false, exposure: "codemode" } } }));
+		writeFileSync(project, JSON.stringify({ mcpServers: { docs: { enabled: false, exposure: "deferred" } } }));
 		const loaded = loadMcpConfig({ ...options, projectTrusted: true });
 		expect(loaded.servers[0].config).toEqual({
 			command: "unused",
 			env: { KEY: "fake" },
-			exposure: "codemode",
+			exposure: "deferred",
 			enabled: false,
 		});
-		updateMcpServerConfig(project, "docs", { enabled: true, exposure: "codemode" });
+		updateMcpServerConfig(project, "docs", { enabled: true, exposure: "deferred" });
 		expect(JSON.parse(readFileSync(project, "utf8")).mcpServers.docs).toEqual({
 			enabled: true,
-			exposure: "codemode",
+			exposure: "deferred",
 		});
-		updateMcpServerConfig(global, "docs", { exposure: "codemode" });
+		updateMcpServerConfig(global, "docs", { exposure: "deferred" });
 		expect(JSON.parse(readFileSync(global, "utf8")).mcpServers.docs.exposure).toBeUndefined();
 		expect(
 			getMcpToolExposure(

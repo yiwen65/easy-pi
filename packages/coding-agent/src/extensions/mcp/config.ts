@@ -146,7 +146,7 @@ export function loadMcpConfig(options: { agentDir: string; cwd: string; projectT
 	};
 }
 
-/** Settings `/mcp` changes. `enabled: true` and the default exposure remove the key. */
+/** Settings `/mcp` changes. `enabled: true` and the default exposure (`deferred`) remove the key. */
 export interface McpServerConfigPatch {
 	enabled?: boolean;
 	exposure?: McpExposure;

@@ -258,7 +258,7 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 
 An empty array starts with no built-in tools while preserving extension and SDK custom tools. `--tools` replaces this behavior with a strict allowlist for all tools, `--no-tools` disables all tools, and `--no-builtin-tools` disables the built-in defaults. `--exclude-tools` filters the resulting list. A project `defaultTools` array replaces the global array.
 
-MCP servers default to `codemode` exposure, so keep target tools enabled as well:
+For codemode, keep target tools enabled as well:
 
 ```json
 {
