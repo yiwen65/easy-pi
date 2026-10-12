@@ -11,6 +11,9 @@ import { createMcpExtension } from "../../../src/extensions/mcp/index.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../../utilities.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
+/** MCP servers register their tools asynchronously; the 1s default poll budget is too short when suites run in parallel. */
+const MCP_REGISTRATION_WAIT = { timeout: 15_000 } as const;
+
 function deferred() {
 	let resolve!: () => void;
 	const promise = new Promise<void>((done) => {
@@ -268,7 +271,7 @@ describe("MCP migration: direct SDK session shutdown", () => {
 			})(pi),
 		);
 		await session.bindExtensions({ mode: "rpc" });
-		await vi.waitFor(() => expect(session.getActiveToolNames()).toContain("mcp__fake__read"));
+		await vi.waitFor(() => expect(session.getActiveToolNames()).toContain("mcp__fake__read"), MCP_REGISTRATION_WAIT);
 		session.dispose();
 		await session.shutdown();
 		expect(closed).toHaveBeenCalledOnce();

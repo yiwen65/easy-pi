@@ -16,6 +16,9 @@ import { createToolSearchExtension } from "../../src/extensions/tool-search/inde
 import { spawnArgs } from "../collaboration-fixture.ts";
 import { createHarness, getMessageText } from "./harness.ts";
 
+/** MCP servers register their tools asynchronously; the 1s default poll budget is too short when suites run in parallel. */
+const MCP_REGISTRATION_WAIT = { timeout: 15_000 } as const;
+
 const fixture = fileURLToPath(new URL("../fixtures/mcp-migration/owned-stdio-server.mjs", import.meta.url));
 const resourceNames = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
 const echoTool = "mcp__docs__echo";
@@ -62,7 +65,10 @@ async function setup(exposure: McpExposure = "direct") {
 		root.cleanup();
 	});
 	await root.session.bindExtensions({ mode: "rpc" });
-	await vi.waitFor(() => expect(root.session.getAllTools().some((tool) => tool.name === echoTool)).toBe(true));
+	await vi.waitFor(
+		() => expect(root.session.getAllTools().some((tool) => tool.name === echoTool)).toBe(true),
+		MCP_REGISTRATION_WAIT,
+	);
 	const cwd = realpathSync(root.tempDir);
 	const natives = new Map<string, AgentSession>();
 	const snapshots: string[][] = [];
@@ -148,7 +154,7 @@ describe("MCP ownership and live authority in native children", () => {
 				grant,
 				grant === "explicit" ? (name) => allowed.has(name) : undefined,
 			);
-			await vi.waitFor(() => expect(native.getActiveToolNames()).toContain(echoTool));
+			await vi.waitFor(() => expect(native.getActiveToolNames()).toContain(echoTool), MCP_REGISTRATION_WAIT);
 			expect(native.getActiveToolNames()).toContain("deliver_result");
 			expect(child.identity).toEqual({ rootSessionId: f.root.session.sessionId, agentPath: `/root/${grant}` });
 			for (const name of resourceNames) expect(native.getDelegatableToolNames()).not.toContain(name);
@@ -181,7 +187,10 @@ describe("MCP ownership and live authority in native children", () => {
 	it("keeps deferred tools undisclosed until discovery and retains activation on explicit follow-up", async () => {
 		const f = await setup("deferred");
 		const { child, native } = await f.create("discovery");
-		await vi.waitFor(() => expect(native.getAllTools().map((tool) => tool.name)).toContain(otherTool));
+		await vi.waitFor(
+			() => expect(native.getAllTools().map((tool) => tool.name)).toContain(otherTool),
+			MCP_REGISTRATION_WAIT,
+		);
 		expect(native.getActiveToolNames()).not.toContain(echoTool);
 		expect(native.getActiveToolNames()).not.toContain(otherTool);
 		const declared: string[][] = [];
@@ -358,7 +367,7 @@ describe("MCP ownership and live authority in native children", () => {
 		});
 		bindNativeSession(root.session);
 		await root.session.bindExtensions({ mode: "rpc" });
-		await vi.waitFor(() => expect(root.session.getActiveToolNames()).toContain(echoTool));
+		await vi.waitFor(() => expect(root.session.getActiveToolNames()).toContain(echoTool), MCP_REGISTRATION_WAIT);
 		expect(root.session.resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toContain(
 			"<inline:mcp>",
 		);

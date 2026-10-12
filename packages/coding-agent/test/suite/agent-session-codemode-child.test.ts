@@ -16,6 +16,9 @@ import { registerPiCollaborationRoot } from "../../src/extensions/pi-collaborati
 import { spawnArgs } from "../collaboration-fixture.ts";
 import { createHarness, getMessageText } from "./harness.ts";
 
+/** MCP servers register their tools asynchronously; the 1s default poll budget is too short when suites run in parallel. */
+const MCP_REGISTRATION_WAIT = { timeout: 15_000 } as const;
+
 const fixture = fileURLToPath(new URL("../fixtures/mcp-migration/owned-stdio-server.mjs", import.meta.url));
 const echoTool = "mcp__docs__echo";
 const otherTool = "mcp__docs__other";
@@ -71,7 +74,10 @@ async function setup(options: { revokeOnQuery?: string } = {}) {
 		root.cleanup();
 	});
 	await root.session.bindExtensions({ mode: "rpc" });
-	await vi.waitFor(() => expect(root.session.getAllTools().map((tool) => tool.name)).toContain(echoTool));
+	await vi.waitFor(
+		() => expect(root.session.getAllTools().map((tool) => tool.name)).toContain(echoTool),
+		MCP_REGISTRATION_WAIT,
+	);
 	const natives = new Map<string, AgentSession>();
 	const host = createPiChildSessionHost({
 		modelRuntime: root.session.modelRuntime,
@@ -122,7 +128,10 @@ async function setup(options: { revokeOnQuery?: string } = {}) {
 		});
 		cleanups.push(() => child.dispose());
 		const native = natives.get(`/root/${name}`)!;
-		await vi.waitFor(() => expect(native.getAllTools().map((tool) => tool.name)).toContain(echoTool));
+		await vi.waitFor(
+			() => expect(native.getAllTools().map((tool) => tool.name)).toContain(echoTool),
+			MCP_REGISTRATION_WAIT,
+		);
 		return { child, native };
 	}
 	const audit = () => readAudit(auditPath);
