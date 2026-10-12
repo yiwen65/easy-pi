@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionToolContext, ToolLoadout } from "../src/core/extensions/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { executeCodemode, readCodemodeStore } from "../src/extensions/codemode/execute.ts";
 import { CodemodeOutputPreview } from "../src/extensions/codemode/output.ts";
 import {
@@ -415,6 +416,54 @@ describe("local codemode extension", () => {
 });
 
 describe("codemode catalog/loadout", () => {
+	it("puts balanced selection guidance in both system prompt and tool description", () => {
+		const definition = createCodemodeToolDefinition();
+		const prompt = buildSystemPrompt({
+			cwd: "/test",
+			selectedTools: ["codemode"],
+			toolSnippets: { codemode: definition.promptSnippet! },
+			promptGuidelines: definition.promptGuidelines,
+		});
+		for (const text of [
+			"batch independent calls, chain deterministic steps, or filter large tool output",
+			"Prefer a direct tool for a single simple call when it is declared",
+			"split execution when the next step needs model judgment",
+		]) {
+			expect(prompt).toContain(text);
+			expect(definition.description).toContain(text);
+		}
+	});
+
+	it.each(["on", "only"] as const)("keeps safety boundaries in %s mode even with no catalog budget", (mode) => {
+		const direct = tool("read");
+		const codemode = createCodemodeTool();
+		const definition = createCodemodeToolDefinition({ getMode: () => mode, getInlineBudget: () => 0 });
+		const changes = definition.prepareLoadout?.({
+			declared: [direct, codemode],
+			callable: [direct],
+			registered: [direct, codemode],
+			getExposure: (name) => (name === "codemode" ? "model-only" : "direct"),
+			getNamespace: () => undefined,
+			getPromptGuidelines: () => [],
+		});
+		const description = changes?.descriptions?.codemode;
+		for (const text of [
+			"Parallelize only independent read-only calls",
+			"keep dependent steps and writes ordered",
+			"Promise.allSettled()",
+			"Await calls that matter; do not fire-and-forget writes",
+			"their effects are not undone",
+			"inspect external state before retrying; do not repeat unresolved effects",
+			"Scripts can call only currently authorized tools",
+			"the VM does not isolate effects of Bash or MCP tools",
+			"branch-local JSON values",
+			"failures, cancellation or unknown outcomes discard them",
+		])
+			expect(description).toContain(text);
+		expect(description).not.toContain("### `read`");
+		expect(changes?.hiddenDeclarations).toEqual(mode === "only" ? ["read"] : []);
+	});
+
 	it("changes declaration visibility for only mode without changing the callable list", () => {
 		const direct = tool("read");
 		const deferred = tool("mcp__docs__search");

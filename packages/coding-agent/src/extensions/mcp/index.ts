@@ -1,5 +1,5 @@
 /** Built-in MCP support. Configured and registered servers connect in the background;
- * deferred tools are discovered with tool_search. Lifecycle and cancellation state machine
+ * deferred tools are discovered with tool_search or authorized codemode scripts. Lifecycle and cancellation state machine
  * adapted from upstream e37cdc420669e48b4df4bbce0fb2617fc3c71328.
  */
 
@@ -113,7 +113,7 @@ interface McpServer {
 
 const EXPOSURE_DESCRIPTIONS: Record<McpExposure, string> = {
 	hidden: "registered but unreachable",
-	deferred: "not declared until tool_search loads them, then called directly",
+	deferred: "load with tool_search for direct calls, or use authorized codemode scripts",
 	direct: "declared to the model like built-in tools",
 	codemode: "called only from authorized codemode scripts",
 };
@@ -144,7 +144,7 @@ function hasDirectTools(entry: McpServerEntry): boolean {
 	return configuredExposures(entry).has("direct");
 }
 
-/** Whether some of the server's tools are reached through tool_search. */
+/** Whether some of the server's tools are reached through discovery or scripts. */
 function hasIndirectTools(entry: McpServerEntry): boolean {
 	const exposures = configuredExposures(entry);
 	return exposures.has("deferred") || exposures.has("codemode");
@@ -163,9 +163,11 @@ export const MAX_SERVERS_SECTION_CHARS = 4096;
 /** The section's first line. It explains only the ways of reaching tools that the listed servers use. */
 function serversSectionIntro(reaches: ReadonlySet<string>): string {
 	let intro = "MCP servers whose tools are not declared to you.";
-	if (reaches.has("tool_search")) intro += " Load the tools of `tool_search` servers with `tool_search`.";
-	if (reaches.has("codemode")) intro += " Call the tools of `codemode` servers from authorized codemode scripts.";
-	return intro;
+	if (reaches.has("deferred"))
+		intro +=
+			" For `deferred` tools, use `tool_search` when available to load declarations for direct calls, or discover and call them inside authorized codemode scripts with `searchTools` and `describeTool`, without prior `tool_search`.";
+	if (reaches.has("codemode")) intro += " Tools marked `codemode` are called only from authorized codemode scripts.";
+	return `${intro} Use only routes and tools authorized in this session.`;
 }
 
 function truncate(text: string, max: number): string {
@@ -198,7 +200,7 @@ export function renderServersSection(servers: readonly McpServerListing[]): stri
 	const routes = listed.map((server) => {
 		const exposures = configuredExposures(server.entry);
 		return [
-			exposures.has("deferred") ? "tool_search" : undefined,
+			exposures.has("deferred") ? "deferred" : undefined,
 			exposures.has("codemode") ? "codemode" : undefined,
 		].filter((value): value is string => value !== undefined);
 	});
@@ -207,9 +209,7 @@ export function renderServersSection(servers: readonly McpServerListing[]): stri
 	const heads = listed.map((server, index) => `- ${mcpNamespace(server.entry.name)} (${reaches[index]})`);
 	const omitted = (count: number) =>
 		count > 0
-			? [
-					`- … ${count} more server${count === 1 ? "" : "s"}; find their tools with tool_search or from codemode scripts`,
-				]
+			? [`- … ${count} more server${count === 1 ? "" : "s"}; find their authorized tools through the routes above`]
 			: [];
 	// Characters of the intro, the first `kept` server lines without descriptions, and the omission line.
 	const size = (kept: number) => [intro, ...heads.slice(0, kept), ...omitted(listed.length - kept)].join("\n").length;

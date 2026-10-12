@@ -104,18 +104,24 @@ export interface CodemodeToolDetails {
 	output?: AgentToolResult<unknown>["content"];
 }
 
+const CODEMODE_SELECTION_GUIDELINE =
+	"Use codemode to batch independent calls, chain deterministic steps, or filter large tool output. Prefer a direct tool for a single simple call when it is declared; split execution when the next step needs model judgment.";
+
 export const codemodeToolSystemPromptContribution = {
 	snippet: "Run JavaScript that calls other tools",
-	guidelines: [
-		"Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.",
-	],
+	guidelines: [CODEMODE_SELECTION_GUIDELINE],
 } as const;
 
 /** The reference for scripts: globals, tool results, store persistence, and limits. */
 export const CODEMODE_DOCS_PATH = join(getDocsPath(), "codemode.md");
 
-const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
-- \`await tools.<name>({ ...args })\` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. Calls still running when the script ends are cancelled.
+const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. ${CODEMODE_SELECTION_GUIDELINE}
+The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
+- \`await tools.<name>({ ...args })\` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure.
+- Parallelize only independent read-only calls; keep dependent steps and writes ordered. Use \`Promise.allSettled()\` when successful results should survive known failures.
+- Await calls that matter; do not fire-and-forget writes. Calls still running when the script ends are signalled to cancel, but their effects are not undone.
+- Catching an error or cancelling a call does not prove an external effect failed or stopped. For unknown outcomes, inspect external state before retrying; do not repeat unresolved effects.
+- Scripts can call only currently authorized tools. Nested calls retain normal validation, hooks and host permissions; the VM does not isolate effects of Bash or MCP tools.
 - Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\`. Text output defaults to 10000 estimated tokens; oversized output is saved to a private temporary file.`;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
@@ -123,7 +129,7 @@ function describeGlobals(): string {
 	const lines = [
 		"Globals:",
 		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
-		"- `store(key, value)` and `load(key)` keep JSON values across codemode calls.",
+		"- `store(key, value)` and `load(key)` keep branch-local JSON values across codemode calls. Writes commit only after a successful, non-cancelled script with known nested outcomes; failures, cancellation or unknown outcomes discard them.",
 		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
 	];
 	return lines.join("\n");

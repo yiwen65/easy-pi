@@ -27,13 +27,19 @@ Tool names in `--tools` and SDK `tools` are strict grants. **`--tools codemode` 
 }
 ```
 
-MCP servers default to `deferred` exposure, so `tool_search` finds their tools; servers configured with `codemode` exposure use `codemode` scripts instead. The top-level `autoEnableCodemode` option in `mcp.json` controls automatic activation for enabled, authorized servers; it defaults to `true`, but activation still requires authority for `codemode`, and it never grants the server's tools. See [MCP servers](mcp.md#discovery-and-strict-authorization).
+MCP servers default to `deferred` exposure. For direct calls, `tool_search` loads their declarations; authorized codemode scripts can discover them with `searchTools` / `describeTool` and call them without first using `tool_search`. Servers configured with `codemode` exposure use scripts only. The top-level `autoEnableCodemode` option in `mcp.json` controls automatic activation for enabled, authorized servers; it defaults to `true`, but activation still requires authority for `codemode`, and it never grants the server's tools. See [MCP servers](mcp.md#discovery-and-strict-authorization).
 
 Use `noCodemode: true` to omit the built-in registration from the SDK's default loader. Custom SDK resource loaders remain host-owned; add `createCodemodeExtension()` explicitly when needed. See [SDK](sdk.md#codemode).
 
 ### Updating a running development session
 
 After updating the core source, restart the Easy Pi process and resume the session. `/reload` reloads resources and extensions, not the already-loaded core modules. An old core can therefore load a newer codemode extension without providing its invocation-scoped tool context. Codemode rejects that mismatch before starting the script or nested calls; retrying or `/reload` cannot repair the old core. SDK hosts must likewise supply the full `ExtensionToolContext`, not an event-handler context.
+
+## Choosing a call path
+
+- Use codemode to batch independent calls, chain deterministic steps, or filter large tool output.
+- Prefer a direct tool for one simple call when it is declared. Split execution when the next step needs model judgment rather than encoding an unconfirmed decision in a script.
+- Parallelize only independent read-only calls; keep dependent steps and writes ordered. Use `Promise.allSettled()` when successful results should survive known failures.
 
 ## Scripts
 
