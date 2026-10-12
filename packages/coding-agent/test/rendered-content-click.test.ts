@@ -143,10 +143,13 @@ test("displayed tool ranges do not re-render or retarget after unseen details gr
 	}
 	try {
 		const displayed = group.render(80);
+		// Row 0 is the group's collapsed summary row; it names the newest tool too, so the
+		// second tool's own row is the first match below it.
 		const row = displayed.findIndex(
-			(line) =>
-				stripVTControlCharacters(line).includes("◆ second") ||
-				stripVTControlCharacters(line).startsWith("◇ second"),
+			(line, index) =>
+				index > 0 &&
+				(stripVTControlCharacters(line).includes("◆ second") ||
+					stripVTControlCharacters(line).startsWith("◇ second")),
 		);
 		expect(row).toBeGreaterThan(1);
 		tools[0]!.updateResult({ content: [{ type: "text", text: "unseen\n".repeat(8) }], isError: false });

@@ -7,7 +7,7 @@
  * - getUserMessagesForForking returns correct entries
  */
 
-import { mkdtempSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";

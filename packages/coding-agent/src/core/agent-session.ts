@@ -2504,7 +2504,7 @@ export class AgentSession {
 		// threshold maintenance is deferred to the next real provider request by the
 		// transformContext preflight; an idle agent_end never rewrites context.
 		if (msg.stopReason === "error" || msg.stopReason === "length") {
-			if (await this._checkCompaction(msg)) {
+			if (await this._checkCompaction(msg, true, "", 0, false, false)) {
 				return true;
 			}
 		}
@@ -3483,6 +3483,8 @@ export class AgentSession {
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
+	 * @param allowThresholdMaintenance When false, only overflow/length recovery may compact;
+	 *   threshold maintenance stays deferred to the next provider-request preflight. Default: true
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
 	private async _checkCompaction(
@@ -3491,6 +3493,7 @@ export class AgentSession {
 		currentInput = "",
 		currentInputExtraTokens = 0,
 		providerRequestPending = false,
+		allowThresholdMaintenance = true,
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
@@ -3633,6 +3636,10 @@ export class AgentSession {
 				return false;
 			}
 		}
+		// Threshold maintenance belongs to a real provider-request boundary. A run
+		// that ends without one (idle agent_end) only records pressure; the next
+		// request re-evaluates it against its exact input at the preflight.
+		if (!allowThresholdMaintenance) return false;
 		const evaluation = this._hfHost?.evaluateCompactionTrigger({
 			branchEntries: this.sessionManager.getBranch(),
 			modelContextLimit: contextWindow,

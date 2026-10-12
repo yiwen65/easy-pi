@@ -8,7 +8,7 @@ import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils
  * - Compaction entry is saved to session file
  */
 
-import { mkdtempSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";

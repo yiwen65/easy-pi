@@ -33,7 +33,10 @@ function setup(count = 60) {
 		const rows = terminal.getViewport();
 		const y = rows.findIndex((line) => line.includes("⬇"));
 		expect(y).toBeGreaterThan(0);
-		expect(rows[y + 1]).toContain("╭");
+		// The button docks directly above the input: the bordered editor frame while the
+		// fullscreen layout is roomy, and the border-free compact input under 24 columns.
+		if (terminal.columns >= 24) expect(rows[y + 1]).toContain("╭");
+		else expect(rows[y + 1]).toContain("❯ draft");
 		const x = rows[y].indexOf("⬇");
 		expect(x).toBe(Math.floor((terminal.columns - 4) / 2) + 1);
 		return { x: x + 1, y: y + 1 };

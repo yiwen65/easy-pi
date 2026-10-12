@@ -575,21 +575,19 @@ test("settled rows show the result summary and detail follows the newest activit
 	await command;
 });
 
-test("child terminal toast fires when the panel is closed and stays silent while it is open", async () => {
+test("child completion stays silent while the panel is closed and while it is open", async () => {
 	const f = await fixture();
 	const child = holdChild(f);
 	await f.session.prompt("delegate");
 	await child.ready;
 
-	// panel closed: completion raises a toast
+	// Child completion notices were removed, so a settle raises no toast even with the
+	// panel closed.
 	child.release(fauxAssistantMessage("first done"));
-	await vi.waitFor(
-		() =>
-			expect(f.notices.some((notice) => notice.includes("/root/worker") && notice.includes("completed"))).toBe(true),
-		{ timeout: 5_000 },
-	);
+	await new Promise((resolve) => setTimeout(resolve, 700));
+	expect(f.notices.filter((notice) => notice.includes("/root/worker"))).toHaveLength(0);
 
-	// panel open: the next settle stays silent
+	// panel open: the next settle stays silent as well
 	const opened = await f.show();
 	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 	f.key("\x1b[B");
@@ -601,14 +599,14 @@ test("child terminal toast fires when the panel is closed and stays silent while
 	child.release(fauxAssistantMessage("second done"));
 	await vi.waitFor(() => expect(f.text()).toContain("Completed"));
 	await new Promise((resolve) => setTimeout(resolve, 700));
-	expect(f.notices.filter((notice) => notice.includes("/root/worker"))).toHaveLength(1);
+	expect(f.notices.filter((notice) => notice.includes("/root/worker"))).toHaveLength(0);
 
 	// the followup was composed from the list view, so a single Esc closes the panel
 	f.key("\x1b");
 	await opened.command;
 });
 
-test("/agents with a dead team owner explains the recovery path", async () => {
+test("/agents adopts a dead team owner and lists the retained child", async () => {
 	const f = await fixture();
 	const child = holdChild(f);
 	await f.session.prompt("delegate");
@@ -616,24 +614,21 @@ test("/agents with a dead team owner explains the recovery path", async () => {
 	child.release(fauxAssistantMessage("done"));
 
 	// Simulate the previous owner dying without a clean shutdown: owner row left behind.
+	// Acquisition adopts a verified dead owner, so there is no availability notice and no
+	// manual /agents recover step before the panel works.
 	await f.restart(async () => {
 		const registry = join(f.cwd, "agent", "teams", f.session.sessionId, "registry.sqlite");
 		const db = new DatabaseSync(registry);
 		db.prepare("UPDATE team SET owner=?, pid=?").run("dead-owner", 999999);
 		db.close();
 	});
-	await f.session.prompt("/agents");
-	expect(
-		f.notices.some(
-			(notice) => notice.includes("Native agents unavailable: interrupted") && notice.includes("/agents recover"),
-		),
-	).toBe(true);
+	expect(f.notices.some((notice) => notice.includes("Native agents unavailable"))).toBe(false);
 
-	// recovery adopts the team and the panel works again
-	const recovering = f.session.prompt("/agents recover");
-	await vi.waitFor(() => expect(f.panel).toBeDefined());
+	// the adopted team keeps its retained child, and a single Esc returns to the editor
+	const opened = await f.show();
+	await vi.waitFor(() => expect(f.text()).toContain("/root/worker"));
 	f.key("\x1b");
-	await recovering;
+	await opened.command;
 });
 
 test("a retired legacy child environment cannot silently become an unrestricted native root", async () => {
