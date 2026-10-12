@@ -35,6 +35,21 @@ async function runProbe(
 	const events: Event[] = [];
 	let stderrText = "";
 	let failed = false;
+	async function saveDiagnostics() {
+		const diagnosticEvents = events.filter(
+			(event) =>
+				event.type === "message_end" ||
+				event.type === "tool_execution_start" ||
+				event.type === "tool_execution_end",
+		);
+		const redact = (value: string) =>
+			value.replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]").replace(/\bsk-[A-Za-z0-9_-]+/g, "[REDACTED]");
+		await writeFile(
+			join(cwd, "diagnostic.json"),
+			redact(JSON.stringify({ events: diagnosticEvents, stderr: stderrText }, null, 2)),
+			{ mode: 0o600 },
+		);
+	}
 	try {
 		await mkdir(agentDir);
 		const source = process.env.PI_AGENT_DIR ?? join(homedir(), ".epi", "agent");
@@ -50,7 +65,7 @@ async function runProbe(
 				mcpServers: {
 					rates: {
 						command: process.execPath,
-						args: [fixture, join(cwd, "mcp-audit.jsonl")],
+						args: [fixture, join(cwd, "mcp-audit.jsonl"), join(cwd, "mcp-lifecycle.jsonl")],
 						exposure: "deferred",
 					},
 				},
@@ -159,24 +174,18 @@ async function runProbe(
 		}
 	} catch (error) {
 		failed = true;
-		const diagnosticEvents = events.filter(
-			(event) =>
-				event.type === "message_end" ||
-				event.type === "tool_execution_start" ||
-				event.type === "tool_execution_end",
-		);
-		const redact = (value: string) =>
-			value.replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]").replace(/\bsk-[A-Za-z0-9_-]+/g, "[REDACTED]");
-		await writeFile(
-			join(cwd, "diagnostic.json"),
-			redact(JSON.stringify({ events: diagnosticEvents, stderr: stderrText }, null, 2)),
-			{ mode: 0o600 },
-		);
+		await saveDiagnostics();
 		console.error(`Codemode failure diagnostics retained at ${join(cwd, "diagnostic.json")}`);
 		throw error;
 	} finally {
-		// Never retain credential/model symlinks alongside failure artifacts.
-		await rm(failed ? agentDir : cwd, { recursive: true, force: true });
+		// Explicit diagnosis can retain successful runs for good/bad comparisons too.
+		const retain = failed || process.env.PI_REAL_CODEMODE_RETAIN === "1";
+		if (retain && !failed) {
+			await saveDiagnostics();
+			console.log(`Codemode success diagnostics retained at ${join(cwd, "diagnostic.json")}`);
+		}
+		// Never retain credential/model symlinks alongside diagnostic artifacts.
+		await rm(retain ? agentDir : cwd, { recursive: true, force: true });
 	}
 }
 

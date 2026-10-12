@@ -26,7 +26,7 @@
 <!-- task-doc-section:assumptions-questions -->
 ## Assumptions and open questions
 - Assumption: 本地受控 provider 可驱动源码 CLI；T-001 验证。
-- Open question: None. 用户已明确授权真实模型测试，默认 gpt-6.1-sol / medium，限定指定文件一次运行。
+- Open question: None. 用户已明确授权多次真实模型复测锁定根因，默认 gpt-6.1-sol / medium，先做 3 次同输入 MCP 复测，再按证据进行单变量对照。
 
 <!-- task-doc-section:acceptance-criteria -->
 ## Acceptance criteria
@@ -117,8 +117,28 @@
 - Verification method:
   - 指定 vitest 实际退出结果。
 - Validation evidence: 首轮完整文件 85.26s，1 passed / 2 failed。用户授权诊断后仅 -t 'batches reads|discovers an undeclared' 复跑一次，119.41s，批量 passed，MCP failed，部分失败用例 skipped。MCP message_end 为 stopReason:error、Codex request processing error，工具事件为空、stderr 为空，但 CLI exit0；请求 ID 83df9228-0649-4510-a2fa-fdc8cdfa1638。npm run check 通过。诊断信息保留在临时 diagnostic.json，认证/model 链接已删除。
-- Blocker: 本次 MCP 模型请求在工具执行前失败；服务端内部原因不可见，原首轮详细事件已删除，无法证明首轮同因。
-- Unblock condition: provider 请求问题解决或另获授权进行受控实验；本轮授权次数已用完，不再调用 API。
+- Blocker: T-005 已证明 MCP 审计断言拒绝合法 _meta 字段；需另行授权修正测试断言。历史 provider 请求错误的内部原因不可见，原首轮详细事件已删除。
+- Unblock condition: 获准修正 exact audit 断言并重新验收；不自动重复未知副作用。
+
+### [x] T-005 — 多次受控复测与因果诊断
+- Status: done
+- Owner: coordinator
+- Objective: 区分模型请求错误、MCP 生命周期和模型未调用工具，尽可能锁定根因。
+- Inputs and prerequisites: 用户授权多次复测；T-004 已提供一次远端错误证据。
+- Scope or files: 真实模型测试和 MCP fixture 的诊断信息，本文档；不修改产品行为。
+- Expected output: 同输入失败频率、好坏轨迹对照、单变量因果证据或明确可见性边界。
+- Dependencies: T-002
+- Execution steps:
+  1. 保留成功与失败诊断，增加本地 MCP 生命周期审计。
+  2. 同模型/effort/提示/授权顺序运行 MCP 用例 3 次。
+  3. 据第一差异选择有区分能力的对照，避免无信息盲目重试。
+- Acceptance criteria:
+  - 报告精确运行次数、失败分类；根因须由对照证据支撑。
+- Verification method:
+  - 指定 vitest、诊断 JSON/MCP 审计、npm run check。
+- Validation evidence: 固定输入 MCP 3 次复测，47.82s / 24.36s / 27.25s，全部在相同 audit.toEqual 断言失败。三次生命周期均 initialize→tools/list→tools/call；调用 lookup_rate 参数 ZED 恰好一次，附带 _meta.progressToken:3；嵌套调用 ok，产物 rate:7 正确，assistant 无 error/abort。临时 Node 离线重放同一数据：原 exact 断言 3/3 失败，仅投影 name/arguments（保留数组数量）3/3 通过，产物与嵌套调用均通过。因果链：tools.ts:305–308 传 onProgress → mcp/client.ts:403–407 注入合法 _meta → fixture 记录完整 params → 测试错误地精确比对仅 name/arguments。npm run check 通过；本任务只诊断，未修正业务断言。
+- Blocker: None.
+- Unblock condition: None.
 
 <!-- task-doc-section:validation-plan -->
 ## Test and validation plan
@@ -126,7 +146,7 @@
 
 <!-- task-doc-section:risks-blockers -->
 ## Risks and blockers
-实际模型首轮运行 1 passed / 2 failed；当前证据不足以区分模型行为、provider 或测试 harness 问题。进程测试的超时与清理必须有界，避免留下子进程。
+实际模型首轮运行 1 passed / 2 failed；后续三次 MCP 复测已证明合法 _meta 导致断言误报，历史远端 provider 请求错误为另一条失败路径。进程测试的超时与清理必须有界，避免留下子进程。
 
 <!-- task-doc-section:execution-log -->
 ## Execution log
@@ -140,9 +160,12 @@
 - 2026-10-12: T-004 首轮 85.26s 完成，1 passed / 2 failed，未重试；缺乏保留的详细事件，阻塞通过验收。
 - 2026-10-12: 只读检查确认 JSON 模式退出码不检查 assistant error/abort，测试未保留失败证据。用户授权诊断修改和两个失败用例各复跑一次；诊断代码 npm run check 通过，启动定向复跑。
 - 2026-10-12: 复跑批量通过，MCP 在工具执行前发生 Codex 请求错误；新 assistant error 断言正确捕获，JSON exit0 掩盖错误路径已由运行观察确认。未修改产品功能，未再次重试。
+- 2026-10-12: 用户授权多次受控复测；启动 T-005，新增可选成功诊断留存和 MCP 生命周期日志，仅增强可观测性。
+- 2026-10-12: 三次同输入真实 MCP 均完成正确调用和产物，均被 _meta.progressToken 导致的 exact 断言误判；原/投影断言离线对照证明因果。停止付费复测；尚未获授权修正断言，不修改产品行为。临时 payload 扩展未使用，已移除。
+- 2026-10-12: T-005 完成诊断；T-004 仍阻塞真实验收，原因现在包含已证明的断言错误与独立 provider 请求错误历史。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 - Result: failed
 - Evidence: 目标 5 文件 35 passed / 3 skipped；npm run check、fixture 语法检查、git diff --check 和任务文档 validator 通过。
-- Limitations: 首轮 1 passed / 2 failed；授权诊断复跑批量通过、MCP 请求失败。已定位本次失败在 provider response 前于工具调用，无法解释服务端内部错误或证明首轮同因。live child/ancestor 撤权和兄弟分支隔离由既有 suite 验证，未复制为 CLI 进程用例；显式脚本 deadline 未新增独立进程用例，已验证 RPC abort。
+- Limitations: 新增 3 次同输入 MCP 运行均业务成功但断言失败，根因为 exact audit 比对不允许合法 _meta.progressToken，离线单变量对照已证明，尚未修正。此前 provider 请求错误是独立失败路径，当前 3 次未复现，服务端内部原因及首轮同因仍不可证明。live child/ancestor 撤权和兄弟分支隔离由既有 suite 验证，未复制为 CLI 进程用例；显式脚本 deadline 未新增独立进程用例，已验证 RPC abort。

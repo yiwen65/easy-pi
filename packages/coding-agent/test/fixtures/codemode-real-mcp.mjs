@@ -3,6 +3,12 @@ import { createInterface } from "node:readline";
 
 // Isolated, deterministic stdio fixture; never reads credentials or accesses a network.
 const auditPath = process.argv[2];
+const lifecyclePath = process.argv[3];
+const record = (event, method) => {
+	if (lifecyclePath) appendFileSync(lifecyclePath, `${JSON.stringify({ event, method, timestamp: Date.now() })}\n`);
+};
+record("start");
+process.on("exit", () => record("exit"));
 const tools = [{
 	name: "lookup_rate",
 	description: "Look up the exchange rate for the fictional currency ZED; returns rate 7.",
@@ -12,6 +18,7 @@ const tools = [{
 const lines = createInterface({ input: process.stdin });
 lines.on("line", (line) => {
 	const request = JSON.parse(line);
+	record("request", request.method);
 	if (request.id === undefined) return;
 	let result = {};
 	if (request.method === "initialize") {
