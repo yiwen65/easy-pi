@@ -278,7 +278,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames = ["read", "bash", "edit", "write", ...BACKGROUND_TASK_TOOL_NAMES];
+	// `codemode` ships active: MCP servers default to script-only exposure, so a fresh session
+	// reaches their tools without extra configuration.
+	const defaultActiveToolNames = ["read", "bash", "edit", "write", "codemode", ...BACKGROUND_TASK_TOOL_NAMES];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	// Background task management tools are part of the bash feature surface: a configured
 	// defaultTools list that enables bash gets them too (excludeTools can still remove them).

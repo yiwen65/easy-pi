@@ -497,7 +497,7 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 Pi is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [pi packages](#pi-packages). This keeps the core minimal while letting you shape pi to fit how you work.
 
-**MCP and codemode (this fork).** Connect stdio or Streamable HTTP servers with `epi mcp`, manage them with `/mcp`, and discover deferred tools with `tool_search`. Opt into local QuickJS tool orchestration with `epi --tools codemode,read` or the `defaultTools` setting. Codemode can call only separately authorized tools; strict allowlists and live native-child restrictions still apply. See [MCP servers](docs/mcp.md) and [Codemode](docs/codemode.md).
+**MCP and codemode (this fork).** Connect stdio or Streamable HTTP servers with `epi mcp`, manage them with `/mcp`, and discover the tools of `deferred` servers with `tool_search`. MCP tools default to script-only `codemode` exposure, and `codemode` is a default tool: it can call only separately authorized tools, with strict allowlists and live native-child restrictions still applying. Turn it off with `--exclude-tools codemode` or a `defaultTools` list without it. See [MCP servers](docs/mcp.md) and [Codemode](docs/codemode.md).
 
 **No sub-agents.** There's many ways to do this. Spawn pi instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
 
@@ -587,7 +587,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-The built-in tools are `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The built-in [codemode extension](docs/codemode.md) is inactive until selected; use `--tools codemode,read` to let scripts read files, or name other permitted targets explicitly. Selecting only `codemode` does not grant other tools. The V2 profile and `--tool-profile` option have been removed; use the standard tools and existing tool filters.
+The built-in tools are `read`, `bash`, `edit`, and `write`, with optional `grep`, `find`, and `ls`. The built-in [codemode extension](docs/codemode.md) is active by default, and MCP servers default to script-only `codemode` exposure; use `--tools codemode,read` to let scripts read files, or name other permitted targets explicitly. Selecting only `codemode` does not grant other tools, and `defaultTools` without `codemode` turns it off. The V2 profile and `--tool-profile` option have been removed; use the standard tools and existing tool filters.
 
 Bash uses the shared execution core and renderer. Bash accepts `command`, optional `cwd`, and optional `timeout` in seconds. Success includes structured status details without adding a mandatory exit-0 footer; nonzero exits, signals, timeouts, and cancellation are tool errors with retained details. Native scheduling is unchanged, with no automatic Bash replay. `run` is removed, not an alias: update tool filters and integrations to `bash`. See [Bash contract and migration](docs/sdk.md#bash-contract-and-migration) for SDK changes and host boundaries.
 

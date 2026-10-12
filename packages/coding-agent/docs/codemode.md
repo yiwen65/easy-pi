@@ -6,7 +6,7 @@ This integration does not expose the upstream `models.*` catalog, classifier, or
 
 ## Enable codemode
 
-The built-in extension registers `codemode` inactive. Activate it with `--tools`, `defaultTools` in [settings](settings.md#tools), or `setActiveTools()` in an extension:
+The built-in extension registers `codemode` active, and it is part of the default tool set next to `read`, `bash`, `edit`, and `write`. Turn it off for one run with `--exclude-tools codemode` (or a `--tools` list that omits it), or persistently with a [settings](settings.md#tools) `defaultTools` list without it:
 
 ```bash
 # The script may read files, but cannot edit, write, or run commands.
@@ -18,16 +18,16 @@ epi --tools 'codemode,read,mcp__docs__*' --exclude-tools 'mcp__docs__delete_*'
 
 Tool names in `--tools` and SDK `tools` are strict grants. **`--tools codemode` grants no target tools.** Discovery, `codemode.mode: "only"`, and MCP auto-activation do not expand this list. Native children need both `codemode` and each target capability in their delegated tool set; current root and ancestor restrictions still apply.
 
-To opt in persistently, edit `~/.epi/agent/settings.json` or trusted `.epi/settings.json` (or the directories selected by the product configuration):
+`defaultTools` without `codemode` disables it persistently; a list that omits it never re-enables it at startup:
 
 ```json
 {
-  "defaultTools": ["read", "bash", "edit", "write", "codemode"],
+  "defaultTools": ["read", "bash", "edit", "write"],
   "codemode": { "mode": "on", "inlineBudget": 3000 }
 }
 ```
 
-For MCP tools configured with `codemode` exposure, the top-level `autoEnableCodemode` option in `mcp.json` controls automatic activation. It defaults to `true`, but activation still requires authority for `codemode`; it never grants the server's tools. See [MCP servers](mcp.md#discovery-and-strict-authorization).
+MCP tools default to `codemode` exposure, so a session with configured servers uses `codemode` to reach them. The top-level `autoEnableCodemode` option in `mcp.json` controls automatic activation for enabled, authorized servers; it defaults to `true`, but activation still requires authority for `codemode`, and it never grants the server's tools. See [MCP servers](mcp.md#discovery-and-strict-authorization).
 
 Use `noCodemode: true` to omit the built-in registration from the SDK's default loader. Custom SDK resource loaders remain host-owned; add `createCodemodeExtension()` explicitly when needed. See [SDK](sdk.md#codemode).
 

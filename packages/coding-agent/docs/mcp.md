@@ -49,7 +49,8 @@ Tools are named `mcp__<server>__<tool>`, with provider-safe sanitization and a h
 
 | Exposure | Behavior |
 | --- | --- |
-| `deferred` (default) | `tool_search` finds and loads allowed tools; their schemas appear on the next model call. Authorized codemode scripts can also call them without loading a direct declaration. |
+| `codemode` (default) | Tools are callable from authorized scripts, but are not declared as direct model tools. |
+| `deferred` | `tool_search` finds and loads allowed tools; their schemas appear on the next model call. Authorized codemode scripts can also call them without loading a direct declaration. |
 | `direct` | Tools are declared as soon as the server connects and are callable from authorized codemode scripts. |
 | `codemode` | Tools are callable from authorized scripts, but are not declared as direct model tools. |
 | `hidden` | Tools cannot be discovered, declared or called. |
@@ -85,7 +86,7 @@ epi --no-mcp
 
 Search, late registration, resume, reload and branch navigation never add authorization. Loaded deferred tools are restored from the active branch when their server reconnects, subject to current grants and exclusions. Hidden or withdrawn tools remain unavailable.
 
-The top-level `autoEnableCodemode` option in `mcp.json` defaults to `true`: for enabled, authorized servers with `codemode` exposure, the integration can activate an already-authorized `codemode` tool. Set it to `false` to keep activation manual; a trusted project value overrides the global one. It never grants `codemode` or MCP targets outside the current allowlist:
+The top-level `autoEnableCodemode` option in `mcp.json` defaults to `true`: for enabled, authorized servers with `codemode` exposure, the integration can activate an already-authorized `codemode` tool, which is a default tool anyway. Set it to `false` to keep activation manual; a trusted project value overrides the global one. It never grants `codemode` or MCP targets outside the current allowlist:
 
 ```json
 {
@@ -96,7 +97,7 @@ The top-level `autoEnableCodemode` option in `mcp.json` defaults to `true`: for 
 }
 ```
 
-The default exposure remains `deferred`; selecting `codemode` is explicit. See [Codemode](codemode.md) for script discovery and `on`/`only` presentation modes.
+The default exposure is `codemode`; set `"exposure": "deferred"` for `tool_search` discovery or `"exposure": "direct"` to declare tools to the model. See [Codemode](codemode.md) for script discovery and `on`/`only` presentation modes.
 
 ## Management and OAuth
 

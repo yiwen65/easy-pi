@@ -14,7 +14,7 @@ import type {
 	ExtensionFactory,
 	ToolDefinition,
 } from "../../core/extensions/types.ts";
-import { createToolNameMatcher, mcpNamespace } from "../../core/mcp-servers.ts";
+import { createToolNameMatcher, DEFAULT_MCP_EXPOSURE, mcpNamespace } from "../../core/mcp-servers.ts";
 import type { ReadonlySessionManager } from "../../core/session-manager.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { CODEMODE_TOOL_NAME, isCodemodeTool } from "../codemode/tool.ts";
@@ -131,7 +131,7 @@ function isEnabled(server: Pick<McpServer, "entry">): boolean {
 }
 
 function exposureOf(entry: McpServerEntry): McpExposure {
-	return entry.config.exposure ?? "deferred";
+	return entry.config.exposure ?? DEFAULT_MCP_EXPOSURE;
 }
 
 /** Exposures the server's tools can have, known from its config before it connects. */
@@ -206,7 +206,11 @@ export function renderServersSection(servers: readonly McpServerListing[]): stri
 	const intro = serversSectionIntro(new Set(routes.flat()));
 	const heads = listed.map((server, index) => `- ${mcpNamespace(server.entry.name)} (${reaches[index]})`);
 	const omitted = (count: number) =>
-		count > 0 ? [`- … ${count} more server${count === 1 ? "" : "s"}; find their tools with tool_search`] : [];
+		count > 0
+			? [
+					`- … ${count} more server${count === 1 ? "" : "s"}; find their tools with tool_search or from codemode scripts`,
+				]
+			: [];
 	// Characters of the intro, the first `kept` server lines without descriptions, and the omission line.
 	const size = (kept: number) => [intro, ...heads.slice(0, kept), ...omitted(listed.length - kept)].join("\n").length;
 	let kept = listed.length;

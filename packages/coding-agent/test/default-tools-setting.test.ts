@@ -8,7 +8,7 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../s
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { type CreateAgentSessionOptions, createAgentSession, type InlineExtension } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 
 type ToolOptions = Pick<CreateAgentSessionOptions, "tools" | "excludeTools" | "noTools" | "customTools">;
 
@@ -158,6 +158,35 @@ describe("defaultTools setting", () => {
 		const excluded = await createSession(["bash"], { excludeTools: ["task_stop", "wait_for"] });
 		expect(excluded.getActiveToolNames().sort()).toEqual(["bash", "task_list", "task_output"]);
 		excluded.dispose();
+	});
+
+	async function createDefaultSession(settings: Partial<Settings> = {}, options: ToolOptions = {}) {
+		const settingsManager = SettingsManager.inMemory(settings);
+		return (
+			await createAgentSession({
+				cwd: tempDir,
+				agentDir,
+				model: getModel("anthropic", "claude-sonnet-4-5")!,
+				settingsManager,
+				sessionManager: SessionManager.inMemory(tempDir),
+				...options,
+			})
+		).session;
+	}
+
+	it("activates codemode by default and deactivates it when the configured list omits it", async () => {
+		const defaultSession = await createDefaultSession();
+		expect(defaultSession.getActiveToolNames()).toContain("codemode");
+		defaultSession.dispose();
+
+		const configuredSession = await createDefaultSession({ defaultTools: ["read", "bash"] });
+		expect(configuredSession.getAllTools().map((tool) => tool.name)).toContain("codemode");
+		expect(configuredSession.getActiveToolNames()).not.toContain("codemode");
+		configuredSession.dispose();
+
+		const excludedSession = await createDefaultSession({}, { excludeTools: ["codemode"] });
+		expect(excludedSession.getActiveToolNames()).not.toContain("codemode");
+		excludedSession.dispose();
 	});
 
 	it("applies through service-based session creation", async () => {

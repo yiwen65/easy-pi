@@ -632,7 +632,7 @@ The default resource loader includes MCP and `tool_search`. Use `noMcp: true` to
 
 ### Codemode
 
-The default SDK resource loader registers the local QuickJS `codemode` tool inactive. Use `noCodemode: true` to omit that built-in registration; custom loaders remain host-owned. Name codemode and its target tools in the strict `tools` allowlist to activate it:
+The default SDK resource loader registers the local QuickJS `codemode` tool active; when `tools` is given, name `codemode` and its target tools in that strict allowlist. Use `noCodemode: true` to omit that built-in registration; custom loaders remain host-owned:
 
 ```typescript
 import { createAgentSession, SettingsManager } from "@earendil-works/pi-coding-agent";

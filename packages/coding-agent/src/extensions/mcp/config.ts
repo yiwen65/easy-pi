@@ -27,6 +27,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "../../config.ts";
 import {
+	DEFAULT_MCP_EXPOSURE,
 	type McpExposure,
 	type McpServerConfig,
 	mcpNamespace,
@@ -145,7 +146,7 @@ export function loadMcpConfig(options: { agentDir: string; cwd: string; projectT
 	};
 }
 
-/** Settings `/mcp` changes. `enabled: true` and `exposure: "deferred"` are the defaults and remove the key. */
+/** Settings `/mcp` changes. `enabled: true` and the default exposure remove the key. */
 export interface McpServerConfigPatch {
 	enabled?: boolean;
 	exposure?: McpExposure;
@@ -175,7 +176,7 @@ export function updateMcpServerConfig(
 			else server.enabled = patch.enabled;
 		}
 		if (patch.exposure !== undefined) {
-			if (patch.exposure === "deferred" && !keepDefaults) delete server.exposure;
+			if (patch.exposure === DEFAULT_MCP_EXPOSURE && !keepDefaults) delete server.exposure;
 			else server.exposure = patch.exposure;
 		}
 		return true;

@@ -11,7 +11,7 @@ import { createInterface } from "node:readline/promises";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME } from "../../config.ts";
 import type { ProjectTrustContext } from "../../core/extensions/types.ts";
-import { validateMcpServerConfig } from "../../core/mcp-servers.ts";
+import { DEFAULT_MCP_EXPOSURE, validateMcpServerConfig } from "../../core/mcp-servers.ts";
 import { resolveProjectTrusted } from "../../core/project-trust.ts";
 import { type DefaultProjectTrust, SettingsManager } from "../../core/settings-manager.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
@@ -69,7 +69,7 @@ Options for add:
                           Fixed OAuth callback port
   --oauth-client-name <name>
                           Client name sent when registering with the OAuth server
-  --exposure <mode>       deferred (default), direct, codemode, or hidden
+  --exposure <mode>       codemode (default), deferred, direct, or hidden
   --description <text>    What the server offers, shown in the system prompt
 
 Other options:
@@ -479,7 +479,7 @@ async function list(
 				source: entry.source,
 				...(entry.override ? { override: entry.override } : {}),
 				enabled: entry.config.enabled !== false,
-				exposure: entry.config.exposure ?? "deferred",
+				exposure: entry.config.exposure ?? DEFAULT_MCP_EXPOSURE,
 				transport: describeTransport(entry),
 				state: "disabled",
 				tools: [],

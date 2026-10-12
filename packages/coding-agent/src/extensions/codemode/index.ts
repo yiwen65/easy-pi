@@ -2,8 +2,10 @@
  * The `codemode` tool as an extension. The CLI loads it as a built-in extension; SDK users
  * add `createCodemodeExtension()` to their extension factories.
  *
- * `codemode` is registered inactive. Activate it with `--tools`, the `defaultTools` setting, or
- * `setActiveTools()`; the MCP extension activates it when MCP tools are only reachable from scripts.
+ * `codemode` is registered inactive and is part of the default tool set, so a session without a
+ * `defaultTools` list activates it while `--tools`, `--exclude-tools codemode`, or a `defaultTools`
+ * list without it keeps it inactive. The MCP extension also activates it when MCP tools are only
+ * reachable from scripts.
  */
 
 import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";

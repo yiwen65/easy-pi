@@ -25,11 +25,11 @@ describe("MCP server configuration", () => {
 		expect(validateMcpServerConfig("docs", config)).toEqual(config);
 	});
 
-	it("defaults exposure to deferred and does not mutate validated configuration", () => {
+	it("defaults exposure to codemode and does not mutate validated configuration", () => {
 		const raw: McpServerConfig = { command: "node", args: ["server.mjs"], toolExposure: { search: "direct" } };
 		const validated = validateMcpServerConfig("docs", raw);
 		if (typeof validated === "string") throw new Error(validated);
-		expect(getMcpToolExposure(validated, "other")).toBe("deferred");
+		expect(getMcpToolExposure(validated, "other")).toBe("codemode");
 		expect(validated).not.toBe(raw);
 		raw.toolExposure!.search = "hidden";
 		if ("command" in raw) raw.args!.push("changed");
@@ -142,12 +142,12 @@ describe("MCP server configuration", () => {
 		expect(getMcpToolExposure(config, "delete_repo")).toBe("hidden");
 		expect(getMcpToolExposure(config, "list")).toBe("deferred");
 		expect(getMcpToolExposure({ command: "node", toolExposure: { "get_file.*": "direct" } }, "get_file_x")).toBe(
-			"deferred",
+			"codemode",
 		);
 		expect(getMcpToolExposure({ command: "node", toolExposure: { "get_file.*": "direct" } }, "get_file.json")).toBe(
 			"direct",
 		);
-		expect(getMcpToolExposure({ command: "node" }, "constructor")).toBe("deferred");
+		expect(getMcpToolExposure({ command: "node" }, "constructor")).toBe("codemode");
 	});
 
 	it.each([

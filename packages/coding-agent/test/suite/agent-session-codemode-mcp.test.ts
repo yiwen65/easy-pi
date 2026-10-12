@@ -321,7 +321,8 @@ return { entries, described, matches: matches.map(tool => tool.name), denied };
 	it.each([
 		{ allowed: undefined, autoEnableCodemode: true, enabled: true },
 		{ allowed: [searchName], autoEnableCodemode: true, enabled: false },
-		{ allowed: undefined, autoEnableCodemode: false, enabled: false },
+		// `codemode` is a default tool now; auto-activation cannot bring back a disabled tool.
+		{ allowed: undefined, autoEnableCodemode: false, excluded: ["codemode"], enabled: false },
 		// Explicit tool selection activates codemode independently of MCP's automatic activation setting.
 		{ allowed: ["codemode", searchName], autoEnableCodemode: false, enabled: true },
 	])("auto-enable obeys both the whitelist and config: $allowed / $autoEnableCodemode", async (options) => {
