@@ -36,9 +36,9 @@ it("uses API-equivalent reference costs for Coding Plan models", () => {
 		cacheWrite: 0,
 	});
 	expect(getBuiltinModel("zai-coding-cn", "glm-5.3-flash").cost).toEqual({
-		input: 0.075,
-		output: 0.25,
-		cacheRead: 0.015,
+		input: 0.15,
+		output: 0.5,
+		cacheRead: 0.03,
 		cacheWrite: 0,
 	});
 	for (const provider of ["zai", "zai-coding-cn"] as const) {

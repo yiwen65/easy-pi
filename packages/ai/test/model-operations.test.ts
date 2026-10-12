@@ -77,14 +77,14 @@ it("derives exact chat/image literals from operation keys without overwriting sa
 
 it("keeps global image catalog/registry entrypoints available against the unified generated image projection", async () => {
 	expect(getImageProviders()).toEqual(["openrouter"]);
-	expect(getImageModels("openrouter")).toHaveLength(45);
+	expect(getImageModels("openrouter")).toHaveLength(61);
 	const found = getImageModel("openrouter", "google/gemini-2.5-flash-image");
 	expect(found).toBe(IMAGE_MODELS.openrouter["google/gemini-2.5-flash-image"]);
 	expect(found.type).toBe("image");
 	const builtin = getBuiltinImageModel("openrouter", "google/gemini-2.5-flash-image");
 	expectTypeOf(builtin.api).toEqualTypeOf<"openrouter-images">();
 	expect(getBuiltinImageModels("anthropic")).toEqual([]);
-	expect(getAllBuiltinModels("openrouter")).toHaveLength(437);
+	expect(getAllBuiltinModels("openrouter")).toHaveLength(453);
 	expectTypeOf(found.api).toEqualTypeOf<"openrouter-images">();
 	expect(MODELS.openrouter.auto.type).toBe("chat");
 	const forced = { ...found, api: "openai-completions" } as unknown as Model<"openai-completions">;

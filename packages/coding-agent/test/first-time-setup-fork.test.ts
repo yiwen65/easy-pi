@@ -3,11 +3,14 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// A forked distribution changes the product identity (package.json piConfig name/configDir),
+// which is what `isOfficialDistribution` reads; the npm package name is not consulted.
 vi.mock("../src/config.ts", async (importOriginal) => {
 	const actual = await importOriginal();
 	return {
 		...(actual as Record<string, unknown>),
-		PACKAGE_NAME: "@example/pi-coding-agent",
+		APP_NAME: "pi",
+		CONFIG_DIR_NAME: ".pi",
 	};
 });
 

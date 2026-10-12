@@ -503,7 +503,7 @@ describe("unified Models image operations", () => {
 		});
 		expect(models.getProviders()).toHaveLength(39);
 		expect(models.getProvider("radius")).toBeUndefined();
-		expect(models.getModelsOfType("image", "openrouter")).toHaveLength(45);
+		expect(models.getModelsOfType("image", "openrouter")).toHaveLength(61);
 		expect(models.getModels("openrouter").every((model) => model.api === "openai-completions")).toBe(true);
 		expect((await models.getAuth(models.getModelsOfType("image")[0]))?.auth.apiKey).toBe("fixture-key");
 	});
