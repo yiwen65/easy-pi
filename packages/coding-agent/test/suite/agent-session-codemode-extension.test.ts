@@ -1,9 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AgentToolError } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
+import { createReadTool } from "../../src/core/tools/read.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import { CODEMODE_STORE_ENTRY_TYPE, type CodemodeToolDetails } from "../../src/extensions/codemode/tool.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -221,5 +225,30 @@ describe("codemode extension in AgentSession", () => {
 				.getBranch()
 				.some((entry) => entry.type === "custom" && entry.customType === CODEMODE_STORE_ENTRY_TYPE),
 		).toBe(false);
+	});
+
+	it("keeps an ordinary read failure a known error instead of pausing the task", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "codemode-read-"));
+		writeFileSync(join(dir, "sample.txt"), "one\ntwo\n");
+		const harness = await createHarness({
+			tools: [createReadTool(dir)],
+			initialActiveToolNames: ["codemode", "read"],
+			extensionFactories: [createCodemodeExtension()],
+		});
+		harnesses.push(harness);
+		try {
+			const message = await run(
+				harness,
+				'try { await tools.read({ path: "sample.txt", offset: 1000, limit: 1 }); return "unexpected"; } catch (error) { return String(error && error.message); }',
+			);
+			expect(text(message)).toContain("Script completed");
+			expect(text(message)).toContain("beyond end of file");
+			expect(text(message)).not.toContain("unknown outcome");
+			harness.setResponses([fauxAssistantMessage("independent")]);
+			await harness.session.prompt("independent task");
+			expect(harness.session.suspendedTaskRecovery).toHaveLength(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

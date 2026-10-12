@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Treated an ordinary failure of a replay-safe tool (read-only, idempotent, or without side effects) as a known outcome instead of an unknown effect, so a failed `read`, `ls`, `grep`, or `find` inside a codemode script no longer pauses the task for reconciliation.
 - Treated captured foreground Bash exit failures as committed tool results instead of unknown effects, allowing model continuation without replaying the command.
 - Persisted complete stream items and individual parallel tool results before further effects; added tool-batch recovery and explicit reconciliation, and cancelled timed-out tools without treating unknown outcomes as completed failures.
 - Fixed proxy thinking completion snapshots to update the accumulated thinking text.

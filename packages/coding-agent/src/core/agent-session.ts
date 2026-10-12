@@ -28,7 +28,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { hasConfirmedBashExit, ok } from "@earendil-works/pi-agent-core";
+import { hasConfirmedBashExit, isReplaySafeTool, ok } from "@earendil-works/pi-agent-core";
 import { BackgroundTaskManager, type BackgroundTaskRecord } from "@earendil-works/pi-agent-core/node";
 import { contentText } from "@earendil-works/pi-ai";
 import type {
@@ -869,8 +869,7 @@ export class AgentSession {
 			this._taskRecovery.dispatch(
 				context.toolCall,
 				context.args,
-				!context.tool.orchestratesTools &&
-					(contract?.readOnly === true || contract?.idempotent === true || contract?.sideEffects === "none"),
+				isReplaySafeTool(context.tool),
 				JSON.stringify({ name: context.tool.name, parameters: context.tool.parameters, contract }),
 				context.parentToolCallId,
 			);

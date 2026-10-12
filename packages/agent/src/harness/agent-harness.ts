@@ -2065,7 +2065,7 @@ export class AgentHarness implements AgentLane {
 					...errorToolResult(toolCall, error instanceof Error ? error.message : String(error)),
 					details: error instanceof AgentToolError ? error.details : {},
 				}) as ToolResultMessage;
-				const outcomeKnown = getToolErrorOutcome(error, toolCall.name, args) !== "unknown";
+				const outcomeKnown = getToolErrorOutcome(error, toolCall.name, args, tool) !== "unknown";
 				if (
 					!outcomeKnown &&
 					contract?.readOnly !== true &&

@@ -1421,7 +1421,7 @@ async function executePreparedToolCall(
 					: {}),
 			},
 			isError: true,
-			executionOutcome: getToolErrorOutcome(error, prepared.toolCall.name, prepared.args),
+			executionOutcome: getToolErrorOutcome(error, prepared.toolCall.name, prepared.args, prepared.tool),
 		};
 	} finally {
 		acceptingUpdates = false;

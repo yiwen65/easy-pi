@@ -19,6 +19,7 @@ import {
 } from "./agent-loop.ts";
 import { RunScope } from "./run-scope.ts";
 import { getDefaultStreamFn } from "./stream-fn.ts";
+import { getToolErrorOutcome } from "./tool-outcome.ts";
 import { createToolPlan } from "./tool-plan.ts";
 import type {
 	AfterToolCallContext,
@@ -391,7 +392,12 @@ export class Agent {
 					details: error instanceof AgentToolError ? error.details : {},
 				},
 				isError: true,
-				executionOutcome: error instanceof AgentToolError ? error.executionOutcome : "unknown",
+				executionOutcome: getToolErrorOutcome(
+					error,
+					toolCall.name,
+					toolCall.arguments,
+					tools.find((tool) => tool.name === toolCall.name),
+				),
 			};
 		}
 	}
