@@ -1,5 +1,5 @@
 import { constants as bufferConstants } from "buffer";
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "fs";
+import { appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,8 +12,7 @@ describe("loadEntriesFromFile", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
 	});
 
 	afterEach(() => {
@@ -140,8 +139,7 @@ describe("findMostRecentSession", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
 	});
 
 	afterEach(() => {
@@ -232,7 +230,7 @@ describe("SessionManager custom flat session directory", () => {
 	let projectB: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
+		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
 		projectA = join(tempDir, "project-a");
 		projectB = join(tempDir, "project-b");
 		mkdirSync(projectA, { recursive: true });
@@ -290,8 +288,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
 	});
 
 	afterEach(() => {

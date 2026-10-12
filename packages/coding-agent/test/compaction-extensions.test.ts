@@ -3,7 +3,7 @@ import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils
  * Tests for compaction extension events (before_compact / compact).
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -32,8 +32,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 	let capturedEvents: SessionEvent[];
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `pi-compaction-extensions-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "pi-compaction-extensions-test-"));
 		capturedEvents = [];
 	});
 

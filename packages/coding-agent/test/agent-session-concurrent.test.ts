@@ -3,7 +3,7 @@ import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils
  * Tests for AgentSession concurrent prompt guard.
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -64,8 +64,7 @@ describe("AgentSession concurrent prompt guard", () => {
 	const pendingPrompts: Promise<void>[] = [];
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `pi-concurrent-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "pi-concurrent-test-"));
 	});
 
 	afterEach(async () => {
@@ -535,6 +534,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					systemPromptOptions: BuildSystemPromptOptions,
 				) => Promise<undefined>;
 				invalidate: (message?: string) => void;
+				releaseEventBusSubscriptions: () => void;
 			};
 		};
 		sessionWithRunner._extensionRunner = {
@@ -554,6 +554,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			emitInput: async () => ({ action: "continue" }),
 			emitBeforeAgentStart: async () => undefined,
 			invalidate: () => {},
+			releaseEventBusSubscriptions: () => {},
 		};
 
 		await session.prompt("hi");
@@ -683,6 +684,7 @@ describe("AgentSession concurrent prompt guard", () => {
 					systemPromptOptions: BuildSystemPromptOptions,
 				) => Promise<undefined>;
 				invalidate: (message?: string) => void;
+				releaseEventBusSubscriptions: () => void;
 			};
 		};
 		sessionWithRunner._extensionRunner = {
@@ -698,6 +700,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			emitInput: async () => ({ action: "continue" }),
 			emitBeforeAgentStart: async () => undefined,
 			invalidate: () => {},
+			releaseEventBusSubscriptions: () => {},
 		};
 
 		const settled = waitForSessionEvent((event) => event.type === "agent_settled");

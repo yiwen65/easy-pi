@@ -47,7 +47,7 @@ describe("SessionInfo.modified", () => {
 	});
 
 	it("uses last user/assistant message timestamp instead of file mtime", async () => {
-		const filePath = join(tmpdir(), `pi-session-${Date.now()}-modified.jsonl`);
+		const filePath = join(tmpdir(), `pi-session-${Date.now()}-${Math.random().toString(36).slice(2)}-modified.jsonl`);
 		createSessionFile(filePath);
 
 		const before = await stat(filePath);

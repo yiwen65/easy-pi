@@ -8,7 +8,7 @@ import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils
  * - Compaction entry is saved to session file
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -29,8 +29,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 
 	beforeEach(async () => {
 		// Create temp directory for session files
-		tempDir = join(tmpdir(), `pi-compaction-test-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = mkdtempSync(join(tmpdir(), "pi-compaction-test-"));
 
 		// Track events
 		events = [];
