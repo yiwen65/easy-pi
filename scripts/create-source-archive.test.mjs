@@ -27,6 +27,23 @@ function write(path, content) {
 	writeFileSync(path, content);
 }
 
+/**
+ * Skip reason for tests that need `git archive --mtime`, or undefined when the installed git
+ * supports it. The option was added in git 2.38; older builds reject it with
+ * "error: unknown option `mtime=@...`". The source archive must stay byte-deterministic, so the
+ * script refuses to run instead of falling back to checkout timestamps.
+ */
+function gitArchiveMtimeSkipReason() {
+	const result = spawnSync("git", ["--version"], { encoding: "utf8", timeout: 10_000 });
+	if (result.error !== undefined || result.status !== 0) return "git is not available on PATH";
+	const versionOutput = result.stdout.trim();
+	const match = /^git version (\d+)\.(\d+)(?:\.\d+)?/.exec(versionOutput);
+	if (match === null) return `unexpected git --version output: ${versionOutput}`;
+	const [major, minor] = [Number(match[1]), Number(match[2])];
+	if (major > 2 || (major === 2 && minor >= 38)) return undefined;
+	return `git ${versionOutput.split(" ")[2]} does not support \`git archive --mtime\` (added in git 2.38)`;
+}
+
 function fixture(t, { includeModelCatalog = true } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "pi-source-archive-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -90,6 +107,11 @@ function fixture(t, { includeModelCatalog = true } = {}) {
 }
 
 test("archives schema4 same-ID chat/image data and validates it from archived source", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason !== undefined) {
+		t.skip(skipReason);
+		return;
+	}
 	const f = fixture(t);
 	const result = f.archive();
 	assert.equal(result.status, 0, result.stderr);
@@ -122,6 +144,11 @@ test("archives schema4 same-ID chat/image data and validates it from archived so
 });
 
 test("same commit and ignored mixed data produce byte-identical deterministic archives", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason !== undefined) {
+		t.skip(skipReason);
+		return;
+	}
 	const f = fixture(t);
 	const first = f.archive(join(f.root, "first.tar.gz"));
 	const second = f.archive(join(f.root, "second.tar.gz"));
@@ -134,6 +161,11 @@ test("same commit and ignored mixed data produce byte-identical deterministic ar
 });
 
 test("still requires the unified model-catalog source module", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason !== undefined) {
+		t.skip(skipReason);
+		return;
+	}
 	const f = fixture(t, { includeModelCatalog: false });
 	const result = f.archive();
 	assert.equal(result.status, 1);
@@ -155,6 +187,11 @@ for (const [label, filename] of [["manifest", ".manifest.json"], ["provider data
 }
 
 test("archived checker rejects a mismatched data hash without replacing previous output", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason !== undefined) {
+		t.skip(skipReason);
+		return;
+	}
 	const f = fixture(t);
 	const dataPath = join(f.dataDir, "fixture.json");
 	writeFileSync(dataPath, readFileSync(dataPath, "utf8").replace("Image same", "Tampered image"));
@@ -167,6 +204,11 @@ test("archived checker rejects a mismatched data hash without replacing previous
 });
 
 test("archived checker rejects malformed image metadata even with a matching manifest hash", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason !== undefined) {
+		t.skip(skipReason);
+		return;
+	}
 	const f = fixture(t);
 	f.writeData({ ...f.data, "custom-image": { "image:same": { ...image, output: ["text"] } } });
 	const result = f.archive();
@@ -176,6 +218,11 @@ test("archived checker rejects malformed image metadata even with a matching man
 });
 
 test("archived checker rejects a stale schema3 manifest", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason !== undefined) {
+		t.skip(skipReason);
+		return;
+	}
 	const f = fixture(t);
 	const path = join(f.dataDir, ".manifest.json");
 	const manifest = JSON.parse(readFileSync(path, "utf8"));
@@ -184,5 +231,18 @@ test("archived checker rejects a stale schema3 manifest", (t) => {
 	const result = f.archive();
 	assert.equal(result.status, 1);
 	assert.match(result.stderr, /model data schema is 3, expected 4/);
+	assert.equal(existsSync(result.output), false);
+});
+
+test("fails with an actionable message when git lacks `git archive --mtime`", (t) => {
+	const skipReason = gitArchiveMtimeSkipReason();
+	if (skipReason === undefined) {
+		t.skip("installed git supports `git archive --mtime`; the missing-capability failure is unreachable");
+		return;
+	}
+	const f = fixture(t);
+	const result = f.archive();
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /does not support 'git archive --mtime' \(added in git 2\.38\)/);
 	assert.equal(existsSync(result.output), false);
 });

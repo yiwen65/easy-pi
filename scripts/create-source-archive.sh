@@ -93,6 +93,23 @@ if [[ ${#model_data_files[@]} -eq 1 ]]; then
     exit 1
 fi
 
+# `git archive --mtime` (git >= 2.38) pins archive member timestamps so the same commit and
+# generated model data always produce the same bytes. Older git rejects the option, and falling
+# back to checkout timestamps would silently make the archive non-deterministic, so report the
+# missing capability instead.
+git_version="$(git --version | sed -n 's/^git version \([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)*\).*$/\1/p')"
+if [ -z "$git_version" ]; then
+    echo "Unable to determine the installed git version; git 2.38 or newer is required for 'git archive --mtime'" >&2
+    exit 1
+fi
+git_major="${git_version%%.*}"
+git_minor="${git_version#*.}"
+git_minor="${git_minor%%.*}"
+if [ "$git_major" -lt 2 ] || { [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 38 ]; }; then
+    echo "git ${git_version} does not support 'git archive --mtime' (added in git 2.38); git 2.38 or newer is required to create the deterministic source archive" >&2
+    exit 1
+fi
+
 temporary_archive="$(mktemp "${output}.tmp.XXXXXX")"
 temporary_index="$(mktemp "${output}.index.XXXXXX")"
 manifest="$(mktemp "${output}.manifest.XXXXXX")"
