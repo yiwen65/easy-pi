@@ -7,10 +7,19 @@ export interface PageSample {
 	ready: boolean;
 	passwordForm: boolean;
 	captureTruncated: boolean;
+	/** Content revision: the value stays stable while the captured text stays stable. */
 	revision: number;
+	contentRevision: number;
+	layoutRevision: number;
 	pending: boolean;
 	busy: boolean;
 	incompleteReasons: string[];
+	/**
+	 * Disclosures that do not make the capture incomplete, e.g. `identity_ambiguous`
+	 * for a recycling container whose items carry no logical key. They are kept out of
+	 * `incompleteReasons` so a legitimate position-keyed virtual list still completes.
+	 */
+	ambiguities: string[];
 }
 
 // Executed only in a CDP isolated world. Keep this as JavaScript source: the
@@ -19,13 +28,15 @@ export interface PageSample {
 export const SAMPLE_PAGE = `(() => {
 	const key = '__easyPiFullPageScan1';
 	if (!globalThis[key]) {
-		const limit = ${MAX_CAPTURE_CHARS}, maxNodes = 50000, maxRecords = 12000, maxContainers = 24;
+		const limit = ${MAX_CAPTURE_CHARS}, maxNodes = 50000, maxRecords = 12000, maxContainers = 24, maxRetained = 2000;
+		const keyAttrs = ['data-line-num', 'data-row-key', 'data-item-id', 'data-index', 'aria-rowindex', 'aria-posinset', 'data-node-uid'];
 		const regions = [], byElement = new WeakMap(), nodeIds = new WeakMap(), expanded = new WeakSet();
-		const reasons = new Set();
-		let revision = 0, chars = 0, records = 0, nextNode = 0, detailsCount = 0, truncated = false;
+		const reasons = new Set(), ambiguities = new Set();
+		let contentRevision = 0, layoutRevision = 0, chars = 0, records = 0, nextNode = 0, nextRegion = 0, detailsCount = 0, truncated = false, sampleNo = 0;
 		const parent = el => el.parentElement;
-		const visible = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+		const rule = el => getComputedStyle(el);
 		const depth = el => { let n = 0; while ((el = parent(el))) n++; return n; };
+		const boxed = el => el.getClientRects().length > 0 && rule(el).visibility !== 'hidden';
 		const position = (rect, region) => {
 			if (!region || region.root) return { y: rect.top + (document.scrollingElement?.scrollTop ?? 0), x: rect.left + (document.scrollingElement?.scrollLeft ?? 0) };
 			const origin = region.el.getBoundingClientRect();
@@ -36,108 +47,190 @@ export const SAMPLE_PAGE = `(() => {
 			if (byElement.has(el)) return;
 			if (regions.length >= maxContainers) { reasons.add('container_limit'); return; }
 			const root = el === document.scrollingElement;
-			const region = { el, root, id: regions.length, depth: depth(el), entries: new Map(), reset: el.scrollTop !== 0 || el.scrollLeft !== 0, right: true, parent: null, x: 0, y: 0, width: 0, height: 0 };
-			byElement.set(el, region); regions.push(region); revision++;
+			const region = { el, root, id: ++nextRegion, depth: depth(el), entries: new Map(), retained: 0, reset: el.scrollTop !== 0 || el.scrollLeft !== 0, right: true, parent: null, x: 0, y: 0, width: 0, height: 0, overflowX: false, overflowY: false, scrollX: true, scrollY: true, virtual: false };
+			byElement.set(el, region); regions.push(region); layoutRevision++;
 			el.style.setProperty('scroll-behavior', 'auto', 'important');
 			el.style.setProperty('scroll-snap-type', 'none', 'important');
 		};
 		const horizontalEnd = r => !r.scrollX || (r.right ? r.el.scrollLeft + r.el.clientWidth >= r.el.scrollWidth - 2 : r.el.scrollLeft <= 2);
 		const atEnd = r => (!r.scrollY || r.el.scrollTop + r.el.clientHeight >= r.el.scrollHeight - 2) && horizontalEnd(r);
-		const active = () => regions.filter(r => r.el.isConnected && visible(r.el));
-		const identity = (el, region, segment, point) => {
-			let sticky = false;
-			for (let node = el; node && node !== region.el; node = parent(node)) if (/^(fixed|sticky)$/.test(getComputedStyle(node).position)) sticky = true;
-			const parts = []; let anchor;
-			for (let node = el; node && node !== region.el; node = parent(node)) {
-				for (const name of ['data-line-num', 'data-row-key', 'data-item-id', 'data-index', 'aria-rowindex', 'aria-posinset', 'data-node-uid']) {
-					const value = node.getAttribute(name);
-					if (value !== null) { parts.push(name + '=' + value.slice(0, 256)); anchor ??= node; }
-				}
-				const record = node.getAttribute('data-record-id') ?? node.getAttribute('data-block-id');
-				if (record !== null) { parts.push('record=' + record.slice(0, 256)); anchor ??= node; break; }
-			}
-			if (anchor) {
-				const path = []; for (let node = el; node !== anchor && parent(node); node = parent(node)) path.push(Array.prototype.indexOf.call(parent(node).children, node));
-				return { key: 'id:' + parts.reverse().join('/') + ':' + path.reverse().join('.') + ':' + segment, sticky };
-			}
-			if (sticky) { if (!nodeIds.has(el)) nodeIds.set(el, ++nextNode); return { key: 'sticky:' + nodeIds.get(el) + ':' + segment, sticky }; }
-			// Logical container coordinates survive node replacement/reuse. Text is
-			// deliberately NOT the key: two equal paragraphs at different positions
-			// are separate content, not duplicates to discard.
-			return { key: 'pos:' + Math.round(point.y * 2) + ':' + Math.round(point.x * 2) + ':' + segment, sticky };
-		};
+		const active = () => regions.filter(r => r.el.isConnected && boxed(r.el));
+		const median = list => { if (!list.length) return 0; const sorted = list.slice().sort((a, b) => a - b); return sorted[sorted.length >> 1]; };
+		const empty = () => ({ url: location.href, title: document.title, text: '', ready: false, revision: contentRevision, contentRevision, layoutRevision, pending: true, busy: true, passwordForm: false, captureTruncated: false, incompleteReasons: [], ambiguities: [] });
 		const sample = () => {
-			if (!document.body || !document.scrollingElement) return { url: location.href, title: document.title, text: '', ready: false, revision, pending: true, busy: true, passwordForm: false, captureTruncated: false, incompleteReasons: [] };
+			sampleNo++;
+			if (!document.body || !document.scrollingElement) return empty();
 			addRegion(document.scrollingElement);
+			// Every DOM write of this sample (details expansion, registered container styles)
+			// happens before the geometry and text measurements below.
 			const elements = [], walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
 			let node = document.body;
 			do { elements.push(node); if (elements.length >= maxNodes) { reasons.add('node_limit'); break; } } while ((node = walker.nextNode()));
+			const containers = [], expand = [];
 			for (const el of elements) {
-				if (!visible(el)) continue;
-				if (el.shadowRoot) reasons.add('shadow_dom');
+				const shown = boxed(el);
+				if (el.shadowRoot && shown) reasons.add('shadow_dom');
+				if (!shown) continue;
 				if (el.tagName === 'DETAILS' && !el.open) {
 					if (expanded.has(el)) reasons.add('collapsed_content');
 					else if (detailsCount >= 128) reasons.add('details_limit');
-					else { el.removeAttribute('name'); el.open = true; expanded.add(el); detailsCount++; revision++; }
+					else { expanded.add(el); detailsCount++; expand.push(el); }
 				}
-				const style = getComputedStyle(el);
+				const style = rule(el);
 				if (el.clientHeight > 0 && el.clientWidth > 0 &&
-					((/auto|scroll/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 2) || (/auto|scroll/.test(style.overflowX) && el.scrollWidth > el.clientWidth + 2))) addRegion(el);
+					((/auto|scroll/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 2) || (/auto|scroll/.test(style.overflowX) && el.scrollWidth > el.clientWidth + 2))) containers.push(el);
 			}
+			for (const el of expand) { el.removeAttribute('name'); el.open = true; contentRevision++; }
+			for (const el of containers) addRegion(el);
 			for (const r of active()) {
-				const style = getComputedStyle(r.el);
+				const style = rule(r.el);
 				// scrollWidth may exceed the viewport on a deliberately hidden axis.
 				// Some editors reset that axis after every scroll; it is not a scan path.
 				r.scrollX = r.root ? !/hidden|clip/.test(style.overflowX) : /auto|scroll/.test(style.overflowX);
 				r.scrollY = r.root ? !/hidden|clip/.test(style.overflowY) : /auto|scroll/.test(style.overflowY);
+				r.overflowX = r.el.scrollWidth > r.el.clientWidth + 2;
+				r.overflowY = r.el.scrollHeight > r.el.clientHeight + 2;
 				if (!r.root) { r.parent = regionFor(parent(r.el)); Object.assign(r, position(r.el.getBoundingClientRect(), r.parent)); }
-				if (r.width !== r.el.scrollWidth || r.height !== r.el.scrollHeight) { r.width = r.el.scrollWidth; r.height = r.el.scrollHeight; revision++; }
+				if (r.width !== r.el.scrollWidth || r.height !== r.el.scrollHeight) { r.width = r.el.scrollWidth; r.height = r.el.scrollHeight; layoutRevision++; }
 			}
-			const groups = [], segments = new Map(), textWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+			const isHidden = el => {
+				for (let node = el; node; node = parent(node)) {
+					const style = rule(node);
+					// display:none, opacity:0 and content-visibility:hidden cannot be re-enabled
+					// by a descendant, unlike visibility.
+					if (style.display === 'none' || style.opacity === '0' || style.getPropertyValue('content-visibility') === 'hidden') return true;
+				}
+				return false;
+			};
+			const groups = [], segments = new Map();
 			let current, visited = 0;
+			const textWalker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
 			while ((node = textWalker.nextNode())) {
 				if (++visited > maxNodes) { reasons.add('node_limit'); break; }
 				const br = node.nodeType === 1 && node.tagName === 'BR';
 				if (node.nodeType !== 3 && !br) continue;
 				const owner = node.parentElement;
-				if (!owner || owner.closest('script,style,noscript,template,textarea,select') || !visible(owner)) continue;
+				if (!owner || owner.closest('script,style,noscript,template,textarea,select') || isHidden(owner)) continue;
+				const ownerStyle = rule(owner);
+				// visibility is inherited but re-enableable, so only the text owner decides.
+				if (ownerStyle.visibility === 'hidden' || ownerStyle.visibility === 'collapse') continue;
+				const range = document.createRange();
+				range.selectNode(node);
+				// A range measures laid-out text even when its owner has no box (display:contents).
+				if (!range.getClientRects().length) continue;
 				let el = owner;
-				while (parent(el) && /^(inline|contents)$/.test(getComputedStyle(el).display)) el = parent(el);
-				const pre = /pre|break-spaces/.test(getComputedStyle(el).whiteSpace);
+				while (parent(el) && /^(inline|contents)$/.test(rule(el).display)) el = parent(el);
+				const pre = /pre|break-spaces/.test(rule(el).whiteSpace);
 				const value = br ? '\\n' : pre ? node.data : node.data.replace(/[\\t\\r\\n ]+/g, ' ');
 				if (!value) continue;
 				if (!current || current.el !== el) {
 					const segment = segments.get(el) ?? 0; segments.set(el, segment + 1);
-					const range = document.createRange(); range.selectNode(node);
-					current = { el, segment, pre, raw: '', rect: range.getBoundingClientRect(), region: regionFor(owner) }; groups.push(current);
+					const style = rule(el);
+					current = { el, segment, pre, raw: '', rect: range.getBoundingClientRect(), region: regionFor(owner), positioned: /^(absolute|fixed)$/.test(style.position) || style.transform !== 'none' };
+					groups.push(current);
 				}
 				current.raw += value;
 			}
+			// A container that recycles absolutely positioned children cannot be told apart
+			// from one that deletes them by its DOM children alone, so the implied item count
+			// decides whether container-relative positions are a safe fallback identity.
+			const shapes = new Map();
+			for (const r of regions) shapes.set(r, { count: 0, heights: [], widths: [] });
+			for (const group of groups) {
+				if (!group.positioned) continue;
+				const shape = shapes.get(group.region);
+				if (!shape) continue;
+				shape.count++;
+				if (group.rect.height > 0) shape.heights.push(group.rect.height);
+				if (group.rect.width > 0) shape.widths.push(group.rect.width);
+			}
+			for (const r of regions) {
+				const shape = shapes.get(r), height = median(shape.heights), width = median(shape.widths);
+				const rows = r.overflowY && height ? Math.max(1, Math.round(r.height / height)) : 1;
+				const cols = r.overflowX && width ? Math.max(1, Math.round(r.width / width)) : 1;
+				r.virtual = shape.count >= 2 && rows * cols >= Math.max(8, shape.count * 2);
+			}
+			const keyCounts = new Map();
+			const identity = (group, point) => {
+				const el = group.el, region = group.region, segment = group.segment;
+				let sticky = false;
+				for (let node = el; node && node !== region.el; node = parent(node)) if (/^(fixed|sticky)$/.test(rule(node).position)) sticky = true;
+				const parts = []; let anchor;
+				for (let node = el; node && node !== region.el; node = parent(node)) {
+					for (const name of keyAttrs) {
+						const value = node.getAttribute(name);
+						if (value !== null) { parts.push(name + '=' + value.slice(0, 256)); anchor ??= node; }
+					}
+					const record = node.getAttribute('data-record-id') ?? node.getAttribute('data-block-id');
+					if (record !== null) { parts.push('record=' + record.slice(0, 256)); anchor ??= node; break; }
+				}
+				if (anchor) {
+					const path = []; for (let node = el; node !== anchor && parent(node); node = parent(node)) path.push(Array.prototype.indexOf.call(parent(node).children, node));
+					const base = 'id:' + parts.reverse().join('/') + ':' + path.reverse().join('.') + ':' + segment;
+					// Page ids are not unique by contract: identical key strings stay separate
+					// blocks, disambiguated by their document-order ordinal, which is stable for
+					// a stable document instead of alternating with the sample.
+					const ordinal = keyCounts.get(base) ?? 0;
+					keyCounts.set(base, ordinal + 1);
+					return { key: ordinal ? base + '#' + ordinal : base, kind: 'key', sticky };
+				}
+				if (region.virtual && group.positioned) {
+					// The page recycles these nodes for different items, so node identity would
+					// overwrite several items into one. Container-relative position is retained
+					// while the container exists, and the reuse itself is disclosed.
+					ambiguities.add('identity_ambiguous');
+					return { key: 'vpos:' + Math.round(point.y * 2) + ':' + Math.round(point.x * 2) + ':' + segment, kind: 'vpos', sticky };
+				}
+				if (!nodeIds.has(el)) nodeIds.set(el, ++nextNode);
+				return { key: 'node:' + region.id + ':' + (sticky ? 'sticky:' : '') + nodeIds.get(el) + ':' + segment, kind: 'node', sticky };
+			};
+			let complete = true;
 			for (const group of groups) {
 				if (!group.raw.trim() || !group.region) continue;
 				let text = group.pre ? group.raw.replace(/\\r\\n?/g, '\\n') : group.raw.trim();
-				const point = position(group.rect, group.region), id = identity(group.el, group.region, group.segment, point);
-				const old = group.region.entries.get(id.key);
-				if (!old && records >= maxRecords) { reasons.add('block_limit'); break; }
+				const point = position(group.rect, group.region);
+				const id = identity(group, point);
+				const entries = group.region.entries;
+				const previous = entries.get(id.key);
+				if (!previous && records >= maxRecords) { reasons.add('block_limit'); complete = false; break; }
+				if (!previous && id.kind === 'vpos' && group.region.retained >= maxRetained) { reasons.add('block_limit'); complete = false; break; }
 				let length = Array.from(text).length;
-				const available = limit - chars + (old?.length ?? 0);
+				const available = limit - chars + (previous?.length ?? 0);
 				if (length > available) { text = Array.from(text).slice(0, Math.max(0, available)).join(''); length = Array.from(text).length; truncated = true; reasons.add('capture_limit'); }
-				if (old?.text !== text) revision++;
-				chars += length - (old?.length ?? 0); if (!old) records++;
-				group.region.entries.set(id.key, { text, length, x: id.sticky && old ? old.x : point.x, y: id.sticky && old ? old.y : point.y, order: old?.order ?? records });
-				if (truncated) break;
+				if (!previous) { contentRevision++; chars += length; records++; if (id.kind === 'vpos') group.region.retained++; }
+				else {
+					if (previous.text !== text) { contentRevision++; chars += length - previous.length; }
+					if (Math.abs(previous.x - point.x) > 0.5 || Math.abs(previous.y - point.y) > 0.5) layoutRevision++;
+				}
+				entries.set(id.key, { text, length, x: id.sticky && previous ? previous.x : point.x, y: id.sticky && previous ? previous.y : point.y, order: previous?.order ?? records, kind: id.kind, seen: sampleNo });
+				if (truncated) { complete = false; break; }
+			}
+			if (complete) {
+				// A removed or hidden block disappears; a retained logical key (explicit key or
+				// container-relative position) survives recycling while its container exists.
+				for (const r of regions) {
+					if (!r.el.isConnected) {
+						for (const entry of r.entries.values()) { chars -= entry.length; records--; if (entry.kind === 'vpos') r.retained--; }
+						r.entries.clear();
+						continue;
+					}
+					for (const [id, entry] of r.entries) {
+						if (entry.kind !== 'node' || entry.seen === sampleNo) continue;
+						chars -= entry.length; records--; r.entries.delete(id); contentRevision++;
+					}
+				}
 			}
 			const serialize = r => {
 				const entries = [...r.entries.values()];
 				for (const child of regions) if (child.parent === r) entries.push({ x: child.x, y: child.y, order: -child.id, text: serialize(child) });
-				return entries.sort((a,b) => a.y - b.y || a.x - b.x || a.order - b.order).map(entry => entry.text).filter(Boolean).join('\\n');
+				return entries.sort((a, b) => a.y - b.y || a.x - b.x || a.order - b.order).map(entry => entry.text).filter(Boolean).join('\\n');
 			};
 			let text = serialize(regions[0]);
 			if (Array.from(text).length > limit) { text = Array.from(text).slice(0, limit).join(''); truncated = true; reasons.add('capture_limit'); }
-			return { url: location.href, title: document.title.slice(0, 512), text, ready: document.readyState === 'complete', revision,
-				pending: active().some(r => r.reset || !atEnd(r)), busy: elements.some(el => el.getAttribute('aria-busy') === 'true' && visible(el)),
-				passwordForm: elements.some(el => el.tagName === 'INPUT' && el.type === 'password' && visible(el)),
-				captureTruncated: truncated, incompleteReasons: [...reasons] };
+			return { url: location.href, title: document.title.slice(0, 512), text, ready: document.readyState === 'complete', revision: contentRevision, contentRevision, layoutRevision,
+				pending: active().some(r => r.reset || !atEnd(r)), busy: elements.some(el => el.getAttribute('aria-busy') === 'true' && boxed(el)),
+				passwordForm: elements.some(el => el.tagName === 'INPUT' && el.type === 'password' && boxed(el)),
+				captureTruncated: truncated, incompleteReasons: [...reasons], ambiguities: [...ambiguities] };
 		};
 		const advance = () => {
 			const list = active().sort((a,b) => b.depth - a.depth || a.id - b.id);
