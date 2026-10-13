@@ -154,14 +154,16 @@ test("real Pi loader registers exactly two tools without a key, key reads, or st
 	}
 	assert.deepEqual(loaded.runtime.pendingProviderRegistrations, []);
 	assert.deepEqual(loaded.runtime.pendingNativeProviderRegistrations, []);
+	// web_fetch requires no field individually: either url or snapshot_id must be present, and that
+	// rule is enforced at run time (plan §2.2), so the schema itself requires nothing.
 	for (const [name, fields, required] of [
 		["web_search", ["limit", "query"], ["query"]],
-		["web_fetch", ["max_chars", "offset", "url"], ["url"]],
+		["web_fetch", ["max_chars", "offset", "snapshot_id", "url"], []],
 	]) {
 		const tool = tools.get(name);
 		assert.equal(tool.parameters.additionalProperties, false);
 		assert.deepEqual(Object.keys(tool.parameters.properties).sort(), fields);
-		assert.deepEqual(tool.parameters.required, required);
+		assert.deepEqual(tool.parameters.required ?? [], required);
 		assert.ok(tool.promptSnippet);
 		assert.ok(tool.promptGuidelines.length);
 	}
@@ -673,9 +675,15 @@ test("capture bounds and password-form warnings are explicit rather than a false
 	assert.match(text(result), /password form/);
 });
 
-test("offset beyond captured text fails explicitly", async (t) => {
+test("offset beyond captured text still fails, while exactly the end is an empty EOF page", async (t) => {
 	mockBrowser(t, { text: "A😀" });
-	for (const offset of [2, MAX_RESPONSE_BYTES]) await rejectsSafe(execute("web_fetch", { url: PAGE_URL, offset }), /offset is beyond.*\(2 characters\)/);
+	// offset == total_chars is the explicit end of the capture: an empty page, no next offset.
+	const end = await execute("web_fetch", { url: PAGE_URL, offset: 2 });
+	assert.equal(end.structuredContent.text, "");
+	assert.equal(end.details.offset, 2);
+	assert.equal(end.details.next_offset, null);
+	assert.ok(text(end).endsWith("\n\n"));
+	for (const offset of [3, MAX_RESPONSE_BYTES]) await rejectsSafe(execute("web_fetch", { url: PAGE_URL, offset }), /offset is beyond.*\(2 characters\)/);
 });
 
 test("web_fetch refuses nonstandard ports before starting a browser", async () => {
