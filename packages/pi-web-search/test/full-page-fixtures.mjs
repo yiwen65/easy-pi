@@ -53,7 +53,7 @@ export function fixturePage(path) {
 		case "/same-frame": return shell("<p>FRAME_SAME_TEXT</p>");
 		case "/cross-frame": return shell(`<p>FRAME_CROSS_TEXT</p><iframe src="http://leaf.public.edu/leaf-frame"></iframe><p>FRAME_CROSS_END</p>`);
 		case "/leaf-frame": return shell("<p>FRAME_NESTED_TEXT</p>");
-		case "/hidden-auth": return shell('<p>HIDDEN_AUTH_SHOULD_NOT_APPEAR</p><input type="password">');
+		case "/hidden-auth": return { html: shell('<p>HIDDEN_AUTH_SHOULD_NOT_APPEAR</p><input type="password">'), status: 403 };
 		case "/blocked-frame": return shell('<p>VISIBLE_PARENT_TEXT</p><iframe src="http://restricted.public.net/denied"></iframe><p>PARENT_END</p>');
 		case "/large": return shell(`<pre>${"X".repeat(300000)}</pre>`);
 		case "/infinite": return shell('<p>INFINITE_START</p><div class="feed"></div>', `

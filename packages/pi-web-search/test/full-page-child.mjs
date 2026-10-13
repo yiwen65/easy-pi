@@ -1,73 +1,13 @@
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
-import dns from "node:dns/promises";
-import { existsSync, readdirSync } from "node:fs";
-import http from "node:http";
-import net from "node:net";
-import { after, afterEach, before, test } from "node:test";
-import { pathToFileURL } from "node:url";
+import { after, test } from "node:test";
+import { setupBrowserFixtures } from "./browser-harness.mjs";
 import { fixturePage, markers } from "./full-page-fixtures.mjs";
 
-assert.equal(process.env.PI_FULL_PAGE_BROWSER_TEST, "1", "Use test/full-page.mjs for isolated, explicit browser tests.");
-assert.deepEqual(Object.keys(process.env).filter(name => /KEY|TOKEN|SECRET|AUTH|PROXY|^NODE_(OPTIONS|PATH)$/.test(name)), []);
-const env = process.env;
-const browsers = [], sockets = [], unexpected = [];
-const hosts = new Set(["page.public.org", "frame.public.net", "leaf.public.edu"]);
-const { TCP } = process.binding("tcp_wrap");
-const tcpConnect = TCP.prototype.connect, tcpConnect6 = TCP.prototype.connect6;
-const spawn = childProcess.spawn, lookup = dns.lookup, connect = net.connect;
-let keyReads = 0, publicAttempts = 0, serverPort;
-const server = http.createServer((request, response) => {
-	if (request.method !== "GET") { unexpected.push("non-GET action"); response.writeHead(405); response.end(); return; }
-	const html = fixturePage(new URL(request.url, "http://page.public.org").pathname);
-	response.writeHead(request.url === "/hidden-auth" ? 403 : html ? 200 : 404, { "Content-Type": "text/html; charset=utf-8" }); response.end(html ?? "Not found");
+const { readPage, stats } = await setupBrowserFixtures({
+	fixturePage,
+	hosts: ["page.public.org", "frame.public.net", "leaf.public.edu"],
 });
-const serverSockets = new Set();
-server.on("connection", socket => { serverSockets.add(socket); socket.once("close", () => serverSockets.delete(socket)); });
-
-// The production guard still sees a complete all-public DNS snapshot. Only this
-// test process maps the already-approved native TCP attempt to its own fixture.
-// All non-fixture hostnames resolve to a blocked address; no external TCP is made.
-dns.lookup = async host => [{ address: hosts.has(host) ? "8.8.8.8" : "127.0.0.1", family: 4 }];
-TCP.prototype.connect = function(request, address, port) {
-	assert.equal(address, "8.8.8.8", "Unexpected external or unvetted connection");
-	assert.equal(port, 80); publicAttempts++;
-	return tcpConnect.call(this, request, "127.0.0.1", serverPort);
-};
-TCP.prototype.connect6 = () => { unexpected.push("IPv6 connection"); throw new Error("No external IPv6 in fixtures"); };
-net.connect = options => { const socket = connect(options); sockets.push(socket); return socket; };
-childProcess.spawn = (file, args, options) => {
-	assert.ok(args.includes("--remote-debugging-pipe"));
-	assert.ok(!args.includes("--no-sandbox") && !args.includes("--ignore-certificate-errors"));
-	assert.deepEqual(Object.keys(options.env).sort(), ["HOME", "LANG", "PATH", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"]);
-	// HTTP fixtures must stay HTTP; this changes only the test browser's optional
-	// HTTPS upgrade heuristic, not the proxy, sandbox or TLS validation policy.
-	const flags = args.map(arg => arg.startsWith("--disable-features=") ? `${arg},HttpsUpgrades` : arg);
-	const child = spawn(file, flags, options); browsers.push({ child, root: options.cwd }); return child;
-};
-globalThis.fetch = () => { unexpected.push("Node fetch"); throw new Error("No Node fetch or paid service in fixtures"); };
-process.env = new Proxy(env, { get(target, key) {
-	if (key === "TAVILY_API_KEY") { keyReads++; throw new Error("No credential access in browser fixtures"); }
-	return Reflect.get(target, key);
-} });
-const { readPage } = await import(pathToFileURL(env.PI_WEB_FETCH_BROWSER_MODULE).href);
-
-before(async () => {
-	await new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); serverPort = server.address().port;
-});
-afterEach(() => {
-	assert.equal(keyReads, 0); assert.deepEqual(unexpected, []);
-	assert.ok(browsers.every(({ child, root }) => !existsSync(root) && (child.exitCode !== null || child.signalCode !== null)));
-	assert.ok(sockets.every(socket => socket.destroyed));
-	assert.deepEqual(readdirSync(env.TMPDIR).filter(name => name.startsWith("pi-web-fetch-")), []);
-});
-after(async () => {
-	process.env = env; dns.lookup = lookup; childProcess.spawn = spawn; net.connect = connect;
-	TCP.prototype.connect = tcpConnect; TCP.prototype.connect6 = tcpConnect6;
-	for (const socket of serverSockets) socket.destroy();
-	await new Promise(resolve => server.close(resolve));
-	assert.ok(publicAttempts > 0);
-});
+after(() => assert.ok(stats.publicAttempts > 0));
 const read = path => readPage(`http://page.public.org${path}`);
 const assertMarkers = (page, prefix, count) => {
 	assert.deepEqual(page.text.match(new RegExp(`${prefix}_\\d{3}_汉字😀`, "gu")), markers(prefix, count));
