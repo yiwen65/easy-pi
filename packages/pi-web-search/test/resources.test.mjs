@@ -486,6 +486,7 @@ test("R04: read metrics are numbers only, bounded, and never contain page text o
 		"queued",
 		"samples",
 		"scanMs",
+		"serializations",
 		"startupMs",
 	]);
 	assert.equal(typeof page.metrics.queued, "boolean");
@@ -498,6 +499,10 @@ test("R04: read metrics are numbers only, bounded, and never contain page text o
 	assert.equal(page.metrics.browsers, 1);
 	assert.equal(page.metrics.queued, false);
 	assert.ok(page.metrics.samples >= 1 && page.metrics.samples <= 1000, `saw ${page.metrics.samples} samples`);
+	assert.ok(
+		page.metrics.serializations >= 0 && page.metrics.serializations <= page.metrics.samples,
+		`serializations (${page.metrics.serializations}) counts full-text rebuilds of the samples (${page.metrics.samples})`,
+	);
 	assert.ok(page.metrics.cdpBytesIn > 0 && page.metrics.cdpBytesOut > 0);
 	assert.ok(page.metrics.proxyBytes >= 0);
 	assert.equal(page.metrics.proxyRequests, 1);
@@ -544,4 +549,75 @@ test("R04: proxyRequests and proxyBytes meter a CONNECT tunnel without changing 
 	);
 	assert.equal(page.blockedRequests, 0, "An allowed tunnel is not a refusal");
 	assert.equal(mock.servers[0].closed, true);
+});
+
+test("M04: a read stuck in a slow frame never blocks the slot cap, a queued cancel frees its place and nothing leaks", async (t) => {
+	setConcurrency(t, "2");
+	// Every frame tree is answered by the test, which keeps one read alive inside its frame
+	// while the reads behind it must still take their slots, finish and give them back.
+	const pendingTrees = [];
+	// CDP commands are per spawn, so the normal read's isolated world can be counted
+	// exactly: one per frame document, not one per evaluation (WF07 part A).
+	const isolatedWorlds = new Map();
+	const answerTree = (command, child) =>
+		child.stdio[4].write(
+			`${JSON.stringify({ id: command.id, result: { frameTree: { frame: { id: "main", url: PAGE_URL, loaderId: "document" } } } })}\0`,
+		);
+	const mock = mockBrowser(t, {
+		hangOn: "Page.getFrameTree",
+		onCommand(command, child) {
+			if (command.method === "Page.createIsolatedWorld") isolatedWorlds.set(child, (isolatedWorlds.get(child) ?? 0) + 1);
+			if (command.method !== "Page.getFrameTree") return;
+			if (child === mock.processes[0]) pendingTrees.push({ command, child });
+			else answerTree(command, child);
+		},
+	});
+	const slowController = new AbortController();
+	const slowOutcome = captured(readPage(PAGE_URL, slowController.signal));
+	await until(() => pendingTrees.length === 1, "the slow read to reach the frame tree that is never answered");
+	assert.equal(webFetchSlotStats().running, 1);
+	const normalOutcome = captured(readPage(PAGE_URL));
+	await until(() => mock.calls.length === 2, "the second read to create its own browser");
+	await until(() => webFetchSlotStats().running === 2, "both reads to hold a slot");
+	const queuedController = new AbortController();
+	const queuedOutcome = captured(readPage(PAGE_URL, queuedController.signal));
+	await until(() => webFetchSlotStats().queued === 1, "the third read to queue behind the cap");
+	assert.equal(mock.calls.length, 2, "A queued read must not create a browser before it owns a slot");
+	assert.ok(
+		webFetchSlotStats().maxObserved <= webFetchSlotStats().limit,
+		`The process-wide peak must stay at the cap (saw ${webFetchSlotStats().maxObserved})`,
+	);
+	// The read behind the stuck frame keeps progressing on its own and completes.
+	const normal = await normalOutcome;
+	assert.equal(normal.ok, true, normal.ok ? "" : String(normal.error));
+	assert.ok(normal.value.text.includes("Anonymous rendered content"));
+	assert.ok(normal.value.metrics.serializations <= normal.value.metrics.samples);
+	// One isolated world per frame document (plus one re-resolution after the mock's URL
+	// change), instead of one CDP round trip per evaluation.
+	const isolated = isolatedWorlds.get(mock.processes[1]);
+	assert.ok(isolated !== undefined && isolated <= 2, `at most one world per document + one re-resolution, saw ${isolated}`);
+	assert.ok(
+		isolated * 4 <= normal.value.metrics.samples,
+		`${isolated} isolated-world resolutions for ${normal.value.metrics.samples} samples must not be per-evaluation`,
+	);
+	assert.equal(mock.calls.length, 2);
+	// A waiter cancelled before it is granted a slot frees its place and spawns nothing.
+	queuedController.abort(new Error("synthetic-abort-reason"));
+	const queued = await queuedOutcome;
+	assert.equal(queued.ok, false, "A cancelled waiter must never resolve");
+	assert.equal(queued.error.code, "cancelled");
+	await until(() => webFetchSlotStats().queued === 0, "the cancelled waiter to leave the queue");
+	assert.equal(webFetchSlotStats().running, 1, "The stuck read still owns its slot");
+	assert.equal(pendingTrees.length, 1, "The stuck read is still waiting on its unanswered frame tree");
+	// Cancelling the read that is stuck inside its slow frame rejects cancelled, never a partial page.
+	slowController.abort(new Error("synthetic-abort-reason"));
+	const slow = await slowOutcome;
+	assert.equal(slow.ok, false, "A read cancelled inside its frame must not resolve with content");
+	assert.equal(slow.error.code, "cancelled");
+	assert.equal(mock.calls.length, 2, "No cancelled read may create another browser");
+	assertNoLeftovers(mock, "slow frame cancel");
+	assert.ok(
+		mock.processes.every((child) => child.exitCode !== null || child.signalCode !== null),
+		"Both owned browsers must be gone",
+	);
 });

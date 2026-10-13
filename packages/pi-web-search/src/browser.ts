@@ -45,6 +45,8 @@ export interface ReadMetrics {
 	cleanupMs: number;
 	/** Page samples the scanner evaluated in the browser, including the end re-verification pass. */
 	samples: number;
+	/** Of those samples, the ones that rebuilt the full page text in the collector. */
+	serializations: number;
 	cdpBytesIn: number;
 	cdpBytesOut: number;
 	/** Requests this read's proxy received, refusals included. */
@@ -498,6 +500,7 @@ export async function readPage(requestedUrl: string, callerSignal?: AbortSignal)
 		scanMs: 0,
 		cleanupMs: 0,
 		samples: 0,
+		serializations: 0,
 		cdpBytesIn: 0,
 		cdpBytesOut: 0,
 		proxyRequests: 0,
@@ -643,6 +646,7 @@ export async function readPage(requestedUrl: string, callerSignal?: AbortSignal)
 			}
 		} catch {}
 		counters.samples = scanner?.samples ?? 0;
+		counters.serializations = scanner?.serialized ?? 0;
 		// A directory whose browser could not be confirmed gone is preserved: it may still
 		// be in use, and a cleanup failure must never look like a successful read.
 		try {

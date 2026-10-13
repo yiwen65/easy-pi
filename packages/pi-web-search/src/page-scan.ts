@@ -22,6 +22,16 @@ export interface PageSample {
 	ambiguities: string[];
 }
 
+/**
+ * Collector answer. `serialized` is true when this pass rebuilt the full text, and
+ * `unchanged` means the rebuilt text is byte-identical to the last one, so `text` may
+ * be empty and the driver must keep the copy it already holds (WF07 sampling path).
+ */
+export interface PageProbe extends PageSample {
+	unchanged: boolean;
+	serialized: boolean;
+}
+
 // Executed only in a CDP isolated world. Keep this as JavaScript source: the
 // product is Node-only, and TS/Jiti function-toString output is not browser code.
 // The page cannot access this world's collector; only its DOM is shared.
@@ -33,13 +43,19 @@ export const SAMPLE_PAGE = `(() => {
 		const regions = [], byElement = new WeakMap(), nodeIds = new WeakMap(), expanded = new WeakSet();
 		const reasons = new Set(), ambiguities = new Set();
 		let contentRevision = 0, layoutRevision = 0, chars = 0, records = 0, nextNode = 0, nextRegion = 0, detailsCount = 0, truncated = false, sampleNo = 0;
+		// The text is only rebuilt when every input the serialization reads changed. The
+		// digest covers exactly those inputs, so an equal digest proves the same bytes.
+		let lastDigest = null, serialized = false;
+		// One pass must not resolve the same computed style or layout box twice.
+		let styles = new WeakMap(), rects = new WeakMap();
 		const parent = el => el.parentElement;
-		const rule = el => getComputedStyle(el);
+		const rule = el => { let style = styles.get(el); if (style === undefined) { style = getComputedStyle(el); styles.set(el, style); } return style; };
+		const rectOf = el => { let rect = rects.get(el); if (rect === undefined) { rect = el.getBoundingClientRect(); rects.set(el, rect); } return rect; };
 		const depth = el => { let n = 0; while ((el = parent(el))) n++; return n; };
 		const boxed = el => el.getClientRects().length > 0 && rule(el).visibility !== 'hidden';
 		const position = (rect, region) => {
 			if (!region || region.root) return { y: rect.top + (document.scrollingElement?.scrollTop ?? 0), x: rect.left + (document.scrollingElement?.scrollLeft ?? 0) };
-			const origin = region.el.getBoundingClientRect();
+			const origin = rectOf(region.el);
 			return { y: rect.top - origin.top + region.el.scrollTop, x: rect.left - origin.left + region.el.scrollLeft };
 		};
 		const regionFor = el => { for (let node = el; node; node = parent(node)) { const r = byElement.get(node); if (r) return r; } return regions[0]; };
@@ -56,9 +72,10 @@ export const SAMPLE_PAGE = `(() => {
 		const atEnd = r => (!r.scrollY || r.el.scrollTop + r.el.clientHeight >= r.el.scrollHeight - 2) && horizontalEnd(r);
 		const active = () => regions.filter(r => r.el.isConnected && boxed(r.el));
 		const median = list => { if (!list.length) return 0; const sorted = list.slice().sort((a, b) => a - b); return sorted[sorted.length >> 1]; };
-		const empty = () => ({ url: location.href, title: document.title, text: '', ready: false, revision: contentRevision, contentRevision, layoutRevision, pending: true, busy: true, passwordForm: false, captureTruncated: false, incompleteReasons: [], ambiguities: [] });
-		const sample = () => {
+		const empty = () => ({ url: location.href, title: document.title, text: '', ready: false, revision: contentRevision, contentRevision, layoutRevision, pending: true, busy: true, passwordForm: false, captureTruncated: false, incompleteReasons: [], ambiguities: [], unchanged: false, serialized: false });
+		const sample = full => {
 			sampleNo++;
+			styles = new WeakMap(); rects = new WeakMap();
 			if (!document.body || !document.scrollingElement) return empty();
 			addRegion(document.scrollingElement);
 			// Every DOM write of this sample (details expansion, registered container styles)
@@ -90,7 +107,7 @@ export const SAMPLE_PAGE = `(() => {
 				r.scrollY = r.root ? !/hidden|clip/.test(style.overflowY) : /auto|scroll/.test(style.overflowY);
 				r.overflowX = r.el.scrollWidth > r.el.clientWidth + 2;
 				r.overflowY = r.el.scrollHeight > r.el.clientHeight + 2;
-				if (!r.root) { r.parent = regionFor(parent(r.el)); Object.assign(r, position(r.el.getBoundingClientRect(), r.parent)); }
+				if (!r.root) { r.parent = regionFor(parent(r.el)); Object.assign(r, position(rectOf(r.el), r.parent)); }
 				if (r.width !== r.el.scrollWidth || r.height !== r.el.scrollHeight) { r.width = r.el.scrollWidth; r.height = r.el.scrollHeight; layoutRevision++; }
 			}
 			const isHidden = el => {
@@ -225,12 +242,39 @@ export const SAMPLE_PAGE = `(() => {
 				for (const child of regions) if (child.parent === r) entries.push({ x: child.x, y: child.y, order: -child.id, text: serialize(child) });
 				return entries.sort((a, b) => a.y - b.y || a.x - b.x || a.order - b.order).map(entry => entry.text).filter(Boolean).join('\\n');
 			};
-			let text = serialize(regions[0]);
-			if (Array.from(text).length > limit) { text = Array.from(text).slice(0, limit).join(''); truncated = true; reasons.add('capture_limit'); }
-			return { url: location.href, title: document.title.slice(0, 512), text, ready: document.readyState === 'complete', revision: contentRevision, contentRevision, layoutRevision,
+			// Digest of every value the serialization reads, so an unchanged fingerprint
+			// proves the text is byte-identical without joining or sorting it again.
+			const fingerprint = () => {
+				let h1 = 0x811c9dc5, h2 = 0x01000193;
+				const fold = value => {
+					if (typeof value !== 'string') value = ':' + value + ':';
+					for (let at = 0; at < value.length; at++) {
+						const code = value.charCodeAt(at);
+						h1 = Math.imul(h1 ^ code, 16777619) >>> 0;
+						h2 = Math.imul(h2 + code, 2246822519) >>> 0;
+						h2 = (h2 ^ (h2 >>> 15)) >>> 0;
+					}
+				};
+				const visit = region => {
+					fold(region.id); fold(region.parent ? region.parent.id : 0); fold(region.x); fold(region.y);
+					for (const entry of region.entries.values()) { fold(entry.text); fold(entry.x); fold(entry.y); fold(entry.order); fold(entry.kind); }
+					for (const child of regions) if (child.parent === region) { fold(child.id); fold(child.x); fold(child.y); visit(child); }
+				};
+				visit(regions[0]);
+				return h1 + ':' + h2;
+			};
+			const fingerprinted = fingerprint();
+			serialized = full || fingerprinted !== lastDigest;
+			let text = '';
+			if (serialized) {
+				text = serialize(regions[0]);
+				if (Array.from(text).length > limit) { text = Array.from(text).slice(0, limit).join(''); truncated = true; reasons.add('capture_limit'); }
+				lastDigest = fingerprinted;
+			}
+			return { url: location.href, title: document.title.slice(0, 512), text: serialized ? text : '', ready: document.readyState === 'complete', revision: contentRevision, contentRevision, layoutRevision,
 				pending: active().some(r => r.reset || !atEnd(r)), busy: elements.some(el => el.getAttribute('aria-busy') === 'true' && boxed(el)),
 				passwordForm: elements.some(el => el.tagName === 'INPUT' && el.type === 'password' && boxed(el)),
-				captureTruncated: truncated, incompleteReasons: [...reasons], ambiguities: [...ambiguities] };
+				captureTruncated: truncated, incompleteReasons: [...reasons], ambiguities: [...ambiguities], unchanged: !serialized, serialized };
 		};
 		const advance = () => {
 			const list = active().sort((a,b) => b.depth - a.depth || a.id - b.id);
@@ -247,7 +291,10 @@ export const SAMPLE_PAGE = `(() => {
 		};
 		globalThis[key] = { sample, advance };
 	}
-	return globalThis[key].sample();
+	return globalThis[key].sample(true);
 })()`;
+
+/** Status-only answer: no text is rebuilt while the collector's own fingerprint is unchanged. */
+export const LIGHT_SAMPLE_PAGE = "globalThis.__easyPiFullPageScan1.sample(false)";
 
 export const ADVANCE_PAGE = "globalThis.__easyPiFullPageScan1.advance()";

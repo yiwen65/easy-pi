@@ -1,6 +1,13 @@
 import timers from "node:timers/promises";
 import { publicTarget, publicUrl, WebError } from "./network.ts";
-import { ADVANCE_PAGE, MAX_CAPTURE_CHARS, type PageSample, SAMPLE_PAGE } from "./page-scan.ts";
+import {
+	ADVANCE_PAGE,
+	LIGHT_SAMPLE_PAGE,
+	MAX_CAPTURE_CHARS,
+	type PageProbe,
+	type PageSample,
+	SAMPLE_PAGE,
+} from "./page-scan.ts";
 
 interface Protocol {
 	call<T>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T>;
@@ -59,6 +66,8 @@ interface FrameState {
 	/** When the committed loader was last identified, used to age out responses from older documents. */
 	loaderAt: number;
 	context?: number;
+	/** Execution context id resolved before the cached one was dropped, for change detection. */
+	lastContext?: number;
 	generation: number;
 	sample?: PageSample;
 	chars: number;
@@ -67,8 +76,11 @@ interface FrameState {
 	status: FrameScanStatus | "active";
 	owned: boolean;
 	initialized: boolean;
+	/** A collector pass ran in the current document's isolated world. */
+	collected: boolean;
 	initialUrl: string;
-	initialText: string;
+	/** Content/layout revision pair observed by the last probe. */
+	initialState: string;
 	lastRevision: number;
 	stableSince: number;
 	startedAt: number;
@@ -88,9 +100,6 @@ const FRAME_VISIBLE = `function() {
 	}
 	return true;
 }`;
-const INITIAL_PAGE = `(() => ({ url: location.href, ready: document.readyState === 'complete',
-	text: Array.from(document.body?.innerText ?? '').slice(0, ${MAX_CAPTURE_CHARS}).join('') }))()`;
-
 const MAX_FRAMES = 24;
 const MAX_SESSIONS = 24;
 const INITIAL_MAIN_WINDOW_MS = 2000;
@@ -165,6 +174,10 @@ export class PageScanner {
 	private reasons = new Set<string>();
 	private mainFrame = "";
 	private steps = 0;
+	/** Full page-text serializations the collector rebuilt; the light path adds none. */
+	private serializations = 0;
+	/** Frame trees already read in the current driver round; never reused across rounds. */
+	private trees = new Map<string, FrameTree>();
 	private navigations = 0;
 	private truncated = false;
 	private stopped = false;
@@ -182,10 +195,18 @@ export class PageScanner {
 		return this.sampleCount;
 	}
 
+	get serialized(): number {
+		return this.serializations;
+	}
+
 	constructor(protocol: Protocol, mainSession: string, signal: AbortSignal) {
 		this.protocol = protocol;
 		this.mainSession = mainSession;
 		this.signal = signal;
+	}
+
+	private clearTrees(): void {
+		this.trees.clear();
 	}
 
 	async prepare(session: string): Promise<void> {
@@ -213,11 +234,14 @@ export class PageScanner {
 		const ready = this.prepare(session).catch(() => {
 			if (!this.signal.aborted) this.reasons.add("frame_unavailable");
 		});
+		// A new session can carry its own frame tree; never serve the previous one.
+		this.clearTrees();
 		this.sessions.set(targetId, { id: session, parent, ready });
 	}
 
 	/** A detached target is not proof that the DOM removed the frame; only the session is dropped. */
 	onDetached(session: string): void {
+		this.clearTrees();
 		for (const [id, value] of this.sessions) if (value.id === session) this.sessions.delete(id);
 	}
 
@@ -265,8 +289,9 @@ export class PageScanner {
 			status: "active",
 			owned: false,
 			initialized: false,
+			collected: false,
 			initialUrl: "",
-			initialText: "",
+			initialState: "",
 			lastRevision: -1,
 			loaderAt: 0,
 			stableSince: now,
@@ -278,29 +303,69 @@ export class PageScanner {
 		};
 	}
 
+	/**
+	 * The isolated world of one frame/document is stable, so its execution context id is
+	 * cached and only re-resolved after this frame's generation was invalidated (new
+	 * loader, new session, navigation) or an evaluation proved the cached one destroyed.
+	 * The id check stays as strict as before: a re-resolved world that differs from the
+	 * last known one still means the document changed under us.
+	 */
 	private async context(frame: FrameState): Promise<number> {
+		if (frame.context !== undefined) return frame.context;
 		const result = await this.protocol.call<{ executionContextId: number }>(
 			"Page.createIsolatedWorld",
 			{ frameId: frame.id, worldName: "pi-web-fetch" },
 			frame.session,
 		);
-		const previous = frame.context;
+		const previous = frame.lastContext;
 		frame.context = result.executionContextId;
-		// A new isolated world id means the cached execution context was destroyed.
+		frame.lastContext = result.executionContextId;
+		// A new isolated world id means the previous execution context was destroyed.
 		if (previous !== undefined && previous !== frame.context)
 			throw new WebError("Browser frame changed during navigation.", "frame-changed");
 		return result.executionContextId;
 	}
 
 	private async evaluate<T>(frame: FrameState, expression: string): Promise<T> {
-		const result = await this.protocol.call<Evaluation<T>>(
-			"Runtime.evaluate",
-			{ expression, contextId: await this.context(frame), returnByValue: true },
-			frame.session,
-		);
+		let contextId: number;
+		try {
+			contextId = await this.context(frame);
+		} catch (error) {
+			if (error instanceof WebError && error.code === "frame-changed") frame.context = undefined;
+			throw error;
+		}
+		const result = await this.protocol
+			.call<Evaluation<T>>("Runtime.evaluate", { expression, contextId, returnByValue: true }, frame.session)
+			.catch((error: unknown) => {
+				// A destroyed context is proven by the failed call itself, so the cached id is
+				// dropped instead of being re-used by the next evaluation.
+				if (error instanceof WebError && error.code === "frame-changed") frame.context = undefined;
+				throw error;
+			});
 		if (result.exceptionDetails || result.result?.value === undefined)
 			throw new WebError("Browser page scan failed.");
 		return result.result.value;
+	}
+
+	/** Every collector evaluation is a page sample; only the ones that rebuilt text serialize. */
+	private async collect<T>(frame: FrameState, expression: string): Promise<T> {
+		const value = await this.evaluate<T>(frame, expression);
+		this.sampleCount++;
+		return value;
+	}
+
+	private async collectProbe(frame: FrameState, expression: string): Promise<PageProbe> {
+		const answer = await this.collect<PageProbe>(frame, expression);
+		if (answer.serialized) this.serializations++;
+		return answer;
+	}
+
+	private async sessionTree(session: string): Promise<FrameTree> {
+		const cached = this.trees.get(session);
+		if (cached !== undefined) return cached;
+		const { frameTree } = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, session);
+		this.trees.set(session, frameTree);
+		return frameTree;
 	}
 
 	/** Drop every stored sample and state that belongs to a previous document generation. */
@@ -311,16 +376,21 @@ export class PageScanner {
 		frame.sample = undefined;
 		frame.chars = 0;
 		frame.initialized = false;
+		frame.collected = false;
 		frame.initialUrl = "";
-		frame.initialText = "";
+		frame.initialState = "";
 		frame.stableSince = Date.now();
 		frame.lastRevision = -1;
 		frame.childrenPassed = false;
 		frame.context = undefined;
+		// The previous document's world id is not comparable with the next document's.
+		frame.lastContext = undefined;
 		frame.steps = 0;
 		frame.budgetSpent = false;
 		frame.status = "active";
 		frame.done = false;
+		// A navigation or session change can replace the frame tree of any session.
+		this.clearTrees();
 		if (kind !== "document") return;
 		// A new document replaces the frame's coverage notes and its embedded frames.
 		frame.reasons.clear();
@@ -348,8 +418,7 @@ export class PageScanner {
 	}
 
 	private async treeFor(frame: FrameState): Promise<FrameTree | undefined> {
-		const { frameTree } = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, frame.session);
-		return findTree(frameTree, frame.id);
+		return findTree(await this.sessionTree(frame.session), frame.id);
 	}
 
 	/** Refresh the committed document identity after a generation change. */
@@ -389,16 +458,25 @@ export class PageScanner {
 		frame.loaderAt = Date.now();
 	}
 
-	private async probe(frame: FrameState): Promise<void> {
-		const initial = await this.evaluate<{ url: string; text: string; ready: boolean }>(frame, INITIAL_PAGE);
-		if (initial.url !== frame.initialUrl || initial.text !== frame.initialText || !initial.ready)
-			frame.stableSince = Date.now();
-		frame.initialUrl = initial.url;
-		frame.initialText = initial.text;
+	/**
+	 * Wait until the frame's captured content and URL stop changing. The collector's own
+	 * content/layout revisions replace the full innerText transfer this probe used to make
+	 * on every poll, and only the first probe of a document installs the collector.
+	 */
+	private async probe(frame: FrameState): Promise<boolean> {
+		const answer = await this.collectProbe(frame, frame.collected ? LIGHT_SAMPLE_PAGE : SAMPLE_PAGE);
+		frame.collected = true;
+		const state = `${answer.contentRevision}:${answer.layoutRevision}`;
+		const changed = answer.url !== frame.initialUrl || state !== frame.initialState || !answer.ready;
+		if (changed) frame.stableSince = Date.now();
+		frame.initialUrl = answer.url;
+		frame.initialState = state;
 		const stable =
 			Date.now() - frame.stableSince >=
 			(frame.id === this.mainFrame ? INITIAL_MAIN_WINDOW_MS : INITIAL_CHILD_WINDOW_MS);
-		if (stable || Date.now() - frame.startedAt >= INITIAL_PROBE_LIMIT_MS) frame.initialized = true;
+		const initialized = stable || Date.now() - frame.startedAt >= INITIAL_PROBE_LIMIT_MS;
+		if (initialized) frame.initialized = true;
+		return changed || initialized;
 	}
 
 	private validSample(sample: PageSample | undefined): sample is PageSample {
@@ -440,8 +518,14 @@ export class PageScanner {
 		const before = frame.status;
 		this.syncStatus(frame);
 		if (this.stopped || frame.status !== before) return undefined;
-		const sample = await this.evaluate<PageSample>(frame, SAMPLE_PAGE);
-		this.sampleCount++;
+		// The driver already holds this frame's text, so the collector may answer with a
+		// status-only payload while its own fingerprint of that text is unchanged.
+		const carried = frame.sample;
+		let answer = await this.collectProbe(frame, carried ? LIGHT_SAMPLE_PAGE : SAMPLE_PAGE);
+		if (answer.unchanged) {
+			answer = carried ? { ...answer, text: carried.text } : await this.collectProbe(frame, SAMPLE_PAGE);
+		}
+		const sample = answer;
 		if (!this.validSample(sample)) throw new WebError("Browser returned invalid or oversized page text.");
 		if (frame.id === this.mainFrame || !["about:blank", "about:srcdoc"].includes(sample.url))
 			publicTarget(sample.url);
@@ -530,8 +614,7 @@ export class PageScanner {
 	}
 
 	private async discover(parent: FrameState): Promise<Map<string, DiscoveredFrame>> {
-		const result = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, parent.session);
-		const self = findTree(result.frameTree, parent.id);
+		const self = findTree(await this.sessionTree(parent.session), parent.id);
 		const children = new Map<string, DiscoveredFrame>();
 		for (const child of self?.childFrames ?? []) children.set(child.frame.id, { tree: child, owned: true });
 		// Chromium omits OOPIFs from the parent's Page.getFrameTree. Related
@@ -539,7 +622,7 @@ export class PageScanner {
 		for (const attached of this.sessions.values()) {
 			if (attached.id === parent.session || (attached.parent && attached.parent !== parent.id)) continue;
 			await attached.ready;
-			const { frameTree } = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, attached.id);
+			const frameTree = await this.sessionTree(attached.id);
 			attached.parent ??= frameTree.frame.parentId;
 			if (attached.parent !== parent.id) continue;
 			if (!children.has(frameTree.frame.id)) children.set(frameTree.frame.id, { tree: frameTree, owned: false });
@@ -689,44 +772,52 @@ export class PageScanner {
 		frame.stableSince = Date.now();
 	}
 
-	/** One short, bounded step for a single frame; the driver gives every active frame turns. */
-	private async step(frame: FrameState): Promise<void> {
-		if (this.isSettled(frame)) return;
+	/**
+	 * One short, bounded step for a single frame; the driver gives every active frame turns.
+	 * Returns true when this step observed progress (content changed, a frame advanced, a
+	 * frame settled or a child set changed), which lets the driver skip its pacing wait.
+	 */
+	private async step(frame: FrameState): Promise<boolean> {
+		if (this.isSettled(frame)) return false;
 		try {
 			if (frame.id !== this.mainFrame && Date.now() - frame.startedAt >= FRAME_TIME_LIMIT_MS) {
 				this.settleIncomplete(frame, "frame_time_limit");
-				return;
+				return true;
 			}
-			if (!frame.initialized) {
-				await this.probe(frame);
-				return;
-			}
+			if (!frame.initialized) return await this.probe(frame);
+			const previousRevision = frame.lastRevision;
 			const sample = await this.sample(frame);
-			if (this.stopped || frame.status !== "active" || !sample) return;
-			if (Date.now() - frame.stableSince < (sample.pending ? PENDING_WINDOW_MS : STABLE_WINDOW_MS)) return;
+			if (this.stopped) return false;
+			// An invalidated, failed or settling sample already changed the frame's state.
+			if (!sample || frame.status !== "active") return true;
+			// Content and layout that moved in this round are progress: continue without the
+			// 200 ms pacing wait, which is kept for rounds that observed nothing.
+			if (sample.revision !== previousRevision) return true;
+			if (Date.now() - frame.stableSince < (sample.pending ? PENDING_WINDOW_MS : STABLE_WINDOW_MS)) return false;
 			if (!frame.childrenPassed) {
-				await this.enumerateChildren(frame);
-				if (this.stopped || frame.status !== "active") return;
-				if (!(await this.childrenSettled(frame))) return;
+				const changed = await this.enumerateChildren(frame);
+				if (this.stopped || frame.status !== "active") return changed;
+				if (!(await this.childrenSettled(frame))) return changed;
 				frame.childrenPassed = true;
 				frame.stableSince = Date.now();
-				return;
+				return true;
 			}
 			if (!sample.pending) {
 				this.settleComplete(frame);
-				return;
+				return true;
 			}
 			await this.advance(frame);
+			return true;
 		} catch (error) {
 			this.signal.throwIfAborted();
 			if (error instanceof WebError && (error.code === "cancelled" || error.code === "read-timeout")) throw error;
 			if (error instanceof WebError && error.code === "frame-changed") {
 				this.invalidate(frame, "document");
-				return;
+				return true;
 			}
 			if (frame.id !== this.mainFrame) {
 				this.settleFailed(frame, "frame_unavailable");
-				return;
+				return true;
 			}
 			throw error;
 		}
@@ -736,12 +827,16 @@ export class PageScanner {
 		while (!this.stopped) {
 			const pending = this.orderedFrames().filter((frame) => !this.isSettled(frame));
 			if (!pending.length) return;
+			// Frame trees read in this round are shared by every frame's discovery pass; a
+			// navigation, attach or detach clears them immediately (see invalidate).
+			this.clearTrees();
+			let progressed = false;
 			for (const frame of pending) {
 				if (this.stopped) return;
 				if (this.frames.get(frame.id) !== frame) continue;
-				await this.step(frame);
+				progressed = (await this.step(frame)) || progressed;
 			}
-			await timers.setTimeout(STEP_PACING_MS, undefined, { signal: this.signal });
+			if (!progressed) await timers.setTimeout(STEP_PACING_MS, undefined, { signal: this.signal });
 		}
 	}
 
@@ -757,6 +852,7 @@ export class PageScanner {
 	/** Bounded recheck of frames that already finished, so a stale sample is not frozen as final. */
 	private async verifySettled(): Promise<boolean> {
 		let changed = false;
+		this.clearTrees();
 		for (const frame of this.orderedFrames()) {
 			if (this.stopped) break;
 			if (this.signal.aborted) this.signal.throwIfAborted();
