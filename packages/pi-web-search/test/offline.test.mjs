@@ -155,10 +155,11 @@ test("real Pi loader registers exactly two tools without a key, key reads, or st
 	assert.deepEqual(loaded.runtime.pendingProviderRegistrations, []);
 	assert.deepEqual(loaded.runtime.pendingNativeProviderRegistrations, []);
 	// web_fetch requires no field individually: either url or snapshot_id must be present, and that
-	// rule is enforced at run time (plan §2.2), so the schema itself requires nothing.
+	// rule is enforced at run time (plan §2.2), so the schema itself requires nothing. `format` was
+	// added by WF08 (plan §2.2) and is optional, so the required list stays empty.
 	for (const [name, fields, required] of [
 		["web_search", ["limit", "query"], ["query"]],
-		["web_fetch", ["max_chars", "offset", "snapshot_id", "url"], []],
+		["web_fetch", ["format", "max_chars", "offset", "snapshot_id", "url"], []],
 	]) {
 		const tool = tools.get(name);
 		assert.equal(tool.parameters.additionalProperties, false);

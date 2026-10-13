@@ -145,7 +145,14 @@ test("P01: one capture serves four snapshot pages, from one browser spawn, one p
 		assert.equal(page.structuredContent.pagination_consistent, true);
 		assert.equal(page.structuredContent.pagination_consistent, page.details.pagination_consistent);
 		assert.equal(page.details.provider, "snapshot");
-		assert.equal(page.details.stabilized, null, "a memory read must not claim a settled page scan");
+		// WF08: `format` is a real field now, and a continuation reports the CAPTURE's own counters
+		// (they describe that capture, not a new read) instead of 0 / "none" / null.
+		assert.equal(page.details.stabilized, true, "the capture-time settled state travels with the snapshot");
+		assert.equal(page.details.frames_read, data.frames_read, "a continuation reports the capture-time frame count");
+		assert.equal(page.details.scroll_steps, data.scroll_steps);
+		assert.equal(page.details.blocked_requests, data.blocked_requests);
+		assert.equal(page.details.dns_mode, data.dns_mode);
+		assert.match(text(page), /Capture-time scan \(counted during that capture, not by this memory read\)/);
 		assert.match(text(page), /short-term memory snapshot/);
 		assert.doesNotMatch(text(page), /REPLACED CONTENT/);
 		if (index < 3) assert.ok(page.structuredContent.next_offset > page.structuredContent.offset, "the cursor advances");
@@ -281,8 +288,8 @@ test("P04: bad combinations, unknown fields and unknown handles are rejected bef
 		[{}, /exactly one of url/],
 		[{ offset: 1 }, /exactly one of url/],
 		[{ max_chars: 8 }, /exactly one of url/],
-		[{ url: PAGE_URL, format: "markdown" }, /Unknown web_fetch parameter "format"/],
-		[{ snapshot_id: data.snapshot_id, format: "text" }, /Unknown web_fetch parameter "format"/],
+		[{ url: PAGE_URL, foo: "markdown" }, /Unknown web_fetch parameter "foo"/],
+		[{ snapshot_id: data.snapshot_id, foo: "text" }, /Unknown web_fetch parameter "foo"/],
 		[{ snapshot_id: data.snapshot_id, offset: 1.5 }, /offset must be an integer between 0 and 1048576/],
 		[{ snapshot_id: data.snapshot_id, max_chars: 0 }, /max_chars must be an integer between 1 and 16000/],
 		[{ snapshot_id: "x".repeat(129) }, /snapshot_id must be a 1 to 128 character opaque handle/],

@@ -1,10 +1,39 @@
 import { randomBytes } from "node:crypto";
+import {
+	MAX_CAPTURE_BLOCKS,
+	STRUCTURE_TYPES,
+	type StructureBlock,
+	type StructureLinkSpan,
+	type StructureType,
+} from "./content-format.ts";
 
 export type SnapshotFormat = "text" | "markdown";
 
+/**
+ * WF08: the capture-time scan counters, kept with the snapshot so a continuation page can report
+ * what the capture did instead of reporting 0 / "none" / null. The capture-time values are the only
+ * values that exist for a continuation: nothing is read again, so there is no new measurement.
+ */
+export interface SnapshotCaptureMeta {
+	framesRead: number;
+	scrollSteps: number;
+	blockedRequests: number;
+	dnsMode: "pinned_public_ip" | "local_fake_ip_client" | "none";
+	stabilized: boolean;
+	ambiguities: readonly string[];
+}
+
+/** WF08: which document a stored block came from; indexed by StructureBlock.frame. */
+export interface SnapshotFrameProvenance {
+	url: string;
+	status: string;
+	reasons: readonly string[];
+	role: "main" | "embedded";
+}
+
 /** Immutable capture result kept for later pagination; never HTML, cookies or a live browser handle. */
 export interface SnapshotContent {
-	/** Cleaned text of the whole capture, never only the current output page. */
+	/** Cleaned text of the whole capture in its own format, never only the current output page. */
 	text: string;
 	requestedUrl: string;
 	url: string;
@@ -16,6 +45,12 @@ export interface SnapshotContent {
 	incompleteReasons: readonly string[];
 	warnings: readonly string[];
 	contentStatus: string;
+	/** Capture-time counters; optional so a capture written without them stays readable. */
+	meta?: SnapshotCaptureMeta;
+	/** Structure of exactly `text`, with code point offsets into it (WF08). */
+	blocks?: readonly StructureBlock[];
+	/** Per-frame provenance indexed by `StructureBlock.frame` (WF08). */
+	frames?: readonly SnapshotFrameProvenance[];
 }
 
 export interface SnapshotStoreOptions {
@@ -42,6 +77,8 @@ const MAX_URL_CHARS = 2048;
 const MAX_LABEL_CHARS = 64;
 const MAX_LIST_ITEMS = 64;
 const MAX_ID_CHARS = 128;
+/** Bounded structure: at most a few links per block, and never an unbounded label list. */
+const MAX_BLOCK_LINKS = 64;
 
 interface StoredEntry {
 	id: string;
@@ -76,6 +113,122 @@ function boundedStrings(value: unknown): value is readonly string[] {
 	);
 }
 
+/** A counter or offset: a finite non-negative integer, so no NaN, fraction or Infinity is stored. */
+function counter(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+}
+
+const DNS_MODES: readonly string[] = ["pinned_public_ip", "local_fake_ip_client", "none"];
+
+function prepareMeta(value: unknown): SnapshotCaptureMeta | undefined {
+	if (value === undefined) return undefined;
+	if (value === null || typeof value !== "object") return undefined;
+	const meta = value as SnapshotCaptureMeta;
+	if (!counter(meta.framesRead) || !counter(meta.scrollSteps) || !counter(meta.blockedRequests)) return undefined;
+	if (typeof meta.dnsMode !== "string" || !DNS_MODES.includes(meta.dnsMode)) return undefined;
+	if (typeof meta.stabilized !== "boolean" || !boundedStrings(meta.ambiguities)) return undefined;
+	return Object.freeze({
+		framesRead: meta.framesRead,
+		scrollSteps: meta.scrollSteps,
+		blockedRequests: meta.blockedRequests,
+		dnsMode: meta.dnsMode,
+		stabilized: meta.stabilized,
+		ambiguities: Object.freeze([...meta.ambiguities]),
+	});
+}
+
+function prepareLink(value: unknown): StructureLinkSpan | undefined {
+	if (value === null || typeof value !== "object") return undefined;
+	const link = value as StructureLinkSpan;
+	if (!counter(link.start) || !counter(link.end) || link.end <= link.start) return undefined;
+	if (typeof link.href !== "string" || link.href.length === 0 || link.href.length > MAX_URL_CHARS) return undefined;
+	if (link.title !== undefined && (typeof link.title !== "string" || link.title.length > MAX_TITLE_CHARS))
+		return undefined;
+	const prepared: StructureLinkSpan = { start: link.start, end: link.end, href: link.href };
+	if (link.title !== undefined) prepared.title = link.title;
+	return prepared;
+}
+
+/** Reject rather than truncate, like every other stored shape: a malformed capture is never kept. */
+function prepareBlock(value: unknown): StructureBlock | undefined {
+	if (value === null || typeof value !== "object") return undefined;
+	const block = value as StructureBlock;
+	if (typeof block.type !== "string" || !STRUCTURE_TYPES.includes(block.type as StructureType)) return undefined;
+	if (!counter(block.start) || !counter(block.end) || block.end <= block.start) return undefined;
+	const prepared: StructureBlock = { type: block.type, start: block.start, end: block.end };
+	for (const name of ["level", "depth", "ordinal", "table", "row", "cell"] as const) {
+		const value = block[name];
+		if (value === undefined) continue;
+		if (!counter(value) || value < (name === "level" ? 1 : 0) || (name === "level" && value > 6)) return undefined;
+		prepared[name] = value;
+	}
+	if (block.ordered !== undefined) prepared.ordered = block.ordered === true;
+	if (block.header !== undefined) prepared.header = block.header === true;
+	if (block.frame !== undefined) {
+		if (!counter(block.frame) || block.frame > MAX_LIST_ITEMS) return undefined;
+		prepared.frame = block.frame;
+	}
+	if (block.id !== undefined) {
+		if (typeof block.id !== "string" || block.id.length === 0 || block.id.length > MAX_LABEL_CHARS) return undefined;
+		prepared.id = block.id;
+	}
+	if (block.links !== undefined) {
+		if (!Array.isArray(block.links) || block.links.length > MAX_BLOCK_LINKS) return undefined;
+		const links: StructureLinkSpan[] = [];
+		for (const link of block.links) {
+			const preparedLink = prepareLink(link);
+			if (!preparedLink) return undefined;
+			// A link span must lie inside the block that owns it: the renderer and the page block list
+			// both rely on a link never reaching outside its own text.
+			if (preparedLink.start < block.start || preparedLink.end > block.end) return undefined;
+			// Every link is kept with the verdict that was computed for it, never re-derived later.
+			if (link.allowed !== undefined) preparedLink.allowed = link.allowed === true;
+			if (link.note !== undefined) {
+				if (typeof link.note !== "string" || link.note.length > MAX_LABEL_CHARS * 2) return undefined;
+				preparedLink.note = link.note;
+			}
+			links.push(preparedLink);
+		}
+		prepared.links = links;
+	}
+	return prepared;
+}
+
+function prepareBlocks(value: unknown): readonly StructureBlock[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length > MAX_CAPTURE_BLOCKS) return undefined;
+	const blocks: StructureBlock[] = [];
+	for (const block of value) {
+		const prepared = prepareBlock(block);
+		if (!prepared) return undefined;
+		blocks.push(prepared);
+	}
+	return Object.freeze(blocks);
+}
+
+function prepareFrames(value: unknown): readonly SnapshotFrameProvenance[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length > MAX_LIST_ITEMS) return undefined;
+	const frames: SnapshotFrameProvenance[] = [];
+	for (const frame of value) {
+		if (frame === null || typeof frame !== "object") return undefined;
+		const entry = frame as SnapshotFrameProvenance;
+		if (typeof entry.url !== "string" || entry.url.length > MAX_URL_CHARS) return undefined;
+		if (typeof entry.status !== "string" || entry.status.length > MAX_LABEL_CHARS) return undefined;
+		if (entry.role !== "main" && entry.role !== "embedded") return undefined;
+		if (!boundedStrings(entry.reasons)) return undefined;
+		frames.push(
+			Object.freeze({
+				url: entry.url,
+				status: entry.status,
+				reasons: Object.freeze([...entry.reasons]),
+				role: entry.role,
+			}),
+		);
+	}
+	return Object.freeze(frames);
+}
+
 /** Bound the stored shape: metadata is clamped by rejection, text only by the byte budget. */
 function prepareContent(value: SnapshotContent): SnapshotContent | undefined {
 	if (value === null || typeof value !== "object") return undefined;
@@ -87,7 +240,13 @@ function prepareContent(value: SnapshotContent): SnapshotContent | undefined {
 		return undefined;
 	if (typeof value.scanComplete !== "boolean" || typeof value.captureTruncated !== "boolean") return undefined;
 	if (!boundedStrings(value.incompleteReasons) || !boundedStrings(value.warnings)) return undefined;
-	return Object.freeze({
+	const meta = prepareMeta(value.meta);
+	if (value.meta !== undefined && !meta) return undefined;
+	const blocks = prepareBlocks(value.blocks);
+	if (value.blocks !== undefined && !blocks) return undefined;
+	const frames = prepareFrames(value.frames);
+	if (value.frames !== undefined && !frames) return undefined;
+	const prepared: SnapshotContent = {
 		text: value.text,
 		requestedUrl: value.requestedUrl,
 		url: value.url,
@@ -99,16 +258,35 @@ function prepareContent(value: SnapshotContent): SnapshotContent | undefined {
 		incompleteReasons: Object.freeze([...value.incompleteReasons]),
 		warnings: Object.freeze([...value.warnings]),
 		contentStatus: value.contentStatus,
-	});
+	};
+	if (meta) prepared.meta = meta;
+	if (blocks) prepared.blocks = blocks;
+	if (frames) prepared.frames = frames;
+	return Object.freeze(prepared);
+}
+
+/** A frozen copy of one stored block; callers can never mutate stored structure or another page. */
+function copyBlock(block: StructureBlock): StructureBlock {
+	const copy: StructureBlock = { ...block };
+	if (block.links) copy.links = block.links.map((link) => ({ ...link }));
+	return Object.freeze(copy);
 }
 
 /** A detached copy; callers can never mutate stored state or another page of the same snapshot. */
 function copyContent(content: SnapshotContent): SnapshotContent {
-	return Object.freeze({
+	const copy: SnapshotContent = {
 		...content,
 		incompleteReasons: Object.freeze([...content.incompleteReasons]),
 		warnings: Object.freeze([...content.warnings]),
-	});
+	};
+	if (content.meta)
+		copy.meta = Object.freeze({ ...content.meta, ambiguities: Object.freeze([...content.meta.ambiguities]) });
+	if (content.blocks) copy.blocks = Object.freeze(content.blocks.map(copyBlock));
+	if (content.frames)
+		copy.frames = Object.freeze(
+			content.frames.map((frame) => Object.freeze({ ...frame, reasons: Object.freeze([...frame.reasons]) })),
+		);
+	return Object.freeze(copy);
 }
 
 function byteSize(content: SnapshotContent): number {

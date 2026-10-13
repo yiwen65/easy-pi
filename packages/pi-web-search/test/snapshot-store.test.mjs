@@ -233,3 +233,123 @@ test("S09 malformed captures are refused without touching stored state", () => {
 	assert.equal(store.bytes, 0);
 	assert.equal(typeof store.put(owner, content()), "string", "a valid capture still works afterwards");
 });
+
+// WF08 additions: the capture-time counters, the structure of the stored text and the per-frame
+// provenance are stored with the capture, counted like every other stored byte, and detached.
+const captureMeta = (overrides = {}) => ({
+	framesRead: 3,
+	scrollSteps: 12,
+	blockedRequests: 1,
+	dnsMode: "local_fake_ip_client",
+	stabilized: true,
+	ambiguities: ["structure_truncated"],
+	...overrides,
+});
+const structure = [
+	{ type: "heading", start: 0, end: 5, level: 1, frame: 0, id: "f0b0" },
+	{
+		type: "link",
+		start: 6,
+		end: 12,
+		frame: 0,
+		id: "f0b1",
+		links: [{ start: 6, end: 12, href: "https://page.public.org/a", title: "a", allowed: true }],
+	},
+];
+const provenance = [{ url: "https://page.public.org/a", status: "complete", reasons: [], role: "main" }];
+
+test("S10 WF08: capture-time counters, structure and provenance are stored and detached", () => {
+	const store = isolated();
+	const owner = {};
+	const id = store.put(owner, content({ meta: captureMeta(), blocks: structure, frames: provenance }));
+	assert.equal(typeof id, "string");
+	const page = store.get(owner, id);
+	assert.equal(page.meta.framesRead, 3);
+	assert.equal(page.meta.scrollSteps, 12);
+	assert.equal(page.meta.blockedRequests, 1);
+	assert.equal(page.meta.dnsMode, "local_fake_ip_client");
+	assert.equal(page.meta.stabilized, true);
+	assert.deepEqual(page.meta.ambiguities, ["structure_truncated"]);
+	assert.equal(page.blocks.length, 2);
+	assert.equal(page.blocks[0].level, 1);
+	assert.equal(page.blocks[1].links[0].href, "https://page.public.org/a");
+	assert.equal(page.blocks[1].links[0].allowed, true);
+	assert.equal(page.frames[0].role, "main");
+	assert.equal(page.frames[0].url, "https://page.public.org/a");
+	assert.ok(Object.isFrozen(page.meta) && Object.isFrozen(page.meta.ambiguities));
+	assert.ok(Object.isFrozen(page.blocks) && Object.isFrozen(page.blocks[0]));
+	assert.ok(Object.isFrozen(page.frames) && Object.isFrozen(page.frames[0].reasons));
+	assert.throws(() => {
+		page.meta.framesRead = 99;
+	});
+	assert.throws(() => {
+		page.blocks.push({ type: "other", start: 0, end: 1 });
+	});
+	assert.throws(() => {
+		page.frames[0].reasons.push("injected");
+	});
+	const again = store.get(owner, id);
+	assert.equal(again.meta.framesRead, 3);
+	assert.equal(again.blocks.length, 2);
+	assert.equal(again.frames[0].reasons.length, 0);
+});
+
+test("S10 WF08: stored structure and metadata count toward the byte budget", () => {
+	const metadataOnly = isolated({ maxOwnerBytes: 4_000 });
+	const owner = {};
+	assert.equal(typeof metadataOnly.put(owner, content({ text: "x".repeat(100), meta: captureMeta() })), "string");
+	const plainBytes = Buffer.byteLength(JSON.stringify(content({ text: "x".repeat(100) })));
+	assert.ok(metadataOnly.bytes > plainBytes, `metadata is accounted for: ${metadataOnly.bytes} > ${plainBytes}`);
+	const withStructure = isolated({ maxOwnerBytes: 20_000 });
+	const structureStore = { blocks: Array.from({ length: 200 }, (_, index) => ({ type: "paragraph", start: index * 2, end: index * 2 + 1, frame: 0, id: `f0b${index}` })), frames: provenance };
+	const stored = withStructure.put(owner, content({ text: "x".repeat(100), ...structureStore }));
+	assert.equal(typeof stored, "string");
+	const structureBytes = withStructure.bytes;
+	assert.ok(structureBytes > metadataOnly.bytes, `structure and provenance are accounted for: ${structureBytes}`);
+	const tight = isolated({ maxOwnerBytes: 2_000 });
+	const refusingOwner = {};
+	assert.equal(typeof tight.put(refusingOwner, content({ text: "x".repeat(100) })), "string");
+	assert.equal(
+		tight.put(refusingOwner, content({ text: "x".repeat(100), blocks: Array.from({ length: 2_000 }, (_, index) => ({ type: "paragraph", start: index * 2, end: index * 2 + 1, frame: 0 })) })),
+		undefined,
+		"structure over the byte budget is refused, never silently truncated",
+	);
+});
+
+test("S10 WF08: malformed counters, structure or provenance are refused", () => {
+	const store = isolated();
+	const owner = {};
+	const invalid = [
+		content({ meta: captureMeta({ dnsMode: "unknown-mode" }) }),
+		content({ meta: captureMeta({ framesRead: -1 }) }),
+		content({ meta: captureMeta({ framesRead: 1.5 }) }),
+		content({ meta: captureMeta({ scrollSteps: Number.NaN }) }),
+		content({ meta: captureMeta({ stabilized: "yes" }) }),
+		content({ meta: captureMeta({ ambiguities: "structure_truncated" }) }),
+		content({ meta: captureMeta({ ambiguities: Array.from({ length: 65 }, () => "x") }) }),
+		content({ blocks: [{ type: "banner", start: 0, end: 4 }] }),
+		content({ blocks: [{ type: "heading", start: 5, end: 5 }] }),
+		content({ blocks: [{ type: "heading", start: 5, end: 4 }] }),
+		content({ blocks: [{ type: "heading", start: 0, end: 4, level: 7 }] }),
+		content({ blocks: [{ type: "heading", start: 0.5, end: 4 }] }),
+		content({ blocks: [{ type: "link", start: 0, end: 4, links: [{ start: 0, end: 4, href: "" }] }] }),
+		content({ blocks: [{ type: "link", start: 0, end: 4, links: [{ start: 0, end: 9, href: "https://page.public.org/a" }] }] }),
+		content({ blocks: [{ type: "frame", start: 0, end: 4, frame: "0" }] }),
+		content({ frames: [{ url: "https://page.public.org/a", status: "complete", reasons: [], role: "unknown" }] }),
+		content({ frames: [{ url: "https://page.public.org/a", status: "complete", reasons: [1], role: "main" }] }),
+		content({ blocks: "structure" }),
+		content({ frames: "provenance" }),
+	];
+	for (const value of invalid) {
+		assert.equal(store.put(owner, value), undefined, `refused: ${JSON.stringify(value)?.slice(0, 90)}`);
+	}
+	assert.equal(store.size, 0);
+	assert.equal(store.bytes, 0);
+	// A capture written without the new fields stays readable, exactly as before WF08.
+	const legacy = store.put(owner, content());
+	assert.equal(typeof legacy, "string");
+	const page = store.get(owner, legacy);
+	assert.equal(page.meta, undefined);
+	assert.equal(page.blocks, undefined);
+	assert.equal(page.frames, undefined);
+});

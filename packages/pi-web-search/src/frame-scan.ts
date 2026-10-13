@@ -1,4 +1,5 @@
 import timers from "node:timers/promises";
+import { codePointLength, MAX_CAPTURE_BLOCKS, STRUCTURE_TRUNCATED, type StructureBlock } from "./content-format.ts";
 import { publicTarget, publicUrl, WebError } from "./network.ts";
 import {
 	ADVANCE_PAGE,
@@ -38,6 +39,8 @@ export interface FrameReport {
 	url: string;
 	status: FrameScanStatus;
 	reasons: string[];
+	/** WF08 addition: which document a provenance entry describes; embedded frames keep discovery order. */
+	role?: "main" | "embedded";
 }
 
 export interface ScanResult {
@@ -51,6 +54,11 @@ export interface ScanResult {
 	incompleteReasons: string[];
 	/** Confidence caveats from the sampler; never coverage gaps and never part of incompleteReasons. */
 	ambiguities: string[];
+	/**
+	 * WF08 structure of exactly `text`: code point offsets into it, each block carrying the index of
+	 * its source frame in `frames`. Bounded; a budget overflow is disclosed through `ambiguities`.
+	 */
+	blocks: StructureBlock[];
 	framesRead: number;
 	scrollSteps: number;
 	frames: FrameReport[];
@@ -145,11 +153,12 @@ function frameReason(reason: string): string {
 }
 
 /** A frame that is gone from the DOM has no current source document to attribute text or status to. */
-function frameEntry(frame: FrameState): FrameReport {
+function frameEntry(frame: FrameState, role: "main" | "embedded"): FrameReport {
 	return {
 		url: frame.status === "removed" ? "" : displayUrl(frame.url),
 		status: frame.status === "active" ? "incomplete" : frame.status,
 		reasons: [...frame.reasons],
+		role,
 	};
 }
 
@@ -479,18 +488,43 @@ export class PageScanner {
 		return changed || initialized;
 	}
 
-	private validSample(sample: PageSample | undefined): sample is PageSample {
-		return (
-			!!sample &&
-			typeof sample.text === "string" &&
-			typeof sample.url === "string" &&
-			typeof sample.title === "string" &&
-			Array.from(sample.text).length <= MAX_CAPTURE_CHARS &&
-			Buffer.byteLength(sample.text) <= 1_048_576 &&
-			Number.isInteger(sample.revision) &&
-			Array.isArray(sample.incompleteReasons)
-		);
+	private validStructure(structure: unknown): string | undefined {
+		if (structure === undefined) return undefined;
+		if (!Array.isArray(structure)) return "structure is not a list";
+		if (structure.length > MAX_CAPTURE_BLOCKS) return `structure has ${structure.length} entries`;
+		for (const block of structure) {
+			if (typeof block !== "object" || block === null) return "structure entry is not an object";
+			const value = block as StructureBlock;
+			if (typeof value.type !== "string") return "structure entry has no type";
+			if (!Number.isInteger(value.start) || !Number.isInteger(value.end))
+				return `structure ${value.type} has non-integer offsets`;
+			if (value.start < 0 || value.end <= value.start)
+				return `structure ${value.type} has offsets ${value.start}..${value.end}`;
+		}
+		return undefined;
 	}
+
+	private validSample(sample: PageSample | undefined): sample is PageSample {
+		this.structureFailure = "";
+		if (
+			!sample ||
+			typeof sample.text !== "string" ||
+			typeof sample.url !== "string" ||
+			typeof sample.title !== "string" ||
+			Array.from(sample.text).length > MAX_CAPTURE_CHARS ||
+			Buffer.byteLength(sample.text) > 1_048_576 ||
+			!Number.isInteger(sample.revision) ||
+			!Array.isArray(sample.incompleteReasons)
+		)
+			return false;
+		// A malformed structure is named with its own bounded shape, never with page text.
+		const invalid = this.validStructure(sample.structure);
+		if (invalid !== undefined) this.structureFailure = invalid;
+		return invalid === undefined;
+	}
+
+	/** Bounded shape of the first invalid structure entry, used only for the diagnostic message. */
+	private structureFailure = "";
 
 	/** Frame-local notes stay on the frame; only the main document feeds the aggregate reasons. */
 	private accountSample(frame: FrameState, sample: PageSample): void {
@@ -523,10 +557,16 @@ export class PageScanner {
 		const carried = frame.sample;
 		let answer = await this.collectProbe(frame, carried ? LIGHT_SAMPLE_PAGE : SAMPLE_PAGE);
 		if (answer.unchanged) {
-			answer = carried ? { ...answer, text: carried.text } : await this.collectProbe(frame, SAMPLE_PAGE);
+			// A status-only answer carries no structure either, so the driver keeps both of its copies.
+			answer = carried
+				? { ...answer, text: carried.text, structure: carried.structure }
+				: await this.collectProbe(frame, SAMPLE_PAGE);
 		}
 		const sample = answer;
-		if (!this.validSample(sample)) throw new WebError("Browser returned invalid or oversized page text.");
+		if (!this.validSample(sample))
+			throw new WebError(
+				`Browser returned invalid or oversized page text.${this.structureFailure ? ` (${this.structureFailure})` : ""}`,
+			);
 		if (frame.id === this.mainFrame || !["about:blank", "about:srcdoc"].includes(sample.url))
 			publicTarget(sample.url);
 		if (sample.url !== frame.url) {
@@ -918,24 +958,87 @@ export class PageScanner {
 		if (reason) this.reasons.add(reason);
 		const main = this.frames.get(this.mainFrame);
 		const samples = [...this.frames.values()].filter((frame) => frame.sample);
-		const text = samples
-			.filter((frame) => frame.sample!.text.trim())
-			.map((frame) =>
-				frame.id === this.mainFrame ? frame.sample!.text : `\n[Embedded frame text]\n${frame.sample!.text}`,
-			)
-			.join("\n");
-		const chars = Array.from(text);
 		const ambiguities = new Set<string>();
 		for (const frame of this.frames.values()) {
 			for (const reason of sampleAmbiguities(frame.sample)) ambiguities.add(reason);
 		}
-		const captureTruncated = this.truncated || chars.length > MAX_CAPTURE_CHARS;
-		if (captureTruncated) this.reasons.add("capture_limit");
-		let gap = false;
 		// Embedded frames come first so a lookup by source URL always finds the frame itself; the
 		// main document is reported last, and its settled state is also exposed above.
-		const entries = [...this.frames.values()].filter((frame) => frame !== main).map((frame) => frameEntry(frame));
-		if (main) entries.push(frameEntry(main));
+		const ordered = [...this.frames.values()].filter((frame) => frame !== main);
+		if (main) ordered.push(main);
+		const entries = ordered.map((frame) => frameEntry(frame, frame === main ? "main" : "embedded"));
+		const indexOf = new Map(ordered.map((frame, index) => [frame, index]));
+		// One pass builds the capture text and the structure of exactly that text: the same frames,
+		// the same order and the same separators the text assembly always used, so text mode is
+		// byte-identical and every block offset is a code point offset of the returned capture text.
+		const parts: string[] = [];
+		const blocks: StructureBlock[] = [];
+		let chars = 0;
+		let structureTruncated = false;
+		for (const frame of samples) {
+			const sample = frame.sample!;
+			if (!sample.text.trim()) continue;
+			const embedded = frame.id !== this.mainFrame;
+			const prefix = embedded ? "\n[Embedded frame text]\n" : "";
+			if (parts.length) {
+				parts.push("\n");
+				chars += 1;
+			}
+			const start = chars + codePointLength(prefix);
+			parts.push(prefix, sample.text);
+			const frameChars = codePointLength(sample.text);
+			chars = start + frameChars;
+			const index = indexOf.get(frame) ?? entries.length - 1;
+			const clip = (value: number) => Math.max(0, Math.min(value, MAX_CAPTURE_CHARS));
+			let ordinal = 0;
+			for (const block of sample.structure ?? []) {
+				if (blocks.length >= MAX_CAPTURE_BLOCKS) {
+					structureTruncated = true;
+					break;
+				}
+				const from = Math.max(0, Math.min(block.start, frameChars));
+				const to = Math.max(from, Math.min(block.end, frameChars));
+				const blockStart = clip(start + from);
+				const blockEnd = clip(start + to);
+				if (blockEnd <= blockStart) continue;
+				// The frame's own link spans are relative to that frame's text, so they move with it.
+				const merged: StructureBlock = {
+					...block,
+					start: blockStart,
+					end: blockEnd,
+					frame: index,
+					id: `f${index}b${ordinal++}`,
+				};
+				if (block.links) {
+					const links = [];
+					for (const link of block.links) {
+						const linkStart = clip(start + link.start);
+						const linkEnd = clip(start + link.end);
+						if (linkEnd <= linkStart) continue;
+						links.push({ ...link, start: linkStart, end: linkEnd });
+					}
+					if (links.length) merged.links = links;
+					else delete merged.links;
+				}
+				blocks.push(merged);
+			}
+			// An embedded frame is itself a block of the aggregate capture, so a reader can tell where
+			// another document's text starts and which frame it came from.
+			if (embedded && blocks.length < MAX_CAPTURE_BLOCKS)
+				blocks.push({
+					type: "frame",
+					start: clip(start),
+					end: clip(start + frameChars),
+					frame: index,
+					id: `f${index}frame`,
+				});
+		}
+		if (structureTruncated) ambiguities.add(STRUCTURE_TRUNCATED);
+		const text = parts.join("");
+		const textChars = Array.from(text);
+		const captureTruncated = this.truncated || textChars.length > MAX_CAPTURE_CHARS;
+		if (captureTruncated) this.reasons.add("capture_limit");
+		let gap = false;
 		for (const frame of this.frames.values()) {
 			if (frame === main) continue;
 			if (frame.status === "incomplete" || frame.status === "failed") gap = true;
@@ -944,13 +1047,14 @@ export class PageScanner {
 		return {
 			url: main?.sample ? publicUrl(main.sample.url) : "",
 			title: main?.sample?.title ?? "",
-			text: chars.slice(0, MAX_CAPTURE_CHARS).join(""),
+			text: textChars.slice(0, MAX_CAPTURE_CHARS).join(""),
 			captureTruncated,
 			stabilized: main?.done === true,
 			passwordForm: samples.some((frame) => frame.sample?.passwordForm),
 			scanComplete: main?.done === true && this.reasons.size === 0 && samples.every((frame) => frame.done),
 			incompleteReasons: [...this.reasons],
 			ambiguities: [...ambiguities].sort(),
+			blocks,
 			framesRead: samples.length,
 			scrollSteps: this.steps,
 			frames: entries,
