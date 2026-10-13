@@ -113,22 +113,22 @@ class BrowserPipe {
 		const input = process.stdio[4] as Readable;
 		this.exited = new Promise((resolve) => {
 			process.once("exit", () => {
-				this.fail(new WebError("Browser exited before the page could be read."));
+				this.fail(new WebError("Browser exited before the page could be read.", "protocol-failed"));
 				resolve();
 			});
 			process.once("error", () => {
-				this.fail(new WebError("Chrome/Chromium could not be started."));
+				this.fail(new WebError("Chrome/Chromium could not be started.", "protocol-failed"));
 				resolve();
 			});
 		});
-		this.output.on("error", () => this.fail(new WebError("Browser connection failed.")));
-		input.on("error", () => this.fail(new WebError("Browser connection failed.")));
-		input.on("end", () => this.fail(new WebError("Browser connection closed.")));
+		this.output.on("error", () => this.fail(new WebError("Browser connection failed.", "protocol-failed")));
+		input.on("error", () => this.fail(new WebError("Browser connection failed.", "protocol-failed")));
+		input.on("end", () => this.fail(new WebError("Browser connection closed.", "protocol-failed")));
 		input.setEncoding("utf8");
 		input.on("data", (chunk: string) => {
 			this.buffer += chunk;
 			if (Buffer.byteLength(this.buffer) > MAX_CDP_BYTES) {
-				this.fail(new WebError("Browser response exceeds the 4 MiB protocol limit."));
+				this.fail(new WebError("Browser response exceeds the 4 MiB protocol limit.", "protocol-failed"));
 				return;
 			}
 			while (true) {
@@ -141,11 +141,11 @@ class BrowserPipe {
 				try {
 					message = JSON.parse(value);
 				} catch {
-					this.fail(new WebError("Browser returned invalid protocol data."));
+					this.fail(new WebError("Browser returned invalid protocol data.", "protocol-failed"));
 					return;
 				}
 				if (!message || typeof message !== "object") {
-					this.fail(new WebError("Browser returned invalid protocol data."));
+					this.fail(new WebError("Browser returned invalid protocol data.", "protocol-failed"));
 					return;
 				}
 				if (message.id && this.pending.has(message.id)) {
@@ -157,24 +157,28 @@ class BrowserPipe {
 						pending.reject(
 							new WebError(
 								changed ? "Browser frame changed during navigation." : "Browser protocol command failed.",
+								changed ? "frame-changed" : "protocol-failed",
 							),
 						);
 					} else pending.resolve(message.result);
 				} else this.onEvent(message);
 			}
 		});
-		this.onAbort = () => this.fail(new WebError("Web request cancelled."));
+		this.onAbort = () => this.fail(new WebError("Web request cancelled.", "cancelled"));
 		signal.addEventListener("abort", this.onAbort, { once: true });
 		if (signal.aborted) this.onAbort();
 	}
 
 	call<T>(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<T> {
-		if (this.stopped || this.signal.aborted) return Promise.reject(new WebError("Browser connection is closed."));
+		if (this.stopped || this.signal.aborted)
+			return Promise.reject(
+				new WebError("Browser connection is closed.", this.signal.aborted ? "cancelled" : "protocol-failed"),
+			);
 		return new Promise((resolve, reject) => {
 			const id = ++this.nextId;
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
-				reject(new WebError("Browser protocol command timed out."));
+				reject(new WebError("Browser protocol command timed out.", "read-timeout"));
 			}, READ_TIMEOUT_MS);
 			this.pending.set(id, { resolve, reject, timer });
 			this.output.write(`${JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })}\0`);
@@ -208,7 +212,7 @@ class BrowserPipe {
 				await Promise.race([this.exited, timers.setTimeout(1000)]);
 			}
 		}
-		this.fail(new WebError("Browser connection closed."));
+		this.fail(new WebError("Browser connection closed.", "protocol-failed"));
 		if (this.process.exitCode === null && this.process.signalCode === null && this.process.pid) {
 			throw new WebError("Browser cleanup failed; its temporary profile was preserved.");
 		}
@@ -228,7 +232,7 @@ function delegatedNote(proxy: PublicProxy | undefined): string {
 }
 
 export async function readPage(requestedUrl: string, callerSignal?: AbortSignal): Promise<RenderedPage> {
-	if (callerSignal?.aborted) throw new WebError("Web request cancelled.");
+	if (callerSignal?.aborted) throw new WebError("Web request cancelled.", "cancelled");
 	publicTarget(requestedUrl);
 	const executable = await browserExecutable();
 	const deadline = AbortSignal.timeout(READ_TIMEOUT_MS);
@@ -269,7 +273,7 @@ export async function readPage(requestedUrl: string, callerSignal?: AbortSignal)
 			} else if (message.method === "Target.detachedFromTarget") {
 				scanner!.onDetached(message.params?.sessionId);
 			} else if (message.method === "Network.responseReceived" && message.params?.type === "Document") {
-				scanner!.onResponse(message.params.frameId, message.params.response?.status ?? 0);
+				scanner!.onResponse(message.params.frameId, message.params.response?.status ?? 0, message.params.loaderId);
 			}
 		};
 		await scanner.prepare(sessionId);
@@ -302,7 +306,7 @@ export async function readPage(requestedUrl: string, callerSignal?: AbortSignal)
 			);
 		return { ...result, blockedRequests: proxy.blockedRequests, fakeIpDelegated: proxy.fakeIpDelegated };
 	} catch (error) {
-		if (callerSignal?.aborted) throw new WebError("Web request cancelled.");
+		if (callerSignal?.aborted) throw new WebError("Web request cancelled.", "cancelled");
 		if (deadline.aborted) {
 			const partial = scanner?.result("timeout");
 			if (partial?.text.trim() && scanner!.status < 400)
@@ -311,10 +315,13 @@ export async function readPage(requestedUrl: string, callerSignal?: AbortSignal)
 					blockedRequests: proxy?.blockedRequests ?? 0,
 					fakeIpDelegated: proxy?.fakeIpDelegated ?? false,
 				};
-			throw new WebError("Webpage read timed out after 90 seconds.");
+			throw new WebError("Webpage read timed out after 90 seconds.", "read-timeout");
 		}
 		if (error instanceof WebError) throw error;
-		throw new WebError("Anonymous browser read failed. No Tavily request or credential fallback was made.");
+		throw new WebError(
+			"Anonymous browser read failed. No Tavily request or credential fallback was made.",
+			"protocol-failed",
+		);
 	} finally {
 		try {
 			await browser?.close();

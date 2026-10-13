@@ -5,24 +5,32 @@ import { ADVANCE_PAGE, MAX_CAPTURE_CHARS, type PageSample, SAMPLE_PAGE } from ".
 interface Protocol {
 	call<T>(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<T>;
 }
+interface FrameNode {
+	id: string;
+	url: string;
+	loaderId?: string;
+	parentId?: string;
+}
 interface FrameTree {
-	frame: { id: string; url: string; loaderId?: string; parentId?: string };
+	frame: FrameNode;
 	childFrames?: FrameTree[];
 }
-interface FrameState {
-	id: string;
-	session: string;
-	loader?: string;
-	parent?: string;
-	context?: number;
-	url: string;
-	sample?: PageSample;
-	done: boolean;
-	failed?: boolean;
+interface DiscoveredFrame {
+	tree: FrameTree;
+	/** The parent's own frame tree listed it, so absence from that tree proves DOM removal. */
+	owned: boolean;
 }
 interface Evaluation<T> {
 	result?: { value?: T; objectId?: string };
 	exceptionDetails?: unknown;
+}
+
+export type FrameScanStatus = "complete" | "incomplete" | "skipped" | "failed" | "removed";
+
+export interface FrameReport {
+	url: string;
+	status: FrameScanStatus;
+	reasons: string[];
 }
 
 export interface ScanResult {
@@ -34,8 +42,40 @@ export interface ScanResult {
 	passwordForm: boolean;
 	scanComplete: boolean;
 	incompleteReasons: string[];
+	/** Confidence caveats from the sampler; never coverage gaps and never part of incompleteReasons. */
+	ambiguities: string[];
 	framesRead: number;
 	scrollSteps: number;
+	frames: FrameReport[];
+}
+
+interface FrameState {
+	id: string;
+	session: string;
+	parent?: string;
+	url: string;
+	/** loaderId of the committed document, from the frame tree; a new one means new content. */
+	loader?: string;
+	/** When the committed loader was last identified, used to age out responses from older documents. */
+	loaderAt: number;
+	context?: number;
+	generation: number;
+	sample?: PageSample;
+	chars: number;
+	reasons: Set<string>;
+	done: boolean;
+	status: FrameScanStatus | "active";
+	owned: boolean;
+	initialized: boolean;
+	initialUrl: string;
+	initialText: string;
+	lastRevision: number;
+	stableSince: number;
+	startedAt: number;
+	steps: number;
+	budgetSpent: boolean;
+	childrenPassed: boolean;
+	loaderStale: boolean;
 }
 
 // Only the rendered owner is inspected, in its parent's isolated world. Hidden
@@ -51,6 +91,70 @@ const FRAME_VISIBLE = `function() {
 const INITIAL_PAGE = `(() => ({ url: location.href, ready: document.readyState === 'complete',
 	text: Array.from(document.body?.innerText ?? '').slice(0, ${MAX_CAPTURE_CHARS}).join('') }))()`;
 
+const MAX_FRAMES = 24;
+const MAX_SESSIONS = 24;
+const INITIAL_MAIN_WINDOW_MS = 2000;
+const INITIAL_CHILD_WINDOW_MS = 500;
+const INITIAL_PROBE_LIMIT_MS = 15_000;
+const PENDING_WINDOW_MS = 400;
+const STABLE_WINDOW_MS = 2000;
+const STEP_PACING_MS = 200;
+const GLOBAL_STEP_LIMIT = 160;
+const FRAME_STEP_LIMIT = 48;
+const FRAME_TIME_LIMIT_MS = 20_000;
+const MAIN_NAVIGATION_LIMIT = 8;
+/** Bounded end re-verification of frames that already finished. */
+const END_CHECK_ROUNDS = 2;
+/** browser.ts aborts the whole read at 90s; do not start new verification close to it. */
+const END_CHECK_LIMIT_MS = 75_000;
+const MAX_STATUS_ENTRIES = 256;
+const MAX_URL_CHARS = 2048;
+
+function findTree(tree: FrameTree, frameId: string): FrameTree | undefined {
+	if (tree.frame.id === frameId) return tree;
+	for (const child of tree.childFrames ?? []) {
+		const found = findTree(child, frameId);
+		if (found) return found;
+	}
+}
+
+/** Provenance URLs are bounded and stripped of credentials; they are not a publicness verdict. */
+function displayUrl(value: string): string {
+	try {
+		const url = new URL(value);
+		url.username = "";
+		url.password = "";
+		return url.href.slice(0, MAX_URL_CHARS);
+	} catch {
+		return value.slice(0, MAX_URL_CHARS);
+	}
+}
+
+/** Frame-local budget reasons use the frozen frame-prefixed codes. */
+function frameReason(reason: string): string {
+	return reason === "container_limit" || reason === "node_limit" ? `frame_${reason}` : reason;
+}
+
+/** A frame that is gone from the DOM has no current source document to attribute text or status to. */
+function frameEntry(frame: FrameState): FrameReport {
+	return {
+		url: frame.status === "removed" ? "" : displayUrl(frame.url),
+		status: frame.status === "active" ? "incomplete" : frame.status,
+		reasons: [...frame.reasons],
+	};
+}
+
+interface AmbiguityCarrier {
+	ambiguities?: unknown;
+}
+
+/** Sampling confidence caveats are disclosed separately from coverage gaps. */
+function sampleAmbiguities(sample: PageSample | undefined): string[] {
+	const value = (sample as AmbiguityCarrier | undefined)?.ambiguities;
+	if (!Array.isArray(value)) return [];
+	return value.filter((reason): reason is string => typeof reason === "string");
+}
+
 /** Bounded frame traversal; all network access still goes through PublicProxy. */
 export class PageScanner {
 	private protocol: Protocol;
@@ -64,10 +168,12 @@ export class PageScanner {
 	private navigations = 0;
 	private truncated = false;
 	private stopped = false;
-	private statuses = new Map<string, number>();
+	private startedAt = Date.now();
+	/** Latest Document response per frame, kept with the loaderId that produced it. */
+	private statuses = new Map<string, { status: number; loader?: string; at: number }>();
 
 	get status(): number {
-		return this.statuses.get(this.mainFrame) ?? 0;
+		return this.statusFor(this.frames.get(this.mainFrame));
 	}
 
 	constructor(protocol: Protocol, mainSession: string, signal: AbortSignal) {
@@ -94,7 +200,7 @@ export class PageScanner {
 	}
 
 	onAttached(targetId: string, session: string, parent?: string): void {
-		if (this.sessions.size >= 24) {
+		if (this.sessions.size >= MAX_SESSIONS) {
 			this.reasons.add("frame_limit");
 			return;
 		}
@@ -104,54 +210,86 @@ export class PageScanner {
 		this.sessions.set(targetId, { id: session, parent, ready });
 	}
 
+	/** A detached target is not proof that the DOM removed the frame; only the session is dropped. */
 	onDetached(session: string): void {
 		for (const [id, value] of this.sessions) if (value.id === session) this.sessions.delete(id);
 	}
 
-	onResponse(frameId: string, status: number): void {
+	onResponse(frameId: string, status: number, loader?: string): void {
 		// Hidden auth/tracking frames may fail without affecting document text.
-		if (this.statuses.size < 256) this.statuses.set(frameId, status);
+		if (!this.statuses.has(frameId) && this.statuses.size >= MAX_STATUS_ENTRIES) return;
+		this.statuses.set(frameId, { status, loader, at: Date.now() });
+	}
+
+	private statusFor(frame: FrameState | undefined): number {
+		if (!frame) return 0;
+		const entry = this.statuses.get(frame.id);
+		if (!entry) return 0;
+		// A response from a document the frame has not committed to must not describe its content.
+		if (entry.loader && frame.loader && entry.loader !== frame.loader) return 0;
+		return entry.status;
+	}
+
+	/**
+	 * The network layer reported a failed document that this frame has not committed to (yet). A
+	 * response older than the committed document describes content that was already replaced, so it
+	 * is ignored; a newer failure drops the current samples instead of presenting them as current.
+	 */
+	private syncStatus(frame: FrameState): void {
+		const entry = this.statuses.get(frame.id);
+		if (!entry?.loader || !frame.loader || entry.loader === frame.loader) return;
+		if (entry.status < 400) return;
+		if (entry.at < frame.loaderAt) return;
+		// The committed loader identity is unchanged: only a commit replaces what this frame shows.
+		this.invalidate(frame, "document");
+		this.settleFailed(frame, "frame_http_error");
+	}
+
+	private createState(id: string, session: string, url: string, parent?: string): FrameState {
+		const now = Date.now();
+		return {
+			id,
+			session,
+			parent,
+			url,
+			generation: 0,
+			chars: 0,
+			reasons: new Set(),
+			done: false,
+			status: "active",
+			owned: false,
+			initialized: false,
+			initialUrl: "",
+			initialText: "",
+			lastRevision: -1,
+			loaderAt: 0,
+			stableSince: now,
+			startedAt: now,
+			steps: 0,
+			budgetSpent: false,
+			childrenPassed: false,
+			loaderStale: false,
+		};
 	}
 
 	private async context(frame: FrameState): Promise<number> {
 		const result = await this.protocol.call<{ executionContextId: number }>(
 			"Page.createIsolatedWorld",
-			{
-				frameId: frame.id,
-				worldName: "pi-web-fetch",
-			},
+			{ frameId: frame.id, worldName: "pi-web-fetch" },
 			frame.session,
 		);
 		const previous = frame.context;
 		frame.context = result.executionContextId;
-		if (previous !== undefined && previous !== frame.context) {
-			frame.sample = undefined;
-			const removeChildren = (id: string) => {
-				for (const child of this.frames.values())
-					if (child.parent === id) {
-						removeChildren(child.id);
-						this.frames.delete(child.id);
-					}
-			};
-			removeChildren(frame.id);
-			if (frame.id === this.mainFrame) this.reasons.clear();
-			if (++this.navigations >= 8) {
-				this.reasons.add("navigation_limit");
-				this.stopped = true;
-			}
-			throw new WebError("Browser frame changed during navigation.");
-		}
+		// A new isolated world id means the cached execution context was destroyed.
+		if (previous !== undefined && previous !== frame.context)
+			throw new WebError("Browser frame changed during navigation.", "frame-changed");
 		return result.executionContextId;
 	}
 
 	private async evaluate<T>(frame: FrameState, expression: string): Promise<T> {
 		const result = await this.protocol.call<Evaluation<T>>(
 			"Runtime.evaluate",
-			{
-				expression,
-				contextId: await this.context(frame),
-				returnByValue: true,
-			},
+			{ expression, contextId: await this.context(frame), returnByValue: true },
 			frame.session,
 		);
 		if (result.exceptionDetails || result.result?.value === undefined)
@@ -159,26 +297,289 @@ export class PageScanner {
 		return result.result.value;
 	}
 
-	private async children(frame: FrameState): Promise<FrameTree[]> {
-		const result = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, frame.session);
-		const find = (tree: FrameTree): FrameTree | undefined => {
-			if (tree.frame.id === frame.id) return tree;
-			for (const child of tree.childFrames ?? []) {
-				const found = find(child);
-				if (found) return found;
+	/** Drop every stored sample and state that belongs to a previous document generation. */
+	private invalidate(frame: FrameState, kind: "document" | "url", url?: string): void {
+		const hadDocument = frame.sample !== undefined || frame.initialized;
+		if (url !== undefined) frame.url = url;
+		frame.generation++;
+		frame.sample = undefined;
+		frame.chars = 0;
+		frame.initialized = false;
+		frame.initialUrl = "";
+		frame.initialText = "";
+		frame.stableSince = Date.now();
+		frame.lastRevision = -1;
+		frame.childrenPassed = false;
+		frame.context = undefined;
+		frame.steps = 0;
+		frame.budgetSpent = false;
+		frame.status = "active";
+		frame.done = false;
+		if (kind !== "document") return;
+		// A new document replaces the frame's coverage notes and its embedded frames.
+		frame.reasons.clear();
+		frame.loaderStale = true;
+		this.dropDescendants(frame);
+		if (frame.id !== this.mainFrame || !hadDocument) return;
+		this.reasons.clear();
+		if (++this.navigations >= MAIN_NAVIGATION_LIMIT) {
+			this.reasons.add("navigation_limit");
+			this.stopped = true;
+		}
+	}
+
+	private dropDescendants(frame: FrameState): void {
+		for (const child of [...this.frames.values()]) {
+			if (child.parent !== frame.id) continue;
+			this.dropDescendants(child);
+			child.sample = undefined;
+			child.chars = 0;
+			child.reasons.clear();
+			child.done = false;
+			child.status = "removed";
+			this.frames.delete(child.id);
+		}
+	}
+
+	private async treeFor(frame: FrameState): Promise<FrameTree | undefined> {
+		const { frameTree } = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, frame.session);
+		return findTree(frameTree, frame.id);
+	}
+
+	/** Refresh the committed document identity after a generation change. */
+	private async refreshIdentity(frame: FrameState): Promise<void> {
+		frame.loaderStale = false;
+		try {
+			const self = await this.treeFor(frame);
+			if (!self) return;
+			this.adoptDocument(frame, self.frame);
+		} catch (error) {
+			this.signal.throwIfAborted();
+			if (error instanceof WebError && error.code === "frame-changed") {
+				this.invalidate(frame, "document");
+				return;
 			}
-		};
-		const children = new Map((find(result.frameTree)?.childFrames ?? []).map((child) => [child.frame.id, child]));
+			frame.loaderStale = true;
+		}
+	}
+
+	/** Adopt the committed loader/url from the frame tree, invalidating samples on a new document. */
+	private adoptDocument(frame: FrameState, node: FrameNode): void {
+		const loader = node.loaderId;
+		if (loader !== undefined && frame.loader !== undefined && loader !== frame.loader) {
+			this.invalidate(frame, "document");
+			this.setLoader(frame, loader);
+			if (node.url) frame.url = node.url;
+			return;
+		}
+		if (loader !== undefined) this.setLoader(frame, loader);
+		if (node.url && node.url !== frame.url) this.invalidate(frame, "url", node.url);
+	}
+
+	/** A committed loader only re-dates the frame when it is first identified, so older responses age out. */
+	private setLoader(frame: FrameState, loader: string): void {
+		if (frame.loader === loader) return;
+		frame.loader = loader;
+		frame.loaderAt = Date.now();
+	}
+
+	private async probe(frame: FrameState): Promise<void> {
+		const initial = await this.evaluate<{ url: string; text: string; ready: boolean }>(frame, INITIAL_PAGE);
+		if (initial.url !== frame.initialUrl || initial.text !== frame.initialText || !initial.ready)
+			frame.stableSince = Date.now();
+		frame.initialUrl = initial.url;
+		frame.initialText = initial.text;
+		const stable =
+			Date.now() - frame.stableSince >=
+			(frame.id === this.mainFrame ? INITIAL_MAIN_WINDOW_MS : INITIAL_CHILD_WINDOW_MS);
+		if (stable || Date.now() - frame.startedAt >= INITIAL_PROBE_LIMIT_MS) frame.initialized = true;
+	}
+
+	private validSample(sample: PageSample | undefined): sample is PageSample {
+		return (
+			!!sample &&
+			typeof sample.text === "string" &&
+			typeof sample.url === "string" &&
+			typeof sample.title === "string" &&
+			Array.from(sample.text).length <= MAX_CAPTURE_CHARS &&
+			Buffer.byteLength(sample.text) <= 1_048_576 &&
+			Number.isInteger(sample.revision) &&
+			Array.isArray(sample.incompleteReasons)
+		);
+	}
+
+	/** Frame-local notes stay on the frame; only the main document feeds the aggregate reasons. */
+	private accountSample(frame: FrameState, sample: PageSample): void {
+		const main = frame.id === this.mainFrame;
+		for (const reason of sample.incompleteReasons) {
+			if (reason === "capture_limit") continue;
+			if (main) this.reasons.add(reason);
+			else frame.reasons.add(frameReason(reason));
+			if (!main && /limit|stalled/.test(reason)) frame.budgetSpent = true;
+		}
+		if (sample.passwordForm) this.reasons.add("password_form");
+	}
+
+	private capturedChars(): number {
+		let total = 0;
+		for (const frame of this.frames.values()) if (frame.sample) total += frame.chars;
+		return total;
+	}
+
+	/** `verify` allows re-checking a frame that already settled, without restarting it first. */
+	private async sample(frame: FrameState, verify = false): Promise<PageSample | undefined> {
+		if (frame.loaderStale) await this.refreshIdentity(frame);
+		if (this.stopped) return undefined;
+		if (!verify && frame.status !== "active") return undefined;
+		const before = frame.status;
+		this.syncStatus(frame);
+		if (this.stopped || frame.status !== before) return undefined;
+		const sample = await this.evaluate<PageSample>(frame, SAMPLE_PAGE);
+		if (!this.validSample(sample)) throw new WebError("Browser returned invalid or oversized page text.");
+		if (frame.id === this.mainFrame || !["about:blank", "about:srcdoc"].includes(sample.url))
+			publicTarget(sample.url);
+		if (sample.url !== frame.url) {
+			// Same-document navigation: stored samples and state are no longer current.
+			this.invalidate(frame, "url", sample.url);
+			return undefined;
+		}
+		if (this.statusFor(frame) >= 400) {
+			this.settleFailed(frame, "frame_http_error");
+			return undefined;
+		}
+		const previous = frame.sample;
+		if (!previous || previous.text !== sample.text) frame.chars = Array.from(sample.text).length;
+		frame.sample = sample;
+		frame.url = sample.url;
+		const changed = !previous || previous.revision !== sample.revision || previous.url !== sample.url;
+		if (sample.revision !== frame.lastRevision || !sample.ready || sample.busy) frame.stableSince = Date.now();
+		frame.lastRevision = sample.revision;
+		if (changed) frame.childrenPassed = false;
+		this.accountSample(frame, sample);
+		if (sample.captureTruncated || this.capturedChars() > MAX_CAPTURE_CHARS) {
+			frame.budgetSpent = true;
+			this.truncated = true;
+			this.reasons.add("capture_limit");
+			this.stopped = true;
+		}
+		if (frame.budgetSpent) {
+			this.settleIncomplete(frame);
+			return undefined;
+		}
+		return sample;
+	}
+
+	private isSettled(frame: FrameState): boolean {
+		return frame.status !== "active";
+	}
+
+	private async childrenSettled(parent: FrameState): Promise<boolean> {
+		for (const frame of this.frames.values()) {
+			if (frame.parent === parent.id && !this.isSettled(frame)) return false;
+		}
+		return true;
+	}
+
+	private settleComplete(frame: FrameState): void {
+		frame.done = true;
+		frame.status = frame.reasons.size > 0 ? "incomplete" : "complete";
+	}
+
+	private settleIncomplete(frame: FrameState, reason?: string): void {
+		if (reason !== undefined) {
+			frame.reasons.add(reason);
+			if (frame.id === this.mainFrame) this.reasons.add(reason);
+		}
+		frame.done = false;
+		frame.status = "incomplete";
+	}
+
+	private settleFailed(frame: FrameState, reason: string): void {
+		frame.reasons.add(reason);
+		frame.sample = undefined;
+		frame.chars = 0;
+		frame.done = false;
+		frame.status = "failed";
+	}
+
+	private settleSkipped(frame: FrameState): void {
+		frame.sample = undefined;
+		frame.chars = 0;
+		frame.done = false;
+		frame.status = "skipped";
+	}
+
+	private settleRemoved(frame: FrameState): void {
+		frame.sample = undefined;
+		frame.chars = 0;
+		frame.done = false;
+		frame.status = "removed";
+		this.dropDescendants(frame);
+	}
+
+	private orderedFrames(): FrameState[] {
+		const main = this.frames.get(this.mainFrame);
+		return main ? [main, ...[...this.frames.values()].filter((frame) => frame !== main)] : [...this.frames.values()];
+	}
+
+	private async discover(parent: FrameState): Promise<Map<string, DiscoveredFrame>> {
+		const result = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, parent.session);
+		const self = findTree(result.frameTree, parent.id);
+		const children = new Map<string, DiscoveredFrame>();
+		for (const child of self?.childFrames ?? []) children.set(child.frame.id, { tree: child, owned: true });
 		// Chromium omits OOPIFs from the parent's Page.getFrameTree. Related
 		// targets have their own trees; auto-attach alone does not enumerate them.
 		for (const attached of this.sessions.values()) {
-			if (attached.id === frame.session || (attached.parent && attached.parent !== frame.id)) continue;
+			if (attached.id === parent.session || (attached.parent && attached.parent !== parent.id)) continue;
 			await attached.ready;
 			const { frameTree } = await this.protocol.call<{ frameTree: FrameTree }>("Page.getFrameTree", {}, attached.id);
 			attached.parent ??= frameTree.frame.parentId;
-			if (attached.parent === frame.id) children.set(frameTree.frame.id, frameTree);
+			if (attached.parent !== parent.id) continue;
+			if (!children.has(frameTree.frame.id)) children.set(frameTree.frame.id, { tree: frameTree, owned: false });
 		}
-		return [...children.values()];
+		return children;
+	}
+
+	private sessionFor(frameId: string, parent: FrameState): string {
+		return this.sessions.get(frameId)?.id ?? parent.session;
+	}
+
+	/** Returns true when the frame's document identity changed and its samples were invalidated. */
+	private updateIdentity(frame: FrameState, discovered: DiscoveredFrame, parent: FrameState): boolean {
+		const session = this.sessionFor(frame.id, parent);
+		const node = discovered.tree.frame;
+		frame.owned = discovered.owned;
+		if (session !== frame.session) {
+			frame.session = session;
+			this.invalidate(frame, "document");
+			this.adoptDocument(frame, node);
+			return true;
+		}
+		const loader = node.loaderId;
+		if (loader !== undefined && frame.loader !== undefined && loader !== frame.loader) {
+			this.invalidate(frame, "document");
+			this.adoptDocument(frame, node);
+			return true;
+		}
+		if (loader !== undefined) this.setLoader(frame, loader);
+		if (node.url && node.url !== frame.url) {
+			this.invalidate(frame, "url", node.url);
+			return true;
+		}
+		return false;
+	}
+
+	/** True only when the parent's DOM still owns a frame that enumeration did not list. */
+	private async ownedByParent(parent: FrameState, child: FrameState): Promise<boolean> {
+		if (child.owned) return false;
+		try {
+			await this.protocol.call("DOM.getFrameOwner", { frameId: child.id }, parent.session);
+			return true;
+		} catch (error) {
+			this.signal.throwIfAborted();
+			if (error instanceof WebError && error.code === "frame-changed") throw error;
+			return false;
+		}
 	}
 
 	private async visible(child: FrameTree, parent: FrameState): Promise<boolean> {
@@ -189,20 +590,13 @@ export class PageScanner {
 		);
 		const { object } = await this.protocol.call<{ object: { objectId: string } }>(
 			"DOM.resolveNode",
-			{
-				backendNodeId,
-				executionContextId: await this.context(parent),
-			},
+			{ backendNodeId, executionContextId: await this.context(parent) },
 			parent.session,
 		);
 		try {
 			const result = await this.protocol.call<Evaluation<boolean>>(
 				"Runtime.callFunctionOn",
-				{
-					objectId: object.objectId,
-					functionDeclaration: FRAME_VISIBLE,
-					returnByValue: true,
-				},
+				{ objectId: object.objectId, functionDeclaration: FRAME_VISIBLE, returnByValue: true },
 				parent.session,
 			);
 			if (result.exceptionDetails || typeof result.result?.value !== "boolean")
@@ -215,164 +609,205 @@ export class PageScanner {
 		}
 	}
 
-	private async readChildren(parent: FrameState): Promise<boolean> {
-		let scanned = false;
-		for (const child of await this.children(parent)) {
-			if (this.stopped) return scanned;
-			try {
-				if (!(await this.visible(child, parent))) continue;
-				if ((this.statuses.get(child.frame.id) ?? 0) >= 400) {
-					this.reasons.add("frame_http_error");
-					continue;
-				}
-				const previous = this.frames.get(child.frame.id);
-				if (
-					(previous?.done || previous?.failed) &&
-					previous.loader === child.frame.loaderId &&
-					previous.url === child.frame.url
-				)
-					continue;
-				if (this.frames.size >= 24 && !previous) {
+	/** Discover, refresh and settle the parent's child frames. Returns true when children changed. */
+	private async enumerateChildren(parent: FrameState): Promise<boolean> {
+		let changed = false;
+		const discovered = await this.discover(parent);
+		if (this.stopped) return changed;
+		for (const child of [...this.frames.values()]) {
+			if (child.parent !== parent.id || child.status === "removed" || discovered.has(child.id)) continue;
+			if (await this.ownedByParent(parent, child)) continue;
+			this.settleRemoved(child);
+			changed = true;
+		}
+		for (const entry of discovered.values()) {
+			if (this.stopped) break;
+			const id = entry.tree.frame.id;
+			let frame = this.frames.get(id);
+			if (!frame) {
+				if (this.frames.size >= MAX_FRAMES) {
 					this.reasons.add("frame_limit");
 					continue;
 				}
-				const attached = this.sessions.get(child.frame.id);
-				if (attached) await attached.ready;
-				const frame: FrameState = {
-					id: child.frame.id,
-					parent: parent.id,
-					session: attached?.id ?? parent.session,
-					url: child.frame.url,
-					loader: child.frame.loaderId,
-					done: false,
-				};
-				this.frames.set(frame.id, frame);
-				await this.readFrame(frame, false);
-				scanned = true;
+				frame = this.createState(id, this.sessionFor(id, parent), entry.tree.frame.url, parent.id);
+				if (entry.tree.frame.loaderId !== undefined) this.setLoader(frame, entry.tree.frame.loaderId);
+				frame.owned = entry.owned;
+				this.frames.set(id, frame);
+				changed = true;
+			} else if (this.updateIdentity(frame, entry, parent)) {
+				changed = true;
+			}
+			if (frame.status !== "active") continue;
+			try {
+				if (!(await this.visible(entry.tree, parent))) {
+					this.settleSkipped(frame);
+					continue;
+				}
 			} catch (error) {
 				this.signal.throwIfAborted();
-				if (!(error instanceof WebError) || error.message === "Browser frame changed during navigation.")
-					throw error;
-				this.reasons.add("frame_unavailable");
-				const failed = this.frames.get(child.frame.id);
-				if (failed) failed.failed = true;
+				if (error instanceof WebError && error.code === "frame-changed") throw error;
+				// The frame may still be attaching; keep it active and retry on the next pass.
+				frame.reasons.add("frame_unavailable");
+				if (Date.now() - frame.startedAt >= FRAME_TIME_LIMIT_MS) this.settleIncomplete(frame);
+				continue;
+			}
+			this.syncStatus(frame);
+			if (frame.status !== "active") continue;
+			if (this.statusFor(frame) >= 400) {
+				this.settleFailed(frame, "frame_http_error");
 			}
 		}
-		return scanned;
+		return changed;
 	}
 
-	private async readFrame(frame: FrameState, main: boolean): Promise<void> {
-		let stableSince = Date.now(),
-			lastRevision = -1,
-			initialized = false;
-		let initialText = "",
-			initialUrl = "";
-		const started = Date.now();
-		while (!this.stopped) {
-			this.signal.throwIfAborted();
-			try {
-				// Do not retain transient loading UI before the first stable render.
-				if (!initialized) {
-					const initial = await this.evaluate<{ url: string; text: string; ready: boolean }>(frame, INITIAL_PAGE);
-					if (initial.url !== initialUrl || initial.text !== initialText || !initial.ready)
-						stableSince = Date.now();
-					initialUrl = initial.url;
-					initialText = initial.text;
-					if (Date.now() - stableSince < (main ? 2000 : 500) && Date.now() - started < 15_000) {
-						await timers.setTimeout(200, undefined, { signal: this.signal });
-						continue;
-					}
-					initialized = true;
-				}
-				const sample = await this.evaluate<PageSample>(frame, SAMPLE_PAGE);
-				if (
-					!sample ||
-					typeof sample.text !== "string" ||
-					typeof sample.url !== "string" ||
-					typeof sample.title !== "string" ||
-					Array.from(sample.text).length > MAX_CAPTURE_CHARS ||
-					Buffer.byteLength(sample.text) > 1_048_576 ||
-					!Number.isInteger(sample.revision) ||
-					!Array.isArray(sample.incompleteReasons)
-				)
-					throw new WebError("Browser returned invalid or oversized page text.");
-				if (main || !["about:blank", "about:srcdoc"].includes(sample.url)) publicTarget(sample.url);
-				if (frame.url !== sample.url) {
-					frame.sample = undefined;
-					frame.url = sample.url;
-					stableSince = Date.now();
-				}
-				frame.sample = sample;
-				if (sample.revision !== lastRevision || !sample.ready || sample.busy) stableSince = Date.now();
-				lastRevision = sample.revision;
-				for (const reason of sample.incompleteReasons) this.reasons.add(reason);
-				if (sample.passwordForm) this.reasons.add("password_form");
-				if (sample.captureTruncated || this.result().captureTruncated) {
-					this.truncated = true;
-					this.reasons.add("capture_limit");
-					this.stopped = true;
-					return;
-				}
-				if (sample.incompleteReasons.some((reason) => /limit|stalled/.test(reason))) {
-					this.stopped = true;
-					return;
-				}
-				if (Date.now() - stableSince >= (sample.pending ? 400 : 2000)) {
-					const scannedChildren = await this.readChildren(frame);
-					if (this.stopped) return;
-					// Also recheck after a failed/detached child, not just successful reads.
-					const current = await this.evaluate<PageSample>(frame, SAMPLE_PAGE);
-					if (
-						current.revision !== sample.revision ||
-						current.url !== sample.url ||
-						current.pending !== sample.pending ||
-						current.busy ||
-						!current.ready
-					) {
-						stableSince = Date.now();
-						continue;
-					}
-					// A child read may take seconds. Recheck the parent before claiming
-					// it settled, rather than returning a pre-child navigation snapshot.
-					if (scannedChildren) {
-						stableSince = Date.now();
-						continue;
-					}
-					if (!sample.pending) {
-						frame.done = true;
-						return;
-					}
-					if (this.steps >= 160) {
-						this.reasons.add("scroll_limit");
-						this.stopped = true;
-						return;
-					}
-					const advance = await this.evaluate<{ moved: boolean; stalled?: boolean }>(frame, ADVANCE_PAGE);
-					if (advance.moved) this.steps++;
-					if (advance.stalled) {
-						this.reasons.add("scroll_stalled");
-						this.stopped = true;
-						return;
-					}
-					stableSince = Date.now();
-				}
-			} catch (error) {
-				if (!(error instanceof WebError) || error.message !== "Browser frame changed during navigation.")
-					throw error;
-				frame.sample = undefined;
-				initialized = false;
-				stableSince = Date.now();
-				lastRevision = -1;
-			}
-			await timers.setTimeout(200, undefined, { signal: this.signal });
+	private async advance(frame: FrameState): Promise<void> {
+		if (this.steps >= GLOBAL_STEP_LIMIT) {
+			this.reasons.add("scroll_limit");
+			this.stopped = true;
+			return;
 		}
+		if (frame.id !== this.mainFrame && frame.steps >= FRAME_STEP_LIMIT) {
+			this.settleIncomplete(frame, "frame_scroll_limit");
+			return;
+		}
+		const advance = await this.evaluate<{ moved: boolean; stalled?: boolean }>(frame, ADVANCE_PAGE);
+		if (advance.moved) {
+			frame.steps++;
+			this.steps++;
+		}
+		if (advance.stalled) {
+			this.settleIncomplete(frame, "scroll_stalled");
+			return;
+		}
+		frame.stableSince = Date.now();
+	}
+
+	/** One short, bounded step for a single frame; the driver gives every active frame turns. */
+	private async step(frame: FrameState): Promise<void> {
+		if (this.isSettled(frame)) return;
+		try {
+			if (frame.id !== this.mainFrame && Date.now() - frame.startedAt >= FRAME_TIME_LIMIT_MS) {
+				this.settleIncomplete(frame, "frame_time_limit");
+				return;
+			}
+			if (!frame.initialized) {
+				await this.probe(frame);
+				return;
+			}
+			const sample = await this.sample(frame);
+			if (this.stopped || frame.status !== "active" || !sample) return;
+			if (Date.now() - frame.stableSince < (sample.pending ? PENDING_WINDOW_MS : STABLE_WINDOW_MS)) return;
+			if (!frame.childrenPassed) {
+				await this.enumerateChildren(frame);
+				if (this.stopped || frame.status !== "active") return;
+				if (!(await this.childrenSettled(frame))) return;
+				frame.childrenPassed = true;
+				frame.stableSince = Date.now();
+				return;
+			}
+			if (!sample.pending) {
+				this.settleComplete(frame);
+				return;
+			}
+			await this.advance(frame);
+		} catch (error) {
+			this.signal.throwIfAborted();
+			if (error instanceof WebError && (error.code === "cancelled" || error.code === "read-timeout")) throw error;
+			if (error instanceof WebError && error.code === "frame-changed") {
+				this.invalidate(frame, "document");
+				return;
+			}
+			if (frame.id !== this.mainFrame) {
+				this.settleFailed(frame, "frame_unavailable");
+				return;
+			}
+			throw error;
+		}
+	}
+
+	private async settleAll(): Promise<void> {
+		while (!this.stopped) {
+			const pending = this.orderedFrames().filter((frame) => !this.isSettled(frame));
+			if (!pending.length) return;
+			for (const frame of pending) {
+				if (this.stopped) return;
+				if (this.frames.get(frame.id) !== frame) continue;
+				await this.step(frame);
+			}
+			await timers.setTimeout(STEP_PACING_MS, undefined, { signal: this.signal });
+		}
+	}
+
+	/** Restart a frame whose DOM changed after it was already reported as finished. */
+	private unsettle(frame: FrameState): void {
+		frame.status = "active";
+		frame.done = false;
+		frame.childrenPassed = false;
+		frame.stableSince = Date.now();
+		frame.startedAt = Date.now();
+	}
+
+	/** Bounded recheck of frames that already finished, so a stale sample is not frozen as final. */
+	private async verifySettled(): Promise<boolean> {
+		let changed = false;
+		for (const frame of this.orderedFrames()) {
+			if (this.stopped) break;
+			if (this.signal.aborted) this.signal.throwIfAborted();
+			if (this.frames.get(frame.id) !== frame) continue;
+			if (!this.isSettled(frame)) {
+				changed = true;
+				continue;
+			}
+			try {
+				const before = frame.status;
+				this.syncStatus(frame);
+				if (frame.status !== before) changed = true;
+				if (this.isSettled(frame) && (await this.enumerateChildren(frame))) changed = true;
+				if (this.stopped) break;
+				if (frame.status !== "complete" || !frame.sample) continue;
+				const revision = frame.lastRevision;
+				const sample = await this.sample(frame, true);
+				if (this.stopped || this.frames.get(frame.id) !== frame) break;
+				if (!sample) {
+					// The sample was invalidated or settled the frame: its coverage changed.
+					changed = true;
+					continue;
+				}
+				if (sample.revision === revision) continue;
+				// The frame changed after it was reported as done: settle it again within budget.
+				this.unsettle(frame);
+				changed = true;
+			} catch (error) {
+				this.signal.throwIfAborted();
+				if (error instanceof WebError && error.code === "frame-changed") {
+					this.invalidate(frame, "document");
+					changed = true;
+					continue;
+				}
+				throw error;
+			}
+		}
+		return changed;
+	}
+
+	private endBudgetRemains(): boolean {
+		return Date.now() - this.startedAt < END_CHECK_LIMIT_MS;
 	}
 
 	async scan(mainFrame: string, url: string): Promise<ScanResult> {
 		this.mainFrame = mainFrame;
-		const frame: FrameState = { id: mainFrame, session: this.mainSession, url, done: false };
-		this.frames.set(mainFrame, frame);
-		await this.readFrame(frame, true);
+		this.startedAt = Date.now();
+		this.frames.set(mainFrame, this.createState(mainFrame, this.mainSession, url));
+		await this.settleAll();
+		let rounds = 0;
+		let changed = false;
+		while (!this.stopped && this.endBudgetRemains() && rounds < END_CHECK_ROUNDS) {
+			rounds++;
+			changed = await this.verifySettled();
+			if (!changed) break;
+			await this.settleAll();
+		}
+		if (changed) this.reasons.add("content_changed_during_scan");
 		return this.result();
 	}
 
@@ -387,8 +822,22 @@ export class PageScanner {
 			)
 			.join("\n");
 		const chars = Array.from(text);
+		const ambiguities = new Set<string>();
+		for (const frame of this.frames.values()) {
+			for (const reason of sampleAmbiguities(frame.sample)) ambiguities.add(reason);
+		}
 		const captureTruncated = this.truncated || chars.length > MAX_CAPTURE_CHARS;
 		if (captureTruncated) this.reasons.add("capture_limit");
+		let gap = false;
+		// Embedded frames come first so a lookup by source URL always finds the frame itself; the
+		// main document is reported last, and its settled state is also exposed above.
+		const entries = [...this.frames.values()].filter((frame) => frame !== main).map((frame) => frameEntry(frame));
+		if (main) entries.push(frameEntry(main));
+		for (const frame of this.frames.values()) {
+			if (frame === main) continue;
+			if (frame.status === "incomplete" || frame.status === "failed") gap = true;
+		}
+		if (gap) this.reasons.add("frame_incomplete");
 		return {
 			url: main?.sample ? publicUrl(main.sample.url) : "",
 			title: main?.sample?.title ?? "",
@@ -398,8 +847,10 @@ export class PageScanner {
 			passwordForm: samples.some((frame) => frame.sample?.passwordForm),
 			scanComplete: main?.done === true && this.reasons.size === 0 && samples.every((frame) => frame.done),
 			incompleteReasons: [...this.reasons],
+			ambiguities: [...ambiguities].sort(),
 			framesRead: samples.length,
 			scrollSteps: this.steps,
+			frames: entries,
 		};
 	}
 }
