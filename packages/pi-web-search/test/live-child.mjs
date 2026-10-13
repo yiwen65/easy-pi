@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import dns from "node:dns/promises";
+import { isFakeIpAddress, isPublicAddress } from "../src/network.ts";
 import { existsSync, readdirSync } from "node:fs";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
-import { isPublicAddress } from "../src/network.ts";
 
 assert.equal(process.env.PI_WEB_FETCH_LIVE, "1", "Use test/live.mjs, not a normal user environment.");
 assert.deepEqual(Object.keys(process.env).filter(name => /KEY|TOKEN|SECRET|AUTH|PROXY|^NODE_(OPTIONS|PATH)$/.test(name)), []);
@@ -14,6 +14,7 @@ let fetchCalls = 0;
 let connections = 0;
 const browsers = [];
 const snapshots = new Map();
+const dialledModes = new Set();
 const sockets = [];
 const originalSpawn = childProcess.spawn;
 const originalConnect = net.connect;
@@ -36,7 +37,17 @@ net.connect = options => {
 	assert.equal(typeof options.lookup, "function");
 	assert.equal(options.autoSelectFamily, true);
 	const approved = snapshots.get(options.host);
-	assert.ok(approved?.length && approved.every(({ address }) => isPublicAddress(address)));
+	assert.ok(approved?.length, "Every dialled host must come from the read's own vetted DNS snapshot");
+	// The read either pins public addresses or, on a machine whose local DNS client answers in
+	// fake-ip mode, dials those 198.18.0.0/15 addresses and lets that client route them. Never a
+	// mixed snapshot, and the result must report exactly the mode that was dialled.
+	const fakeIp = approved.filter(({ address }) => isFakeIpAddress(address));
+	const publicIp = approved.filter(({ address }) => isPublicAddress(address));
+	assert.ok(
+		fakeIp.length === approved.length || publicIp.length === approved.length,
+		`A DNS snapshot must be all public or all fake-ip, got ${JSON.stringify(approved)}`,
+	);
+	dialledModes.add(fakeIp.length === approved.length ? "local_fake_ip_client" : "pinned_public_ip");
 	const socket = originalConnect(options);
 	sockets.push(socket);
 	socket.on("connectionAttempt", (address, port, family) => {
@@ -64,6 +75,9 @@ try {
 	const text = result.content[0].text;
 	if (process.argv[3]) assert.ok(text.includes(process.argv[3]), "Expected visible page text was not returned");
 	assert.equal(result.details.provider, "browser");
+	// A live run must report the mode it really dialled, so a silent policy change cannot pass.
+	assert.equal(result.details.dns_mode === "local_fake_ip_client", dialledModes.has("local_fake_ip_client"));
+	assert.ok(dialledModes.size >= 1, "The live check must dial at least one vetted address");
 	assert.equal(keyReads, 0); assert.equal(fetchCalls, 0);
 	assert.ok(connections > 0);
 	assert.ok(sockets.every(socket => socket.destroyed));
