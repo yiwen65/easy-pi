@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Duplex } from "node:stream";
 import { afterEach, beforeEach, test } from "node:test";
 import tls from "node:tls";
@@ -178,7 +178,12 @@ test("native loader can still discover the source entry through a directory syml
 	const discovered = await discoverAndLoadExtensions([], process.cwd(), isolatedEnv.EASY_PI_CODING_AGENT_DIR);
 	assert.deepEqual(discovered.errors, []);
 	assert.equal(discovered.extensions.length, 1);
-	assert.equal(discovered.extensions[0].path, join(directory, "web-search", "index.ts"));
+	// The discovery path must resolve the configured entry itself, so the expected file name
+	// follows the entry being tested (index.ts for the source run, index.js for a compiled run).
+	assert.equal(
+		discovered.extensions[0].path,
+		join(directory, "web-search", basename(isolatedEnv.PI_WEB_SEARCH_EXTENSION)),
+	);
 	assert.deepEqual([...discovered.extensions[0].tools.keys()].sort(), ["web_fetch", "web_search"]);
 });
 
