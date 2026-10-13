@@ -320,6 +320,40 @@ Next: 无（计划完成）
 
 ---
 
+## WF09 附加：真实模型与公网站点验收（用户明确授权后追加）
+
+Status: verified（用户在计划完成后明确要求“用真实模型和公网站点测试”，此前“无真实模型/公网授权”的边界由此解除）
+Base HEAD: a987aa7cc
+Changed files: `test/live-child.mjs`（fake-ip 感知：快照必须全公网或全 fake-ip，并断言 `dns_mode` 与实际拨号一致）、
+`test/live-snapshot.mjs` + `test/live-snapshot-child.mjs`（新增公网站点快照验收）
+Tests: 离线与非真实模型回归不受影响：`run.mjs` 140/140 exit 0、`npm run check` exit 0
+Evidence（原始日志 `logs/`）：
+1) 公网单页（编译产物 `dist/index.js`，真实 Chromium，本地 fixture 断言不变）：
+   - `https://example.com` → passed，911 字符，`scan_complete=true`，`dns_mode=local_fake_ip_client`，`logs/live-public-single-page.log`
+   - `https://docs.python.org/3/library/json.html` → passed，26.8s
+   - `https://www.iana.org/help/example-domains` → passed，8.1s
+2) 公网快照续页（`logs/live-public-snapshot-example.log`、`logs/live-public-multi-site.log`）：
+   - example.com：911 字符捕获，续页至 EOF，无新增浏览器/DNS，窗口一致性、EOF 空页、越界拒绝、format 冲突拒绝、
+     未知/跨 owner 句柄同一错误、无凭据读取、无 Node fetch、临时 profile 清理
+   - docs.python.org/3/library/json.html：25,847 字符捕获，续页至 EOF，markdown 28 个块、含来源映射
+3) 真实模型端到端（内置 CLI `dist/cli.js`，真实 provider `custom/qd/dfmodel`，strict allowlist，`--thinking low`）：
+   - 两步直调：模型自行 `web_fetch({url, max_chars:300})` → `web_fetch({snapshot_id, offset:300, max_chars:300})`；
+     事件流证据（`logs/live-model-events.jsonl`）：call 1 `provider=browser`、`snapshot_id=89cc56c8…`、`next_offset=300`、`total_chars=911`、
+     `scan_complete=true`、`dns_mode=local_fake_ip_client`；call 2 `provider=snapshot`、`pagination_consistent=true`、`captured_at` 与 call 1 相同、
+     `next_offset=600`；模型最终 JSON 与之一致
+   - markdown 公网页（`logs/live-model-markdown.jsonl`）：模型请求 `format=markdown` 读到 docs.python json.html 前 1200 字符（总 26,282），
+     正确报出标题行、代码围栏/表格与首行
+   - codemode 嵌套（`logs/live-model-codemode.jsonl`）：真实模型写脚本 `tools.web_fetch(...)`，嵌套调用经宿主管线执行（`nestedCalls=["web_fetch"]`），
+     脚本直接取得 `structuredContent`（snapshot_id/total_chars/next_offset/content_status/dns_mode，911 字符），无需解析英文正文
+Decisions/deviations: live harness 的 fake-ip 断言按产品既有契约修正（原先要求“所有已校验地址都是公网 IP”，
+在 fake-ip 机器上必然失败）；真实模型调用遵守仓库规则（显式 opt-in 环境变量、仅目标文件/仅本任务、不打印或写入凭据、不使用 Tavily）。
+Remaining risks: 公网验收是抽样（3 个站点 + 1 个 docs 页）；模型调用成本与站点反自动化策略不可控；
+本次未测 `PI_WEB_FETCH_SNAPSHOTS=0`/`PI_WEB_FETCH_CONCURRENCY` 在真实模型会话下的行为（离线已覆盖）；
+真实模型运行写入了 `/tmp/wf-live-model/sessions`（临时目录），用户 agent 目录未被修改。
+Commit: a987aa7cc
+Next: 无
+
+---
 ## 10. 交付摘要
 
 | 项目 | 内容 |
@@ -347,5 +381,6 @@ Next: 无（计划完成）
 | `ac1ec3a16` | fix | WF07 去除重复全量序列化/上下文/帧树查询，metrics.serializations，bench 对照 |
 | `37fff7fab` | feat | WF08 结构/来源/format/链接策略/content_status |
 | `533b9fe05` | docs | TASK_STATUS 与计划文件 |
+| `a987aa7cc` | test | 公网快照验收 harness + live harness fake-ip 修正 |
 | `afd7e299c` | docs | README 契约更新、目录发现用例按实际入口文件名断言 |
 | `60daaeef5` | feat | WF05+WF06 会话隔离快照存储、快照续页、`structuredContent`/`outputSchema`、EOF 契约 |
