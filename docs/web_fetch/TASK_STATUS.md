@@ -295,16 +295,44 @@ Next: WF09
 
 ## WF09：最终验证、文档与交付
 
-Status: pending
-Base HEAD:
-Changed files:
-Reproduction:
-Tests:
-Evidence:
-Decisions/deviations:
-Remaining risks:
-Commit:
-Next:
+Status: verified
+Base HEAD: 2ec7a0ee7（开工）→ afd7e299c（收尾文档提交）
+Changed files: `packages/pi-web-search/README.md`（契约/限制/配置/验证入口）、
+`test/offline.test.mjs`（目录发现用例改按实际入口文件名断言，使同一套件可验证编译产物）、
+`docs/web_fetch/TASK_STATUS.md`
+Tests: 最终全量（源码入口，真实 Jiti loader）：`node packages/pi-web-search/test/run.mjs` → 140/140 exit 0；
+`npm run check` exit 0；真实 Chromium 分组：`--child=sampling-child.mjs` 10/10、`--child=frames-child.mjs` 7/7、
+`--child=perf-child.mjs` 7/7、`--child=structure-child.mjs` 4/4、`full-page.mjs` 13/13（`logs/wf08-root-verify.log`）；
+**编译产物验证**：`node scripts/build-easy-pi-product.mjs` exit 0（dist 含新增 `snapshot-store.js`/`content-format.js`），
+之后 `PI_WEB_SEARCH_EXTENSION=dist/index.js node test/run.mjs` → 140/140 exit 0（真实 loader + 编译入口），
+`PI_WEB_FETCH_BROWSER_MODULE=dist/browser.js` 跑 sampling-child 10/10 与 structure-child 4/4（`logs/wf09-dist-verify.log`）。
+codemode 嵌套路径由 `test/tool-contract.test.mjs` 的 P05 用真实 QuickJS 执行器实跑（脚本直接拿到 `structuredContent`）。
+Evidence: 见 §0.1/§9 与各 WF 小节；本节结论：所有适用强制测试与静态检查通过，未删除或放宽断言，
+未关闭 sandbox/TLS、未继承登录态、未接入 Moli/Tavily 变更、未调用真实模型或付费 API。
+Decisions/deviations: 当前分支 `my-pi` 非 `main`，按 `AGENTS.md` 不新增 changelog 条目，行为变化由 README 记录；
+未执行任何 push/发版/远程 PR。
+Remaining risks: 未做公网真实站点验收（无授权）；Linux/Windows 未验证；p95 每组仅 10 样本；
+结构聚合预算、`possible_login` 长登录页、`<pre>` CRLF 偏移映射等边界见 WF08；
+快照的真实浏览器续页路径由 mock + codemode 实跑覆盖；性能优化未启用 Part B（已记录理由）。
+Restart note: 内置模块已重建到 `packages/*/dist`；正在运行的其他 easy-pi 进程需重启才能加载新实现。
+Commit: afd7e299c
+Next: 无（计划完成）
+
+---
+
+## 10. 交付摘要
+
+| 项目 | 内容 |
+| --- | --- |
+| 版本 | 起始 `2ec7a0ee7` → 结束 `afd7e299c`（分支 `my-pi`）；Node v24.15.0；Chrome 155.0.8059.40；测试加载的是 `src/index.ts`（默认）或 `dist/index.js`（编译验证） |
+| 改动 | WF01 回归组（C/F）；WF02 采样身份/可见性/双修订；WF03 frame 局部预算与文档代次；WF04 清理/取消/CDP/限流/metrics；WF05+WF06 会话隔离快照与结构化分页；WF07 去除重复序列化与上下文/帧树重复查询；WF08 结构与来源、format、链接策略、content_status |
+| 正确性 | 新增回归：C01–C09b（10）、F01–F05（7）、M01–M04（7）、O01–O04（4 真实 + 离线契约）、S01–S10、R01–R04（22）、P01–P05（8）；关键 red→green 见各 WF 小节与 `logs/` 原始日志 |
+| 隔离 | sandbox 与 TLS 校验全程开启；每次捕获临时 HOME/profile + 最小环境 + 空登录态；仅本地 fixtures；清理/取消/授权/跨会话隔离均有测试 |
+| 性能 | 交错 10×6 页对照：中位数 -3.8%…-12.6%，`cdpBytesOut` 下降 6.4–16 倍，6 页正文 sha256 与基线一致，0 失败（`logs/bench-wf07-10x.json`） |
+| 契约 | `web_fetch({url})` / `web_fetch({snapshot_id, offset, max_chars?, format?})`；`offset==total_chars` 空结尾页；TTL 10 分钟绝对、每会话 8/8 MiB、进程 32/32 MiB、`PI_WEB_FETCH_SNAPSHOTS=0`；`structuredContent` 22 字段 + `details.blocks`/`details.frames`；错误码见 §0.2.4 |
+| 文档 | `packages/pi-web-search/README.md` 已更新；changelog 按分支规则未改；本文件为状态与证据入口 |
+| Git | 9 个本地提交（见 §9），未 push、未发版；`docs/web_fetch/logs/` 为未跟踪原始日志 |
+| 限制 | 未做公网真实站点/真实模型验收；Linux 未验证；WF07 Part B 未启用；WF08 结构列表在 `details` 而非 `structuredContent` |
 
 ---
 
@@ -317,4 +345,7 @@ Next:
 | `6b766a76a` | fix | WF03 frame 局部预算、文档代次失效、`frames[]` 来源 |
 | `5a63c72b5` | fix | WF04 清理顺序/所有权、取消覆盖、CDP 健壮性、槽位限流、metrics |
 | `ac1ec3a16` | fix | WF07 去除重复全量序列化/上下文/帧树查询，metrics.serializations，bench 对照 |
+| `37fff7fab` | feat | WF08 结构/来源/format/链接策略/content_status |
+| `533b9fe05` | docs | TASK_STATUS 与计划文件 |
+| `afd7e299c` | docs | README 契约更新、目录发现用例按实际入口文件名断言 |
 | `60daaeef5` | feat | WF05+WF06 会话隔离快照存储、快照续页、`structuredContent`/`outputSchema`、EOF 契约 |
