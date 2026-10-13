@@ -12,6 +12,10 @@ export function mockBrowser(t, options = {}) {
 	const commands = [];
 	const servers = [];
 	const processes = [];
+	// Every process.kill() the product issues, including signal 0 liveness probes.
+	const kills = [];
+	// A frame larger than the product's 4 MiB CDP cap; written unterminated on purpose.
+	const MAX_CDP_FRAME = 4_194_304;
 	let clock = Date.now();
 	const previous = process.env.PI_WEB_FETCH_BROWSER;
 	process.env.PI_WEB_FETCH_BROWSER = process.execPath;
@@ -55,6 +59,18 @@ export function mockBrowser(t, options = {}) {
 				commands.push(command);
 				options.onCommand?.(command, child);
 				if (options.hangOn === command.method) continue;
+				if (options.endInputOn === command.method) {
+					queueMicrotask(() => child.stdio[4].end());
+					continue;
+				}
+				if (options.errorInputOn === command.method) {
+					queueMicrotask(() => child.stdio[4].destroy(new Error("synthetic-sensitive-pipe-error")));
+					continue;
+				}
+				if (options.oversizedResponse === command.method) {
+					queueMicrotask(() => child.stdio[4].write(Buffer.alloc(MAX_CDP_FRAME + 1, 0x61)));
+					continue;
+				}
 				if (options.invalidProtocol && command.method === "Browser.getVersion") {
 					queueMicrotask(() => child.stdio[4].write("{bad json}\0")); continue;
 				}
@@ -71,9 +87,21 @@ export function mockBrowser(t, options = {}) {
 					if (command.params.expression === "globalThis.__easyPiFullPageScan1.advance()") result = { result: { value: { moved: true } } };
 				}
 				queueMicrotask(() => {
-					if (options.failOn === command.method) child.stdio[4].write(JSON.stringify({ id: command.id, error: { code: -32000, message: "synthetic-sensitive-protocol-error" } }) + "\0");
-					else child.stdio[4].write(JSON.stringify({ id: command.id, result }) + "\0");
-					if (command.method === "Page.navigate") child.stdio[4].write(JSON.stringify({ method: "Network.responseReceived", sessionId: "session", params: { type: "Document", frameId: "main", response: { status: options.status ?? 200 } } }) + "\0");
+					const response = JSON.stringify({ id: command.id, result });
+					if (!options.suppressResponse?.includes(command.method)) {
+						if (options.failOn === command.method) child.stdio[4].write(JSON.stringify({ id: command.id, error: { code: -32000, message: "synthetic-sensitive-protocol-error" } }) + "\0");
+						else if (options.splitResponse === command.method) {
+							// One message split across two chunks, which only the buffer may reassemble.
+							child.stdio[4].write(response.slice(0, 7));
+							child.stdio[4].write(`${response.slice(7)}\0`);
+						} else if (options.batchedResponse === command.method) {
+							// Several NUL-terminated messages in a single chunk, including an unknown event.
+							child.stdio[4].write(`${response}\0${JSON.stringify({ method: "Network.loadingFinished", params: { requestId: "synthetic" } })}\0`);
+						} else {
+							child.stdio[4].write(`${response}\0`);
+							if (command.method === "Page.navigate") child.stdio[4].write(JSON.stringify({ method: "Network.responseReceived", sessionId: "session", params: { type: "Document", frameId: "main", response: { status: options.status ?? 200 } } }) + "\0");
+						}
+					}
 					if (command.method === "Browser.close" && !options.ignoreClose) {
 						child.exitCode = 0; child.emit("exit", 0, null);
 					}
@@ -86,6 +114,17 @@ export function mockBrowser(t, options = {}) {
 	t.mock.method(process, "kill", (pid, signal) => {
 		const child = processes.find(item => item.pid === -pid);
 		assert.ok(child, "Only an owned browser process group may be killed");
+		kills.push({ pid, signal });
+		if (signal === 0) {
+			// Liveness probe: never kills. `groupSurvives` models descendants outliving the main child.
+			if (options.groupSurvives) return true;
+			if (child.exitCode !== null || child.signalCode !== null) {
+				const error = new Error("No such process group");
+				error.code = "ESRCH";
+				throw error;
+			}
+			return true;
+		}
 		if (signal !== "SIGTERM" || !options.ignoreTerm) {
 			child.signalCode = signal; child.emit("exit", null, signal);
 		}
@@ -96,5 +135,5 @@ export function mockBrowser(t, options = {}) {
 		assert.ok(processes.every(child => !child.pid || child.exitCode !== null || child.signalCode !== null), "All fake browsers must exit");
 	});
 	t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-	return { calls, commands, servers, processes };
+	return { calls, commands, servers, processes, kills };
 }

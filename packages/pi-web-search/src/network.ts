@@ -135,6 +135,14 @@ export async function resolvePublicHost(host: string): Promise<LookupAddress[]> 
 export interface PublicProxy {
 	url: string;
 	blockedRequests: number;
+	/** Every HTTP request and CONNECT tunnel this per-read proxy received, refusals included. */
+	requests: number;
+	/**
+	 * Raw transfer bytes over this proxy's pinned outbound connections (request/response framing
+	 * and TLS records included). For HTTPS CONNECT this counts relayed transfer volume, which is
+	 * not the decompressed body size. Counting only: it never changes what is allowed through.
+	 */
+	readonly transferBytes: number;
 	/** True when a refusal was caused by a fake-ip DNS answer, so callers can name the cause. */
 	fakeIpBlocked: boolean;
 	/** True when a hostname was answered with a fake-ip address, so that client routed the read. */
@@ -149,6 +157,8 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 	const hosts = new Map<string, ReturnType<typeof resolvePublicHost>>();
 	let closed = false;
 	let connections = 0;
+	let transferred = 0;
+	const openSockets = new Set<net.Socket>();
 	const track = <T extends Duplex>(socket: T): T => {
 		sockets.add(socket);
 		socket.on("error", () => socket.destroy());
@@ -172,6 +182,11 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 		if (result.some(({ address }) => isFakeIpAddress(address))) proxy.fakeIpDelegated = true;
 		return result;
 	};
+	const countSocketBytes = (socket: net.Socket): number => {
+		const read = Number.isFinite(socket.bytesRead) ? socket.bytesRead : 0;
+		const written = Number.isFinite(socket.bytesWritten) ? socket.bytesWritten : 0;
+		return read + written;
+	};
 	const connectTo = (url: URL, addresses: LookupAddress[]) => {
 		const socket = track(
 			net.connect({
@@ -185,9 +200,17 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 			}),
 		);
 		socket.setTimeout(15_000, () => socket.destroy());
+		// Metering follows the pinned connection for its whole life, so a socket that is
+		// still open when the read ends is counted too, and never counted twice.
+		socket.once("close", () => {
+			transferred += countSocketBytes(socket);
+			openSockets.delete(socket);
+		});
+		openSockets.add(socket);
 		return socket;
 	};
 	const server = http.createServer((request, response) => {
+		proxy.requests++;
 		void (async () => {
 			try {
 				const url = publicTarget(request.url ?? "");
@@ -231,6 +254,7 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 	});
 	server.on("upgrade", (_request, socket) => socket.destroy());
 	server.on("connect", (request, client, head) => {
+		proxy.requests++;
 		void (async () => {
 			try {
 				const url = publicTarget(`https://${request.url ?? ""}`);
@@ -260,6 +284,12 @@ export async function startPublicProxy(signal: AbortSignal): Promise<PublicProxy
 	const proxy: PublicProxy = {
 		url: "",
 		blockedRequests: 0,
+		requests: 0,
+		get transferBytes() {
+			let total = transferred;
+			for (const socket of openSockets) total += countSocketBytes(socket);
+			return total;
+		},
 		fakeIpBlocked: false,
 		fakeIpDelegated: false,
 		close() {

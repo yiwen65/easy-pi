@@ -169,11 +169,17 @@ export class PageScanner {
 	private truncated = false;
 	private stopped = false;
 	private startedAt = Date.now();
+	/** Page samples evaluated in the browser; exposed as a metric and never used for control flow. */
+	private sampleCount = 0;
 	/** Latest Document response per frame, kept with the loaderId that produced it. */
 	private statuses = new Map<string, { status: number; loader?: string; at: number }>();
 
 	get status(): number {
 		return this.statusFor(this.frames.get(this.mainFrame));
+	}
+
+	get samples(): number {
+		return this.sampleCount;
 	}
 
 	constructor(protocol: Protocol, mainSession: string, signal: AbortSignal) {
@@ -435,6 +441,7 @@ export class PageScanner {
 		this.syncStatus(frame);
 		if (this.stopped || frame.status !== before) return undefined;
 		const sample = await this.evaluate<PageSample>(frame, SAMPLE_PAGE);
+		this.sampleCount++;
 		if (!this.validSample(sample)) throw new WebError("Browser returned invalid or oversized page text.");
 		if (frame.id === this.mainFrame || !["about:blank", "about:srcdoc"].includes(sample.url))
 			publicTarget(sample.url);
