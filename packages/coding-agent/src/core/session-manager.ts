@@ -34,6 +34,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import type { TaskRecoveryState } from "./task-recovery.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -595,58 +596,166 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return readSessionFile(filePath).entries;
 }
 
-function readSessionFile(filePath: string): { entries: FileEntry[]; repair: boolean; size: number } {
+interface TaskRecoveryResultReceipt {
+	assistantEntryId: string;
+	resultEntryId: string;
+	callId: string;
+	toolName: string;
+}
+
+const recoveryResultReceipts = new WeakMap<CustomEntry, readonly TaskRecoveryResultReceipt[]>();
+
+/** Only ownership IDs, never tool arguments, results, or other snapshot payloads. */
+export function getTaskRecoveryResultReceipts(entry: CustomEntry): readonly TaskRecoveryResultReceipt[] {
+	const cached = recoveryResultReceipts.get(entry);
+	if (cached) return cached;
+	const receipts: TaskRecoveryResultReceipt[] = [];
+	const state = entry.data as TaskRecoveryState | undefined;
+	if (state && Array.isArray(state.tools)) {
+		const suspended = Array.isArray(state.suspendedTasks) ? state.suspendedTasks.map((task) => task?.state) : [];
+		for (const task of [state, ...suspended]) {
+			if (!task || !Array.isArray(task.tools)) continue;
+			const assistantEntryId = task.step?.assistantEntryId;
+			if (typeof assistantEntryId !== "string" || !assistantEntryId) continue;
+			for (const tool of task.tools) {
+				if (
+					typeof tool?.resultEntryId === "string" &&
+					tool.resultEntryId &&
+					typeof tool.call?.id === "string" &&
+					typeof tool.call.name === "string"
+				) {
+					receipts.push({
+						assistantEntryId,
+						resultEntryId: tool.resultEntryId,
+						callId: tool.call.id,
+						toolName: tool.call.name,
+					});
+				}
+			}
+		}
+	}
+	recoveryResultReceipts.set(entry, receipts);
+	return receipts;
+}
+
+/** Keep the original inode alive across repair/rename/unlink while any entry still refers to it. */
+const recoverySourceFinalizer = new FinalizationRegistry<number>((fd) => closeSync(fd));
+
+class RecoveryDataSource {
+	private readonly fd: number;
+
+	constructor(fd: number) {
+		this.fd = fd;
+		recoverySourceFinalizer.register(this, fd, this);
+	}
+
+	close(): void {
+		recoverySourceFinalizer.unregister(this);
+		closeSync(this.fd);
+	}
+
+	read(offset: number, length: number): unknown {
+		const buffer = Buffer.allocUnsafe(length);
+		let read = 0;
+		while (read < length) {
+			const bytes = readSync(this.fd, buffer, read, length - read, offset + read);
+			if (bytes === 0) throw new Error("Task recovery backing record was truncated");
+			read += bytes;
+		}
+		return (JSON.parse(buffer.toString("utf8")) as CustomEntry).data;
+	}
+}
+
+function isRecoveryEntry(entry: FileEntry): entry is CustomEntry {
+	return entry.type === "custom" && entry.customType === "pi-task-recovery";
+}
+
+function deferRecoveryData(entry: CustomEntry, source: RecoveryDataSource, offset: number, length: number): void {
+	// Receipt lookup is a frequent branch-wide scan; retain its tiny projection
+	// before dropping the payload so it never has to decode historical snapshots.
+	getTaskRecoveryResultReceipts(entry);
+	// Recovery snapshots are immutable journal facts. Do not cache their decoded
+	// payloads: walking the tree must not retain every historical full snapshot.
+	Object.defineProperty(entry, "data", {
+		configurable: true,
+		enumerable: true,
+		get: () => source.read(offset, length),
+	});
+}
+
+function readSessionFile(filePath: string): {
+	entries: FileEntry[];
+	repair: boolean;
+	size: number;
+	recoverySource?: RecoveryDataSource;
+} {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return { entries: [], repair: false, size: 0 };
 
 	const entries: FileEntry[] = [];
 	let damagedTail = false;
 	let repair = false;
-	const acceptLine = (line: string): void => {
+	const fd = openSync(resolvedFilePath, "r");
+	const size = fstatSync(fd).size;
+	let recoverySource: RecoveryDataSource | undefined;
+	let offset = 0;
+	const acceptLine = (bytes: Buffer): void => {
+		const lineOffset = offset;
+		offset += bytes.length + 1;
+		const line = bytes.toString("utf8");
 		if (!line.trim()) return;
 		if (damagedTail) throw new Error(`Corrupt session record before end of file: ${resolvedFilePath}`);
 		const entry = parseSessionEntryLine(line);
-		if (entry) entries.push(entry);
-		else damagedTail = true;
+		if (entry) {
+			if (isRecoveryEntry(entry)) {
+				recoverySource ??= new RecoveryDataSource(fd);
+				deferRecoveryData(entry, recoverySource, lineOffset, bytes.length);
+			}
+			entries.push(entry);
+		} else damagedTail = true;
 	};
-	const fd = openSync(resolvedFilePath, "r");
-	const size = fstatSync(fd).size;
 	try {
-		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-		let pending = "";
-
+		let chunks: Buffer[] = [];
+		let pendingLength = 0;
 		while (true) {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
-
-			pending += decoder.write(buffer.subarray(0, bytesRead));
 			let lineStart = 0;
-			let newlineIndex = pending.indexOf("\n", lineStart);
-			while (newlineIndex !== -1) {
-				acceptLine(pending.slice(lineStart, newlineIndex));
+			let newlineIndex = buffer.indexOf(10, lineStart);
+			while (newlineIndex !== -1 && newlineIndex < bytesRead) {
+				const tail = buffer.subarray(lineStart, newlineIndex);
+				acceptLine(chunks.length ? Buffer.concat([...chunks, tail], pendingLength + tail.length) : tail);
+				chunks = [];
+				pendingLength = 0;
 				lineStart = newlineIndex + 1;
-				newlineIndex = pending.indexOf("\n", lineStart);
+				newlineIndex = buffer.indexOf(10, lineStart);
 			}
-			pending = pending.slice(lineStart);
+			if (lineStart < bytesRead) {
+				const tail = Buffer.from(buffer.subarray(lineStart, bytesRead));
+				chunks.push(tail);
+				pendingLength += tail.length;
+			}
 		}
-
-		pending += decoder.end();
-		acceptLine(pending);
-		repair = damagedTail || pending.length > 0;
+		if (pendingLength) acceptLine(Buffer.concat(chunks, pendingLength));
+		repair = damagedTail || pendingLength > 0;
 		if (fstatSync(fd).size !== size) throw new Error(`Session changed while loading: ${resolvedFilePath}`);
-	} finally {
-		closeSync(fd);
+	} catch (error) {
+		if (recoverySource) recoverySource.close();
+		else closeSync(fd);
+		throw error;
 	}
+	if (!recoverySource) closeSync(fd);
 
 	// Validate session header
 	if (entries.length === 0) return { entries, repair, size };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
+		recoverySource?.close();
 		return { entries: [], repair, size };
 	}
 
-	return { entries, repair, size };
+	return { entries, repair, size, recoverySource };
 }
 
 /** Publish a fully synced replacement; readers see either the old file or the complete new file. */
@@ -1008,6 +1117,7 @@ export class SessionManager {
 	private persist: boolean;
 	private committedSize = 0;
 	private repairPending = false;
+	private recoverySource?: RecoveryDataSource;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -1070,6 +1180,7 @@ export class SessionManager {
 		this.sessionFile = this.persist ? realpathSync(path) : path;
 		this.committedSize = this.persist ? (hadEntries ? loaded.size : statSync(path).size) : 0;
 		this.repairPending = repairPending;
+		this.recoverySource = loaded.recoverySource;
 		this.fileEntries = entries;
 		this.sessionId = (entries[0] as SessionHeader).id;
 		this._buildIndex();
@@ -1096,6 +1207,7 @@ export class SessionManager {
 		this.sessionFile = sessionFile ? realpathSync(sessionFile) : undefined;
 		this.committedSize = sessionFile ? statSync(sessionFile).size : 0;
 		this.repairPending = false;
+		this.recoverySource = undefined;
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.labelsById.clear();
@@ -1149,7 +1261,7 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	_persist(entry: SessionEntry): void {
+	_persist(entry: SessionEntry): { offset: number; length: number } | undefined {
 		if (!this.persist || !this.sessionFile) return;
 		const serialized = Buffer.from(`${JSON.stringify(entry)}\n`);
 		const lockPath = `${this.sessionFile}.append.lock`;
@@ -1167,6 +1279,7 @@ export class SessionManager {
 			}
 			if (this.repairPending) {
 				writeSessionFile(this.sessionFile, [...this.fileEntries, entry]);
+				this.recoverySource = undefined;
 				committedSize = statSync(this.sessionFile).size;
 			} else {
 				const fd = openSync(this.sessionFile, "r+");
@@ -1209,12 +1322,17 @@ export class SessionManager {
 		}
 		this.committedSize = committedSize;
 		this.repairPending = false;
+		return { offset: committedSize - serialized.length, length: serialized.length };
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
 		if (typeof entry.id !== "string" || !entry.id.trim()) throw new Error("Session entry id must be non-empty");
 		if (this.byId.has(entry.id)) throw new Error(`Session entry id already exists: ${entry.id}`);
-		this._persist(entry);
+		const location = this._persist(entry);
+		if (location && this.sessionFile && isRecoveryEntry(entry)) {
+			this.recoverySource ??= new RecoveryDataSource(openSync(this.sessionFile, "r"));
+			deferRecoveryData(entry, this.recoverySource, location.offset, location.length);
+		}
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
@@ -1618,7 +1736,14 @@ export class SessionManager {
 		let pathParentId: string | null = null;
 		for (const entry of path) {
 			if (entry.type === "label") continue;
-			pathWithoutLabels.push({ ...entry, parentId: pathParentId });
+			// Object spread would eagerly decode every historical recovery payload.
+			const copy = Object.defineProperties({}, Object.getOwnPropertyDescriptors(entry)) as SessionEntry;
+			copy.parentId = pathParentId;
+			if (isRecoveryEntry(entry) && isRecoveryEntry(copy)) {
+				const receipts = recoveryResultReceipts.get(entry);
+				if (receipts) recoveryResultReceipts.set(copy, receipts);
+			}
+			pathWithoutLabels.push(copy);
 			pathParentId = entry.id;
 		}
 
@@ -1671,6 +1796,7 @@ export class SessionManager {
 			this.sessionFile = realpathSync(newSessionFile);
 			this.committedSize = statSync(newSessionFile).size;
 			this.repairPending = false;
+			this.recoverySource = undefined;
 			this._buildIndex();
 
 			return this.sessionFile;

@@ -593,3 +593,12 @@
 - Correct approach: fake-ip 现默认被放行——守卫直连该 fake IP 交由本机 TUN 选路,并在 `details.dns_mode=local_fake_ip_client` 与 warnings 中披露;要恢复"只连已校验公网 IP"设 `PI_WEB_FETCH_FAKE_IP_DNS=block`;若想让工具改用真实 IP,则打开 Shadowrocket 的「总是真实IP」(`always-real-ip`)。连通性实测:直连 fake IP 的 TLS 仍通过证书校验(SNI 匹配),HTTPS 多一层保护,HTTP 没有。
 - Prevention: 遇到"浏览器能上网但某个 DNS 相关工具失败"先跑 `scutil --dns` + 上面的 dns.lookup 确认 fake-ip;改 `packages/pi-web-search/src` 后必须 `node scripts/build-easy-pi-product.mjs` 重建 dist,并重启 pi 进程才会生效(会话内已加载的旧模块不会更新)。
 - Verified by: 反证实验——只把 `dns.lookup` 换成公共解析器的真实 A 记录,未改动的 `readPage` 立即成功(911 字符、blocked=0);放行落地后 dist 路径 example.com 911 字符、iana.org 1245 字符,blocked 仅剩 1 个非标准端口拒绝;`PI_WEB_FETCH_FAKE_IP_DNS=block` 仍按原样拒绝。
+
+## SessionManager 大会话恢复——流式读取不等于有界内存
+
+- Wrong approach: 分块读取 JSONL 后仍将每条完整 `pi-task-recovery` 快照驻留在 entries；初版改为惰性数据后，又遗漏每次结果归属查询会遍历所有历史快照的消费者。
+- Why it failed: 真实 3.06 GB 会话中 6697 条重复恢复快照占 95%，触发 V8 OOM；压缩后仍有 2.12 GB。单纯惰性化会让 `resultEntrySources` 每次同步重读数 GB，不能只验证最新 state 能打开。
+- Recognition signal: `/resume` 后 Node 原生 OOM、回到 Shell 并出现鼠标协议残片；先核对 epi 的实际父进程与会话文件，不把外层 AgentPort Session ID 当作 epi 会话 UUID。
+- Correct approach: 内部不可变 journal payload 按需读取，保留原 inode 的共享只读描述符；修复/换文件后旧分支仍可访问。常用归属查询只索引 assistant/result/call/tool ID，并保留 canonical branch 校验；不得删历史分支来降内存。
+- Prevention: 先流式统计文件大小与条目类型；做受限堆的加载、clone/fork、连续 append 回归，另用 throwing getter 证明频繁查询不解码历史正文。数据恢复只操作完整副本并核验原始 SHA256。
+- Verified by: 2026-10-15 `01a0c4e0-large-recovery-session.test.ts` 修复前 96 MiB 堆下 OOM、修复后通过；真实 9272 条记录在 512 MiB 堆限制下约 1.94 秒恢复，GC 后堆约 171 MB，875 个结果归属重复查询约 6 ms，原始文件未修改。

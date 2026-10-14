@@ -15,7 +15,7 @@ import type { AgentMessage, AgentToolCall } from "@earendil-works/pi-agent-core"
 import { hasConfirmedBashExit } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
-import type { SessionManager } from "./session-manager.ts";
+import { getTaskRecoveryResultReceipts, type SessionManager } from "./session-manager.ts";
 
 const ENTRY_TYPE = "pi-task-recovery";
 const driverOwners = new WeakSet<SessionManager>();
@@ -708,27 +708,23 @@ export class TaskRecoveryJournal {
 		const sources = new Map<string, string>();
 		for (const entry of branch) {
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
-			const state = entry.data as TaskRecoveryState | undefined;
-			if (!state || !Array.isArray(state.tools)) continue;
-			for (const task of [state, ...(state.suspendedTasks ?? []).map((task) => task.state)]) {
-				const assistantId = task.step?.assistantEntryId;
-				if (!assistantId || !visible.has(assistantId)) continue;
+			for (const receipt of getTaskRecoveryResultReceipts(entry)) {
+				const assistantId = receipt.assistantEntryId;
+				if (!visible.has(assistantId) || !visible.has(receipt.resultEntryId)) continue;
 				const assistant = this.manager.getEntry(assistantId);
 				if (assistant?.type !== "message" || assistant.message.role !== "assistant") continue;
-				for (const tool of task.tools) {
-					if (!tool.resultEntryId || !visible.has(tool.resultEntryId)) continue;
-					const result = this.manager.getEntry(tool.resultEntryId);
-					if (
-						result?.type === "message" &&
-						result.message.role === "toolResult" &&
-						result.message.toolCallId === tool.call.id &&
-						result.message.toolName === tool.call.name &&
-						assistant.message.content.some(
-							(block) => block.type === "toolCall" && block.id === tool.call.id && block.name === tool.call.name,
-						)
+				const result = this.manager.getEntry(receipt.resultEntryId);
+				if (
+					result?.type === "message" &&
+					result.message.role === "toolResult" &&
+					result.message.toolCallId === receipt.callId &&
+					result.message.toolName === receipt.toolName &&
+					assistant.message.content.some(
+						(block) =>
+							block.type === "toolCall" && block.id === receipt.callId && block.name === receipt.toolName,
 					)
-						sources.set(tool.resultEntryId, assistantId);
-				}
+				)
+					sources.set(receipt.resultEntryId, assistantId);
 			}
 		}
 		return sources;
@@ -823,7 +819,12 @@ export class TaskRecoveryJournal {
 	}
 
 	private save(state: TaskRecoveryState): void {
-		// JSON also strips absent optional provider fields before durability.
-		this.manager.appendCustomEntry(ENTRY_TYPE, JSON.parse(JSON.stringify(state)) as TaskRecoveryState);
+		// Durable managers serialize immediately and retain a file-backed snapshot.
+		// Only ephemeral sessions need a JSON copy to isolate subsequent mutations
+		// and strip absent optional provider fields.
+		this.manager.appendCustomEntry(
+			ENTRY_TYPE,
+			this.manager.isPersisted() ? state : (JSON.parse(JSON.stringify(state)) as TaskRecoveryState),
+		);
 	}
 }
