@@ -9,7 +9,7 @@ cd /absolute/path/to/pi/tools/agent-desktop-mcp
 npm ci --ignore-scripts
 ```
 
-Install the macOS agent-desktop release binary and its adjacent `agent-desktop-macos-helper` from [upstream releases](https://github.com/lahfir/agent-desktop/releases/tag/v0.9.4). Verify the archive against the release's `checksums.txt`. This host uses `/Users/w/.local/share/agent-desktop/0.9.4/agent-desktop`.
+Install the macOS agent-desktop release binary and its adjacent `agent-desktop-macos-helper` from [upstream releases](https://github.com/lahfir/agent-desktop/releases/tag/v0.9.4). Verify the archive against the release's `checksums.txt`. This host uses the independently built PID-inventory fix at `/Users/w/.local/share/agent-desktop/0.9.4-epi-pidfix/agent-desktop`; the original `0.9.4` directory remains available for rollback. See the rebuild instructions below.
 
 ```sh
 /path/to/agent-desktop status
@@ -63,4 +63,48 @@ CLI JSON envelopes and partial batch results are preserved in MCP text and struc
 node --test server.test.mjs
 ```
 
-Tests cover MCP discovery/validation, literal argv construction, byte limits, error propagation, no retry, and serialization using an in-memory MCP client. Real stdio smoke checks on this host verified tool discovery, permission status and a native status batch. Finder snapshot/list-apps currently return upstream application/window inventory timeouts; successful desktop interaction remains unverified until that upstream inventory issue is resolved.
+Tests cover MCP discovery/validation, literal argv construction, byte limits, error propagation, no retry, and serialization using an in-memory MCP client.
+
+The opt-in native E2E test compiles a temporary AppKit app, uses the **registered global MCP configuration**, and verifies all seven tools against its real UI. It checks headless click counts, Unicode text values, an app-specific keyboard shortcut, and a native click/snapshot batch. It closes its own fixture and deletes only its generated temporary directory. It does not touch existing documents, but it brings the fixture forward and sends a shortcut to that app:
+
+```sh
+AGENT_DESKTOP_E2E=1 node e2e/run.mjs
+```
+
+Verified on this host after the PID fix: all seven tools pass. Finder list-apps and snapshot also pass. This does not establish support for every app, headed input, or other OS versions.
+
+## Rebuild the upstream PID-inventory fix
+
+Original agent-desktop 0.9.4 rejected the entire workspace inventory when NSWorkspace returned a stale `Device Hub` record with PID `-1`. `patches/skip-invalid-app-pid.patch` skips nonpositive-PID inventory rows only; positive-PID name, duplicate and launch-time checks remain unchanged. The frontmost-app validation is unchanged.
+
+The native regression includes the actual upstream bridge and injects controlled NSWorkspace records. On pristine source it fails; after the patch it passes. Rebuild from the pinned v0.9.4 commit (requires macOS, Xcode command line tools and Rust >=1.89):
+
+```sh
+ADAPTER="$PWD" # Run from tools/agent-desktop-mcp
+WORK=$(mktemp -d)
+curl -fsSL https://github.com/lahfir/agent-desktop/archive/a4a695fdd1f673426579696c7e17074910e799fc.tar.gz -o "$WORK/source.tar.gz"
+mkdir "$WORK/source"
+tar -xzf "$WORK/source.tar.gz" --strip-components=1 -C "$WORK/source"
+cd "$WORK/source"
+
+# Pristine regression fails at the invalid PID assertion (expected).
+clang -fobjc-arc -fblocks -framework AppKit -I crates/macos/src/system \
+  "$ADAPTER/patches/workspace-inventory.test.m" -o "$WORK/inventory-regression"
+"$WORK/inventory-regression"
+
+patch -p1 < "$ADAPTER/patches/skip-invalid-app-pid.patch"
+clang -fobjc-arc -fblocks -framework AppKit -I crates/macos/src/system \
+  "$ADAPTER/patches/workspace-inventory.test.m" -o "$WORK/inventory-regression"
+"$WORK/inventory-regression"
+cargo build --locked --release -p agent-desktop -p agent-desktop-macos \
+  --bin agent-desktop --bin agent-desktop-macos-helper
+
+DEST="$HOME/.local/share/agent-desktop/0.9.4-epi-pidfix"
+mkdir -p "$DEST"
+cp target/release/agent-desktop target/release/agent-desktop-macos-helper "$DEST/"
+"$DEST/agent-desktop" status
+"$DEST/agent-desktop" list-apps --app Finder
+"$DEST/agent-desktop" snapshot --app Finder -i --max-depth 3
+```
+
+Set the existing `agent_desktop.env.AGENT_DESKTOP_BIN` in `~/.epi/agent/mcp.json` to the patched executable, preserving other settings, then reload/reconnect Easy Pi. To roll back, restore the original binary path. No system permission changes or third-party app shutdown is required by this fix.

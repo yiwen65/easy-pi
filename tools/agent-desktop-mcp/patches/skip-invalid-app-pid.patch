@@ -1,0 +1,17 @@
+--- a/crates/macos/src/system/appkit_bridge.m
++++ b/crates/macos/src/system/appkit_bridge.m
+@@ -164,8 +164,13 @@
+                     continue;
+                 }
+                 int32_t pid = app.processIdentifier;
++                // NSWorkspace can retain terminated/stale records with PID -1.
++                // They are not running applications and must not poison inventory.
++                if (pid <= 0) {
++                    continue;
++                }
+                 NSString *name = app.localizedName;
+-                if (pid <= 0 || name == nil || name.length == 0 ||
++                if (name == nil || name.length == 0 ||
+                     [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 16384) {
+                     result.status = 2;
+                     return result;
