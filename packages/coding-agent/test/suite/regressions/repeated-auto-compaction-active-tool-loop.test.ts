@@ -38,7 +38,9 @@ describe("auto-compaction during an active tool loop", () => {
 
 	it("keeps later provider requests on the activated projection", async () => {
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1_000, maxTokens: 100 }],
+			// Keep the fixed system/tools plus two compacted tool turns below the threshold.
+			// The 8,000-character seed still forces compaction; a 1k window legitimately re-compacts.
+			models: [{ id: "faux-1", contextWindow: 2_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 } },
 			tools: [createNoopTool()],
 			initialActiveToolNames: ["noop"],

@@ -68,10 +68,11 @@ beforeEach(() => {
 describe("completeSummarization (surviving shared choke point)", () => {
 	it("forces toolChoice none and returns the assistant message", async () => {
 		completeSimpleMock.mockResolvedValue(assistantOk("result text"));
-		const result = await completeSummarization(createModel(), context, { maxTokens: 100 });
+		const result = await completeSummarization(createModel(), context, { maxTokens: 100, reasoning: "high" });
 		expect(result.stopReason).toBe("stop");
 		const sentOptions = completeSimpleMock.mock.calls[0][2];
 		expect(sentOptions.toolChoice).toBe("none");
+		expect(sentOptions.reasoning).toBe("high");
 		expect(sentOptions.cacheRetention).toBe("none");
 		expect(sentOptions.sessionId).toBeTruthy();
 	});
@@ -123,6 +124,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 			promptCacheKey: "shared-compaction-prefix",
 			sessionId: "compact-session",
 			toolChoice: "none",
+			reasoning: "low",
 		});
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("maxTokens");
 	});

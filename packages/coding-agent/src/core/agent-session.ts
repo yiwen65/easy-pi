@@ -77,6 +77,7 @@ import {
 	type ProviderContextIdentityInput,
 	preservesProviderContextPrefix,
 } from "./compaction/subsystem/context-identity.ts";
+import { COMPACTION_DIAGNOSTICS_ENTRY_TYPE, CompactionDiagnostics } from "./compaction/subsystem/observability.ts";
 import {
 	type CheckpointCandidate,
 	createPiAiCompleteFn,
@@ -382,6 +383,7 @@ export class AgentSession {
 	private _hfHost: HfCompactionHost | undefined = undefined;
 
 	// Compaction state
+	private readonly _finishedCompactionDiagnostics = new WeakSet<CompactionDiagnostics>();
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionCompletion?: Promise<void>;
@@ -1197,7 +1199,19 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Emit an event to all listeners. */
-	private _emit(event: AgentSessionEvent): void {
+	private _emit(event: AgentSessionEvent, diagnostics?: CompactionDiagnostics): void {
+		if (event.type === "compaction_end" && diagnostics && !this._finishedCompactionDiagnostics.has(diagnostics)) {
+			// A throwing subscriber can cause another end event; finalize each lifecycle only once.
+			this._finishedCompactionDiagnostics.add(diagnostics);
+			try {
+				this.sessionManager.appendCustomEntry(
+					COMPACTION_DIAGNOSTICS_ENTRY_TYPE,
+					diagnostics.finish(event.reason, event.result ? "activated" : event.aborted ? "aborted" : "failed"),
+				);
+			} catch {
+				// Diagnostics must not fail compaction or mask its original error.
+			}
+		}
 		for (const l of this._eventListeners) {
 			l(event);
 		}
@@ -3336,9 +3350,11 @@ export class AgentSession {
 		}
 		await this.abort();
 		this._compactionAbortController = new AbortController();
-		this._emit({ type: "compaction_start", reason: "manual" });
+		// A post-commit extension can start another lifecycle before this one emits its end.
+		const diagnostics = new CompactionDiagnostics();
 
 		try {
+			this._emit({ type: "compaction_start", reason: "manual" });
 			if (!this.model) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
@@ -3387,8 +3403,10 @@ export class AgentSession {
 					callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
 					promptCacheKey: this.agent.promptCacheKey,
 					sessionId: this.sessionId,
+					diagnostics,
 				});
 			const outcome = await this._hfHost.attemptCompaction({
+				diagnostics,
 				manual: true,
 				complete: hfComplete,
 				branchEntries: pathEntries,
@@ -3413,13 +3431,16 @@ export class AgentSession {
 			};
 			this._compactionAbortController = undefined;
 			await this._emitHfSessionCompact(compactionEntry, "manual", false);
-			this._emit({
-				type: "compaction_end",
-				reason: "manual",
-				result: compactionResult,
-				aborted: false,
-				willRetry: false,
-			});
+			this._emit(
+				{
+					type: "compaction_end",
+					reason: "manual",
+					result: compactionResult,
+					aborted: false,
+					willRetry: false,
+				},
+				diagnostics,
+			);
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -3429,14 +3450,17 @@ export class AgentSession {
 				(error instanceof Error && error.name === "AbortError");
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
 			this._compactionAbortController = undefined;
-			this._emit({
-				type: "compaction_end",
-				reason: "manual",
-				result: undefined,
-				aborted,
-				willRetry: false,
-				errorMessage,
-			});
+			this._emit(
+				{
+					type: "compaction_end",
+					reason: "manual",
+					result: undefined,
+					aborted,
+					willRetry: false,
+					errorMessage,
+				},
+				diagnostics,
+			);
 			await this._emitSessionCompactFailed({
 				reason: "manual",
 				errorMessage,
@@ -3667,6 +3691,7 @@ export class AgentSession {
 	private async _tryHfAutoCompaction(
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
+		diagnostics: CompactionDiagnostics,
 		decision: TriggerDecision,
 		currentInput: string,
 		currentInputExtraTokens: number,
@@ -3687,9 +3712,11 @@ export class AgentSession {
 				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
 				promptCacheKey: this.agent.promptCacheKey,
 				sessionId: this.sessionId,
+				diagnostics,
 			});
 		if (decision.action === "none") return false;
 		const outcome = await host.attemptCompaction({
+			diagnostics,
 			triggerReasons: decision.reasons,
 			currentInput,
 			currentInputExtraTokens,
@@ -3700,19 +3727,25 @@ export class AgentSession {
 			modelContextLimit: requestModel.contextWindow,
 		});
 		if (!outcome.activated && this._autoCompactionAbortController?.signal.aborted) {
-			this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+			this._emit(
+				{ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false },
+				diagnostics,
+			);
 			await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
 			return false;
 		}
 		if (!outcome.activated) {
-			this._emit({
-				type: "compaction_end",
-				reason,
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-				errorMessage: `Compaction rejected: ${outcome.summaryText}`,
-			});
+			this._emit(
+				{
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: `Compaction rejected: ${outcome.summaryText}`,
+				},
+				diagnostics,
+			);
 			await this._emitSessionCompactFailed({
 				reason,
 				errorMessage: `Compaction rejected: ${outcome.summaryText}`,
@@ -3731,7 +3764,7 @@ export class AgentSession {
 			estimatedTokensAfter: outcome.tokensAfter,
 		};
 		await this._emitHfSessionCompact(compactionEntry, reason, willRetry);
-		this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+		this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry }, diagnostics);
 		if (willRetry) {
 			this._overflowRecoveryAttempted = true;
 			const messages = this.agent.state.messages;
@@ -3774,13 +3807,14 @@ export class AgentSession {
 			? prepareCompaction(pathEntries, settings)
 			: undefined;
 
-		this._emit({ type: "compaction_start", reason });
+		const diagnostics = new CompactionDiagnostics();
 		this._autoCompactionAbortController = new AbortController();
 		this._autoCompactionCompletion = new Promise<void>((resolve) => {
 			this._resolveAutoCompactionCompletion = resolve;
 		});
 
 		try {
+			this._emit({ type: "compaction_start", reason });
 			if (this._extensionRunner.hasHandlers("session_before_compact") && preparation) {
 				const extensionResult = (await this._extensionRunner.emit({
 					type: "session_before_compact",
@@ -3793,7 +3827,10 @@ export class AgentSession {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
-					this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+					this._emit(
+						{ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false },
+						diagnostics,
+					);
 					await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
 					return false;
 				}
@@ -3801,14 +3838,24 @@ export class AgentSession {
 				// free-text summaries violate the subsystem's invariants.
 			}
 
-			return await this._tryHfAutoCompaction(reason, willRetry, decision, currentInput, currentInputExtraTokens);
+			return await this._tryHfAutoCompaction(
+				reason,
+				willRetry,
+				diagnostics,
+				decision,
+				currentInput,
+				currentInputExtraTokens,
+			);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
 				this._autoCompactionAbortController?.signal.aborted === true ||
 				(error instanceof Error && error.name === "AbortError");
 			if (aborted) {
-				this._emit({ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false });
+				this._emit(
+					{ type: "compaction_end", reason, result: undefined, aborted: true, willRetry: false },
+					diagnostics,
+				);
 				await this._emitSessionCompactFailed({ reason, aborted: true, willRetry: false, fromExtension: false });
 				return false;
 			}
@@ -3816,14 +3863,17 @@ export class AgentSession {
 				reason === "overflow"
 					? `Context overflow recovery failed: ${errorMessage}`
 					: `Auto-compaction failed: ${errorMessage}`;
-			this._emit({
-				type: "compaction_end",
-				reason,
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-				errorMessage: formattedErrorMessage,
-			});
+			this._emit(
+				{
+					type: "compaction_end",
+					reason,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: formattedErrorMessage,
+				},
+				diagnostics,
+			);
 			await this._emitSessionCompactFailed({
 				reason,
 				errorMessage: formattedErrorMessage,

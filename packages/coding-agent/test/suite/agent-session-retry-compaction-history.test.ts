@@ -6,6 +6,7 @@ import {
 	fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { COMPACTION_DIAGNOSTICS_ENTRY_TYPE } from "../../src/core/compaction/subsystem/observability.ts";
 import type { CompactionLLMRequest } from "../../src/core/compaction/subsystem/types.ts";
 import { createCompactionSummaryMessage } from "../../src/core/messages.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -243,13 +244,20 @@ describe("AgentSession retry history with full_pipeline compaction", () => {
 		expect(messages.find((message) => message.role === "toolResult")).toMatchObject({ isError: true });
 		const entries = harness.sessionManager.getEntries();
 		expect(entries.slice(0, before.length)).toEqual(before);
-		expect(entries.at(-1)).toMatchObject({
+		const checkpoint = entries.filter((entry) => entry.type === "compaction").at(-1);
+		expect(checkpoint).toMatchObject({
 			type: "compaction",
 			parentId: before.at(-1)?.id,
 			replacementHistory: [
 				expect.objectContaining({ role: "compactionSummary" }),
 				expect.objectContaining({ role: "user", content: "unanswered-user-goal" }),
 			],
+		});
+		expect(entries.at(-1)).toMatchObject({
+			type: "custom",
+			customType: COMPACTION_DIAGNOSTICS_ENTRY_TYPE,
+			parentId: checkpoint?.id,
+			data: { reason: "manual", outcome: "activated" },
 		});
 		expect(
 			harness.sessionManager

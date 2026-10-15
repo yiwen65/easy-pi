@@ -21,7 +21,7 @@ import {
 	generateCompactionItem,
 	validateCompactionSummary,
 } from "./narrative.ts";
-import { AuditTrail } from "./observability.ts";
+import { AuditTrail, type CompactionDiagnostics } from "./observability.ts";
 import { evaluateTriggers, type TriggerDecision } from "./trigger.ts";
 import type { CompleteFn, TokenStats } from "./types.ts";
 
@@ -434,6 +434,7 @@ export class HfCompactionHost {
 		recentUserTokens?: number;
 		customInstructions?: string;
 		modelContextLimit?: number;
+		diagnostics?: CompactionDiagnostics;
 	}): Promise<{
 		activated: boolean;
 		checkpoint?: CheckpointCandidate;
@@ -445,6 +446,9 @@ export class HfCompactionHost {
 		if (this.compactionInFlight) throw new Error(`Compaction is already in progress for session ${this.sessionId}`);
 		this.syncFromEntries(options.branchEntries);
 		this.compactionInFlight = true;
+		const startedAt = performance.now();
+		let generationStartedAt: number | undefined;
+		let validationStartedAt: number | undefined;
 		try {
 			const activeMessages = this.activeMessages(options.branchEntries);
 			if (activeMessages.length === 0) {
@@ -510,6 +514,7 @@ export class HfCompactionHost {
 				const reason = "No local compaction model is configured";
 				return { activated: false, summaryText: reason, result: { status: "rejected", reason } };
 			}
+			generationStartedAt = performance.now();
 			const generated = await generateCompactionItem({
 				messages: activeMessages,
 				systemPrompt,
@@ -519,6 +524,7 @@ export class HfCompactionHost {
 				customInstructions: options.customInstructions,
 				messageTokenBudget,
 			});
+			validationStartedAt = performance.now();
 			if (generated.rejected) {
 				return {
 					activated: false,
@@ -621,6 +627,13 @@ export class HfCompactionHost {
 			};
 		} finally {
 			this.compactionInFlight = false;
+			const endedAt = performance.now();
+			options.diagnostics?.recordStages({
+				preparationMs: (generationStartedAt ?? endedAt) - startedAt,
+				generationMs:
+					generationStartedAt === undefined ? 0 : (validationStartedAt ?? endedAt) - generationStartedAt,
+				validationMs: validationStartedAt === undefined ? 0 : endedAt - validationStartedAt,
+			});
 		}
 	}
 
@@ -640,8 +653,11 @@ export function createPiAiCompleteFn(options: {
 	callbacks?: RetryCallbacks;
 	promptCacheKey?: string;
 	sessionId?: string;
+	diagnostics?: CompactionDiagnostics;
 }): CompleteFn {
+	let requestIndex = 0;
 	return async (request) => {
+		const currentRequestIndex = ++requestIndex;
 		const response = await completeSummarization(
 			options.model,
 			{
@@ -651,6 +667,8 @@ export function createPiAiCompleteFn(options: {
 			},
 			{
 				signal: request.signal,
+				// Compaction is extraction, not the main agent's reasoning task. Never inherit its effort.
+				reasoning: "low",
 				cacheRetention: "short",
 				promptCacheKey: options.promptCacheKey,
 				sessionId: options.sessionId,
@@ -660,7 +678,29 @@ export function createPiAiCompleteFn(options: {
 			},
 			options.streamFn,
 			options.retry,
-			options.callbacks,
+			options.diagnostics
+				? {
+						...options.callbacks,
+						onRetryScheduled: async (attempt, maxAttempts, delayMs, errorMessage) => {
+							options.diagnostics?.recordRetry(delayMs);
+							await options.callbacks?.onRetryScheduled?.(attempt, maxAttempts, delayMs, errorMessage);
+						},
+					}
+				: options.callbacks,
+			options.diagnostics
+				? (metrics) => {
+						options.diagnostics?.recordAttempt({
+							...metrics,
+							provider: options.model.provider,
+							model: options.model.id,
+							api: options.model.api,
+							reasoning: "low",
+							requestIndex: currentRequestIndex,
+							promptVersion: request.promptVersion,
+							messageCount: request.messages.length,
+						});
+					}
+				: undefined,
 		);
 		const usage = { input: response.usage.input, output: response.usage.output };
 		if (response.stopReason === "error") {

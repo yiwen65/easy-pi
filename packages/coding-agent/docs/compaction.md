@@ -4,6 +4,24 @@ Pi uses a Codex-style replacement checkpoint for long sessions. Compaction is in
 
 During a multi-turn agent run, Pi evaluates the completed tool results before starting the next assistant turn. If compaction activates, the same run resumes from the checkpoint, and steering queued while compaction was running is included in that resumed request. No threshold compaction runs after a terminating tool batch when no further assistant turn is needed.
 
+## Model effort and latency diagnostics
+
+Compaction uses the current session model with an explicit `low` reasoning request, independent of the main agent's thinking level. Providers map this request to their supported effort; non-reasoning models may ignore it. The handoff prompt aims for roughly 1,000–2,000 tokens for typical history, less for simple history, but allows more when necessary to preserve continuation facts. This is a soft prompt target, not a hard output cap or a truncation rule. The normal branch-summary path is unchanged.
+
+Every started manual or automatic compaction best-effort appends a `custom` session entry with `customType: "pi-compaction-diagnostics"` when it ends, including failed, rejected, and cancelled attempts. These entries do not enter provider context. They contain no prompt, tool arguments/results, generated handoff text, credentials, or raw error messages.
+
+The version-1 `data` payload contains:
+
+- `reason` (`manual`, `threshold`, or `overflow`) and `outcome` (`activated`, `failed`, or `aborted`; rejected checkpoints are `failed`);
+- `durationMs`, measured from the compaction-start event to the end before diagnostic persistence;
+- host `stages`: `preparationMs`, `generationMs`, and `validationMs`. Generation includes request conversion, trimming, model calls, outer retry sleeps, and the generator's summary checks. Auth, extension hooks, and checkpoint publication are outside these host stages but included in total duration;
+- `attempts`: each outer provider invocation's duration, requested model/provider/API/effort, prompt version, message count, stop reason, and full reported `usage` (including cache, reasoning, and cost fields when supplied);
+- per-attempt `firstEventMs`, `firstTextMs`, and `firstThinkingMs`, measured from that invocation's start. Missing events leave their fields absent, not zero. A first event may be headers/start rather than a generated token; these timings cannot independently separate server queueing from prefill;
+- `requestIndex`: retries within one summary request share an index; an overflow fallback starts another request;
+- `retryCount` and `scheduledRetryDelayMs`: outer retry count and requested sleep total. Actual waits are included in generation time; provider-internal retries remain inside their invocation's duration.
+
+An injected `config.complete` bypasses the production adapter, so its per-provider attempts are unavailable; host phases and total duration are still recorded. A diagnostic write failure never fails compaction or masks its original error. Inspect the session JSONL to compare a slow request's first-text latency, generation interval, cache usage, output/reasoning tokens, and retries before changing models or retry policy. These diagnostics and offline regressions alone do not establish real-provider speedup or handoff quality.
+
 ## Checkpoint contents
 
 Pi uses one local handoff path for every provider. It makes one tool-free model request that mirrors the external boundary of Codex Remote Compaction V2. The request keeps the current canonical system prompt, converts the active Session messages through the normal provider-message converter, includes the current tool schemas, then appends a dedicated `local_compaction_trigger` user item. `toolChoice` is forced to `none`; short cache retention and the active Session routing ID allow the unchanged prefix to reuse provider cache. The request budget incorporates recent provider-reported usage when it exceeds the local estimate. When necessary, tool-result bodies are rewritten to a fixed truncation notice in the compactor request; if the provider still reports overflow, Pi retries once with every tool-result body rewritten. Durable history is not changed. The resulting local replacement history contains:

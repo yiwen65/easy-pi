@@ -8,7 +8,7 @@
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { type RetryCallbacks, type RetryPolicy, retryAssistantCall, uuidv7 } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { completeSimple, streamSimple } from "@earendil-works/pi-ai/compat";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -444,12 +444,21 @@ export function findCutPoint(
 	};
 }
 
+/** Content-free timing and usage for one invocation, before any outer retry. */
+export interface SummarizationAttemptMetrics {
+	durationMs: number;
+	/** Time to the first stream event, not necessarily a generated token. */
+	firstEventMs?: number;
+	firstTextMs?: number;
+	firstThinkingMs?: number;
+	stopReason: AssistantMessage["stopReason"];
+	usage?: Usage;
+}
+
 /**
- * Shared choke point for every compaction/branch-summary summarization call. Wraps the
- * single LLM call in {@link retryAssistantCall} so transient stream drops (e.g.
- * `terminated`, socket close) honor the configured retry policy instead of failing
- * the whole compaction on the first attempt. Deterministic errors and aborts return
- * immediately (see {@link retryAssistantCall}).
+ * Shared choke point for compaction/branch summaries. Transient errors honor the retry
+ * policy; deterministic errors and aborts return immediately. Optional diagnostics
+ * drain stream events without publishing their content to the main agent.
  */
 export async function completeSummarization(
 	model: Model<any>,
@@ -458,6 +467,7 @@ export async function completeSummarization(
 	streamFn?: StreamFn,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	onAttempt?: (metrics: SummarizationAttemptMetrics) => void,
 ): Promise<AssistantMessage> {
 	// Standalone one-off summaries default to no prompt caching. Cache-friendly callers
 	// explicitly request short retention so providers can reuse the active prefix.
@@ -470,10 +480,44 @@ export async function completeSummarization(
 		// can still reuse an earlier user-message checkpoint, but long tool-heavy turns may need reprocessing.
 		toolChoice: "none",
 	};
-	const produce = async (): Promise<AssistantMessage> =>
-		streamFn
-			? (await streamFn(model, context, requestOptions)).result()
-			: completeSimple(model, context, requestOptions);
+	const produce = async (): Promise<AssistantMessage> => {
+		if (!onAttempt) {
+			return streamFn
+				? (await streamFn(model, context, requestOptions)).result()
+				: completeSimple(model, context, requestOptions);
+		}
+		const startedAt = performance.now();
+		let firstEventMs: number | undefined;
+		let firstTextMs: number | undefined;
+		let firstThinkingMs: number | undefined;
+		let response: AssistantMessage | undefined;
+		try {
+			const stream = await (streamFn ?? streamSimple)(model, context, requestOptions);
+			for await (const event of stream) {
+				const elapsed = performance.now() - startedAt;
+				firstEventMs ??= elapsed;
+				if (event.type === "text_delta" && event.delta.length > 0) firstTextMs ??= elapsed;
+				if (event.type === "thinking_delta" && event.delta.length > 0) firstThinkingMs ??= elapsed;
+				// A terminal event resolves result(); do not depend on a provider also closing the iterator.
+				if (event.type === "done" || event.type === "error") break;
+			}
+			response = await stream.result();
+			return response;
+		} finally {
+			try {
+				onAttempt({
+					durationMs: performance.now() - startedAt,
+					firstEventMs,
+					firstTextMs,
+					firstThinkingMs,
+					stopReason: response?.stopReason ?? (requestOptions.signal?.aborted ? "aborted" : "error"),
+					usage: response ? structuredClone(response.usage) : undefined,
+				});
+			} catch {
+				// Diagnostic observers must never change summarization success, failure, or cancellation.
+			}
+		}
+	};
 	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 
