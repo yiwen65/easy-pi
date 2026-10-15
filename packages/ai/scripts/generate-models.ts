@@ -367,6 +367,11 @@ const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = OPENAI_TOOL_SEARCH_MODEL_IDS;
 const OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
 	"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "gpt-6.1-sol",
 ]);
+// Verified against Codex Speed and API Fast mode documentation (2026-10-15).
+// Model capability is not proof of account entitlement. Unknown models stay opt-in.
+// https://developers.openai.com/codex/speed
+// https://developers.openai.com/api/docs/guides/fast-mode
+const CODEX_FAST_MODE_MODEL_IDS = new Set(["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"]);
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272000;
 const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
 	"gpt-5.4",
@@ -2737,7 +2742,15 @@ async function generateModels() {
 function writeModelCatalog(allModels: readonly AnyModel[], generatedAt: string): void {
 	// Identity is (provider, operation, id), never API or bare id alone.
 	const providers: Record<string, Record<string, AnyModel>> = Object.create(null);
-	for (const model of allModels) {
+	for (const sourceModel of allModels) {
+		// Apply catalog-owned capability metadata to both fetched and offline snapshots.
+		const model =
+			sourceModel.type !== "image" &&
+			sourceModel.provider === "openai-codex" &&
+			sourceModel.api === "openai-codex-responses" &&
+			CODEX_FAST_MODE_MODEL_IDS.has(sourceModel.id)
+				? { ...sourceModel, compat: { supportsFastMode: true, ...sourceModel.compat } }
+				: sourceModel;
 		if (!providers[model.provider]) {
 			providers[model.provider] = Object.create(null);
 		}

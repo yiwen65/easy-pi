@@ -93,6 +93,26 @@ describe("SettingsSelectorComponent", () => {
 		expect(onSubagentModelChange).toHaveBeenCalledExactlyOnceWith(undefined);
 	});
 
+	it("cycles the global Codex default through unspecified, Standard and Fast without touching effort", () => {
+		const onCodexServiceTierChange = vi.fn();
+		const onThinkingLevelChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			{ warnings: {}, subagentModels: [] } as unknown as SettingsConfig,
+			{ onCodexServiceTierChange, onThinkingLevelChange } as unknown as SettingsCallbacks,
+		);
+		const list = selector.getSettingsList();
+		for (const character of "Codex service tier default") list.handleInput(character);
+		expect(selector.render(120).join("\n")).toContain("Unspecified");
+		for (const value of ["Standard", "Fast", "Unspecified"]) {
+			list.handleInput("\r");
+			expect(selector.render(120).join("\n")).toContain(value);
+		}
+		expect(onCodexServiceTierChange.mock.calls).toEqual([["default"], ["fast"], [undefined]]);
+		expect(onThinkingLevelChange).not.toHaveBeenCalled();
+		for (const width of [24, 40, 80, 120])
+			expect(selector.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+	});
+
 	it("cycles through fullscreen settings", () => {
 		const onExitOutputChange = vi.fn();
 		const onScrollbarChange = vi.fn();

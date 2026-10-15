@@ -13,6 +13,7 @@ import {
 	Spacer,
 	Text,
 } from "@earendil-works/pi-tui";
+import type { CodexServiceTier } from "../../../core/codex-service-tier.ts";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
 import type {
 	DefaultProjectTrust,
@@ -69,6 +70,7 @@ export interface SettingsConfig {
 	httpIdleTimeoutMs: number;
 	thinkingLevel: ThinkingLevel;
 	availableThinkingLevels: ThinkingLevel[];
+	codexServiceTier?: CodexServiceTier;
 	subagentModel?: string;
 	subagentThinkingLevel?: ThinkingLevel;
 	subagentModels: readonly Model<Api>[];
@@ -107,6 +109,7 @@ export interface SettingsCallbacks {
 	onTransportChange: (transport: Transport) => void;
 	onHttpIdleTimeoutMsChange: (timeoutMs: number) => void;
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
+	onCodexServiceTierChange?: (tier: CodexServiceTier | undefined) => void;
 	onSubagentModelChange: (model: string | undefined) => void;
 	onSubagentThinkingLevelChange: (level: ThinkingLevel | undefined) => void;
 	onThemeChange: (theme: string) => void;
@@ -692,6 +695,19 @@ export class SettingsSelectorComponent extends Container {
 					),
 			},
 			{
+				id: "codex-service-tier",
+				label: "Codex service tier default",
+				description:
+					"Saves the global default and resets this session to defaults; trusted project settings take precedence. /fast changes this session only. Fast uses extra usage (including summaries); costs are estimates, service is not guaranteed.",
+				currentValue:
+					config.codexServiceTier === "fast"
+						? "Fast"
+						: config.codexServiceTier === "default"
+							? "Standard"
+							: "Unspecified",
+				values: ["Unspecified", "Standard", "Fast"],
+			},
+			{
 				id: "subagent-model",
 				label: "Subagent model",
 				description:
@@ -965,6 +981,11 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen-scrollbar":
 						callbacks.onFullscreenScrollbarChange(newValue as ScrollViewScrollbar);
+						break;
+					case "codex-service-tier":
+						callbacks.onCodexServiceTierChange?.(
+							newValue === "Fast" ? "fast" : newValue === "Standard" ? "default" : undefined,
+						);
 						break;
 					case "subagent-model":
 						callbacks.onSubagentModelChange(newValue === INHERIT_CALLER ? undefined : newValue);

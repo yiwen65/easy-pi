@@ -128,6 +128,7 @@ import { GrokComponentFactory } from "../interactive-grok/grok-component-factory
 import type { GrokInteractiveView } from "../interactive-grok/grok-interactive-view.ts";
 import { PiSessionPort } from "../interactive-grok/pi-session-port.ts";
 import { findPromptJumpTarget } from "../interactive-grok/prompt-navigation.ts";
+import { formatCodexServiceTierStatus } from "./codex-service-tier-ui.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BackgroundTaskGroupComponent } from "./components/background-task-group.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -1049,6 +1050,17 @@ export class InteractiveMode {
 			description: command.description,
 			...(command.argumentHint && { argumentHint: command.argumentHint }),
 		}));
+
+		const fastCommand = slashCommands.find((command) => command.name === "fast");
+		if (fastCommand) {
+			fastCommand.getArgumentCompletions = (prefix) =>
+				createFuzzyAutocompleteItems(
+					["on", "off", "status"],
+					prefix,
+					(value) => value,
+					(value) => ({ value, label: value }),
+				);
+		}
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
@@ -3205,6 +3217,11 @@ export class InteractiveMode {
 			const images = selectSubmittedImages(text, attachmentValues);
 
 			// Handle commands
+			if (/^\/fast(?:\s|$)/.test(text)) {
+				this.handleFastCommand(text);
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
@@ -3514,6 +3531,10 @@ export class InteractiveMode {
 			case "session_info_changed":
 				this.updateTerminalTitle();
 				this.footer.invalidate();
+				this.ui.requestRender();
+				break;
+
+			case "codex_service_tier_changed":
 				this.ui.requestRender();
 				break;
 
@@ -4528,6 +4549,11 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
+		if (/^\/fast(?:\s|$)/.test(text)) {
+			this.handleFastCommand(text);
+			this.editor.setText("");
+			return;
+		}
 		const attachments =
 			this.editor.getAttachments?.() ??
 			(this.editor === this.defaultEditor ? [] : this.defaultEditor.getAttachments());
@@ -5251,6 +5277,7 @@ export class InteractiveMode {
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
+					codexServiceTier: this.settingsManager.getGlobalSettings?.().codexServiceTier,
 					subagentModel: this.settingsManager.getSubagentModel(),
 					subagentThinkingLevel: this.settingsManager.getSubagentThinkingLevel(),
 					subagentModels: this.session.modelRuntime.getAvailableSnapshot(),
@@ -5318,6 +5345,16 @@ export class InteractiveMode {
 						this.session.setThinkingLevel(level);
 						this.footer.invalidate();
 						this.updateEditorBorderColor();
+					},
+					onCodexServiceTierChange: (tier) => {
+						this.settingsManager.setCodexServiceTier(tier);
+						// Reset the session override so trusted project defaults still take precedence.
+						// Unlike /fast on, saving Fast is allowed while the current model is unsupported.
+						this.session.setCodexServiceTier(undefined);
+						this.footer.invalidate();
+						this.showStatus(
+							`Global Codex default saved.\n${formatCodexServiceTierStatus(this.session.getCodexServiceTierStatus())}`,
+						);
 					},
 					onSubagentModelChange: (model) => {
 						this.settingsManager.setSubagentModel(model);
@@ -6537,6 +6574,33 @@ export class InteractiveMode {
 	// =========================================================================
 	// Command handlers
 	// =========================================================================
+
+	private handleFastCommand(text: string): void {
+		const args = text.slice("/fast".length).trim();
+		if (args && args !== "on" && args !== "off" && args !== "status") {
+			this.showError("Usage: /fast [on|off|status]");
+			return;
+		}
+		try {
+			if (args !== "status") {
+				const tier =
+					args === "on"
+						? "fast"
+						: args === "off"
+							? "default"
+							: this.session.codexServiceTier === "fast"
+								? "default"
+								: "fast";
+				this.session.setCodexServiceTier(tier);
+				this.footer.invalidate();
+			}
+			this.showStatus(
+				`${args === "status" ? "" : "Session preference updated; applies to the next model request.\n"}${formatCodexServiceTierStatus(this.session.getCodexServiceTierStatus())}`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
 
 	private async handleReloadCommand(): Promise<void> {
 		if (this.session.isStreaming) {

@@ -5,9 +5,13 @@ import { streamSimple } from "../../ai/src/api/openai-codex-responses.ts";
 import { CompactionDiagnostics } from "../src/core/compaction/subsystem/observability.ts";
 import { createPiAiCompleteFn } from "../src/core/compaction/subsystem/session-integration.ts";
 
-it.each(["low", "high", "off"] as const)(
-	"sends inherited %s reasoning to Codex without losing cache routing",
-	async (thinkingLevel) => {
+it.each(
+	(["low", "high", "off"] as const).flatMap((thinkingLevel) =>
+		([undefined, "default", "fast"] as const).map((serviceTier) => ({ thinkingLevel, serviceTier })),
+	),
+)(
+	"sends inherited $thinkingLevel reasoning and $serviceTier tier without losing Codex cache routing",
+	async ({ thinkingLevel, serviceTier }) => {
 		const model: Model<"openai-codex-responses"> = {
 			id: "synthetic-compactor",
 			name: "Synthetic Compactor",
@@ -69,6 +73,7 @@ it.each(["low", "high", "off"] as const)(
 		const complete = createPiAiCompleteFn({
 			model,
 			thinkingLevel,
+			serviceTier,
 			apiKey,
 			sessionId: "synthetic-session",
 			cacheAffinityId: "parent-cache-affinity",
@@ -91,6 +96,8 @@ it.each(["low", "high", "off"] as const)(
 			tool_choice: "none",
 			prompt_cache_key: "shared-prefix",
 		});
+		if (serviceTier === undefined) expect(body).not.toHaveProperty("service_tier");
+		else expect(body?.service_tier).toBe(serviceTier === "fast" ? "priority" : "default");
 		if (thinkingLevel === "off") expect(body).not.toHaveProperty("reasoning");
 		else expect(body).toMatchObject({ reasoning: { effort: thinkingLevel } });
 		expect(headers?.get("session-id")).toBe("parent-cache-affinity");

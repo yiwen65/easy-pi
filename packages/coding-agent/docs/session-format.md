@@ -270,6 +270,8 @@ Extension state persistence. Does NOT participate in LLM context.
 
 Use `customType` to identify your extension's entries on reload. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
 
+Easy-pi's native Codex service preference uses `customType: "codex-service-tier"`, with `data: { "tier": "fast" }`, `{ "tier": "default" }`, or `{ "tier": null }` to reset the branch override to configuration. Only entries on the selected branch apply; these entries never enter model context. Codex assistant messages may separately contain `serviceTier: { requested?, sent?, reported?, costEstimated? }`. `reported` is the raw upstream value; missing/null is unknown and never inferred from the preference or compatibility price estimate.
+
 ### CustomMessageEntry
 
 Extension-injected messages that DO participate in LLM context.

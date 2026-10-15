@@ -24,6 +24,7 @@ export {
 	type SessionStats,
 } from "./core/agent-session.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
+export type { CodexServiceTier, CodexServiceTierStatus } from "./core/codex-service-tier.ts";
 // Compaction
 export {
 	type BranchPreparation,

@@ -1,9 +1,10 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.ts";
+import { formatCodexServiceTierLabel } from "../codex-service-tier-ui.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -246,6 +247,8 @@ export class FooterComponent implements Component {
 
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
+		const tierLabel = formatCodexServiceTierLabel(this.session.getCodexServiceTierStatus?.());
+		if (tierLabel && width > 0) lines.push(...wrapTextWithAnsi(theme.fg("dim", tierLabel), width));
 
 		// Add extension statuses on a single line, sorted by key alphabetically
 		const extensionStatuses = this.footerData.getExtensionStatuses();

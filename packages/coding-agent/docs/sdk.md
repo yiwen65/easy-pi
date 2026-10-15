@@ -467,6 +467,32 @@ for (const diagnostic of diagnostics) {
 
 > See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
 
+### Codex Fast mode
+
+Codex service tier is separate from reasoning effort. On a model declaring `compat.supportsFastMode: true` with provider `openai-codex` and API `openai-codex-responses`:
+
+```typescript
+const { session } = await createAgentSession({
+  model: capableCodexModel,
+  thinkingLevel: "high",
+  codexServiceTier: "fast", // optional initial branch override
+});
+
+session.setCodexServiceTier("fast");    // next request uses Fast, not less reasoning
+session.setCodexServiceTier("default"); // explicitly request Standard
+session.setCodexServiceTier(undefined); // reset branch override to configuration
+console.log(session.codexServiceTier);
+console.log(session.getCodexServiceTierStatus());
+```
+
+`codexServiceTier` and its setter accept `"default" | "fast"`; omission preserves restored state/configuration. Overrides are stored as branch-scoped custom entries, not model messages. Subscribe to `codex_service_tier_changed` for setter updates. Model switches retain the preference but recompute capability. Explicit Fast activation on an unsupported/unknown model throws; a configured Fast default is inactive there. Other providers do not receive configured Codex tiers.
+
+At the SDK stream seam, precedence is explicit `SimpleStreamOptions.serviceTier` (`"default" | "fast" | "priority"`) > branch override > trusted project/global settings > unspecified. The Codex adapter normalizes `fast` to `priority`; it preserves its full low-level provider-specific SDK tier type. Direct simple adapters for other providers ignore the new option.
+
+Codex `AssistantMessage.serviceTier` preserves optional `requested`, final post-hook `sent`, raw upstream `reported`, and `costEstimated` observations. Missing/null `reported` means unknown, not successful Fast execution; pricing compatibility never changes the raw report. Existing server transcript projections also preserve these observations without adding remote tier controls. `getCodexServiceTierStatus()` adds the current preference/source/availability and the latest matching branch response's sent/reported values.
+
+Same-session compaction and branch summaries inherit the resolved tier; retries retain their summary request's snapshot. Native children use their own configured defaults, not a parent's temporary branch override. Fast can consume more subscription usage/credits; cost figures are estimates and account eligibility, actual service tier and speed are not guaranteed. See [settings](settings.md#codex-fast-mode).
+
 ### API Keys and OAuth
 
 Authentication resolution priority (handled by `ModelRuntime`):

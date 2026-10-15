@@ -7,6 +7,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
+import { formatCodexServiceTierLabel } from "../../interactive/codex-service-tier-ui.ts";
 import type { GrokChromeTheme } from "../grok-component-factory.ts";
 
 export interface GrokEditorFrameOptions {
@@ -69,7 +70,10 @@ export class GrokEditorFrame implements Component {
 	/** Compact model/effort hint; the full label remains available in the regular frame. */
 	renderCompactMetadata(width: number): string[] {
 		const label = this.renderModelLabel(Math.max(0, width));
-		return label ? [truncateToWidth(label, Math.max(0, width), "…")] : [];
+		const lines = label ? [truncateToWidth(label, Math.max(0, width), "…")] : [];
+		const tierLabel = formatCodexServiceTierLabel(this.session?.getCodexServiceTierStatus?.());
+		if (tierLabel && width > 0) lines.push(...wrapTextWithAnsi(this.theme.muted(tierLabel), width));
+		return lines;
 	}
 
 	render(width: number): string[] {
@@ -90,7 +94,9 @@ export class GrokEditorFrame implements Component {
 			const padding = " ".repeat(Math.max(0, hostWidth - visibleWidth(fitted)));
 			return `${borderColor("│")}${prefix}${fitted}${padding}${borderColor("│")}`;
 		});
-		const label = this.renderModelLabel();
+		const modelLabel = this.renderModelLabel();
+		const tierLabel = formatCodexServiceTierLabel(this.session?.getCodexServiceTierStatus?.());
+		const label = tierLabel ? `${modelLabel}${this.theme.muted(` • ${tierLabel}`)}` : modelLabel;
 		const labelWidth = visibleWidth(label);
 		if (label && labelWidth + 4 <= interiorWidth) {
 			const bottom = `${borderColor(`╰${"─".repeat(interiorWidth - labelWidth - 3)}`)} ${label} ${borderColor("─╯")}`;

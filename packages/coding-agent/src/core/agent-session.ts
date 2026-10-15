@@ -63,6 +63,16 @@ import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth
 import { type BackgroundTaskInlinePolicy, BackgroundTaskNotifications } from "./background-task-notifications.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
+	CODEX_SERVICE_TIER_ENTRY_TYPE,
+	type CodexServiceTier,
+	type CodexServiceTierStatus,
+	isCodexFastModeAvailable,
+	parseCodexServiceTier,
+	resolveCodexServiceTierPreference,
+	resolveCodexServiceTierRequest,
+	withCodexServiceTierSnapshot,
+} from "./codex-service-tier.ts";
+import {
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
@@ -172,6 +182,7 @@ export type AgentSessionEvent =
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| { type: "codex_service_tier_changed"; status: CodexServiceTierStatus }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -1689,6 +1700,48 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
+	}
+
+	/** Branch override, otherwise the trusted merged configuration; retained across model switches. */
+	get codexServiceTier(): CodexServiceTier | undefined {
+		return resolveCodexServiceTierPreference(
+			this.sessionManager.getBranch(),
+			this.settingsManager.getCodexServiceTier(),
+		).preference;
+	}
+
+	/** Update this branch only. Undefined resets to configuration, without changing saved defaults. */
+	setCodexServiceTier(tier: CodexServiceTier | undefined): void {
+		parseCodexServiceTier(tier);
+		if (tier === "fast" && !isCodexFastModeAvailable(this.model)) {
+			throw new Error("Fast mode is unavailable for the current model: select a supported OpenAI Codex model.");
+		}
+		this.sessionManager.appendCustomEntry(CODEX_SERVICE_TIER_ENTRY_TYPE, { tier: tier ?? null });
+		this._emit({ type: "codex_service_tier_changed", status: this.getCodexServiceTierStatus() });
+	}
+
+	getCodexServiceTierStatus(): CodexServiceTierStatus {
+		const branch = this.sessionManager.getBranch();
+		const status: CodexServiceTierStatus = {
+			...resolveCodexServiceTierPreference(branch, this.settingsManager.getCodexServiceTier()),
+			available: isCodexFastModeAvailable(this.model),
+		};
+		if (this.model?.provider !== "openai-codex" || this.model.api !== "openai-codex-responses") return status;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.provider === this.model.provider &&
+				entry.message.api === this.model.api &&
+				entry.message.model === this.model.id
+			) {
+				// Missing metadata on the latest attempt is unknown, never the previous success.
+				const tier = entry.message.serviceTier;
+				return { ...status, sent: tier?.sent, reported: tier?.reported, costEstimated: tier?.costEstimated };
+			}
+		}
+		return status;
 	}
 
 	/** Current thinking level */
@@ -3400,7 +3453,10 @@ export class AgentSession {
 					apiKey,
 					headers,
 					env,
-					streamFn: this.agent.streamFunction,
+					streamFn: withCodexServiceTierSnapshot(
+						this.agent.streamFunction,
+						resolveCodexServiceTierRequest(requestModel, this.codexServiceTier),
+					),
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
 					promptCacheKey: this.agent.promptCacheKey,
@@ -3712,7 +3768,10 @@ export class AgentSession {
 				apiKey,
 				headers,
 				env,
-				streamFn: this.agent.streamFunction,
+				streamFn: withCodexServiceTierSnapshot(
+					this.agent.streamFunction,
+					resolveCodexServiceTierRequest(requestModel, this.codexServiceTier),
+				),
 				retry: this.settingsManager.getRetrySettings(),
 				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
 				promptCacheKey: this.agent.promptCacheKey,
@@ -4950,7 +5009,10 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
-					streamFn: this.agent.streamFunction,
+					streamFn: withCodexServiceTierSnapshot(
+						this.agent.streamFunction,
+						resolveCodexServiceTierRequest(requestModel, this.codexServiceTier),
+					),
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
 				});

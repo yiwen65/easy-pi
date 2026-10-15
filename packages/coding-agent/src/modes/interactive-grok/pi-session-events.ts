@@ -124,6 +124,11 @@ export type PiSessionUiEvent =
 	| { sequence: number; kind: "session-info"; name: string | undefined }
 	| {
 			sequence: number;
+			kind: "codex-service-tier";
+			status: Extract<AgentSessionEvent, { type: "codex_service_tier_changed" }>["status"];
+	  }
+	| {
+			sequence: number;
 			kind: "thinking-level";
 			level: Extract<AgentSessionEvent, { type: "thinking_level_changed" }>["level"];
 	  }
@@ -267,6 +272,8 @@ export function mapAgentSessionEvent(event: AgentSessionEvent, sequence: number)
 			return { sequence, kind: "session-info", name: event.name };
 		case "thinking_level_changed":
 			return { sequence, kind: "thinking-level", level: event.level };
+		case "codex_service_tier_changed":
+			return { sequence, kind: "codex-service-tier", status: { ...event.status } };
 		case "bash_execution_update":
 			return { sequence, kind: "bash-output", id: event.id, delta: event.delta };
 		case "background_task_started":

@@ -84,6 +84,37 @@ function contents(root: string): Record<string, string> {
 }
 
 describe("offline normalized model generation", () => {
+	it("adds only verified Codex Fast capabilities and preserves explicit overrides", () => {
+		const f = fixture();
+		const codex: Model<"openai-codex-responses"> = {
+			...chat,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+		};
+		writeFileSync(
+			f.snapshotPath,
+			JSON.stringify({
+				generatedAt,
+				models: [
+					...["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-unknown"].map((id) => ({ ...codex, id })),
+					{ ...codex, id: "gpt-5.4", compat: { supportsFastMode: false } },
+					{ ...codex, provider: "openai", id: "gpt-6.1-sol", api: "openai-responses" },
+				],
+			}),
+		);
+		const result = f.run(["--normalized-input", f.snapshotPath]);
+		expect(result.status, result.stderr).toBe(0);
+		const values = JSON.parse(
+			readFileSync(join(f.isolatedPackageRoot, "src/providers/data/openai-codex.json"), "utf8"),
+		)["openai-codex-responses"];
+		for (const id of ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-sol"])
+			expect(values[`chat:${id}`].compat.supportsFastMode).toBe(true);
+		expect(values["chat:gpt-unknown"].compat).toBeUndefined();
+		expect(values["chat:gpt-5.4"].compat.supportsFastMode).toBe(false);
+		const openai = JSON.parse(readFileSync(join(f.isolatedPackageRoot, "src/providers/data/openai.json"), "utf8"));
+		expect(openai["openai-responses"]["chat:gpt-6.1-sol"].compat).toBeUndefined();
+		expect(() => validateGeneratedModelData(f.isolatedPackageRoot)).not.toThrow();
+	});
 	it("preserves mixed operation records, float/sentinel prices, timestamp and hashes, with keyed public chat projections", () => {
 		const f = fixture();
 		const result = f.run(["--normalized-input", f.snapshotPath, "--json-output", f.outputDir]);

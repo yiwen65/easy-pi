@@ -1,6 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
+import type { CodexServiceTierStatus } from "../src/core/codex-service-tier.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import {
 	computeSessionUsageStats,
@@ -30,6 +31,7 @@ function createSession(options: {
 	compactionUsage?: AssistantUsage;
 	toolUsage?: AssistantUsage;
 	usingSubscription?: boolean;
+	tierStatus?: CodexServiceTierStatus;
 }): AgentSession {
 	const usages = options.usages ?? (options.usage === undefined ? [] : [options.usage]);
 	const entries: Array<Record<string, unknown>> = [];
@@ -84,6 +86,7 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getCodexServiceTierStatus: () => options.tierStatus,
 		modelRuntime: {
 			isUsingSubscription: () => options.usingSubscription ?? false,
 		},
@@ -154,6 +157,38 @@ describe("FooterComponent width handling", () => {
 		const lines = footer.render(width);
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+	});
+
+	it("wraps truthful Fast status without replacing model/effort or adding unset noise", () => {
+		const plain = new FooterComponent(createSession({ sessionName: "" }), createFooterData(1));
+		expect(plain.render(120)).toHaveLength(2);
+		for (const reported of ["default", "priority", undefined]) {
+			const footer = new FooterComponent(
+				createSession({
+					sessionName: "",
+					modelId: "test-model",
+					reasoning: true,
+					thinkingLevel: "high",
+					tierStatus: { preference: "fast", source: "session", available: true, reported, costEstimated: true },
+				}),
+				createFooterData(1),
+			);
+			expect(stripAnsi(footer.render(160)[1])).toContain("test-model • high");
+			for (const width of [4, 12, 24, 40, 80, 160]) {
+				const lines = footer.render(width);
+				expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+				const status = stripAnsi(lines.slice(2).join("")).replace(/\s/g, "");
+				expect(status).toContain("Fastrequested");
+				expect(status).toContain(
+					reported === "default"
+						? "latestupstreamStandard"
+						: reported === "priority"
+							? "latestupstreamFast"
+							: "upstreamtierunknown",
+				);
+				expect(status).toContain("costsestimated");
+			}
 		}
 	});
 

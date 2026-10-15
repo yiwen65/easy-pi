@@ -317,6 +317,8 @@ export type AnthropicRefusalFallback = "default" | readonly { model: string }[];
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
+	/** Codex service preference. Fast is sent as priority; other providers ignore this option. */
+	serviceTier?: "default" | "fast" | "priority";
 	/** Provider-neutral tool selection for simple requests. Default: "auto". */
 	toolChoice?: ToolChoice;
 	reasoning?: ThinkingLevel;
@@ -439,6 +441,14 @@ export interface AssistantMessage {
 	model: string;
 	responseModel?: string; // Concrete `chunk.model` when different from the requested `model` (e.g. OpenRouter `auto` -> `anthropic/...`)
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Codex tier observations. Missing/null reported means unknown, not the requested tier. */
+	serviceTier?: {
+		requested?: string | null;
+		sent?: string | null;
+		reported?: string | null;
+		/** Tier pricing uses compatibility estimates rather than verified billing rates. */
+		costEstimated?: boolean;
+	};
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
@@ -665,6 +675,8 @@ export interface OpenAICompletionsCompat {
 
 /** Compatibility settings for OpenAI Responses APIs. */
 export interface OpenAIResponsesCompat {
+	/** Codex model-declared Fast eligibility, not account entitlement. Missing means unknown. */
+	supportsFastMode?: boolean;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: true. */
 	supportsDeveloperRole?: boolean;
 	/** Session-affinity header format: `openai` sends `session_id` and `x-client-request-id`; `openai-nosession` sends `x-client-request-id`; `openrouter` sends `x-session-id`. Does not affect the `prompt_cache_key` body param, which is governed by cache retention. Default: auto-detected. */

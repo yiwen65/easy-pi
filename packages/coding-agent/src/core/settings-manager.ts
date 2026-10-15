@@ -8,6 +8,7 @@ import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import { type CodexServiceTier, parseCodexServiceTier } from "./codex-service-tier.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 
@@ -105,6 +106,8 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
+	/** Default Codex preference; omission leaves the provider's tier unspecified. */
+	codexServiceTier?: CodexServiceTier;
 	/** Global-only defaults for newly spawned children; omission inherits the caller per field. */
 	subagentModel?: string; // Fully qualified provider/model
 	subagentThinkingLevel?: ThinkingLevel;
@@ -832,6 +835,16 @@ export class SettingsManager {
 	setSubagentEnabled(enabled: boolean | undefined): void {
 		this.globalSettings.subagentEnabled = enabled;
 		this.markModified("subagentEnabled");
+		this.save();
+	}
+
+	getCodexServiceTier(): CodexServiceTier | undefined {
+		return parseCodexServiceTier(this.settings.codexServiceTier);
+	}
+
+	setCodexServiceTier(tier: CodexServiceTier | undefined): void {
+		this.globalSettings.codexServiceTier = parseCodexServiceTier(tier);
+		this.markModified("codexServiceTier");
 		this.save();
 	}
 

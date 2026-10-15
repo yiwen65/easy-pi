@@ -6,7 +6,7 @@ import {
 	type RetryCallbacks,
 	type RetryPolicy,
 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Model, ThinkingBudgets, Tool } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Model, SimpleStreamOptions, ThinkingBudgets, Tool } from "@earendil-works/pi-ai/compat";
 import { createCompactionSummaryMessage } from "../../messages.ts";
 import {
 	buildSessionContext,
@@ -647,6 +647,8 @@ export function createPiAiCompleteFn(options: {
 	model: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	thinkingBudgets?: ThinkingBudgets;
+	/** Resolved at the session request boundary, independently of reasoning effort. */
+	serviceTier?: SimpleStreamOptions["serviceTier"];
 	apiKey?: string;
 	headers?: Record<string, string>;
 	env?: Record<string, string>;
@@ -673,6 +675,7 @@ export function createPiAiCompleteFn(options: {
 				// Match the main agent's off handling and provider-specific budget mapping.
 				reasoning: options.thinkingLevel === "off" ? undefined : options.thinkingLevel,
 				thinkingBudgets: options.thinkingBudgets,
+				...(options.serviceTier !== undefined ? { serviceTier: options.serviceTier } : {}),
 				cacheRetention: "short",
 				promptCacheKey: options.promptCacheKey,
 				cacheAffinityId: options.cacheAffinityId,

@@ -348,6 +348,67 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("codexServiceTier", () => {
+		it("keeps omission distinct from Standard and Fast and persists clearing", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getCodexServiceTier()).toBeUndefined();
+			for (const tier of ["fast", "default", undefined] as const) {
+				manager.setCodexServiceTier(tier);
+				await manager.flush();
+				expect(manager.getCodexServiceTier()).toBe(tier);
+				expect(SettingsManager.create(projectDir, agentDir).getCodexServiceTier()).toBe(tier);
+			}
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"))).not.toHaveProperty(
+				"codexServiceTier",
+			);
+		});
+
+		it("uses only trusted project settings ahead of global defaults", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ codexServiceTier: "fast" }));
+			writeFileSync(
+				join(projectDir, CONFIG_DIR_NAME, "settings.json"),
+				JSON.stringify({ codexServiceTier: "default" }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+			expect(manager.getCodexServiceTier()).toBe("fast");
+			manager.setProjectTrusted(true);
+			expect(manager.getCodexServiceTier()).toBe("default");
+			manager.setProjectTrusted(false);
+			expect(manager.getCodexServiceTier()).toBe("fast");
+		});
+
+		it("preserves project precedence when saving or clearing the global default", async () => {
+			writeFileSync(
+				join(projectDir, CONFIG_DIR_NAME, "settings.json"),
+				JSON.stringify({ codexServiceTier: "fast" }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setCodexServiceTier("default");
+			expect(manager.getCodexServiceTier()).toBe("fast");
+			manager.setCodexServiceTier(undefined);
+			await manager.flush();
+			expect(manager.getCodexServiceTier()).toBe("fast");
+		});
+
+		it.each(["priority", "flex", "FAST", null, true, 1])("rejects invalid loaded value %s", (tier) => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ codexServiceTier: tier }));
+			expect(() => SettingsManager.create(projectDir, agentDir).getCodexServiceTier()).toThrow(
+				"Invalid codexServiceTier",
+			);
+		});
+
+		it("validates writes before mutation and does not let undefined overrides erase a default", () => {
+			const manager = SettingsManager.inMemory({ codexServiceTier: "fast" });
+			// @ts-expect-error exercise untyped callers
+			expect(() => manager.setCodexServiceTier("priority")).toThrow("Invalid codexServiceTier");
+			expect(manager.getCodexServiceTier()).toBe("fast");
+			manager.applyOverrides({ codexServiceTier: undefined });
+			expect(manager.getCodexServiceTier()).toBe("fast");
+			manager.applyOverrides({ codexServiceTier: "default" });
+			expect(manager.getCodexServiceTier()).toBe("default");
+		});
+	});
+
 	describe("httpIdleTimeoutMs", () => {
 		it("should default to 5 minutes", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

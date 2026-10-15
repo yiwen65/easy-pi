@@ -78,6 +78,93 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
+	it.each([undefined, false, true] as const)(
+		"retains bundled Codex Fast capability when a newer remote declaration is %s",
+		async (remoteFast) => {
+			const local: Model<"openai-codex-responses"> = {
+				...model("gpt-6.1-sol"),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				compat: { supportsFastMode: true },
+			};
+			const remote = {
+				...local,
+				name: "New remote name",
+				contextWindow: 2000,
+				compat: { supportsToolSearch: true, ...(remoteFast === undefined ? {} : { supportsFastMode: remoteFast }) },
+			};
+			const make = () =>
+				withRemoteCatalog(
+					createProvider({
+						id: "openai-codex",
+						auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+						models: [local],
+						api: {
+							stream: () => {
+								throw new Error("not used");
+							},
+							streamSimple: () => {
+								throw new Error("not used");
+							},
+						},
+					}),
+					"https://catalog.test",
+					1000,
+				);
+			const provider = make();
+			const store = new InMemoryModelsStore();
+			const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(JSON.stringify([remote, { ...remote, id: "unknown-model" }]), {
+					headers: { "last-modified": new Date(2000).toUTCString() },
+				}),
+			);
+			await refreshProvider(provider, store);
+			for (const current of [provider, make()]) {
+				if (current !== provider) await refreshProvider(current, store, { allowNetwork: false });
+				const known = current.getModels().find((entry) => entry.id === local.id);
+				expect(known).toMatchObject({
+					name: "New remote name",
+					contextWindow: 2000,
+					compat: { supportsToolSearch: true, supportsFastMode: remoteFast ?? true },
+				});
+				expect(current.getAllModels?.().find((entry) => entry.id === local.id)).toEqual(known);
+				const unknown = current.getModels().find((entry) => entry.id === "unknown-model");
+				if (remoteFast === undefined) expect(unknown?.compat ?? {}).not.toHaveProperty("supportsFastMode");
+				else expect(unknown?.compat).toMatchObject({ supportsFastMode: remoteFast });
+			}
+			expect(fetchSpy).toHaveBeenCalledOnce();
+		},
+	);
+
+	it("does not inherit Codex Fast capability across a remote API change", async () => {
+		const local: Model<"openai-codex-responses"> = {
+			...model("shared"),
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+			compat: { supportsFastMode: true },
+		};
+		const provider = withRemoteCatalog(
+			createProvider({
+				id: "openai-codex",
+				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+				models: [local],
+				api: {
+					stream: () => {
+						throw new Error("not used");
+					},
+					streamSimple: () => {
+						throw new Error("not used");
+					},
+				},
+			}),
+		);
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify([{ ...local, api: "openai-responses", compat: {} }])),
+		);
+		await refreshProvider(provider, new InMemoryModelsStore());
+		expect(provider.getModels()[0].api).toBe("openai-responses");
+		expect(provider.getModels()[0].compat ?? {}).not.toHaveProperty("supportsFastMode");
+	});
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>

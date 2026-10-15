@@ -7,6 +7,15 @@ import { bindNativeSession } from "../extensions/native-session-binding.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import {
+	CODEX_SERVICE_TIER_SNAPSHOT,
+	type CodexServiceTier,
+	type CodexServiceTierSnapshotOptions,
+	isCodexFastModeAvailable,
+	parseCodexServiceTier,
+	resolveCodexServiceTierPreference,
+	resolveCodexServiceTierRequest,
+} from "./codex-service-tier.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { createToolNameMatcher } from "./mcp-servers.ts";
@@ -51,6 +60,8 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
+	/** Initial branch-scoped Codex preference. Omission preserves restored state and settings. */
+	codexServiceTier?: CodexServiceTier;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -278,6 +289,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
+	parseCodexServiceTier(options.codexServiceTier);
+	if (options.codexServiceTier === "fast" && !isCodexFastModeAvailable(model)) {
+		throw new Error("Fast mode is unavailable for the current model: select a supported OpenAI Codex model.");
+	}
+
 	// `codemode` ships active: MCP servers default to script-only exposure, so a fresh session
 	// reaches their tools without extra configuration.
 	const defaultActiveToolNames = ["read", "bash", "edit", "write", "codemode", ...BACKGROUND_TASK_TOOL_NAMES];
@@ -352,6 +368,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
+			const { [CODEX_SERVICE_TIER_SNAPSHOT]: snapshotted, ...requestOptions }: CodexServiceTierSnapshotOptions =
+				options ?? {};
+			const serviceTier = snapshotted
+				? requestOptions.serviceTier
+				: resolveCodexServiceTierRequest(
+						model,
+						resolveCodexServiceTierPreference(sessionManager.getBranch(), settingsManager.getCodexServiceTier())
+							.preference,
+						requestOptions.serviceTier,
+					);
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
@@ -362,7 +388,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const headerRunner = extensionRunnerRef.current;
 			return modelRuntime.streamSimple(model, context, {
-				...options,
+				...requestOptions,
+				...(serviceTier !== undefined ? { serviceTier } : {}),
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
@@ -442,6 +469,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		backgroundBash: options.backgroundBash,
 	});
+	if (options.codexServiceTier !== undefined) {
+		session.setCodexServiceTier(options.codexServiceTier);
+	}
 	bindNativeSession(session);
 	const extensionsResult = resourceLoader.getExtensions();
 

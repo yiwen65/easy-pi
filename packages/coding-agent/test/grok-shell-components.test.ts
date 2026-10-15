@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
+import type { CodexServiceTierStatus } from "../src/core/codex-service-tier.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import {
 	CompactionStatusIndicator,
@@ -87,6 +88,7 @@ function createStubSession(options: {
 	contextPercent?: number;
 	contextWindow?: number;
 	usingSubscription?: boolean;
+	tierStatus?: CodexServiceTierStatus;
 }): AgentSession {
 	const entries = options.usage ? [{ type: "message", message: { role: "assistant", usage: options.usage } }] : [];
 	return {
@@ -104,6 +106,7 @@ function createStubSession(options: {
 			getSessionName: () => null,
 			getCwd: () => "/tmp/project",
 		},
+		getCodexServiceTierStatus: () => options.tierStatus,
 		getContextUsage: () => ({
 			contextWindow: options.contextWindow ?? 272_000,
 			percent: options.contextPercent ?? 35.8,
@@ -222,6 +225,49 @@ describe("Grok shell components", () => {
 		}
 		frame.setSession(createStubSession({ modelId: "replacement", thinkingLevel: "off" }));
 		expect(stripTerminalSequences(frame.render(80).at(-1) ?? "")).toContain("replacement • off");
+	});
+
+	it("keeps Fast requested separate from latest upstream tier and preserves ANSI metadata on resize", () => {
+		const session = createStubSession({
+			modelId: "模型-test",
+			tierStatus: {
+				preference: "fast",
+				source: "session",
+				available: true,
+				sent: "priority",
+				reported: "default",
+				costEstimated: true,
+			},
+		});
+		const frame = new GrokComponentFactory(markerTheme).createEditorFrame(new EditorHost(), session);
+		expect(frame.render(180).at(-1)).toContain(`${A}模型-test${X}${M} • ${X}${W}high${X}`);
+		for (const width of [6, 12, 24, 40, 80, 180]) {
+			expectWithinWidth(frame, [width]);
+			const label = stripTerminalSequences(frame.render(width).slice(2).join("")).replace(/[╰╯│─\s]/g, "");
+			for (const text of ["模型-test•high", "Fastrequested", "latestupstreamStandard", "costsestimated"])
+				expect(label).toContain(text);
+			const compact = frame.renderCompactMetadata(width);
+			expect(compact.every((line) => visibleWidth(line) <= width)).toBe(true);
+			expect(stripTerminalSequences(compact.slice(1).join("")).replace(/\s/g, "")).toContain(
+				"Fastrequested·latestupstreamStandard",
+			);
+		}
+		for (const [reported, available, expected] of [
+			[undefined, true, "upstream tier unknown"],
+			["priority", true, "latest upstream Fast"],
+			["fast", false, "unavailable for this model"],
+		] as const) {
+			frame.setSession(
+				createStubSession({ tierStatus: { preference: "fast", source: "session", available, reported } }),
+			);
+			expect(stripTerminalSequences(frame.render(180).join("\n"))).toContain(expected);
+		}
+		frame.setSession(
+			createStubSession({
+				tierStatus: { preference: "default", source: "settings", available: true, reported: "default" },
+			}),
+		);
+		expect(stripTerminalSequences(frame.render(180).join("\n"))).toContain("Standard requested");
 	});
 
 	it("keeps input instead of borders at one and two columns", () => {
@@ -430,6 +476,44 @@ describe("Grok shell components", () => {
 				expect(footerText).not.toMatch(/gpt-5\.6-sol|high|openai-codex|\(sub\)|\(auto\)|42\.6%|272k/);
 				expect(viewport[editorBottom]).toContain(" gpt-5.6-sol • high ─╯");
 				expect(viewport[0]).toContain("43%");
+			}
+		} finally {
+			ui.stop();
+			view.dispose();
+		}
+	});
+
+	it("keeps Fast status, model, effort and input in fullscreen through narrow/wide resize", async () => {
+		const terminal = new VirtualTerminal(120, 30);
+		const ui = new TuiAltScreen(terminal);
+		const view = new GrokComponentFactory(markerTheme).createInteractiveView({
+			document: new StubComponent(["transcript"]),
+			transcriptViewport: new ScrollView(new StubComponent(["transcript"]), { primary: true }),
+			editorHost: new EditorHost(),
+			location: { path: "/workspace" },
+			contextPercent: 42,
+			session: createStubSession({
+				tierStatus: { preference: "fast", source: "session", available: true, reported: "default" },
+			}),
+		});
+		ui.setLayoutRoot(view.fullscreenRoot);
+		ui.start();
+		try {
+			for (const width of [120, 24, 20, 80, 120]) {
+				terminal.resize(width, 30);
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				const text = viewport.join("").replace(/[╰╯│─\s]/g, "");
+				for (const label of [
+					"transcript",
+					"writeamessage",
+					"gpt-5.6-sol•high",
+					"Fastrequested",
+					"latestupstreamStandard",
+					"costsestimated",
+				])
+					expect(text).toContain(label);
+				expect(viewport.every((line) => visibleWidth(line) <= width)).toBe(true);
 			}
 		} finally {
 			ui.stop();

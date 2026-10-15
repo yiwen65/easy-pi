@@ -67,6 +67,7 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
+		supportsFastMode: false, // Product Fast controls are limited to the Codex adapter.
 		supportsDeveloperRole: model.compat?.supportsDeveloperRole ?? true,
 		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,

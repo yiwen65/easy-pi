@@ -620,6 +620,11 @@ export async function processResponsesStream<TApi extends Api>(
 		if (response?.id) {
 			output.responseId = response.id;
 		}
+		// Only adapters that opt into tier observations initialize this metadata.
+		// Preserve the raw report, including null; never use pricing's request fallback here.
+		if (output.serviceTier && response?.service_tier !== undefined) {
+			output.serviceTier.reported = response.service_tier;
+		}
 		if (response?.usage) {
 			const inputDetails = response.usage.input_tokens_details as
 				| { cached_tokens?: number; cache_write_tokens?: number }

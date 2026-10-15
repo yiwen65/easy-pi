@@ -203,6 +203,43 @@ describe("protocol validation", () => {
 		expect(parseServerMessage(message)).toEqual(message);
 	});
 
+	test.each([{}, { sent: "priority", reported: "default", costEstimated: true }, { reported: null }])(
+		"accepts optional raw tier observations without inferring a result (%j)",
+		(serviceTier) => {
+			const message = itemMessage({
+				id: "tier-1",
+				role: "assistant",
+				content: [],
+				model: { provider: "openai-codex", id: "gpt-6.1-sol" },
+				status: "complete",
+				stopReason: "stop",
+				timestamp: 1,
+				serviceTier,
+			});
+			expect(parseServerMessage(message)).toEqual(message);
+		},
+	);
+
+	test.each([{ reported: 123 }, { costEstimated: "yes" }, { reported: "priority", effective: true }])(
+		"rejects invalid or unmodeled tier observations (%j)",
+		(serviceTier) => {
+			expect(() =>
+				parseServerMessage(
+					itemMessage({
+						id: "tier-1",
+						role: "assistant",
+						content: [],
+						model: { provider: "openai-codex", id: "gpt-6.1-sol" },
+						status: "complete",
+						stopReason: "stop",
+						timestamp: 1,
+						serviceTier,
+					}),
+				),
+			).toThrow(ProtocolValidationError);
+		},
+	);
+
 	test.each([
 		{ status: "streaming", stopReason: "stop" },
 		{ status: "complete" },

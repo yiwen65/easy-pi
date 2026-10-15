@@ -30,12 +30,31 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
+| `codexServiceTier` | string | omitted | `"fast"` requests accelerated Codex processing; `"default"` explicitly requests Standard. Independent of thinking level |
 | `subagentModel` | string | inherit caller | Global-only default `provider/model` for newly spawned Subagents; does not change root or existing children |
 | `subagentThinkingLevel` | string | inherit caller | Global-only default child effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `subagentEnabled` | boolean | `true` | Team collaboration tools (`spawn_agent` and peers). `false` removes the seven tools, the collaboration contract, and the agents panel from new sessions; existing team history remains inspectable |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `showCacheMissNotices` | boolean | `false` | Show transcript notices for significant prompt-cache misses and compaction or branch-summary usage |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level. Anthropic, Google, and Bedrock use these natively. OpenAI-compatible models use them when `compat.thinkingTokenBudgetField` (or `supportsThinkingTokenBudget`) is set. |
+
+#### Codex Fast mode
+
+For supported `openai-codex` models, use `/fast on`, `/fast off`, or `/fast` to toggle the current branch's preference. `/fast status` shows the source, model capability, and latest matching response's sent/reported tiers. Changes apply to the next model request, not an in-flight response, and survive resume, tree navigation, fork and clone on the selected branch.
+
+To save a default, select **Codex service tier default** in `/settings`, or edit easy-pi's `~/.epi/agent/settings.json` (trusted `.epi/settings.json` overrides global values):
+
+```json
+{ "codexServiceTier": "fast" }
+```
+
+The menu saves the global default and resets the current session override to configuration; a trusted project value still wins. **Unspecified** removes the global default, while **Standard** explicitly requests `service_tier: "default"`. Without any preference, requests keep their previous unspecified-tier behavior. `/fast` never changes saved defaults.
+
+Fast uses the same model and reasoning effort, sending `service_tier: "priority"`. Initial built-in capability declarations cover GPT-6.1 Sol, GPT-6 Astra, and GPT-5.6 Sol. Unknown/unsupported models cannot be enabled with `/fast on`; a saved Fast preference remains visible but inactive until a capable Codex model is selected. Other providers receive no tier from this setting. See [model compatibility overrides](models.md#openai-compatibility) for explicit custom capability declarations.
+
+Fast uses extra subscription usage or credits, including same-session compaction and branch summaries. Native child sessions use their own settings snapshot and model capability, not the parent's temporary `/fast` override; existing children are unaffected by later parent toggles. Standalone summaries do not acquire a Fast default implicitly.
+
+**Fast requested is not proof of Fast service.** Model capability does not verify account or regional eligibility. The UI preserves the latest upstream report (`default`, `priority`/`fast`, or unknown), independently of the request. Costs are compatibility estimates, not a subscription bill. Codex's historical default-echo pricing estimate is retained and never overwrites the raw upstream report. Unavailable requests are not silently resubmitted at Standard.
 
 #### Subagent defaults
 

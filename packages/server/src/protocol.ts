@@ -90,6 +90,7 @@ type _AiAssistantMessageFieldsAccountedFor = Assert<
 		| "model"
 		| "responseModel"
 		| "responseId"
+		| "serviceTier"
 		| "diagnostics"
 		| "usage"
 		| "stopReason"
@@ -310,6 +311,18 @@ export function toProtocolAssistantMessage(
 		...(message.responseModel === undefined
 			? {}
 			: { responseModel: identifier(message.responseModel, "Assistant response model") }),
+		...(message.serviceTier === undefined
+			? {}
+			: {
+					serviceTier: {
+						...(message.serviceTier.requested === undefined ? {} : { requested: message.serviceTier.requested }),
+						...(message.serviceTier.sent === undefined ? {} : { sent: message.serviceTier.sent }),
+						...(message.serviceTier.reported === undefined ? {} : { reported: message.serviceTier.reported }),
+						...(message.serviceTier.costEstimated === undefined
+							? {}
+							: { costEstimated: message.serviceTier.costEstimated }),
+					},
+				}),
 		...(usage ? { usage } : {}),
 		timestamp: timestamp(message.timestamp),
 	} as const;

@@ -83,6 +83,8 @@ export interface GenerateBranchSummaryOptions {
 	reserveTokens?: number;
 	/** Optional session stream function. Used to preserve SDK request behavior without mutating agent state. */
 	streamFn?: StreamFn;
+	/** Resolved session service preference; standalone summaries leave it unspecified. */
+	serviceTier?: SimpleStreamOptions["serviceTier"];
 	/** Retry policy for transient summarization errors. Reuses coding-agent's `settings.retry`. */
 	retry?: RetryPolicy;
 	/** Optional callbacks for retry reporting (e.g. TUI retry indicators). */
@@ -352,7 +354,14 @@ export async function generateBranchSummary(
 	// without running through agent state/events. Retried via completeSummarization
 	// so transient stream drops reuse the configured retry policy.
 	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens: 2048 };
+	const requestOptions: SimpleStreamOptions = {
+		apiKey,
+		headers,
+		env,
+		signal,
+		maxTokens: 2048,
+		...(options.serviceTier !== undefined ? { serviceTier: options.serviceTier } : {}),
+	};
 	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
 
 	// Check for responses that cannot safely be persisted

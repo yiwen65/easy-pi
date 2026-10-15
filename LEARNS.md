@@ -602,3 +602,12 @@
 - Correct approach: 内部不可变 journal payload 按需读取，保留原 inode 的共享只读描述符；修复/换文件后旧分支仍可访问。常用归属查询只索引 assistant/result/call/tool ID，并保留 canonical branch 校验；不得删历史分支来降内存。
 - Prevention: 先流式统计文件大小与条目类型；做受限堆的加载、clone/fork、连续 append 回归，另用 throwing getter 证明频繁查询不解码历史正文。数据恢复只操作完整副本并核验原始 SHA256。
 - Verified by: 2026-10-15 `01a0c4e0-large-recovery-session.test.ts` 修复前 96 MiB 堆下 OOM、修复后通过；真实 9272 条记录在 512 MiB 堆限制下约 1.94 秒恢复，GC 后堆约 171 MB，875 个结果归属重复查询约 6 ms，原始文件未修改。
+
+## Codex 摘要重试——已解析的“未指定”也是请求快照
+
+- Wrong approach: 只透传明确的 Fast/Standard，未指定时省略选项；用替换 `agent.streamFunction` 的 custom-stream 测试证明摘要重试已固定档位。
+- Why it failed: 实际 SDK stream seam 将缺失字段解释为“重新读取当前偏好”；摘要首次失败期间用户开启 Fast，会把同一摘要的重试从省略档位升级为 Fast，产生额外消费。custom stream 绕过了这次解析，原测试发现不了。
+- Recognition signal: 实际 SDK + mocked runtime 的 manual/auto/branch 回归捕获 `[undefined, "fast"]`，而期望 `[undefined, undefined]`。
+- Correct approach: 摘要边界固定完整解析结果，包括省略状态；内部 snapshot 标记在 SDK 消费后移除，不向 provider 泄漏，也不拿 Standard/null 代替省略。普通请求的 undefined 仍继承当前默认值。
+- Prevention: 涉及动态默认配置的重试，必须穿过真实 SDK seam 验证 unset、显式值、重试间切换和下一条普通请求；不要只测替换掉 SDK 的 custom stream。
+- Verified by: 2026-10-15 `suite/codex-service-tier-sdk-summaries.test.ts` 修复前仅三个 unset 场景失败，修复后九个场景通过；协调者独立复跑六文件 67/67 通过。

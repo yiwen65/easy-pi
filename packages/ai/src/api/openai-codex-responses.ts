@@ -241,6 +241,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			api: "openai-codex-responses" as Api,
 			provider: model.provider,
 			model: model.id,
+			serviceTier: options?.serviceTier !== undefined ? { requested: options.serviceTier } : {},
 			usage: {
 				input: 0,
 				output: 0,
@@ -276,6 +277,15 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
+			}
+			// Snapshot top-level hook fields before awaiting transport setup, and normalize aliases.
+			body = { ...body };
+			if (body.service_tier === "fast") {
+				body.service_tier = "priority";
+			}
+			const sentServiceTier = body.service_tier;
+			if (output.serviceTier && sentServiceTier !== undefined) {
+				output.serviceTier.sent = sentServiceTier;
 			}
 			const websocketRequestId = codexSessionId || uuidv7();
 			const sseHeaders = buildSSEHeaders(
@@ -479,7 +489,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
 			}
-			await processStream(response, output, stream, model, grammarToolInputProperties, options);
+			await processStream(response, output, stream, model, grammarToolInputProperties, sentServiceTier, options);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -517,6 +527,7 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 	const base = {
 		...buildBaseOptions(model, context, options, apiKey),
 		toolChoice: options?.toolChoice,
+		serviceTier: options?.serviceTier,
 	} satisfies OpenAICodexResponsesOptions;
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
@@ -579,7 +590,7 @@ function buildRequestBody(
 	}
 
 	if (options?.serviceTier !== undefined) {
-		body.service_tier = options.serviceTier;
+		body.service_tier = options.serviceTier === "fast" ? "priority" : options.serviceTier;
 	}
 
 	if (toolPlacement.immediate.length > 0) {
@@ -613,6 +624,7 @@ function getServiceTierCostMultiplier(
 	switch (serviceTier) {
 		case "flex":
 			return 0.5;
+		case "fast":
 		case "priority":
 			return model.id === "gpt-5.5" ? 2.5 : 2;
 		default:
@@ -624,8 +636,12 @@ function applyServiceTierPricing(
 	usage: Usage,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	model: Pick<Model<"openai-codex-responses">, "id">,
+	metadata: AssistantMessage["serviceTier"],
 ) {
 	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
+	if (metadata && (multiplier !== 1 || metadata.reported == null || serviceTier !== metadata.reported)) {
+		metadata.costEstimated = true;
+	}
 	if (multiplier === 1) return;
 
 	usage.cost.input *= multiplier;
@@ -639,7 +655,10 @@ function resolveCodexServiceTier(
 	responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 ): ResponseCreateParamsStreaming["service_tier"] | undefined {
-	if (responseServiceTier === "default" && (requestServiceTier === "flex" || requestServiceTier === "priority")) {
+	if (
+		responseServiceTier === "default" &&
+		(requestServiceTier === "flex" || requestServiceTier === "priority" || requestServiceTier === "fast")
+	) {
 		return requestServiceTier;
 	}
 	return responseServiceTier ?? requestServiceTier;
@@ -670,13 +689,15 @@ async function processStream(
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
+	sentServiceTier: ResponseCreateParamsStreaming["service_tier"],
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal), output), output, stream, model, {
-		serviceTier: options?.serviceTier,
+		serviceTier: sentServiceTier,
 		grammarToolInputProperties,
 		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		applyServiceTierPricing: (usage, serviceTier) =>
+			applyServiceTierPricing(usage, serviceTier, model, output.serviceTier),
 	});
 }
 
@@ -746,7 +767,12 @@ async function* mapCodexEvents(
 		}
 
 		if (type === "response.failed") {
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
+			const response = (
+				event as { response?: { service_tier?: unknown; error?: { code?: string; message?: string } } }
+			).response;
+			if (output.serviceTier && (typeof response?.service_tier === "string" || response?.service_tier === null)) {
+				output.serviceTier.reported = response.service_tier;
+			}
 			const code = response?.error?.code;
 			const message = response?.error?.message;
 			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
@@ -1533,10 +1559,11 @@ async function processWebSocketStream(
 			stream,
 			model,
 			{
-				serviceTier: options?.serviceTier,
+				serviceTier: requestBody.service_tier,
 				grammarToolInputProperties,
 				resolveServiceTier: resolveCodexServiceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				applyServiceTierPricing: (usage, serviceTier) =>
+					applyServiceTierPricing(usage, serviceTier, model, output.serviceTier),
 			},
 		);
 		if (options?.signal?.aborted) {

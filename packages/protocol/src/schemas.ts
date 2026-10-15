@@ -123,12 +123,19 @@ export const UserTranscriptItemSchema = StrictObject({
 	content: Type.Array(UserContentSchema),
 	timestamp: TimestampSchema,
 });
+const ServiceTierObservationSchema = StrictObject({
+	requested: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+	sent: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+	reported: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+	costEstimated: Type.Optional(Type.Boolean()),
+});
 const AssistantTranscriptItemProperties = {
 	id: IdSchema,
 	role: Type.Literal("assistant"),
 	content: Type.Array(AssistantContentSchema),
 	model: ModelRefSchema,
 	responseModel: Type.Optional(Type.String({ minLength: 1 })),
+	serviceTier: Type.Optional(ServiceTierObservationSchema),
 	usage: Type.Optional(UsageSchema),
 	timestamp: TimestampSchema,
 } as const;

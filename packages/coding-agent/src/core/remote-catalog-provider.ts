@@ -4,6 +4,7 @@ import {
 	isModelType,
 	type ModelsStoreEntry,
 	modelsAreEqual,
+	type OpenAIResponsesCompat,
 	type Provider,
 } from "@earendil-works/pi-ai";
 import { hasKnownModelType } from "@earendil-works/pi-ai/utils/model-operations";
@@ -19,8 +20,25 @@ function mergeModels(baseline: readonly AnyModel[], dynamic: readonly AnyModel[]
 	const merged = [...baseline];
 	for (const model of dynamic) {
 		const index = merged.findIndex((entry) => modelsAreEqual(entry, model));
-		if (index >= 0) merged[index] = model;
-		else merged.push(model);
+		if (index >= 0) {
+			const bundled = merged[index];
+			if (
+				isModelType(model, "chat") &&
+				isModelType(bundled, "chat") &&
+				model.provider === "openai-codex" &&
+				model.api === "openai-codex-responses" &&
+				bundled.api === "openai-codex-responses"
+			) {
+				const bundledCompat = bundled.compat as OpenAIResponsesCompat | undefined;
+				const remoteCompat = model.compat as OpenAIResponsesCompat | undefined;
+				// Older catalogs cannot declare this newly added field. Keep verified local
+				// knowledge on exact Codex collisions, but honor an explicit remote false.
+				merged[index] =
+					remoteCompat?.supportsFastMode === undefined && bundledCompat?.supportsFastMode !== undefined
+						? { ...model, compat: { ...remoteCompat, supportsFastMode: bundledCompat.supportsFastMode } }
+						: model;
+			} else merged[index] = model;
+		} else merged.push(model);
 	}
 	return merged;
 }

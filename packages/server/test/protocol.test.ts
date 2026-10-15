@@ -136,6 +136,38 @@ describe("pi-ai protocol bridge", () => {
 		assertValidServerPayload(result);
 	});
 
+	test.each([
+		undefined,
+		{},
+		{ requested: "fast", sent: "priority", reported: "default", costEstimated: true },
+		{ sent: "priority", reported: "fast", costEstimated: true },
+		{ requested: "default", sent: "default", reported: null },
+		{ sent: undefined, reported: undefined },
+	])("preserves raw service tier observations in the existing transcript (%j)", (serviceTier) => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-6.1-sol",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+			...(serviceTier === undefined ? {} : { serviceTier }),
+		};
+		const result = toProtocolAssistantMessage(message, { id: "tier-message" });
+		if (serviceTier === undefined) expect(result).not.toHaveProperty("serviceTier");
+		else expect(result.serviceTier).toEqual(JSON.parse(JSON.stringify(serviceTier)));
+		assertValidServerPayload(result);
+	});
+
 	test("maps user and tool messages without leaking non-JSON details", () => {
 		const user = {
 			role: "user",
