@@ -24,7 +24,9 @@ it.each(["low", "high", "off"] as const)(
 		const apiKey = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "synthetic-account" } })).toString("base64")}.test`;
 		const text = "Preserved the task and next action.";
 		let body: Record<string, unknown> | undefined;
+		let headers: Headers | undefined;
 		const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+			headers = new Headers(init?.headers);
 			const raw = init?.body;
 			body = JSON.parse(typeof raw === "string" ? raw : zstdDecompressSync(raw as Uint8Array).toString());
 			const events = [
@@ -69,6 +71,7 @@ it.each(["low", "high", "off"] as const)(
 			thinkingLevel,
 			apiKey,
 			sessionId: "synthetic-session",
+			cacheAffinityId: "parent-cache-affinity",
 			promptCacheKey: "shared-prefix",
 			diagnostics,
 			streamFn: (requestModel, context, options) =>
@@ -90,6 +93,9 @@ it.each(["low", "high", "off"] as const)(
 		});
 		if (thinkingLevel === "off") expect(body).not.toHaveProperty("reasoning");
 		else expect(body).toMatchObject({ reasoning: { effort: thinkingLevel } });
+		expect(headers?.get("session-id")).toBe("parent-cache-affinity");
+		expect(headers?.get("x-client-request-id")).toBe("synthetic-session");
+		expect(body).not.toHaveProperty("previous_response_id");
 		expect(body).not.toHaveProperty("max_output_tokens");
 		expect(result).toMatchObject({ stopReason: "stop", text });
 		expect(fetch).toHaveBeenCalledOnce();

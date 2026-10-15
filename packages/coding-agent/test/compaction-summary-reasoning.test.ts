@@ -111,6 +111,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 			model: createModel(),
 			thinkingLevel: "high",
 			apiKey: "k",
+			cacheAffinityId: "parent-cache-affinity",
 			promptCacheKey: "shared-compaction-prefix",
 			sessionId: "compact-session",
 		});
@@ -122,6 +123,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		expect(res).toEqual({ text: "extracted text", stopReason: "stop", usage: { input: 10, output: 5 } });
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
 			cacheRetention: "short",
+			cacheAffinityId: "parent-cache-affinity",
 			promptCacheKey: "shared-compaction-prefix",
 			sessionId: "compact-session",
 			toolChoice: "none",

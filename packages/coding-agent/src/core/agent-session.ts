@@ -3404,6 +3404,7 @@ export class AgentSession {
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason: "manual" }),
 					promptCacheKey: this.agent.promptCacheKey,
+					cacheAffinityId: this.agent.cacheAffinityId,
 					sessionId: this.sessionId,
 					diagnostics,
 				});
@@ -3715,6 +3716,7 @@ export class AgentSession {
 				retry: this.settingsManager.getRetrySettings(),
 				callbacks: this._summarizationRetryCallbacks({ source: "compaction", reason }),
 				promptCacheKey: this.agent.promptCacheKey,
+				cacheAffinityId: this.agent.cacheAffinityId,
 				sessionId: this.sessionId,
 				diagnostics,
 			});

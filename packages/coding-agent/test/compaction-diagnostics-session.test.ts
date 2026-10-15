@@ -126,7 +126,7 @@ describe("AgentSession compaction diagnostics", () => {
 		["threshold", "high"],
 		["threshold", "medium"],
 		["threshold", "off"],
-	] as const)("inherits the current main-agent effort for %s compaction at %s", async (reason, thinkingLevel) => {
+	] as const)("inherits main-agent settings for %s compaction at %s", async (reason, thinkingLevel) => {
 		const h = await createHarness({
 			model: { ...fauxModel, reasoning: true },
 			contextWindow: 60_000,
@@ -156,6 +156,8 @@ describe("AgentSession compaction diagnostics", () => {
 		}
 		h.session.setThinkingLevel(thinkingLevel);
 		h.agent.thinkingBudgets = { medium: 4096, high: 12288 };
+		h.agent.promptCacheKey = "parent-cache-prefix";
+		h.agent.cacheAffinityId = "parent-cache-affinity";
 		if (reason === "manual") await h.session.compact();
 		else await h.session.prompt("next real request");
 
@@ -163,6 +165,9 @@ describe("AgentSession compaction diagnostics", () => {
 		expect(captured[0]).toMatchObject({
 			reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
 			thinkingBudgets: h.agent.thinkingBudgets,
+			promptCacheKey: "parent-cache-prefix",
+			cacheAffinityId: "parent-cache-affinity",
+			sessionId: h.session.sessionId,
 		});
 		expect(h.session.thinkingLevel).toBe(thinkingLevel);
 		expect(diagnostics(h)[0]).toMatchObject({ reason, attempts: [{ reasoning: thinkingLevel }] });

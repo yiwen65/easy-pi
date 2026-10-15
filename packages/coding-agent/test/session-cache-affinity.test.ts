@@ -131,6 +131,41 @@ test("clone and fork join the parent cache lineage without sharing session ident
 	expect(f.runtime.session.agent.cacheAffinityId).toBe(parentId);
 });
 
+test.each(["clone", "fork"] as const)("compaction retains inherited cache routing after %s", async (kind) => {
+	const f = await fixture();
+	const parentId = f.runtime.session.sessionId;
+	await f.runtime.session.prompt(`parent context ${"verified work ".repeat(1000)}`);
+	let target = f.runtime.session.sessionManager.getLeafId()!;
+	if (kind === "fork") {
+		await f.runtime.session.prompt("selected user message");
+		target = f.runtime.session.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "message" && entry.message.role === "user")
+			.at(-1)!.id;
+	}
+	await f.runtime.fork(target, kind === "clone" ? { position: "at" } : undefined);
+	const child = f.runtime.session;
+	expect(child.sessionId).not.toBe(parentId);
+	expect(child.agent.cacheAffinityId).toBe(parentId);
+	const requests: Array<SimpleStreamOptions | undefined> = [];
+	f.faux.setResponses([
+		(_context: Context, options?: SimpleStreamOptions) => {
+			requests.push(options);
+			return fauxAssistantMessage("Preserve the current task and next action.");
+		},
+	]);
+
+	const result = await child.compact();
+
+	expect(result.summary).toContain("Preserve the current task");
+	expect(requests).toHaveLength(1);
+	expect(requests[0]).toMatchObject({
+		sessionId: child.sessionId,
+		cacheAffinityId: parentId,
+		promptCacheKey: parentId,
+	});
+});
+
 test("lineage survives reopen and repeated forks and is recorded once per branch", async () => {
 	const f = await fixture();
 	await f.runtime.session.prompt("root message");

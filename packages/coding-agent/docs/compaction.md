@@ -8,6 +8,8 @@ During a multi-turn agent run, Pi evaluates the completed tool results before st
 
 Compaction uses the current session model and inherits the main agent's current thinking level and custom thinking budgets when preparing its request. As on the main-agent path, `off` omits the reasoning request parameter; providers map enabled levels to their supported effort, and non-reasoning models may ignore them. The handoff has no token-length target; its length follows the continuation information that must be preserved. The normal branch-summary path is unchanged.
 
+Manual and automatic compaction forward the main agent's `promptCacheKey` and `cacheAffinityId`, including inherited clone/fork cache routing. The request's native `sessionId` remains the current session's own. On Codex, inherited affinity routes SSE to the parent cache partition without sharing WebSocket continuation state. This preserves cache eligibility, not a guarantee of a cache hit.
+
 Every started manual or automatic compaction best-effort appends a `custom` session entry with `customType: "pi-compaction-diagnostics"` when it ends, including failed, rejected, and cancelled attempts. These entries do not enter provider context. They contain no prompt, tool arguments/results, generated handoff text, credentials, or raw error messages.
 
 The version-1 `data` payload contains:

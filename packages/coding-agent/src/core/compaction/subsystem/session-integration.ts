@@ -654,6 +654,7 @@ export function createPiAiCompleteFn(options: {
 	retry?: RetryPolicy;
 	callbacks?: RetryCallbacks;
 	promptCacheKey?: string;
+	cacheAffinityId?: string;
 	sessionId?: string;
 	diagnostics?: CompactionDiagnostics;
 }): CompleteFn {
@@ -674,6 +675,7 @@ export function createPiAiCompleteFn(options: {
 				thinkingBudgets: options.thinkingBudgets,
 				cacheRetention: "short",
 				promptCacheKey: options.promptCacheKey,
+				cacheAffinityId: options.cacheAffinityId,
 				sessionId: options.sessionId,
 				apiKey: options.apiKey,
 				headers: options.headers,
