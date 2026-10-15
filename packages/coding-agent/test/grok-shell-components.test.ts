@@ -227,7 +227,7 @@ describe("Grok shell components", () => {
 		expect(stripTerminalSequences(frame.render(80).at(-1) ?? "")).toContain("replacement • off");
 	});
 
-	it("keeps Fast requested separate from latest upstream tier and preserves ANSI metadata on resize", () => {
+	it("adds only a compact fast marker to model/effort and preserves ANSI metadata on resize", () => {
 		const session = createStubSession({
 			modelId: "模型-test",
 			tierStatus: {
@@ -241,33 +241,31 @@ describe("Grok shell components", () => {
 		});
 		const frame = new GrokComponentFactory(markerTheme).createEditorFrame(new EditorHost(), session);
 		expect(frame.render(180).at(-1)).toContain(`${A}模型-test${X}${M} • ${X}${W}high${X}`);
+		expect(frame.render(180)).toHaveLength(3);
 		for (const width of [6, 12, 24, 40, 80, 180]) {
 			expectWithinWidth(frame, [width]);
 			const label = stripTerminalSequences(frame.render(width).slice(2).join("")).replace(/[╰╯│─\s]/g, "");
-			for (const text of ["模型-test•high", "Fastrequested", "latestupstreamStandard", "costsestimated"])
-				expect(label).toContain(text);
+			expect(label).toBe("模型-test•high•fast");
 			const compact = frame.renderCompactMetadata(width);
 			expect(compact.every((line) => visibleWidth(line) <= width)).toBe(true);
-			expect(stripTerminalSequences(compact.slice(1).join("")).replace(/\s/g, "")).toContain(
-				"Fastrequested·latestupstreamStandard",
-			);
+			expect(stripTerminalSequences(compact.slice(1).join(""))).toBe("fast");
 		}
-		for (const [reported, available, expected] of [
-			[undefined, true, "upstream tier unknown"],
-			["priority", true, "latest upstream Fast"],
-			["fast", false, "unavailable for this model"],
-		] as const) {
+		for (const reported of [undefined, "priority", "fast", "default"]) {
 			frame.setSession(
-				createStubSession({ tierStatus: { preference: "fast", source: "session", available, reported } }),
+				createStubSession({ tierStatus: { preference: "fast", source: "session", available: true, reported } }),
 			);
-			expect(stripTerminalSequences(frame.render(180).join("\n"))).toContain(expected);
+			const label = stripTerminalSequences(frame.render(180).at(-1) ?? "");
+			expect(label).toMatch(/gpt-5\.6-sol • high • fast/);
+			expect(label).not.toMatch(/requested|upstream|costs|estimated/);
 		}
+		frame.setSession(createStubSession({ tierStatus: { preference: "fast", source: "session", available: false } }));
+		expect(stripTerminalSequences(frame.render(180).at(-1) ?? "")).not.toContain("fast");
 		frame.setSession(
 			createStubSession({
 				tierStatus: { preference: "default", source: "settings", available: true, reported: "default" },
 			}),
 		);
-		expect(stripTerminalSequences(frame.render(180).join("\n"))).toContain("Standard requested");
+		expect(stripTerminalSequences(frame.render(180).at(-1) ?? "")).toMatch(/gpt-5\.6-sol • high ─╯$/);
 	});
 
 	it("keeps input instead of borders at one and two columns", () => {
@@ -504,15 +502,9 @@ describe("Grok shell components", () => {
 				await terminal.waitForRender();
 				const viewport = terminal.getViewport();
 				const text = viewport.join("").replace(/[╰╯│─\s]/g, "");
-				for (const label of [
-					"transcript",
-					"writeamessage",
-					"gpt-5.6-sol•high",
-					"Fastrequested",
-					"latestupstreamStandard",
-					"costsestimated",
-				])
+				for (const label of ["transcript", "writeamessage", "gpt-5.6-sol•high", "fast"])
 					expect(text).toContain(label);
+				expect(text).not.toMatch(/requested|upstream|costsestimated/);
 				expect(viewport.every((line) => visibleWidth(line) <= width)).toBe(true);
 			}
 		} finally {

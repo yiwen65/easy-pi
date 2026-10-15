@@ -160,7 +160,7 @@ describe("FooterComponent width handling", () => {
 		}
 	});
 
-	it("wraps truthful Fast status without replacing model/effort or adding unset noise", () => {
+	it("shows only fast without replacing model/effort or adding unset noise", () => {
 		const plain = new FooterComponent(createSession({ sessionName: "" }), createFooterData(1));
 		expect(plain.render(120)).toHaveLength(2);
 		for (const reported of ["default", "priority", undefined]) {
@@ -179,16 +179,15 @@ describe("FooterComponent width handling", () => {
 				const lines = footer.render(width);
 				expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
 				const status = stripAnsi(lines.slice(2).join("")).replace(/\s/g, "");
-				expect(status).toContain("Fastrequested");
-				expect(status).toContain(
-					reported === "default"
-						? "latestupstreamStandard"
-						: reported === "priority"
-							? "latestupstreamFast"
-							: "upstreamtierunknown",
-				);
-				expect(status).toContain("costsestimated");
+				expect(status).toBe("fast");
 			}
+		}
+		for (const tierStatus of [
+			{ preference: "default", source: "session", available: true },
+			{ preference: "fast", source: "session", available: false },
+		] as const) {
+			const footer = new FooterComponent(createSession({ sessionName: "", tierStatus }), createFooterData(1));
+			expect(footer.render(120)).toHaveLength(2);
 		}
 	});
 
