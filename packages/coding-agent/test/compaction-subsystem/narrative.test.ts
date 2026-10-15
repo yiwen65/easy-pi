@@ -65,10 +65,10 @@ describe("local Remote V2-style compaction item", () => {
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("machine-readable contract, ledger, JSON");
 		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Do not reproduce the system prompt");
 		expect(JSON.stringify(capturedRequest?.messages)).not.toContain("<untrusted-history>");
-		expect(capturedRequest?.promptVersion).toBe("remote-v2-local-6");
-		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("1,000–2,000 tokens");
-		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("soft target");
-		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("exceed it when necessary");
+		expect(capturedRequest?.promptVersion).toBe("remote-v2-local-7");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).toContain("Do not target a fixed handoff length");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).not.toContain("1,000–2,000 tokens");
+		expect(JSON.stringify(capturedRequest?.messages.at(-1))).not.toContain("soft target");
 	});
 
 	it("does not impose a fixed output ceiling on the handoff", async () => {
@@ -84,7 +84,7 @@ describe("local Remote V2-style compaction item", () => {
 		expect(capturedRequest).not.toHaveProperty("maxTokens");
 	});
 
-	it("does not clip or reject a complete handoff that exceeds the soft length target", async () => {
+	it("does not clip or reject a complete long handoff", async () => {
 		const longHandoff = `${compliantHandoff}\n${"required continuation evidence ".repeat(1000)}`.trim();
 		const result = await generateCompactionItem({
 			messages,

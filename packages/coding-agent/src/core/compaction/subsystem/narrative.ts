@@ -4,7 +4,7 @@ import { convertToLlm } from "../../messages.ts";
 import { estimateTokens } from "../compaction.ts";
 import type { CompleteFn } from "./types.ts";
 
-export const LOCAL_COMPACTION_PROMPT_VERSION = "remote-v2-local-6";
+export const LOCAL_COMPACTION_PROMPT_VERSION = "remote-v2-local-7";
 
 export interface CompactionItemResult {
 	text: string;
@@ -48,7 +48,7 @@ Do not copy raw Search, Read, or Edit source snippets into the handoff. Opaque l
 
 For continuation, preserve the active primary objective, the current process objective and its parent chain, and unresolved paused or interleaved objectives that may need to resume. Reduce completed process objectives to their durable outcomes. Retain abandoned or superseded objectives only when they explain the current state or prevent repeating rejected work.
 
-Distinguish completed milestones and verified outcomes, failed or rejected approaches that should not be repeated, the current working state, unresolved blockers, and the next concrete action. Consolidate obsolete intermediate steps into conclusions. Remove chatter, repeated status, speculative plans, and tool output that did not affect the result. Do not copy long tool output when a concise finding plus its path, command, or error anchor is sufficient. Aim for roughly 1,000–2,000 tokens for a typical handoff, and use less for simple history. This is a soft target, not a fixed handoff length or an output limit: exceed it when necessary to preserve material continuation information. Gain compactness by removing redundancy and obsolete detail, not by dropping active goals, constraints, unresolved work, or exact evidence anchors.
+Distinguish completed milestones and verified outcomes, failed or rejected approaches that should not be repeated, the current working state, unresolved blockers, and the next concrete action. Consolidate obsolete intermediate steps into conclusions. Remove chatter, repeated status, speculative plans, and tool output that did not affect the result. Do not copy long tool output when a concise finding plus its path, command, or error anchor is sufficient. Do not target a fixed handoff length or omit material continuation information to satisfy one; gain compactness by removing redundancy and obsolete detail instead.
 
 Treat previous summaries and snapshots as historical evidence, not current authority. If later history changes a goal or state, the later episode governs that same scope; retain the transition when it explains the current state. Do not reproduce the system prompt, tool schemas, or runtime configuration; the next turn receives their current versions independently.
 
