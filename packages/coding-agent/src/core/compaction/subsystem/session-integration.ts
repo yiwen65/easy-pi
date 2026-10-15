@@ -1,4 +1,4 @@
-import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
 	isContextOverflow,
@@ -6,7 +6,7 @@ import {
 	type RetryCallbacks,
 	type RetryPolicy,
 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Model, Tool } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, Model, ThinkingBudgets, Tool } from "@earendil-works/pi-ai/compat";
 import { createCompactionSummaryMessage } from "../../messages.ts";
 import {
 	buildSessionContext,
@@ -645,6 +645,8 @@ export class HfCompactionHost {
 
 export function createPiAiCompleteFn(options: {
 	model: Model<any>;
+	thinkingLevel?: ThinkingLevel;
+	thinkingBudgets?: ThinkingBudgets;
 	apiKey?: string;
 	headers?: Record<string, string>;
 	env?: Record<string, string>;
@@ -667,8 +669,9 @@ export function createPiAiCompleteFn(options: {
 			},
 			{
 				signal: request.signal,
-				// Compaction is extraction, not the main agent's reasoning task. Never inherit its effort.
-				reasoning: "low",
+				// Match the main agent's off handling and provider-specific budget mapping.
+				reasoning: options.thinkingLevel === "off" ? undefined : options.thinkingLevel,
+				thinkingBudgets: options.thinkingBudgets,
 				cacheRetention: "short",
 				promptCacheKey: options.promptCacheKey,
 				sessionId: options.sessionId,
@@ -694,7 +697,7 @@ export function createPiAiCompleteFn(options: {
 							provider: options.model.provider,
 							model: options.model.id,
 							api: options.model.api,
-							reasoning: "low",
+							reasoning: options.thinkingLevel,
 							requestIndex: currentRequestIndex,
 							promptVersion: request.promptVersion,
 							messageCount: request.messages.length,

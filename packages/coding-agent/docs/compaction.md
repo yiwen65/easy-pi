@@ -6,7 +6,7 @@ During a multi-turn agent run, Pi evaluates the completed tool results before st
 
 ## Model effort and latency diagnostics
 
-Compaction uses the current session model with an explicit `low` reasoning request, independent of the main agent's thinking level. Providers map this request to their supported effort; non-reasoning models may ignore it. The handoff has no token-length target; its length follows the continuation information that must be preserved. The normal branch-summary path is unchanged.
+Compaction uses the current session model and inherits the main agent's current thinking level and custom thinking budgets when preparing its request. As on the main-agent path, `off` omits the reasoning request parameter; providers map enabled levels to their supported effort, and non-reasoning models may ignore them. The handoff has no token-length target; its length follows the continuation information that must be preserved. The normal branch-summary path is unchanged.
 
 Every started manual or automatic compaction best-effort appends a `custom` session entry with `customType: "pi-compaction-diagnostics"` when it ends, including failed, rejected, and cancelled attempts. These entries do not enter provider context. They contain no prompt, tool arguments/results, generated handoff text, credentials, or raw error messages.
 

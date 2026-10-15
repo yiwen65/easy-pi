@@ -3395,6 +3395,8 @@ export class AgentSession {
 				this._hfHost.configComplete ??
 				createPiAiCompleteFn({
 					model: requestModel,
+					thinkingLevel: this.thinkingLevel,
+					thinkingBudgets: this.agent.thinkingBudgets,
 					apiKey,
 					headers,
 					env,
@@ -3704,6 +3706,8 @@ export class AgentSession {
 			host.configComplete ??
 			createPiAiCompleteFn({
 				model: requestModel,
+				thinkingLevel: this.thinkingLevel,
+				thinkingBudgets: this.agent.thinkingBudgets,
 				apiKey,
 				headers,
 				env,

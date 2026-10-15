@@ -1,13 +1,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	COMPACTION_DIAGNOSTICS_ENTRY_TYPE,
 	type CompactionDiagnosticsSnapshot,
 } from "../src/core/compaction/subsystem/observability.ts";
 import { type CustomEntry, SessionManager } from "../src/core/session-manager.ts";
-import { createHarness, createHarnessWithExtensions, type Harness } from "./test-harness.ts";
+import { createHarness, createHarnessWithExtensions, fauxModel, type Harness } from "./test-harness.ts";
 
 const harnesses: Harness[] = [];
 const sessionDirs: string[] = [];
@@ -116,6 +117,55 @@ describe("AgentSession compaction diagnostics", () => {
 		await h.session.prompt("continue");
 		expect(JSON.stringify(h.faux.contexts)).not.toContain(COMPACTION_DIAGNOSTICS_ENTRY_TYPE);
 		expect(JSON.stringify(h.session.messages)).not.toContain(COMPACTION_DIAGNOSTICS_ENTRY_TYPE);
+	});
+
+	it.each([
+		["manual", "high"],
+		["manual", "medium"],
+		["manual", "off"],
+		["threshold", "high"],
+		["threshold", "medium"],
+		["threshold", "off"],
+	] as const)("inherits the current main-agent effort for %s compaction at %s", async (reason, thinkingLevel) => {
+		const h = await createHarness({
+			model: { ...fauxModel, reasoning: true },
+			contextWindow: 60_000,
+			settings: { compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 } },
+			responses:
+				reason === "manual"
+					? [handoff]
+					: [
+							{ text: "first answer", usage: { totalTokens: 500 } },
+							{ text: "second answer", usage: { totalTokens: 57_500 } },
+							handoff,
+							{ text: "post-compaction answer", usage: { totalTokens: 100 } },
+						],
+		});
+		harnesses.push(h);
+		const captured: SimpleStreamOptions[] = [];
+		const stream = h.agent.streamFunction;
+		h.agent.streamFunction = (model, context, options) => {
+			if (options?.toolChoice === "none") captured.push(options);
+			return stream(model, context, options);
+		};
+		if (reason === "threshold") {
+			await h.session.prompt("start");
+			await h.session.prompt("continue");
+		} else {
+			seedHistory(h);
+		}
+		h.session.setThinkingLevel(thinkingLevel);
+		h.agent.thinkingBudgets = { medium: 4096, high: 12288 };
+		if (reason === "manual") await h.session.compact();
+		else await h.session.prompt("next real request");
+
+		expect(captured).toHaveLength(1);
+		expect(captured[0]).toMatchObject({
+			reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
+			thinkingBudgets: h.agent.thinkingBudgets,
+		});
+		expect(h.session.thinkingLevel).toBe(thinkingLevel);
+		expect(diagnostics(h)[0]).toMatchObject({ reason, attempts: [{ reasoning: thinkingLevel }] });
 	});
 
 	it("restores diagnostics from disk without replaying metadata into the active context", async () => {

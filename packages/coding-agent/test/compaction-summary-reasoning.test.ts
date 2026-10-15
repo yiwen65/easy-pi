@@ -109,6 +109,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		completeSimpleMock.mockResolvedValue(assistantOk("extracted text"));
 		const complete = createPiAiCompleteFn({
 			model: createModel(),
+			thinkingLevel: "high",
 			apiKey: "k",
 			promptCacheKey: "shared-compaction-prefix",
 			sessionId: "compact-session",
@@ -124,10 +125,24 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 			promptCacheKey: "shared-compaction-prefix",
 			sessionId: "compact-session",
 			toolChoice: "none",
-			reasoning: "low",
+			reasoning: "high",
 		});
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("maxTokens");
 	});
+
+	it.each(["off", "low", "medium", "high", "xhigh", "max", undefined] as const)(
+		"uses the supplied thinking level %s without a compaction-specific default",
+		async (thinkingLevel) => {
+			completeSimpleMock.mockResolvedValue(assistantOk("handoff"));
+			const thinkingBudgets = { medium: 4096, high: 12288 };
+			const complete = createPiAiCompleteFn({ model: createModel(), thinkingLevel, thinkingBudgets });
+			await complete({ systemPrompt: "policy", messages: context.messages, promptVersion: "test" });
+			expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
+				reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
+				thinkingBudgets,
+			});
+		},
+	);
 
 	it("maps provider errors to stopReason error (fail closed at the caller)", async () => {
 		completeSimpleMock.mockResolvedValue({ ...assistantOk(""), stopReason: "error", errorMessage: "rate limit" });
