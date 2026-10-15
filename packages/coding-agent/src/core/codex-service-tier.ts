@@ -1,6 +1,5 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import type { SessionEntry } from "./session-manager.ts";
 
 /** User preference; the Codex adapter maps Fast to the wire value `priority`. */
 export type CodexServiceTier = "default" | "fast";
@@ -17,8 +16,6 @@ export interface CodexServiceTierStatus extends CodexServiceTierPreference {
 	reported?: string | null;
 	costEstimated?: boolean;
 }
-
-export const CODEX_SERVICE_TIER_ENTRY_TYPE = "codex-service-tier";
 
 // Internal request-boundary marker, consumed by the SDK before entering ModelRuntime.
 // A resolved omission must not be confused with an ordinary request inheriting defaults.
@@ -51,24 +48,6 @@ export function isCodexFastModeAvailable(model: Model<Api> | undefined): boolean
 		"supportsFastMode" in model.compat &&
 		model.compat.supportsFastMode === true
 	);
-}
-
-/** Only the current branch is authoritative; null resets an override to today's settings. */
-export function resolveCodexServiceTierPreference(
-	branch: readonly SessionEntry[],
-	settingsTier: CodexServiceTier | undefined,
-): CodexServiceTierPreference {
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry.type !== "custom" || entry.customType !== CODEX_SERVICE_TIER_ENTRY_TYPE) continue;
-		const data: unknown = entry.data;
-		if (typeof data !== "object" || data === null || !("tier" in data)) continue;
-		if (data.tier === null) break;
-		if (data.tier === "default" || data.tier === "fast") {
-			return { preference: data.tier, source: "session" };
-		}
-	}
-	return settingsTier === undefined ? { source: "none" } : { preference: settingsTier, source: "settings" };
 }
 
 /** Resolve once at the request boundary, before asynchronous auth/hooks/transport work. */

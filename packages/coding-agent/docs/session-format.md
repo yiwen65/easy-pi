@@ -270,7 +270,7 @@ Extension state persistence. Does NOT participate in LLM context.
 
 Use `customType` to identify your extension's entries on reload. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
 
-Easy-pi's native Codex service preference uses `customType: "codex-service-tier"`, with `data: { "tier": "fast" }`, `{ "tier": "default" }`, or `{ "tier": null }` to reset the branch override to configuration. Only entries on the selected branch apply; these entries never enter model context. Codex assistant messages may separately contain `serviceTier: { requested?, sent?, reported?, costEstimated? }`. `reported` is the raw upstream value; missing/null is unknown and never inferred from the preference or compatibility price estimate.
+Codex service preference is now remembered in global settings, not session entries. Historical `customType: "codex-service-tier"` entries are retained but ignored for preference resolution and never enter model context; new toggles do not append them. Resuming, branching, forking or cloning uses the current global preference. Codex assistant messages may separately contain `serviceTier: { requested?, sent?, reported?, costEstimated? }`. `reported` is the raw upstream value; missing/null is unknown and never inferred from the preference or compatibility price estimate.
 
 ### CustomMessageEntry
 

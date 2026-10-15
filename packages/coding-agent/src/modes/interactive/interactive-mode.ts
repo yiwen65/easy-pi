@@ -5277,7 +5277,7 @@ export class InteractiveMode {
 					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
 					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
-					codexServiceTier: this.settingsManager.getGlobalSettings?.().codexServiceTier,
+					codexServiceTier: this.session.codexServiceTier,
 					subagentModel: this.settingsManager.getSubagentModel(),
 					subagentThinkingLevel: this.settingsManager.getSubagentThinkingLevel(),
 					subagentModels: this.session.modelRuntime.getAvailableSnapshot(),
@@ -5347,13 +5347,10 @@ export class InteractiveMode {
 						this.updateEditorBorderColor();
 					},
 					onCodexServiceTierChange: (tier) => {
-						this.settingsManager.setCodexServiceTier(tier);
-						// Reset the session override so trusted project defaults still take precedence.
-						// Unlike /fast on, saving Fast is allowed while the current model is unsupported.
-						this.session.setCodexServiceTier(undefined);
+						this.session.setCodexServiceTier(tier);
 						this.footer.invalidate();
 						this.showStatus(
-							`Global Codex default saved.\n${formatCodexServiceTierStatus(this.session.getCodexServiceTierStatus())}`,
+							`Global Codex preference saved for all projects and new/resumed sessions; applies to the next model request.\n${formatCodexServiceTierStatus(this.session.getCodexServiceTierStatus())}`,
 						);
 					},
 					onSubagentModelChange: (model) => {
@@ -6595,7 +6592,7 @@ export class InteractiveMode {
 				this.footer.invalidate();
 			}
 			this.showStatus(
-				`${args === "status" ? "" : "Session preference updated; applies to the next model request.\n"}${formatCodexServiceTierStatus(this.session.getCodexServiceTierStatus())}`,
+				`${args === "status" ? "Global Codex preference (remembered across projects and sessions).\n" : "Global Codex preference saved for all projects and new/resumed sessions; applies to the next model request.\n"}${formatCodexServiceTierStatus(this.session.getCodexServiceTierStatus())}`,
 			);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));

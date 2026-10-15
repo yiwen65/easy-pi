@@ -112,6 +112,8 @@ export function preparePiCollaborationFork(
 export function createPiChildSessionHost(options: {
 	modelRuntime: ModelRuntime;
 	settings: Settings;
+	/** Read the root's current global preference when creating or cold-loading a child. */
+	getCodexServiceTier?: () => Settings["codexServiceTier"];
 	getTools?: () => string[];
 	/** Approved root configuration restricted to the concrete delegated tools; never rediscover in a child. */
 	getMcpConfig?: (toolNames: readonly string[]) => LoadedMcpConfig;
@@ -217,6 +219,7 @@ export function createPiChildSessionHost(options: {
 			request.signal?.throwIfAborted();
 			const settingsManager = SettingsManager.inMemory({
 				...structuredClone(options.settings),
+				...(options.getCodexServiceTier ? { codexServiceTier: options.getCodexServiceTier() } : {}),
 				// Only the controller may start a child turn. Background results await an explicit followup.
 				backgroundBashCompletionDelivery: "nextRequest",
 			});

@@ -30,7 +30,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
-| `codexServiceTier` | string | omitted | `"fast"` requests accelerated Codex processing; `"default"` explicitly requests Standard. Independent of thinking level |
+| `codexServiceTier` | string | omitted | Global-only remembered preference: `"fast"` requests accelerated Codex processing; `"default"` explicitly requests Standard. Independent of thinking level |
 | `subagentModel` | string | inherit caller | Global-only default `provider/model` for newly spawned Subagents; does not change root or existing children |
 | `subagentThinkingLevel` | string | inherit caller | Global-only default child effort: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | `subagentEnabled` | boolean | `true` | Team collaboration tools (`spawn_agent` and peers). `false` removes the seven tools, the collaboration contract, and the agents panel from new sessions; existing team history remains inspectable |
@@ -40,19 +40,19 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 
 #### Codex Fast mode
 
-For supported `openai-codex` models, use `/fast on`, `/fast off`, or `/fast` to toggle the current branch's preference. `/fast status` shows the source, model capability, and latest matching response's sent/reported tiers. Changes apply to the next model request, not an in-flight response, and survive resume, tree navigation, fork and clone on the selected branch.
+Use `/fast on`, `/fast off`, or `/fast` to save or toggle one global preference. Set it once: new and resumed sessions in all projects use that preference, including after tree navigation, fork and clone. `/fast status` shows the global setting, model capability, and latest matching response's sent/reported tiers. Changes apply to the next model request, not an in-flight response or a retry of an already-started summary.
 
-To save a default, select **Codex service tier default** in `/settings`, or edit easy-pi's `~/.epi/agent/settings.json` (trusted `.epi/settings.json` overrides global values):
+The same setting is available as **Codex service tier default** in `/settings`, or in easy-pi's `~/.epi/agent/settings.json`:
 
 ```json
 { "codexServiceTier": "fast" }
 ```
 
-The menu saves the global default and resets the current session override to configuration; a trusted project value still wins. **Unspecified** removes the global default, while **Standard** explicitly requests `service_tier: "default"`. Without any preference, requests keep their previous unspecified-tier behavior. `/fast` never changes saved defaults.
+Both `/fast` and the menu save this global setting. Project settings, temporary settings overrides and historical session/branch preferences do not override it. **Unspecified** removes the global preference, while **Standard** explicitly requests `service_tier: "default"`. Without a preference, requests keep their previous unspecified-tier behavior. Other running Pi processes are not hot-synchronized; they load the saved value on restart.
 
-Fast uses the same model and reasoning effort, sending `service_tier: "priority"`. Initial built-in capability declarations cover GPT-6.1 Sol, GPT-6 Astra, and GPT-5.6 Sol. Unknown/unsupported models cannot be enabled with `/fast on`; a saved Fast preference remains visible but inactive until a capable Codex model is selected. Other providers receive no tier from this setting. See [model compatibility overrides](models.md#openai-compatibility) for explicit custom capability declarations.
+Fast uses the same model and reasoning effort, sending `service_tier: "priority"`. Initial built-in capability declarations cover GPT-6.1 Sol, GPT-6 Astra, and GPT-5.6 Sol. You can save Fast while using any model; the preference is inactive on unknown/unsupported models and applies when a capable Codex model is selected. Other providers receive no tier from this setting. See [model compatibility overrides](models.md#openai-compatibility) for explicit custom capability declarations.
 
-Fast uses extra subscription usage or credits, including same-session compaction and branch summaries. Native child sessions use their own settings snapshot and model capability, not the parent's temporary `/fast` override; existing children are unaffected by later parent toggles. Standalone summaries do not acquire a Fast default implicitly.
+Fast uses extra subscription usage or credits, including same-session compaction and branch summaries. New and cold-loaded native child sessions snapshot the current global preference and check their own model capability; already-loaded children retain their snapshot. Standalone summaries do not acquire a Fast default implicitly.
 
 **Fast requested is not proof of Fast service.** Model capability does not verify account or regional eligibility. The UI preserves the latest upstream report (`default`, `priority`/`fast`, or unknown), independently of the request. Costs are compatibility estimates, not a subscription bill. Codex's historical default-echo pricing estimate is retained and never overwrites the raw upstream report. Unavailable requests are not silently resubmitted at Standard.
 

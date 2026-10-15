@@ -11,9 +11,7 @@ import {
 	CODEX_SERVICE_TIER_SNAPSHOT,
 	type CodexServiceTier,
 	type CodexServiceTierSnapshotOptions,
-	isCodexFastModeAvailable,
 	parseCodexServiceTier,
-	resolveCodexServiceTierPreference,
 	resolveCodexServiceTierRequest,
 } from "./codex-service-tier.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -60,7 +58,7 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
-	/** Initial branch-scoped Codex preference. Omission preserves restored state and settings. */
+	/** Set the global Codex preference, remembered for all sessions. Omission preserves the saved preference. */
 	codexServiceTier?: CodexServiceTier;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -290,9 +288,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	parseCodexServiceTier(options.codexServiceTier);
-	if (options.codexServiceTier === "fast" && !isCodexFastModeAvailable(model)) {
-		throw new Error("Fast mode is unavailable for the current model: select a supported OpenAI Codex model.");
-	}
 
 	// `codemode` ships active: MCP servers default to script-only exposure, so a fresh session
 	// reaches their tools without extra configuration.
@@ -372,12 +367,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				options ?? {};
 			const serviceTier = snapshotted
 				? requestOptions.serviceTier
-				: resolveCodexServiceTierRequest(
-						model,
-						resolveCodexServiceTierPreference(sessionManager.getBranch(), settingsManager.getCodexServiceTier())
-							.preference,
-						requestOptions.serviceTier,
-					);
+				: resolveCodexServiceTierRequest(model, settingsManager.getCodexServiceTier(), requestOptions.serviceTier);
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".

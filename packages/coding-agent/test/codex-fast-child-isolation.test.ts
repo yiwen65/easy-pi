@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 it.each([undefined, "default", "fast"] as const)(
-	"native child uses its configured default, not a parent's runtime Fast override (%s)",
+	"new and cold-loaded children inherit the current remembered global Fast preference (%s)",
 	async (defaultTier) => {
 		const cwd = await realpath(await mkdtemp(join(tmpdir(), "epi-fast-child-")));
 		cleanups.push(() => rm(cwd, { recursive: true, force: true }));
@@ -69,11 +69,11 @@ it.each([undefined, "default", "fast"] as const)(
 		cleanups.push(async () => {
 			await parent.shutdown();
 		});
-		parent.setCodexServiceTier(defaultTier === "fast" ? "default" : "fast");
 		const native: AgentSession[] = [];
 		const host = createPiChildSessionHost({
 			modelRuntime,
 			settings: settingsManager.getSettings(),
+			getCodexServiceTier: () => settingsManager.getCodexServiceTier(),
 			noExtensions: true,
 			getTools: () => [],
 			registerTools: () => {},
@@ -82,6 +82,9 @@ it.each([undefined, "default", "fast"] as const)(
 				return () => {};
 			},
 		});
+		// Change Fast after host construction: new children must not use its stale settings snapshot.
+		const globalTier = defaultTier === "fast" ? "default" : "fast";
+		parent.setCodexServiceTier(globalTier);
 		const children: ChildSession[] = [];
 		for (const [index, id] of ["supported", "unknown"].entries()) {
 			const child = await host.create({
@@ -90,13 +93,13 @@ it.each([undefined, "default", "fast"] as const)(
 				cwd,
 				agentDir,
 				model: { provider: "openai-codex", id, thinkingLevel: "off" },
-				storage: { kind: "memory" },
+				storage: index === 0 ? { kind: "file", directory: join(cwd, "child-history") } : { kind: "memory" },
 				getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }),
 			});
 			children.push(child);
 			cleanups.push(() => child.dispose());
-			expect(native[index].codexServiceTier).toBe(defaultTier);
-			expect(native[index].getCodexServiceTierStatus().source).toBe(defaultTier === undefined ? "none" : "settings");
+			expect(native[index].codexServiceTier).toBe(globalTier);
+			expect(native[index].getCodexServiceTierStatus().source).toBe("settings");
 			const calls: Array<SimpleStreamOptions | undefined> = [];
 			faux.setResponses([
 				(_context, options) => {
@@ -107,13 +110,39 @@ it.each([undefined, "default", "fast"] as const)(
 			expect(await child.run("complete the child task")).toMatchObject({ status: "completed" });
 			expect(calls).toHaveLength(1);
 			const expected: CodexServiceTier | undefined =
-				id === "unknown" && defaultTier === "fast" ? undefined : defaultTier;
+				id === "unknown" && globalTier === "fast" ? undefined : globalTier;
 			if (expected === undefined) expect(calls[0]).not.toHaveProperty("serviceTier");
 			else expect(calls[0]?.serviceTier).toBe(expected);
 		}
-		parent.setCodexServiceTier(parent.codexServiceTier === "fast" ? "default" : "fast");
-		expect(native.map((session) => session.codexServiceTier)).toEqual([defaultTier, defaultTier]);
-		expect(settingsManager.getCodexServiceTier()).toBe(defaultTier);
-		expect(children).toHaveLength(2);
+		parent.setCodexServiceTier(undefined);
+		expect(native.map((session) => session.codexServiceTier)).toEqual([globalTier, globalTier]);
+		expect(settingsManager.getCodexServiceTier()).toBeUndefined();
+		const file = children[0].sessionFile!;
+		await children[0].dispose();
+		for (const [index, storage] of [
+			{ kind: "memory" as const },
+			{ kind: "file" as const, directory: join(cwd, "child-history"), sessionFile: file },
+		].entries()) {
+			const child = await host.create({
+				rootSessionId: "fast-test",
+				agentPath: index === 0 ? "/root/new-child" : "/root/child-0",
+				cwd,
+				agentDir,
+				model: { provider: "openai-codex", id: "supported", thinkingLevel: "off" },
+				storage,
+				getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [] }),
+			});
+			cleanups.push(() => child.dispose());
+			expect(native.at(-1)?.codexServiceTier).toBeUndefined();
+			const calls: Array<SimpleStreamOptions | undefined> = [];
+			faux.setResponses([
+				(_context, options) => {
+					calls.push(options);
+					return fauxAssistantMessage("current global default");
+				},
+			]);
+			expect(await child.run("use the remembered global preference")).toMatchObject({ status: "completed" });
+			expect(calls[0]).not.toHaveProperty("serviceTier");
+		}
 	},
 );

@@ -93,7 +93,7 @@ describe("SettingsSelectorComponent", () => {
 		expect(onSubagentModelChange).toHaveBeenCalledExactlyOnceWith(undefined);
 	});
 
-	it("cycles the global Codex default through unspecified, Standard and Fast without touching effort", () => {
+	it("explains global memory and cycles Unspecified, Standard and Fast without touching effort", () => {
 		const onCodexServiceTierChange = vi.fn();
 		const onThinkingLevelChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
@@ -102,6 +102,17 @@ describe("SettingsSelectorComponent", () => {
 		);
 		const list = selector.getSettingsList();
 		for (const character of "Codex service tier default") list.handleInput(character);
+		const description = selector.render(1000).join("\n");
+		for (const text of [
+			"Save once for all projects and new/resumed sessions",
+			"project settings cannot override it",
+			"/fast saves the same global preference",
+			"next model request",
+			"summary retries keep their starting tier",
+			"Other running processes are not hot-synchronized",
+			"extra usage",
+		])
+			expect(description).toContain(text);
 		expect(selector.render(120).join("\n")).toContain("Unspecified");
 		for (const value of ["Standard", "Fast", "Unspecified"]) {
 			list.handleInput("\r");

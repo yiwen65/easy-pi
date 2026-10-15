@@ -101,13 +101,12 @@ async function runSummary(session: AgentSession, path: SummaryPath, targetId: st
 for (const path of ["manual", "auto", "branch"] as const) {
 	describe(`${path} summary retries through the actual SDK seam`, () => {
 		it.each([undefined, "default", "fast"] as const)(
-			"pins the initial %s tier while the branch preference changes",
+			"pins the initial %s tier while the global preference changes",
 			async (initialTier) => {
 				const session = await createSdkSession(initialTier);
 				const targetId = seedHistory(session);
 				const captured: Array<SimpleStreamOptions | undefined> = [];
 				const changedTier = initialTier === "fast" ? "default" : "fast";
-				let changedBranchId = "";
 				const model = session.model!;
 				const effort = session.thinkingLevel;
 				// Keep the SDK-created streamFunction intact. Only the runtime adapter is mocked.
@@ -116,7 +115,6 @@ for (const path of ["manual", "auto", "branch"] as const) {
 					expect(Object.getOwnPropertySymbols(options ?? {})).toEqual([]);
 					if (captured.length === 1) {
 						session.setCodexServiceTier(changedTier);
-						changedBranchId = session.sessionManager.getLeafId()!;
 					}
 					const response: AssistantMessage = {
 						...fauxAssistantMessage(captured.length === 1 ? "" : "retry succeeded", {
@@ -150,11 +148,10 @@ for (const path of ["manual", "auto", "branch"] as const) {
 							promptCacheKey: "summary-cache-lineage",
 							reasoning: "high",
 						});
-				} else {
-					// Tree navigation selects the old target branch. Revisit the branch on which
-					// the user changed the preference before checking its next ordinary request.
-					await session.navigateTree(changedBranchId);
 				}
+				// Even branch-summary navigation cannot restore an older preference.
+				expect(session.codexServiceTier).toBe(changedTier);
+				expect(session.settingsManager.getCodexServiceTier()).toBe(changedTier);
 				const normal = await session.agent.streamFunction(model, { messages: [] }, { serviceTier: undefined });
 				await normal.result();
 				expect(captured.at(-1)?.serviceTier).toBe(changedTier);

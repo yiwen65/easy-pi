@@ -28,9 +28,8 @@ function commandContext(preference?: CodexServiceTier, available = true) {
 			return status.preference;
 		},
 		setCodexServiceTier: vi.fn((tier: CodexServiceTier | undefined) => {
-			if (tier === "fast" && !available) throw new Error("Fast unavailable: unsupported or unknown model");
 			status.preference = tier;
-			status.source = "session";
+			status.source = tier ? "settings" : "none";
 		}),
 		getCodexServiceTierStatus: () => ({ ...status }),
 		prompt: vi.fn(),
@@ -57,13 +56,20 @@ describe("InteractiveMode /fast", () => {
 		for (const harness of harnesses.splice(0)) harness.cleanup();
 	});
 
-	it("is discoverable and toggles resolved preference without changing saved defaults", () => {
+	it("is discoverable and toggles the remembered global preference", () => {
 		expect(BUILTIN_SLASH_COMMANDS).toContainEqual(
-			expect.objectContaining({ name: "fast", argumentHint: "[on|off|status]" }),
+			expect.objectContaining({
+				name: "fast",
+				argumentHint: "[on|off|status]",
+				description: expect.stringContaining("globally across projects and sessions"),
+			}),
 		);
 		const context = commandContext();
 		prototype.handleFastCommand.call(context, "/fast");
 		expect(context.session.setCodexServiceTier).toHaveBeenLastCalledWith("fast");
+		expect(context.showStatus).toHaveBeenLastCalledWith(
+			expect.stringContaining("Global Codex preference saved for all projects and new/resumed sessions"),
+		);
 		expect(context.showStatus).toHaveBeenLastCalledWith(expect.stringContaining("next model request"));
 		prototype.handleFastCommand.call(context, "/fast");
 		expect(context.session.setCodexServiceTier).toHaveBeenLastCalledWith("default");
@@ -94,13 +100,12 @@ describe("InteractiveMode /fast", () => {
 		expect(context.session.prompt).not.toHaveBeenCalled();
 	});
 
-	it("rejects unsupported activation but allows explicit Standard and read-only status", () => {
+	it("saves Fast on unsupported models and keeps status read-only", () => {
 		const context = commandContext(undefined, false);
 		prototype.handleFastCommand.call(context, "/fast on");
-		expect(context.showError).toHaveBeenCalledWith(expect.stringContaining("unavailable"));
-		expect(context.status.preference).toBeUndefined();
-		prototype.handleFastCommand.call(context, "/fast off");
-		expect(context.status.preference).toBe("default");
+		expect(context.showError).not.toHaveBeenCalled();
+		expect(context.status.preference).toBe("fast");
+		expect(context.showStatus).toHaveBeenLastCalledWith(expect.stringContaining("no (unsupported"));
 		context.session.setCodexServiceTier.mockClear();
 		context.status.sent = "priority";
 		context.status.reported = "default";
@@ -109,8 +114,9 @@ describe("InteractiveMode /fast", () => {
 		expect(context.session.setCodexServiceTier).not.toHaveBeenCalled();
 		const output = context.showStatus.mock.calls.at(-1)?.[0];
 		for (const label of [
-			"Standard requested",
-			"Source: session",
+			"remembered across projects and sessions",
+			"Fast requested",
+			"Source: settings",
 			"no (unsupported",
 			'sent: "priority"',
 			'reported: "default"',
@@ -119,6 +125,8 @@ describe("InteractiveMode /fast", () => {
 			"extra usage",
 		])
 			expect(output).toContain(label);
+		prototype.handleFastCommand.call(context, "/fast off");
+		expect(context.status.preference).toBe("default");
 	});
 
 	it("renders unknown upstream honestly and escapes raw untrusted tier text", () => {
@@ -133,7 +141,7 @@ describe("InteractiveMode /fast", () => {
 	});
 
 	it("maps the state event and rerenders both UI engines", async () => {
-		const status: CodexServiceTierStatus = { preference: "fast", source: "session", available: true };
+		const status: CodexServiceTierStatus = { preference: "fast", source: "settings", available: true };
 		const event = { type: "codex_service_tier_changed" as const, status };
 		expect(mapAgentSessionEvent(event, 4)).toEqual({ sequence: 4, kind: "codex-service-tier", status });
 		for (const grok of [false, true]) {
@@ -150,7 +158,7 @@ describe("InteractiveMode /fast", () => {
 		}
 	});
 
-	it("updates the real session preference without changing its configured default or effort", async () => {
+	it("persists commands globally without branch entries, model calls or effort changes", async () => {
 		const harness = await createHarness({ settings: { codexServiceTier: "default" }, hfCompaction: { mode: "off" } });
 		harnesses.push(harness);
 		const model = harness.session.model;
@@ -162,6 +170,8 @@ describe("InteractiveMode /fast", () => {
 			compat: { supportsFastMode: true },
 		};
 		const effort = harness.session.thinkingLevel;
+		const entries = [...harness.sessionManager.getEntries()];
+		const setTier = vi.spyOn(harness.settingsManager, "setCodexServiceTier");
 		const context = {
 			session: harness.session,
 			footer: { invalidate: vi.fn() },
@@ -171,21 +181,53 @@ describe("InteractiveMode /fast", () => {
 		prototype.handleFastCommand.call(context, "/fast on");
 		expect(harness.session.getCodexServiceTierStatus()).toMatchObject({
 			preference: "fast",
-			source: "session",
+			source: "settings",
 			available: true,
 		});
+		expect(harness.settingsManager.getCodexServiceTier()).toBe("fast");
+		expect(setTier).toHaveBeenCalledExactlyOnceWith("fast");
+		prototype.handleFastCommand.call(context, "/fast status");
+		expect(setTier).toHaveBeenCalledTimes(1);
 		prototype.handleFastCommand.call(context, "/fast off");
 		expect(harness.session.codexServiceTier).toBe("default");
 		expect(harness.settingsManager.getCodexServiceTier()).toBe("default");
+		expect(setTier.mock.calls).toEqual([["fast"], ["default"]]);
+		expect(harness.sessionManager.getEntries()).toEqual(entries);
+		expect(harness.eventsOfType("codex_service_tier_changed")).toHaveLength(2);
 		expect(harness.session.thinkingLevel).toBe(effort);
 		expect(harness.session.model?.id).toBe(model.id);
 		expect(harness.faux.state.callCount).toBe(0);
 	});
 
-	it("saves all three defaults, resets the session override and tolerates unavailable current model", async () => {
+	it("remembers Fast globally on an unsupported real session without a request or branch entry", async () => {
 		const harness = await createHarness({ hfCompaction: { mode: "off" } });
 		harnesses.push(harness);
-		harness.session.setCodexServiceTier("default");
+		const entries = [...harness.sessionManager.getEntries()];
+		const context = {
+			session: harness.session,
+			footer: { invalidate: vi.fn() },
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+		};
+		prototype.handleFastCommand.call(context, "/fast on");
+		expect(context.showError).not.toHaveBeenCalled();
+		expect(harness.settingsManager.getCodexServiceTier()).toBe("fast");
+		expect(harness.session.getCodexServiceTierStatus()).toMatchObject({
+			preference: "fast",
+			source: "settings",
+			available: false,
+		});
+		expect(context.showStatus).toHaveBeenLastCalledWith(expect.stringContaining("no (unsupported"));
+		expect(harness.sessionManager.getEntries()).toEqual(entries);
+		expect(harness.faux.state.callCount).toBe(0);
+	});
+
+	it("saves each menu value once through the session setter even on an unsupported model", async () => {
+		const harness = await createHarness({ hfCompaction: { mode: "off" } });
+		harnesses.push(harness);
+		const entries = [...harness.sessionManager.getEntries()];
+		const setSessionTier = vi.spyOn(harness.session, "setCodexServiceTier");
+		const setGlobalTier = vi.spyOn(harness.settingsManager, "setCodexServiceTier");
 		let selector: SettingsSelectorComponent | undefined;
 		const context = {
 			session: harness.session,
@@ -201,14 +243,25 @@ describe("InteractiveMode /fast", () => {
 		prototype.showSettingsSelector.call(context);
 		const list = selector!.getSettingsList();
 		for (const character of "Codex service tier default") list.handleInput(character);
-		for (const preference of ["default", "fast", undefined] as const) {
+		for (const [index, preference] of (["default", "fast", undefined] as const).entries()) {
 			list.handleInput("\r");
+			expect(setSessionTier).toHaveBeenCalledTimes(index + 1);
+			expect(setSessionTier).toHaveBeenNthCalledWith(index + 1, preference);
+			expect(setGlobalTier).toHaveBeenCalledTimes(index + 1);
+			expect(setGlobalTier).toHaveBeenNthCalledWith(index + 1, preference);
 			expect(harness.settingsManager.getCodexServiceTier()).toBe(preference);
+			expect(harness.session.getCodexServiceTierStatus().preference).toBe(preference);
 			expect(harness.session.getCodexServiceTierStatus()).toMatchObject({
 				available: false,
 				source: preference ? "settings" : "none",
 			});
 		}
+		expect(harness.sessionManager.getEntries()).toEqual(entries);
+		expect(harness.eventsOfType("codex_service_tier_changed")).toHaveLength(3);
+		expect(harness.faux.state.callCount).toBe(0);
 		expect(context.showStatus).toHaveBeenCalledTimes(3);
+		expect(context.showStatus).toHaveBeenLastCalledWith(
+			expect.stringContaining("Global Codex preference saved for all projects and new/resumed sessions"),
+		);
 	});
 });

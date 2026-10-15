@@ -63,6 +63,7 @@ export function registerPiCollaborationRoot(
 					shellPath: settings.getShellPath(),
 					shellCommandPrefix: settings.getShellCommandPrefix(),
 				},
+				getCodexServiceTier: () => settings.getCodexServiceTier(),
 				getTools: () => session.getDelegatableToolNames(),
 				getMcpConfig: (toolNames) => {
 					// Only the root's built-in MCP integration can supply its approved configuration.

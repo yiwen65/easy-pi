@@ -63,12 +63,9 @@ import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth
 import { type BackgroundTaskInlinePolicy, BackgroundTaskNotifications } from "./background-task-notifications.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
-	CODEX_SERVICE_TIER_ENTRY_TYPE,
 	type CodexServiceTier,
 	type CodexServiceTierStatus,
 	isCodexFastModeAvailable,
-	parseCodexServiceTier,
-	resolveCodexServiceTierPreference,
 	resolveCodexServiceTierRequest,
 	withCodexServiceTierSnapshot,
 } from "./codex-service-tier.ts";
@@ -1702,28 +1699,22 @@ export class AgentSession {
 		return this.agent.state.model;
 	}
 
-	/** Branch override, otherwise the trusted merged configuration; retained across model switches. */
+	/** Shared global preference; independent of the session branch and current model. */
 	get codexServiceTier(): CodexServiceTier | undefined {
-		return resolveCodexServiceTierPreference(
-			this.sessionManager.getBranch(),
-			this.settingsManager.getCodexServiceTier(),
-		).preference;
+		return this.settingsManager.getCodexServiceTier();
 	}
 
-	/** Update this branch only. Undefined resets to configuration, without changing saved defaults. */
+	/** Remember the global preference. Undefined clears it; capability is checked per request. */
 	setCodexServiceTier(tier: CodexServiceTier | undefined): void {
-		parseCodexServiceTier(tier);
-		if (tier === "fast" && !isCodexFastModeAvailable(this.model)) {
-			throw new Error("Fast mode is unavailable for the current model: select a supported OpenAI Codex model.");
-		}
-		this.sessionManager.appendCustomEntry(CODEX_SERVICE_TIER_ENTRY_TYPE, { tier: tier ?? null });
+		this.settingsManager.setCodexServiceTier(tier);
 		this._emit({ type: "codex_service_tier_changed", status: this.getCodexServiceTierStatus() });
 	}
 
 	getCodexServiceTierStatus(): CodexServiceTierStatus {
 		const branch = this.sessionManager.getBranch();
+		const preference = this.codexServiceTier;
 		const status: CodexServiceTierStatus = {
-			...resolveCodexServiceTierPreference(branch, this.settingsManager.getCodexServiceTier()),
+			...(preference === undefined ? { source: "none" as const } : { preference, source: "settings" as const }),
 			available: isCodexFastModeAvailable(this.model),
 		};
 		if (this.model?.provider !== "openai-codex" || this.model.api !== "openai-codex-responses") return status;

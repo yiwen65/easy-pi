@@ -14,11 +14,7 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../src/core/agent-session-runtime.ts";
-import {
-	CODEX_SERVICE_TIER_ENTRY_TYPE,
-	isCodexFastModeAvailable,
-	resolveCodexServiceTierRequest,
-} from "../../src/core/codex-service-tier.ts";
+import { isCodexFastModeAvailable, resolveCodexServiceTierRequest } from "../../src/core/codex-service-tier.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../../src/core/settings-manager.ts";
@@ -99,55 +95,55 @@ async function request(session: AgentSession, options: SimpleStreamOptions = {})
 	await stream.result();
 }
 
-describe("Codex service tier session state", () => {
-	it("leaves old sessions unspecified and stores overrides outside model messages", async () => {
+describe("Codex service tier global preference", () => {
+	it("leaves old sessions unspecified and saves globally without appending session entries", async () => {
 		const h = await harness();
 		h.session.agent.state.model = codexModel(h);
 		expect(h.session.codexServiceTier).toBeUndefined();
 		expect(h.session.getCodexServiceTierStatus()).toEqual({ source: "none", available: true });
 		const messagesBefore = h.session.messages.slice();
+		const entriesBefore = h.sessionManager.getEntries().slice();
 		h.session.setCodexServiceTier("fast");
 		expect(h.session.codexServiceTier).toBe("fast");
-		expect(h.session.getCodexServiceTierStatus()).toEqual({ preference: "fast", source: "session", available: true });
+		expect(h.session.getCodexServiceTierStatus()).toEqual({
+			preference: "fast",
+			source: "settings",
+			available: true,
+		});
 		expect(h.session.messages).toEqual(messagesBefore);
 		expect(h.sessionManager.buildSessionContext().messages).toEqual(messagesBefore);
-		expect(h.sessionManager.getLeafEntry()).toMatchObject({
-			type: "custom",
-			customType: CODEX_SERVICE_TIER_ENTRY_TYPE,
-			data: { tier: "fast" },
-		});
-		expect(h.eventsOfType("codex_service_tier_changed")).toHaveLength(1);
-		expect(h.settingsManager.getCodexServiceTier()).toBeUndefined();
+		expect(h.sessionManager.getEntries()).toEqual(entriesBefore);
+		expect(h.eventsOfType("codex_service_tier_changed")).toEqual([
+			{ type: "codex_service_tier_changed", status: { preference: "fast", source: "settings", available: true } },
+		]);
+		expect(h.settingsManager.getCodexServiceTier()).toBe("fast");
 	});
 
-	it("resets the branch override to current settings, not a frozen default", async () => {
+	it("clears the global preference rather than restoring an earlier default", async () => {
 		const h = await harness();
 		h.session.agent.state.model = codexModel(h);
 		h.settingsManager.setCodexServiceTier("fast");
 		h.session.setCodexServiceTier("default");
-		expect(h.session.codexServiceTier).toBe("default");
+		expect(h.settingsManager.getCodexServiceTier()).toBe("default");
 		h.session.setCodexServiceTier(undefined);
-		expect(h.session.getCodexServiceTierStatus()).toMatchObject({ preference: "fast", source: "settings" });
-		h.settingsManager.setCodexServiceTier("default");
-		expect(h.session.codexServiceTier).toBe("default");
-		h.settingsManager.setCodexServiceTier(undefined);
-		expect(h.session.getCodexServiceTierStatus()).toMatchObject({ source: "none" });
-		expect(h.session.codexServiceTier).toBeUndefined();
-		expect(h.sessionManager.getLeafEntry()).toMatchObject({ data: { tier: null } });
+		expect(h.session.getCodexServiceTierStatus()).toEqual({ source: "none", available: true });
+		expect(h.settingsManager.getCodexServiceTier()).toBeUndefined();
+		expect(h.sessionManager.getEntries()).toEqual([]);
+		expect(h.eventsOfType("codex_service_tier_changed").at(-1)?.status).toEqual({ source: "none", available: true });
 	});
 
-	it.each([false, undefined])(
-		"blocks enabling Fast with capability %s but allows explicit Standard",
-		async (capability) => {
-			const h = await harness();
-			h.session.agent.state.model = codexModel(h, { supportsFastMode: capability });
-			expect(() => h.session.setCodexServiceTier("fast")).toThrow("Fast mode is unavailable");
-			expect(h.sessionManager.getEntries()).toHaveLength(0);
-			h.session.setCodexServiceTier("default");
-			expect(h.session.codexServiceTier).toBe("default");
-			expect(h.session.getCodexServiceTierStatus().available).toBe(false);
-		},
-	);
+	it.each([false, undefined])("allows saving global Fast with capability %s", async (capability) => {
+		const h = await harness();
+		h.session.agent.state.model = codexModel(h, { supportsFastMode: capability });
+		h.session.setCodexServiceTier("fast");
+		expect(h.session.getCodexServiceTierStatus()).toEqual({
+			preference: "fast",
+			source: "settings",
+			available: false,
+		});
+		expect(h.settingsManager.getCodexServiceTier()).toBe("fast");
+		expect(h.sessionManager.getEntries()).toHaveLength(0);
+	});
 
 	it("validates untyped session setters and requires both the Codex provider and API", async () => {
 		const h = await harness();
@@ -158,13 +154,17 @@ describe("Codex service tier session state", () => {
 		]) {
 			h.session.agent.state.model = model;
 			expect(isCodexFastModeAvailable(model)).toBe(false);
-			expect(() => h.session.setCodexServiceTier("fast")).toThrow("Fast mode is unavailable");
+			h.session.setCodexServiceTier("fast");
+			expect(h.session.codexServiceTier).toBe("fast");
 		}
+		const eventCount = h.eventsOfType("codex_service_tier_changed").length;
 		// @ts-expect-error exercise untyped callers
 		expect(() => h.session.setCodexServiceTier("priority")).toThrow("Invalid codexServiceTier");
+		expect(h.session.codexServiceTier).toBe("fast");
+		expect(h.eventsOfType("codex_service_tier_changed")).toHaveLength(eventCount);
 		Reflect.set(h.session.agent.state, "model", undefined);
-		expect(() => h.session.setCodexServiceTier("fast")).toThrow("Fast mode is unavailable");
-		h.session.setCodexServiceTier("default");
+		h.session.setCodexServiceTier("fast");
+		expect(h.session.getCodexServiceTierStatus().available).toBe(false);
 	});
 
 	it("retains preference and effort across real setModel switches", async () => {
@@ -184,27 +184,24 @@ describe("Codex service tier session state", () => {
 		expect(h.session.model).toBe(supported);
 	});
 
-	it("restores sibling and reset preferences from the selected branch", async () => {
+	it("ignores historical sibling, reset, and malformed overrides when navigating branches", async () => {
 		const h = await harness();
 		h.session.agent.state.model = codexModel(h);
-		h.settingsManager.setCodexServiceTier("default");
 		const root = h.sessionManager.appendCustomEntry("root", {});
-		h.session.setCodexServiceTier("fast");
-		const fast = h.sessionManager.getLeafId()!;
-		await h.session.navigateTree(root);
-		expect(h.session.codexServiceTier).toBe("default");
-		h.session.setCodexServiceTier("default");
-		const standard = h.sessionManager.getLeafId()!;
-		await h.session.navigateTree(fast);
-		expect(h.session.codexServiceTier).toBe("fast");
-		h.session.setCodexServiceTier(undefined);
-		const reset = h.sessionManager.getLeafId()!;
-		await h.session.navigateTree(standard);
-		expect(h.session.codexServiceTier).toBe("default");
-		h.settingsManager.setCodexServiceTier("fast");
-		expect(h.session.codexServiceTier).toBe("default");
-		await h.session.navigateTree(reset);
-		expect(h.session.getCodexServiceTierStatus()).toMatchObject({ preference: "fast", source: "settings" });
+		const fast = h.sessionManager.appendCustomEntry("codex-service-tier", { tier: "fast" });
+		const reset = h.sessionManager.appendCustomEntry("codex-service-tier", { tier: null });
+		h.sessionManager.branch(root);
+		const standard = h.sessionManager.appendCustomEntry("codex-service-tier", { tier: "default" });
+		const malformed = h.sessionManager.appendCustomEntry("codex-service-tier", { tier: "priority" });
+		for (const tier of ["fast", "default", undefined] as const) {
+			h.session.setCodexServiceTier(tier);
+			for (const target of [fast, reset, standard, malformed, root]) {
+				await h.session.navigateTree(target);
+				expect(h.session.codexServiceTier).toBe(tier);
+				expect(h.session.getCodexServiceTierStatus().source).toBe(tier === undefined ? "none" : "settings");
+			}
+		}
+		expect(h.sessionManager.getEntries()).toHaveLength(5);
 	});
 
 	it("reports only the latest matching branch-visible Codex attempt, preserving null and unknown", async () => {
@@ -233,37 +230,52 @@ describe("Codex service tier session state", () => {
 		expect(h.session.getCodexServiceTierStatus().reported).toBeUndefined();
 	});
 
-	it("persists/resumes custom state and metadata, and extracts only the chosen fork/clone path", async () => {
+	it("reuses persisted global settings on new/resumed sessions in another cwd and ignores fork/clone overrides", async () => {
 		const h = await harness();
 		const sessionDir = join(h.tempDir, "sessions");
+		const agentDir = join(h.tempDir, "agent");
+		const otherCwd = join(h.tempDir, "other-project");
 		mkdirSync(sessionDir);
+		mkdirSync(otherCwd);
+		const settingsManager = SettingsManager.create(h.tempDir, agentDir);
 		const sm = SessionManager.create(h.tempDir, sessionDir);
-		const session = await sdkSession(h, { sessionManager: sm });
+		const session = await sdkSession(h, { sessionManager: sm, settingsManager });
 		session.setCodexServiceTier("fast");
-		const user = sm.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
-		const forkParent = sm.getEntry(user)!.parentId!;
+		// Historical branch state must survive as data, but never decide the preference.
+		const forkParent = sm.appendCustomEntry("codex-service-tier", { tier: "fast" });
+		sm.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
 		sm.appendMessage(assistant(session.model!, { sent: "priority", reported: "default", costEstimated: true }));
-		session.setCodexServiceTier("default");
-		const cloneLeaf = sm.getLeafId()!;
+		const cloneLeaf = sm.appendCustomEntry("codex-service-tier", { tier: "default" });
 		const file = session.sessionFile!;
-		expect(readFileSync(file, "utf-8")).toContain('"customType":"codex-service-tier"');
-		const resumed = await sdkSession(h, {
-			sessionManager: SessionManager.open(file, sessionDir),
-			codexServiceTier: undefined,
-		});
-		expect(resumed.codexServiceTier).toBe("default");
-		expect(resumed.getCodexServiceTierStatus()).toMatchObject({ reported: "default", costEstimated: true });
-		const fork = SessionManager.open(file, sessionDir);
-		fork.createBranchedSession(forkParent);
-		const forked = await sdkSession(h, { sessionManager: fork });
-		expect(forked.codexServiceTier).toBe("fast");
-		expect(forked.messages).toEqual([]);
-		const clone = SessionManager.open(file, sessionDir);
-		clone.createBranchedSession(cloneLeaf);
-		const cloned = await sdkSession(h, { sessionManager: clone });
-		expect(cloned.codexServiceTier).toBe("default");
-		expect(cloned.getCodexServiceTierStatus().reported).toBe("default");
-		expect(cloned.messages).toHaveLength(2);
+		const fileBefore = readFileSync(file, "utf-8");
+		expect(fileBefore).toContain('"customType":"codex-service-tier"');
+		for (const tier of ["fast", "default", undefined] as const) {
+			session.setCodexServiceTier(tier);
+			await settingsManager.flush();
+			expect(readFileSync(file, "utf-8")).toBe(fileBefore);
+			const reloaded = SettingsManager.create(otherCwd, agentDir);
+			const fresh = await sdkSession(h, { cwd: otherCwd, settingsManager: reloaded });
+			const resumed = await sdkSession(h, {
+				cwd: otherCwd,
+				sessionManager: SessionManager.open(file, sessionDir),
+				settingsManager: reloaded,
+				codexServiceTier: undefined,
+			});
+			expect(fresh.codexServiceTier).toBe(tier);
+			expect(resumed.codexServiceTier).toBe(tier);
+			expect(resumed.getCodexServiceTierStatus()).toMatchObject({ reported: "default", costEstimated: true });
+			const fork = SessionManager.open(file, sessionDir);
+			fork.createBranchedSession(forkParent);
+			const forked = await sdkSession(h, { sessionManager: fork, settingsManager: reloaded });
+			expect(forked.codexServiceTier).toBe(tier);
+			expect(forked.messages).toEqual([]);
+			const clone = SessionManager.open(file, sessionDir);
+			clone.createBranchedSession(cloneLeaf);
+			const cloned = await sdkSession(h, { sessionManager: clone, settingsManager: reloaded });
+			expect(cloned.codexServiceTier).toBe(tier);
+			expect(cloned.getCodexServiceTierStatus().reported).toBe("default");
+			expect(cloned.messages).toHaveLength(2);
+		}
 	});
 });
 
@@ -276,7 +288,7 @@ describe("Codex service tier SDK request seam", () => {
 		expect(capture.mock.calls[0][2]).not.toHaveProperty("serviceTier");
 	});
 
-	it("uses explicit request > branch > settings, without undefined erasing defaults", async () => {
+	it("uses explicit request > global settings, without undefined erasing defaults", async () => {
 		const h = await harness();
 		h.settingsManager.setCodexServiceTier("fast");
 		const capture = captureRequests(h);
@@ -291,10 +303,12 @@ describe("Codex service tier SDK request seam", () => {
 		session.setCodexServiceTier(undefined);
 		await request(session, { serviceTier: "default" });
 		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("default");
-		expect(session.codexServiceTier).toBe("fast");
+		expect(session.codexServiceTier).toBeUndefined();
+		await request(session);
+		expect(capture.mock.calls.at(-1)?.[2]).not.toHaveProperty("serviceTier");
 	});
 
-	it("applies trusted project precedence at the SDK seam and lets a branch override it", async () => {
+	it("ignores project, temporary and historical branch preferences at the SDK seam", async () => {
 		const h = await harness();
 		const storage = new InMemorySettingsStorage();
 		storage.withLock("global", () => JSON.stringify({ codexServiceTier: "fast" }));
@@ -305,11 +319,17 @@ describe("Codex service tier SDK request seam", () => {
 		await request(session);
 		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("fast");
 		settingsManager.setProjectTrusted(true);
-		await request(session);
-		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("default");
-		session.setCodexServiceTier("fast");
+		settingsManager.applyOverrides({ codexServiceTier: "default" });
+		session.sessionManager.appendCustomEntry("codex-service-tier", { tier: "default" });
 		await request(session);
 		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("fast");
+		session.setCodexServiceTier(undefined);
+		await request(session);
+		expect(capture.mock.calls.at(-1)?.[2]).not.toHaveProperty("serviceTier");
+		session.setCodexServiceTier("default");
+		session.sessionManager.appendCustomEntry("codex-service-tier", { tier: "fast" });
+		await request(session);
+		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("default");
 	});
 
 	it("re-resolves each request across supported, unsupported, and non-Codex model switches", async () => {
@@ -329,20 +349,21 @@ describe("Codex service tier SDK request seam", () => {
 		expect(session.codexServiceTier).toBe("fast");
 	});
 
-	it("supports a persisted initial SDK override and validates it", async () => {
+	it("sets the global preference from the initial SDK option even on unsupported or non-Codex models", async () => {
 		const h = await harness();
-		h.settingsManager.setCodexServiceTier("default");
-		const session = await sdkSession(h, { codexServiceTier: "fast" });
-		expect(session.getCodexServiceTierStatus()).toMatchObject({ preference: "fast", source: "session" });
-		expect(session.sessionManager.getBranch().at(-1)).toMatchObject({ data: { tier: "fast" } });
-		await expect(
-			sdkSession(h, { model: codexModel(h, { supportsFastMode: false }), codexServiceTier: "fast" }),
-		).rejects.toThrow("Fast mode is unavailable");
-		await expect(sdkSession(h, { model: h.getModel(), codexServiceTier: "fast" })).rejects.toThrow(
-			"Fast mode is unavailable",
-		);
+		const capture = captureRequests(h);
+		for (const model of [codexModel(h), codexModel(h, { supportsFastMode: false }), h.getModel()]) {
+			h.settingsManager.setCodexServiceTier("default");
+			const session = await sdkSession(h, { model, codexServiceTier: "fast" });
+			expect(session.getCodexServiceTierStatus()).toMatchObject({ preference: "fast", source: "settings" });
+			expect(h.settingsManager.getCodexServiceTier()).toBe("fast");
+			expect(session.sessionManager.getBranch().some((entry) => entry.type === "custom")).toBe(false);
+			await request(session);
+			expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe(isCodexFastModeAvailable(model) ? "fast" : undefined);
+		}
 		// @ts-expect-error exercise untyped SDK input
 		await expect(sdkSession(h, { codexServiceTier: "priority" })).rejects.toThrow("Invalid codexServiceTier");
+		expect(h.settingsManager.getCodexServiceTier()).toBe("fast");
 	});
 
 	it.each([false, undefined])(
@@ -413,30 +434,39 @@ describe("Codex service tier SDK request seam", () => {
 		expect(session.agent.promptCacheKey).toBe("same-prefix");
 	});
 
-	it("keeps a separate session on its own settings instead of the parent's runtime override", async () => {
+	it("shares the current global preference between sessions using the same SettingsManager", async () => {
 		const h = await harness();
-		h.settingsManager.setCodexServiceTier("default");
-		const parent = await sdkSession(h, { codexServiceTier: "fast" });
-		const child = await sdkSession(h);
-		expect(child.codexServiceTier).toBe("default");
-		parent.setCodexServiceTier(undefined);
-		expect(child.codexServiceTier).toBe("default");
+		const capture = captureRequests(h);
+		const first = await sdkSession(h, { codexServiceTier: "fast" });
+		const second = await sdkSession(h);
+		expect(second.codexServiceTier).toBe("fast");
+		first.setCodexServiceTier("default");
+		expect(second.getCodexServiceTierStatus()).toMatchObject({ preference: "default", source: "settings" });
+		await request(second);
+		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("default");
+		second.setCodexServiceTier("fast");
+		expect(first.codexServiceTier).toBe("fast");
+		await request(first);
+		expect(capture.mock.calls.at(-1)?.[2]?.serviceTier).toBe("fast");
+		first.setCodexServiceTier(undefined);
+		expect(second.codexServiceTier).toBeUndefined();
+		await request(second);
+		expect(capture.mock.calls.at(-1)?.[2]).not.toHaveProperty("serviceTier");
 	});
 
-	it("restores Fast through the actual runtime clone/fork flow and resets it on newSession", async () => {
+	it("retains the global preference through actual runtime clone/fork and newSession flows", async () => {
 		const h = await harness();
 		const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager }) => {
-			const branchHarness = await createHarness({ sessionManager, tools: [], hfCompaction: { mode: "off" } });
-			cleanups.push(branchHarness.cleanup);
+			const session = await sdkSession(h, { cwd, sessionManager });
 			return {
-				session: branchHarness.session,
-				extensionsResult: branchHarness.session.resourceLoader.getExtensions(),
+				session,
+				extensionsResult: session.resourceLoader.getExtensions(),
 				services: {
 					cwd,
 					agentDir: h.tempDir,
-					modelRuntime: branchHarness.session.modelRuntime,
-					settingsManager: branchHarness.settingsManager,
-					resourceLoader: branchHarness.session.resourceLoader,
+					modelRuntime: session.modelRuntime,
+					settingsManager: h.settingsManager,
+					resourceLoader: session.resourceLoader,
 					diagnostics: [],
 				},
 				diagnostics: [],
@@ -459,6 +489,12 @@ describe("Codex service tier SDK request seam", () => {
 		await runtime.fork(user);
 		expect(runtime.session.codexServiceTier).toBe("fast");
 		expect(runtime.session.messages).toEqual([]);
+		await runtime.newSession();
+		expect(runtime.session.codexServiceTier).toBe("fast");
+		runtime.session.setCodexServiceTier("default");
+		await runtime.newSession();
+		expect(runtime.session.codexServiceTier).toBe("default");
+		runtime.session.setCodexServiceTier(undefined);
 		await runtime.newSession();
 		expect(runtime.session.codexServiceTier).toBeUndefined();
 	});

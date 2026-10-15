@@ -169,7 +169,7 @@ for (const path of ["manual", "auto", "branch"] as const) {
 			},
 		);
 
-		it("pins the resolved Fast tier through a summary retry while the session switches to Standard", async () => {
+		it("pins the resolved Fast tier through a summary retry while the global preference switches to Standard", async () => {
 			const h = await summaryHarness("supported");
 			h.session.setCodexServiceTier("fast");
 			const targetId = seedHistory(h);
@@ -181,7 +181,8 @@ for (const path of ["manual", "auto", "branch"] as const) {
 			await runSummary(h, path, targetId);
 			expect(requests.map((request) => request.options?.serviceTier)).toEqual(["fast", "fast"]);
 			expect(h.eventsOfType("summarization_retry_scheduled")).toHaveLength(1);
-			if (path !== "branch") expect(h.session.codexServiceTier).toBe("default");
+			expect(h.session.codexServiceTier).toBe("default");
+			expect(h.settingsManager.getCodexServiceTier()).toBe("default");
 		});
 	});
 }

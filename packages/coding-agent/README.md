@@ -181,7 +181,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, Codex service tier default, theme, message delivery, transport |
-| `/fast [on\|off\|status]` | Request Codex Fast for this session (extra usage), or inspect the upstream tier |
+| `/fast [on\|off\|status]` | Remember Codex Fast globally (extra usage), or inspect the upstream tier |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |

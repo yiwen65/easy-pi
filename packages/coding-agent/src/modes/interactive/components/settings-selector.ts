@@ -698,7 +698,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "codex-service-tier",
 				label: "Codex service tier default",
 				description:
-					"Saves the global default and resets this session to defaults; trusted project settings take precedence. /fast changes this session only. Fast uses extra usage (including summaries); costs are estimates, service is not guaranteed.",
+					"Save once for all projects and new/resumed sessions; project settings cannot override it. /fast saves the same global preference. Applies to the next model request; summary retries keep their starting tier. Other running processes are not hot-synchronized. Fast requires a supported Codex model and uses extra usage (including summaries); costs are estimates, service is not guaranteed.",
 				currentValue:
 					config.codexServiceTier === "fast"
 						? "Fast"

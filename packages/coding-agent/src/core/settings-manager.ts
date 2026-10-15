@@ -106,7 +106,7 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
-	/** Default Codex preference; omission leaves the provider's tier unspecified. */
+	/** Global-only Codex preference; omission leaves the provider's tier unspecified. */
 	codexServiceTier?: CodexServiceTier;
 	/** Global-only defaults for newly spawned children; omission inherits the caller per field. */
 	subagentModel?: string; // Fully qualified provider/model
@@ -839,7 +839,7 @@ export class SettingsManager {
 	}
 
 	getCodexServiceTier(): CodexServiceTier | undefined {
-		return parseCodexServiceTier(this.settings.codexServiceTier);
+		return parseCodexServiceTier(this.globalSettings.codexServiceTier);
 	}
 
 	setCodexServiceTier(tier: CodexServiceTier | undefined): void {
