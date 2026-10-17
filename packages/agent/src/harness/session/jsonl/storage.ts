@@ -1,4 +1,5 @@
 import type { DurableFileWriter } from "../../types.ts";
+import { assertJsonSerializable } from "../session.ts";
 import { type SessionMutation, SessionState } from "../state.ts";
 import {
 	type BranchBounds,
@@ -36,6 +37,7 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 	private closing = false;
 	private releasePromise: Promise<void> | undefined;
 	private writeFailure: Error | undefined;
+	private releaseCallback: (() => void) | undefined;
 
 	constructor(fs: JsonlSessionRepoFileSystem, metadata: JsonlSessionMetadata, writer: DurableFileWriter | undefined) {
 		this.fs = fs;
@@ -117,7 +119,8 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 			const line = physicalLines[index]!;
 			const mutationResult = parseMutation(line);
 			if (!mutationResult.ok) {
-				const isTornTail = index === physicalLines.length - 1 && mutationResult.error.kind === "syntax";
+				const isTornTail =
+					!content.endsWith("\n") && index === physicalLines.length - 1 && mutationResult.error.kind === "syntax";
 				if (isTornTail) {
 					// Drop the unacknowledged partial append by atomically publishing the valid prefix.
 					const validPrefix = `${physicalLines.slice(0, index).join("\n")}\n`;
@@ -160,10 +163,16 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 		await this.tail;
 	}
 
+	setReleaseCallback(callback: () => void): void {
+		this.releaseCallback = callback;
+	}
+
 	async release(): Promise<void> {
 		this.closing = true;
 		this.releasePromise ??= this.tail.then(async () => {
 			if (this.writer) fileResult(await this.writer.release(), `Failed to release session ${this.metadata.path}`);
+			this.releaseCallback?.();
+			this.releaseCallback = undefined;
 		});
 		await this.releasePromise;
 	}
@@ -200,12 +209,14 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 		});
 	}
 
-	appendEntry<TEntry extends Entry>(newEntry: ProvisionedEntry<TEntry>, lane: string): Promise<TEntry> {
+	async appendEntry<TEntry extends Entry>(input: ProvisionedEntry<TEntry>, lane: string): Promise<TEntry> {
+		assertJsonSerializable(input);
+		const newEntry = structuredClone(input);
 		return this.enqueue(async () => {
 			const parentId = this.state.requireLane(lane);
 			this.state.validateUnusedId(newEntry.id);
 			const entry = {
-				...structuredClone(newEntry),
+				...newEntry,
 				parentId,
 				seq: this.state.nextSequence,
 				timestamp: Date.now(),
@@ -217,7 +228,9 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 		});
 	}
 
-	appendRecord<TRecord extends LaneRecord>(newRecord: NewRecord<TRecord>): Promise<TRecord> {
+	async appendRecord<TRecord extends LaneRecord>(input: NewRecord<TRecord>): Promise<TRecord> {
+		assertJsonSerializable(input);
+		const newRecord = structuredClone(input);
 		return this.enqueue(async () => {
 			this.state.requireLane(newRecord.lane);
 			this.state.validateUnusedId(newRecord.id);
@@ -229,7 +242,7 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 				);
 			}
 			const record = {
-				...structuredClone(newRecord),
+				...newRecord,
 				seq: this.state.nextSequence,
 				timestamp: Date.now(),
 			} as unknown as TRecord;

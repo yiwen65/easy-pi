@@ -314,6 +314,22 @@ export class PiClient {
 			this.#connection.fail(error);
 			return;
 		}
+		if ("sessionId" in pending.command) {
+			const sessionId =
+				"session" in message.result
+					? message.result.session.id
+					: "sessionId" in message.result
+						? message.result.sessionId
+						: undefined;
+			if (sessionId !== pending.command.sessionId) {
+				const error = new ProtocolValidationError(
+					`Response session ${sessionId} does not match ${pending.command.sessionId}`,
+				);
+				pending.reject(error);
+				this.#connection.fail(error);
+				return;
+			}
+		}
 		this.#state.applyResult(message.result);
 		pending.resolve(message.result);
 	}

@@ -15,6 +15,44 @@
 
 export const MAX_PROVIDER_ERROR_BODY_CHARS = 4000;
 
+/** Read a bounded diagnostic prefix without dropping caller cancellation after response headers. */
+export async function readProviderErrorBody(response: Response, signal?: AbortSignal): Promise<string> {
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	const maxBytes = 4000;
+	let bytes = 0;
+	let text = "";
+	let complete = false;
+	const onAbort = () => {
+		void reader.cancel().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		while (bytes < maxBytes) {
+			signal?.throwIfAborted();
+			const { done, value } = await reader.read();
+			signal?.throwIfAborted();
+			if (done) {
+				complete = true;
+				return text + decoder.decode();
+			}
+			const chunk = value.subarray(0, maxBytes - bytes);
+			bytes += chunk.byteLength;
+			text += decoder.decode(chunk, { stream: true });
+		}
+		return `${text}${decoder.decode()}... [truncated]`;
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		if (!complete) {
+			try {
+				await reader.cancel();
+			} catch {}
+		}
+		reader.releaseLock();
+	}
+}
+
 export interface NormalizedProviderError {
 	/** HTTP status code, when one could be extracted from the SDK error object. */
 	status?: number;

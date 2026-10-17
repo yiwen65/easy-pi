@@ -1,7 +1,8 @@
 import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderStreams } from "../types.ts";
+import { raceWithAbortSignal } from "../utils/abort.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 
-function createSetupErrorMessage(model: Model<Api>, error: unknown): AssistantMessage {
+function createSetupErrorMessage(model: Model<Api>, error: unknown, signal?: AbortSignal): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
@@ -16,7 +17,7 @@ function createSetupErrorMessage(model: Model<Api>, error: unknown): AssistantMe
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "error",
+		stopReason: signal?.aborted ? "aborted" : "error",
 		errorMessage: error instanceof Error ? error.message : String(error),
 		timestamp: Date.now(),
 	};
@@ -41,21 +42,28 @@ async function forwardStream(
 /**
  * Returns a stream synchronously while running async setup (auth resolution,
  * lazy module loading) behind it. Setup failures terminate the stream with an
- * error event.
+ * error event. A signal cancels the setup wait; setup must also check it before
+ * dispatching after an asynchronous boundary to avoid starting abandoned work.
  */
 export function lazyStream(
 	model: Model<Api>,
 	setup: () => Promise<AsyncIterable<AssistantMessageEvent>>,
+	signal?: AbortSignal,
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 
-	setup()
-		.then((inner) => forwardStream(outer, inner))
-		.catch((error) => {
-			const message = createSetupErrorMessage(model, error);
-			outer.push({ type: "error", reason: "error", error: message });
+	void (async () => {
+		try {
+			signal?.throwIfAborted();
+			const pending = setup();
+			const inner = await (signal ? raceWithAbortSignal(pending, signal) : pending);
+			await forwardStream(outer, inner);
+		} catch (error) {
+			const message = createSetupErrorMessage(model, error, signal);
+			outer.push({ type: "error", reason: signal?.aborted ? "aborted" : "error", error: message });
 			outer.end(message);
-		});
+		}
+	})();
 
 	return outer;
 }
@@ -73,18 +81,39 @@ export interface LazyApiCapabilities {
 export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: LazyApiCapabilities): ProviderStreams {
 	const api: ProviderStreams = {
 		stream: (model, context, options) =>
-			lazyStream(model, async () => (await load()).stream(model, context, options)),
+			lazyStream(
+				model,
+				async () => {
+					const implementation = await load();
+					options?.signal?.throwIfAborted();
+					return implementation.stream(model, context, options);
+				},
+				options?.signal,
+			),
 		streamSimple: (model, context, options) =>
-			lazyStream(model, async () => (await load()).streamSimple(model, context, options)),
+			lazyStream(
+				model,
+				async () => {
+					const implementation = await load();
+					options?.signal?.throwIfAborted();
+					return implementation.streamSimple(model, context, options);
+				},
+				options?.signal,
+			),
 	};
 
 	if (capabilities?.fetchDeferred) {
 		api.fetchDeferred = (model, handle, options) =>
-			lazyStream(model, async () => {
-				const implementation = await load();
-				if (!implementation.fetchDeferred) throw new Error("API does not support deferred responses");
-				return implementation.fetchDeferred(model, handle, options);
-			});
+			lazyStream(
+				model,
+				async () => {
+					const implementation = await load();
+					options?.signal?.throwIfAborted();
+					if (!implementation.fetchDeferred) throw new Error("API does not support deferred responses");
+					return implementation.fetchDeferred(model, handle, options);
+				},
+				options?.signal,
+			);
 	}
 	if (capabilities?.cancelDeferred) {
 		api.cancelDeferred = async (model, handle, options) => {

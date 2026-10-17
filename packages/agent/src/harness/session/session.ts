@@ -21,6 +21,8 @@ import type {
 } from "./types.ts";
 import { SessionError } from "./types.ts";
 
+export { assertDurableEntry, assertDurableRecord } from "./validation.ts";
+
 type JsonValidationFrame = { value: unknown } | { exit: object };
 
 function invalidPayload(reason: string): never {
@@ -290,14 +292,14 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> implem
 
 	private async commitEntry<TEntry extends Entry>(entry: ProvisionedEntry<TEntry>, lane: string): Promise<TEntry> {
 		assertJsonSerializable(entry);
-		return this.storage.appendEntry(entry, lane);
+		return this.storage.appendEntry(structuredClone(entry), lane);
 	}
 
 	private async commitRecord<TNewRecord extends NewRecord>(
 		record: TNewRecord,
 	): Promise<TNewRecord & Pick<RecordBase, "seq" | "timestamp">> {
 		assertJsonSerializable(record);
-		return this.storage.appendRecord<LaneRecord>(record) as unknown as Promise<
+		return this.storage.appendRecord<LaneRecord>(structuredClone(record)) as unknown as Promise<
 			TNewRecord & Pick<RecordBase, "seq" | "timestamp">
 		>;
 	}

@@ -170,7 +170,14 @@ export function toProtocolJsonValue(value: unknown, seen = new Set<object>()): J
 	try {
 		if (Array.isArray(value)) return Array.from(value, (entry) => toProtocolJsonValue(entry, seen));
 		const result: Record<string, JsonValue> = {};
-		for (const [key, entry] of Object.entries(value)) result[key] = toProtocolJsonValue(entry, seen);
+		for (const [key, entry] of Object.entries(value)) {
+			Object.defineProperty(result, key, {
+				value: toProtocolJsonValue(entry, seen),
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
 		return result;
 	} finally {
 		seen.delete(value);
@@ -192,7 +199,14 @@ export function sanitizeProtocolDetails(value: unknown, seen = new Set<object>()
 		const result: Record<string, JsonValue> = {};
 		for (const [key, entry] of Object.entries(value)) {
 			const normalized = sanitizeProtocolDetails(entry, seen);
-			if (normalized !== undefined) result[key] = normalized;
+			if (normalized !== undefined) {
+				Object.defineProperty(result, key, {
+					value: normalized,
+					writable: true,
+					enumerable: true,
+					configurable: true,
+				});
+			}
 		}
 		return result;
 	} finally {

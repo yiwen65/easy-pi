@@ -13,6 +13,8 @@ describe("createAgentSession session manager defaults", () => {
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-sdk-session-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+		tempDir = realpathSync(tempDir);
 		cwd = join(tempDir, "project");
 		agentDir = join(tempDir, "agent");
 		mkdirSync(cwd, { recursive: true });

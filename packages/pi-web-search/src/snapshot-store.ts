@@ -53,6 +53,12 @@ export interface SnapshotContent {
 	frames?: readonly SnapshotFrameProvenance[];
 }
 
+/** Host-provided logical ownership. Only the capture anchor is retained, never branch history. */
+export interface SnapshotScope {
+	sessionId: string;
+	branch: readonly string[];
+}
+
 export interface SnapshotStoreOptions {
 	/** Injectable clock; defaults to Date.now. Used only for absolute TTL checks. */
 	now?: () => number;
@@ -85,10 +91,12 @@ interface StoredEntry {
 	bytes: number;
 	expiresAt: number;
 	store: SnapshotStore;
+	expiryTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface OwnedEntry extends StoredEntry {
 	content: SnapshotContent;
+	binding?: { sessionId: string; anchorId: string };
 }
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
@@ -298,8 +306,8 @@ function byteSize(content: SnapshotContent): number {
  *
  * Entries are ordered by last access: the first entry is the least recently used
  * one and is evicted first, whichever owner it belongs to. Limits are per host
- * process, not machine-wide. The pool holds at most `maxCount` strong references,
- * so an idle session object can be retained no longer than the snapshot TTL.
+ * process, not machine-wide. Stores keep only weak owner references; unreferenced
+ * expiry timers release idle snapshot payloads without keeping the host alive.
  */
 export class SnapshotPool {
 	readonly maxCount: number;
@@ -340,7 +348,7 @@ export class SnapshotPool {
 		if (this.entries.delete(entry)) this.used -= entry.bytes;
 	}
 
-	/** Internal: drop every expired entry. Called from reads and writes, so no timer keeps the host alive. */
+	/** Internal: eagerly drop expired entries on activity, in addition to their idle expiry timers. */
 	sweep(now: number): void {
 		for (const entry of [...this.entries]) if (now >= entry.expiresAt) entry.store.drop(entry);
 	}
@@ -375,7 +383,7 @@ export class SnapshotStore {
 	private idFactory: () => string;
 	private pool: SnapshotPool;
 	private entries = new Map<string, OwnedEntry>();
-	private owner: object | undefined;
+	private owner: WeakRef<object> | undefined;
 
 	constructor(options: SnapshotStoreOptions = {}) {
 		this.now = options.now ?? Date.now;
@@ -396,10 +404,12 @@ export class SnapshotStore {
 	}
 
 	/** Store a capture result. Returns its handle, or undefined when it cannot be stored safely. */
-	put(owner: object, content: SnapshotContent): string | undefined {
+	put(owner: object, content: SnapshotContent, scope?: SnapshotScope): string | undefined {
 		if (!isOwner(owner)) return undefined;
-		if (this.owner === undefined) this.owner = owner;
-		else if (this.owner !== owner) return undefined;
+		if (this.owner === undefined) this.owner = new WeakRef(owner);
+		else if (this.owner.deref() !== owner) return undefined;
+		const anchorId = scope?.branch.at(-1);
+		if (scope && (!scope.sessionId || !anchorId)) return undefined;
 		const prepared = prepareContent(content);
 		if (!prepared) return undefined;
 		const bytes = byteSize(prepared);
@@ -414,7 +424,9 @@ export class SnapshotStore {
 			expiresAt: now + this.ttlMs,
 			store: this,
 			content: prepared,
+			binding: scope && anchorId ? { sessionId: scope.sessionId, anchorId } : undefined,
 		};
+		this.scheduleExpiry(entry);
 		this.entries.set(id, entry);
 		this.pool.insert(entry);
 		this.enforceOwnerLimits();
@@ -422,12 +434,18 @@ export class SnapshotStore {
 	}
 
 	/** Read one page source by handle. Unknown owners, unknown ids and expired entries are indistinguishable. */
-	get(owner: object, id: string): SnapshotContent | undefined {
-		if (!isOwner(owner) || this.owner !== owner || typeof id !== "string" || id.length === 0) return undefined;
+	get(owner: object, id: string, scope?: SnapshotScope): SnapshotContent | undefined {
+		if (!isOwner(owner) || this.owner?.deref() !== owner || typeof id !== "string" || id.length === 0)
+			return undefined;
 		const now = this.now();
 		this.pool.sweep(now);
 		const entry = this.entries.get(id);
 		if (!entry) return undefined;
+		if (
+			entry.binding &&
+			(!scope || scope.sessionId !== entry.binding.sessionId || !scope.branch.includes(entry.binding.anchorId))
+		)
+			return undefined;
 		if (now >= entry.expiresAt) {
 			this.drop(entry);
 			return undefined;
@@ -440,7 +458,19 @@ export class SnapshotStore {
 	drop(entry: StoredEntry): void {
 		if (this.entries.get(entry.id) !== entry) return;
 		this.entries.delete(entry.id);
+		clearTimeout(entry.expiryTimer);
 		this.pool.remove(entry);
+	}
+
+	private scheduleExpiry(entry: OwnedEntry): void {
+		entry.expiryTimer = setTimeout(
+			() => {
+				if (this.now() >= entry.expiresAt) this.drop(entry);
+				else this.scheduleExpiry(entry);
+			},
+			Math.max(1, Math.min(entry.expiresAt - this.now(), 2_147_483_647)),
+		);
+		entry.expiryTimer.unref();
 	}
 
 	private nextId(): string | undefined {

@@ -70,7 +70,12 @@ async function resolveProviderAuthWithSignal(
 	signal.throwIfAborted();
 	const requestAuthContext = overrides?.env ? overlayEnvAuthContext(authContext, overrides.env) : authContext;
 
-	if (overrides?.apiKey !== undefined && provider.auth.apiKey) {
+	if (overrides?.apiKey !== undefined) {
+		// A request token is an override, not a request to log in with an API key.
+		// OAuth-only providers still accept already acquired access tokens.
+		if (!provider.auth.apiKey) {
+			return { auth: { apiKey: overrides.apiKey }, env: overrides.env, source: "explicit API key" };
+		}
 		return resolveApiKey(
 			requestAuthContext,
 			provider.auth.apiKey,

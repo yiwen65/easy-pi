@@ -8,7 +8,8 @@ export type McpTransportCloseListener = () => void;
 
 export interface McpTransport {
 	start(): Promise<void>;
-	send(message: JsonRpcMessage): Promise<void>;
+	/** Abort request-owned I/O where supported; aborting does not undo dispatched remote effects. */
+	send(message: JsonRpcMessage, signal?: AbortSignal): Promise<void>;
 	close(): Promise<void>;
 	onMessage(listener: McpTransportMessageListener): () => void;
 	onError(listener: McpTransportErrorListener): () => void;

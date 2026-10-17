@@ -425,7 +425,94 @@ describe("OpenAI Codex OAuth", () => {
 		expect(pollTimes).toHaveLength(3);
 	});
 
-	it("includes the response body in OpenAI Codex device auth poll failures", async () => {
+	it.each(["string", "nested"] as const)(
+		"preserves %s pending and slow_down responses before a successful device login",
+		async (shape) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(0);
+			const pollTimes: number[] = [];
+			const errorBody = (code: string) => ({ error: shape === "string" ? code : { code } });
+			const responses = [
+				jsonResponse(errorBody("deviceauth_authorization_pending"), 400),
+				jsonResponse(errorBody("slow_down"), 429),
+				jsonResponse({ authorization_code: "synthetic-code", code_verifier: "synthetic-verifier" }),
+			];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: unknown): Promise<Response> => {
+					const url = getUrl(input);
+					if (url.endsWith("/deviceauth/usercode"))
+						return jsonResponse({
+							device_auth_id: "synthetic-device",
+							user_code: "synthetic-user-code",
+							interval: 1,
+						});
+					if (url.endsWith("/deviceauth/token")) {
+						pollTimes.push(Date.now());
+						const response = responses.shift();
+						if (!response) throw new Error("Unexpected poll");
+						return response;
+					}
+					if (url === "https://auth.openai.com/oauth/token")
+						return jsonResponse({
+							access_token: createAccessToken("test-account"),
+							refresh_token: "synthetic-refresh",
+							expires_in: 3600,
+						});
+					throw new Error("Unexpected request");
+				}),
+			);
+			const login = loginOpenAICodexDeviceCodeForTest({ onDeviceCode: () => {} });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(pollTimes).toEqual([0]);
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pollTimes).toEqual([0, 1000]);
+			await vi.advanceTimersByTimeAsync(5999);
+			expect(pollTimes).toEqual([0, 1000]);
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(login).resolves.toMatchObject({ accountId: "test-account", refresh: "synthetic-refresh" });
+			expect(pollTimes).toEqual([0, 1000, 7000]);
+		},
+	);
+
+	it("preserves cancellation of the token exchange after successful device authorization", async () => {
+		const controller = new AbortController();
+		let markExchangeStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markExchangeStarted = resolve;
+		});
+		let exchangeSignal: AbortSignal | null | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+				const url = getUrl(input);
+				if (url.endsWith("/deviceauth/usercode"))
+					return jsonResponse({
+						device_auth_id: "synthetic-device",
+						user_code: "synthetic-user-code",
+						interval: 1,
+					});
+				if (url.endsWith("/deviceauth/token"))
+					return jsonResponse({ authorization_code: "synthetic-code", code_verifier: "synthetic-verifier" });
+				if (url === "https://auth.openai.com/oauth/token") {
+					exchangeSignal = init?.signal;
+					return new Promise<Response>((_resolve, reject) => {
+						init?.signal?.addEventListener("abort", () => reject(init?.signal?.reason), { once: true });
+						markExchangeStarted();
+					});
+				}
+				throw new Error("Unexpected request");
+			}),
+		);
+		const login = loginOpenAICodexDeviceCodeForTest({ onDeviceCode: () => {}, signal: controller.signal });
+		const rejected = expect(login).rejects.toThrow("Login cancelled");
+		await started;
+		expect(exchangeSignal).toBe(controller.signal);
+		controller.abort();
+		await rejected;
+	});
+
+	it("keeps the HTTP status without response bodies in OpenAI Codex device auth poll failures", async () => {
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (input: unknown): Promise<Response> => {
@@ -448,9 +535,7 @@ describe("OpenAI Codex OAuth", () => {
 			loginOpenAICodexDeviceCodeForTest({
 				onDeviceCode: () => {},
 			}),
-		).rejects.toThrow(
-			'OpenAI Codex device auth failed with status 500: {"error":"server_error","error_description":"try again later"}',
-		);
+		).rejects.toThrow("OpenAI Codex device auth failed with status 500");
 	});
 
 	it("does not write token refresh failures to stderr", async () => {
@@ -480,7 +565,7 @@ describe("OpenAI Codex OAuth", () => {
 				},
 				neverAbortedSignal,
 			),
-		).rejects.toThrow(/OpenAI Codex token refresh failed \(401\).*Could not validate your token/);
+		).rejects.toThrow("OpenAI Codex token refresh failed (401)");
 		expect(consoleError).not.toHaveBeenCalled();
 	});
 });

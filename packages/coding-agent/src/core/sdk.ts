@@ -23,6 +23,7 @@ import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
+import { recordedCacheAffinityId } from "./session-cache-affinity.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
@@ -352,7 +353,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Inherited cache lineage: route this session's requests to the provider cache partition the
 	// duplicated prefix was cached in. Session, request and native transport identity stay this
 	// session's own; Codex forces SSE because cache-affine requests must not share WebSocket state.
-	const cacheAffinityId = options.cacheAffinityId;
+	// Runtime replacement may forward a recorded ID before the final model is selected.
+	// Revalidate that recorded lineage here; explicit non-recorded hints remain caller-owned.
+	const cacheAffinityId =
+		options.cacheAffinityId && recordedCacheAffinityId(sessionManager) === options.cacheAffinityId
+			? model
+				? recordedCacheAffinityId(sessionManager, { provider: model.provider, id: model.id })
+				: undefined
+			: options.cacheAffinityId;
 
 	agent = new Agent({
 		initialState: {

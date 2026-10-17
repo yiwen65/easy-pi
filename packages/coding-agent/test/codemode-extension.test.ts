@@ -401,6 +401,75 @@ describe("local codemode extension", () => {
 		);
 	});
 
+	it("bounds real VM host dispatch beyond the display cap without committing store", async () => {
+		let dispatched = 0;
+		const { ctx } = context([tool("echo")], async () => {
+			dispatched++;
+			return known("ok");
+		});
+		const drain = vi.fn(async () => "confirmed" as const);
+		ctx.waitForNestedTools = drain;
+		const append = vi.fn();
+		const error = await failure(
+			'store("uncommitted", true); for (let n = 0; n < 2048; n++) await tools.echo({});',
+			ctx,
+			append,
+		).finally(() => console.log(`product host calls: dispatched=${dispatched}`));
+		expect(dispatched).toBe(1024);
+		expect(error.message).toContain("host calls");
+		expect(error.executionOutcome).toBe("confirmed");
+		expect(error.details).toMatchObject({ calls: expect.any(Array), omittedCalls: 768 });
+		expect(drain).toHaveBeenCalledOnce();
+		expect(append).not.toHaveBeenCalled();
+	});
+
+	it("drains a quota-cancelled effect and preserves its unknown outcome", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let signal: AbortSignal | undefined;
+		const { ctx } = context([tool("effect")], async (_name, _args, callSignal) => {
+			signal = callSignal;
+			await gate;
+			return { ...known("interrupted effect"), executionOutcome: "unknown" };
+		});
+		const append = vi.fn();
+		let settled = false;
+		const running = failure(
+			'tools.effect({}); store("uncommitted", true); for (let n = 0; n < 1024; n++) await describeTool("effect");',
+			ctx,
+			append,
+		).then((error) => {
+			settled = true;
+			return error;
+		});
+		await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+		expect(settled).toBe(false);
+		expect(append).not.toHaveBeenCalled();
+		release();
+		const error = await running;
+		expect(error.executionOutcome).toBe("unknown");
+		expect(error.message).toContain("host calls");
+		expect(error.details).toMatchObject({ calls: [{ name: "effect", executionOutcome: "unknown" }] });
+		expect(append).not.toHaveBeenCalled();
+	});
+
+	it("does not persist oversized deletion mutations", async () => {
+		const append = vi.fn();
+		const error = await failure(
+			'store("kept", 1); store("x".repeat(1048577), undefined);',
+			undefined,
+			append,
+		).finally(() =>
+			console.log(
+				`product store commits=${append.mock.calls.length}, bytes=${Buffer.byteLength(JSON.stringify(append.mock.calls))}`,
+			),
+		);
+		expect(error.message).toContain("RangeError");
+		expect(append).not.toHaveBeenCalled();
+	});
+
 	it("ignores malformed store entries and keeps prototype-shaped keys as own data", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendCustomEntry(CODEMODE_STORE_ENTRY_TYPE, { set: [], delete: [] });

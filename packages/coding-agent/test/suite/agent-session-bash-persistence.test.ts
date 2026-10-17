@@ -641,10 +641,13 @@ describe("AgentSession bash and persistence characterization", () => {
 				).rejects.toBe(error);
 				expect(createStream).toHaveBeenCalledTimes(1);
 				const stream = createStream.mock.results[0].value as fs.WriteStream;
-				outputFiles.push(String(stream.path));
+				// Node does not populate stream.path when the managed writer supplies an fd.
+				const outputPath = createStream.mock.calls[0][0];
+				if (typeof outputPath !== "string") throw new Error("Expected managed output path");
+				outputFiles.push(outputPath);
 				expect(stream.writableEnded).toBe(true);
 				await finished(stream);
-				expect(fs.readFileSync(stream.path, "utf8")).toBe(partial);
+				expect(fs.readFileSync(outputPath, "utf8")).toBe(partial);
 				expect(deltas.join("")).toBe(partial);
 				expect(harness.session.messages.some((message) => message.role === "bashExecution")).toBe(false);
 				expect(harness.session.isBashRunning).toBe(false);

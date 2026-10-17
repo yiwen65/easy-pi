@@ -63,6 +63,7 @@ interface PendingRequest {
 	timeoutMs: number;
 	timer: ReturnType<typeof setTimeout> | undefined;
 	signal: AbortSignal | undefined;
+	controller: AbortController;
 	onAbort: () => void;
 	cancellable: boolean;
 	onProgress: ((progress: ProgressNotification) => void) | undefined;
@@ -154,6 +155,7 @@ export class McpClient {
 	readonly options: Readonly<McpClientOptions>;
 	private state: ClientState = "idle";
 	private transport: McpTransport | undefined;
+	private closePromise: Promise<void> | undefined;
 	private nextRequestId = 1;
 	private serverInfoValue: Implementation | undefined;
 	private serverCapabilitiesValue: ServerCapabilities | undefined;
@@ -383,12 +385,15 @@ export class McpClient {
 		);
 	}
 
-	async close(): Promise<void> {
+	close(): Promise<void> {
+		if (this.closePromise) return this.closePromise;
 		const transport = this.transport;
 		this.transport = undefined;
 		this.disposeTransportListeners();
+		// Cache cleanup before notifying listeners, which may themselves call close().
+		this.closePromise = Promise.resolve().then(() => transport?.close());
 		this.markClosed(new McpConnectionClosedError());
-		await transport?.close();
+		return this.closePromise;
 	}
 
 	private async requestInternal(
@@ -418,6 +423,7 @@ export class McpClient {
 				timeoutMs: options.timeoutMs ?? this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
 				timer: undefined,
 				signal: options.signal,
+				controller: new AbortController(),
 				// The spec forbids cancelling `initialize`.
 				onAbort: () =>
 					this.cancelPending(
@@ -434,7 +440,7 @@ export class McpClient {
 			if (progressToken !== undefined) this.progressRequests.set(progressToken, id);
 			options.signal?.addEventListener("abort", entry.onAbort, { once: true });
 			this.armTimeout(id, entry);
-			transport.send(message).catch((error) => this.cancelPending(id, error, false));
+			transport.send(message, entry.controller.signal).catch((error) => this.cancelPending(id, error, false));
 		});
 	}
 
@@ -557,6 +563,7 @@ export class McpClient {
 		const entry = this.pending.get(id);
 		if (!entry) return;
 		this.removePending(id, entry);
+		entry.controller.abort(error);
 		entry.reject(error);
 		if (notifyServer && this.transport) {
 			void this.transport
@@ -579,6 +586,7 @@ export class McpClient {
 	private rejectPending(error: unknown): void {
 		for (const [id, entry] of this.pending) {
 			this.removePending(id, entry);
+			entry.controller.abort(error);
 			entry.reject(error);
 		}
 	}

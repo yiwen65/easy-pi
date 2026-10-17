@@ -54,6 +54,7 @@ import {
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { lazyStream } from "./lazy.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { buildBaseOptions, clampThinkingBudgetToAnswerRoom, thinkingBudgetForLevel } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
@@ -255,7 +256,13 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 					signal: options?.signal,
 				},
 			);
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			try {
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			} catch (error) {
+				openaiStream.controller.abort();
+				await response.body?.cancel().catch(() => {});
+				throw error;
+			}
 			stream.push({ type: "start", partial: output });
 
 			interface StreamingToolCallBlock extends ToolCall {
@@ -622,20 +629,26 @@ export const streamSimple: StreamFunction<"openai-completions", SimpleStreamOpti
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	getClientApiKey(model.provider, options?.apiKey, options?.headers);
+	return lazyStream(
+		model,
+		async () => {
+			getClientApiKey(model.provider, options?.apiKey, options?.headers);
 
-	const base = {
-		...buildBaseOptions(model, context, options, options?.apiKey),
-		toolChoice: options?.toolChoice,
-	} satisfies OpenAICompletionsOptions;
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+			const base = {
+				...buildBaseOptions(model, context, options, options?.apiKey),
+				toolChoice: options?.toolChoice,
+			} satisfies OpenAICompletionsOptions;
+			const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+			const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
 
-	return stream(model, context, {
-		...base,
-		reasoningEffort,
-		thinkingBudgets: options?.thinkingBudgets,
-	} satisfies OpenAICompletionsOptions);
+			return stream(model, context, {
+				...base,
+				reasoningEffort,
+				thinkingBudgets: options?.thinkingBudgets,
+			} satisfies OpenAICompletionsOptions);
+		},
+		options?.signal,
+	);
 };
 
 function createClient(

@@ -165,6 +165,31 @@ describe("runPrintMode", () => {
 		expect(output).toContain('"type":"message_end"');
 	});
 
+	it("subscribes to startup recovery before binding extensions", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const { session } = runtimeHost;
+		session.sessionManager.getHeader = () => ({ type: "session", id: "startup" });
+		session.bindExtensions.mockImplementation(async () => {
+			const listener = session.subscribe.mock.calls[0]?.[0] as ((event: AgentSessionEvent) => void) | undefined;
+			expect(listener).toBeDefined();
+			expect(session.agent.subscribe).toHaveBeenCalledTimes(1);
+			listener?.({ type: "agent_start" });
+			listener?.({ type: "agent_settled" });
+		});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "json",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(outputGuard.chunks.map((line) => JSON.parse(line))).toEqual([
+			{ type: "session", id: "startup" },
+			{ type: "agent_start" },
+			{ type: "agent_settled" },
+		]);
+	});
+
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {
 		const runtimeHost = createRuntimeHost(
 			createAssistantMessage({ stopReason: "error", errorMessage: "provider failure" }),

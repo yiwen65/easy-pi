@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	type ExternalMutationJournalPolicy,
 	validateExternalMutationJournalPolicy,
@@ -571,7 +572,6 @@ function findCatastrophicDelete(
 		...new Set([
 			resolve("/"),
 			canonicalExistingPath(homedir()),
-			canonicalizeProspectivePath(cwd, cwd),
 			...additionalProtectedRoots.map((root) => canonicalizeProspectivePath(root, cwd)),
 		]),
 	];
@@ -660,7 +660,7 @@ export function assessBash(
 	cwd: string,
 	additionalProtectedRoots: readonly string[] = [],
 ): BashAssessment {
-	const hardDenyReason = findCatastrophicDelete(command, cwd, additionalProtectedRoots);
+	const hardDenyReason = findCatastrophicDelete(command, cwd, [cwd, ...additionalProtectedRoots]);
 	return hardDenyReason ? { hardDenyReason } : {};
 }
 
@@ -762,10 +762,30 @@ export function createChildHarnessContext(options: CreateChildHarnessContextOpti
 }
 
 export function decidePermission(request: PermissionRequest): PermissionOutcome {
-	const command =
-		request.toolName === "bash" && typeof request.input.command === "string" ? request.input.command : "";
-	const bash =
-		request.toolName === "bash" ? assessBash(command, request.cwd, request.protectedRoots ?? []) : undefined;
-	if (bash?.hardDenyReason) return { decision: "deny", reason: bash.hardDenyReason };
+	if (request.toolName === "bash") {
+		const command = typeof request.input.command === "string" ? request.input.command : "";
+		let invocationCwd = typeof request.input.cwd === "string" ? request.input.cwd : request.cwd;
+		// Match NodeExecutionEnv.absolutePath; a tool cwd changes resolution, not protected roots.
+		if (invocationCwd === "~") invocationCwd = homedir();
+		else if (invocationCwd.startsWith("~/") || (process.platform === "win32" && invocationCwd.startsWith("~\\")))
+			invocationCwd = join(homedir(), invocationCwd.slice(2));
+		else if (invocationCwd.startsWith("file://")) {
+			try {
+				invocationCwd = fileURLToPath(invocationCwd);
+			} catch {
+				// Execution treats malformed file URLs as ordinary paths too.
+			}
+		}
+		const protectedRoots = [request.cwd, ...(request.protectedRoots ?? [])].map((root) =>
+			canonicalizeProspectivePath(root, request.cwd),
+		);
+		// The process enters the physical directory before shell-relative targets such as ../* are resolved.
+		const hardDenyReason = findCatastrophicDelete(
+			command,
+			canonicalizeProspectivePath(invocationCwd, request.cwd),
+			protectedRoots,
+		);
+		if (hardDenyReason) return { decision: "deny", reason: hardDenyReason };
+	}
 	return { decision: "allow", reason: "Full Access mode" };
 }

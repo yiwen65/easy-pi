@@ -14,7 +14,12 @@ import {
 	type StructureBlock,
 } from "./content-format.ts";
 import { publicUrl, WebError } from "./network.ts";
-import { type SnapshotContent, type SnapshotFrameProvenance, snapshotStore } from "./snapshot-store.ts";
+import {
+	type SnapshotContent,
+	type SnapshotFrameProvenance,
+	type SnapshotScope,
+	snapshotStore,
+} from "./snapshot-store.ts";
 
 const API_ORIGIN = "https://api.tavily.com";
 const TIMEOUT_MS = 20_000;
@@ -237,7 +242,7 @@ const MAX_FRAME_REASONS = 8;
 const SNAPSHOT_UNAVAILABLE = "snapshot-unavailable";
 
 const NO_SNAPSHOT_WARNING =
-	"No snapshot was kept for this capture (the host disabled snapshots or the session snapshot budget is full), so it cannot be continued with snapshot_id; reading later pages needs a new capture with url.";
+	"No snapshot was kept for this capture (snapshots are disabled, the budget is full, or session/branch ownership was unavailable or changed), so it cannot be continued with snapshot_id; reading later pages needs a new capture with url.";
 
 const fetchOutputSchema = Type.Object(
 	{
@@ -601,7 +606,7 @@ function fetchResult(report: FetchReport): FetchResult {
 /** Identical for an unknown, expired, evicted and other-owner handle, and for a disabled store. */
 function snapshotUnavailable(): WebError {
 	return new WebError(
-		"This web_fetch snapshot is not available to this session: the handle is unknown, expired, evicted, owned by another session, or snapshots are disabled for this host. Nothing was re-fetched; start a new capture with url.",
+		"This web_fetch snapshot is not available to this session: the handle is unknown, expired, evicted, outside the current session/branch, or snapshots are disabled for this host. Nothing was re-fetched; start a new capture with url.",
 		SNAPSHOT_UNAVAILABLE,
 	);
 }
@@ -649,13 +654,24 @@ function frameList(
 	}));
 }
 
+/** Capture ownership comes from the host's current path, never from model-supplied arguments. */
+function snapshotScope(ctx: ExtensionToolContext): SnapshotScope | undefined {
+	const manager = ctx?.sessionManager;
+	if (typeof manager?.getSessionId !== "function" || typeof manager?.getBranch !== "function") return undefined;
+	const sessionId = manager.getSessionId();
+	const branch = manager.getBranch().map((entry) => entry.id);
+	// Without a capture anchor there is no way to distinguish later sibling paths safely.
+	return sessionId && branch.length > 0 ? { sessionId, branch } : undefined;
+}
+
 /** Read one page of a stored capture. No DNS, proxy, browser or network work happens on this path. */
 function readStoredPage(
 	request: { snapshotId: string; offset: number; maxChars: number; format?: FetchFormat },
 	ctx: ExtensionToolContext,
 ) {
 	const owner = ctx?.sessionManager;
-	const stored = owner ? snapshotStore(owner)?.get(owner, request.snapshotId) : undefined;
+	const scope = snapshotScope(ctx);
+	const stored = owner && scope ? snapshotStore(owner)?.get(owner, request.snapshotId, scope) : undefined;
 	if (!stored) throw snapshotUnavailable();
 	// A capture's format is fixed when it is created: its offsets are code point offsets into that
 	// format's text, so asking for the other one is refused instead of silently returning another
@@ -716,6 +732,8 @@ async function capturePage(
 	ctx: ExtensionToolContext,
 	signal: AbortSignal | undefined,
 ): Promise<FetchResult> {
+	const owner = ctx?.sessionManager;
+	const scope = snapshotScope(ctx);
 	const rendered = await readPage(request.requestedUrl, signal);
 	const url = publicUrl(rendered.url);
 	const title = clip(cleanText(rendered.title), 512);
@@ -765,9 +783,15 @@ async function capturePage(
 	// A cancelled request publishes no handle, and readPage() returns only after the browser, proxy
 	// and temporary profile were cleaned up, so a validated capture reaching this point is clean.
 	if (signal?.aborted) throw new WebError("Web request cancelled.", "cancelled");
-	const owner = ctx?.sessionManager;
+	const currentScope = snapshotScope(ctx);
 	let snapshotId: string | null = null;
-	if (owner) {
+	if (
+		owner &&
+		owner === ctx?.sessionManager &&
+		scope &&
+		currentScope?.sessionId === scope.sessionId &&
+		currentScope.branch.includes(scope.branch[scope.branch.length - 1])
+	) {
 		const dnsMode = rendered.fakeIpDelegated ? "local_fake_ip_client" : "pinned_public_ip";
 		const stored: SnapshotContent = {
 			text: captureText,
@@ -799,7 +823,7 @@ async function capturePage(
 				role: frame.role,
 			})),
 		};
-		const id = snapshotStore(owner)?.put(owner, stored);
+		const id = snapshotStore(owner)?.put(owner, stored, scope);
 		if (typeof id === "string") snapshotId = id;
 	}
 	const report: FetchReport = {

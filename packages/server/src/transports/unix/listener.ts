@@ -281,7 +281,8 @@ export class UnixByteConnection implements ByteConnection {
 	}
 
 	private write(chunk: Uint8Array): Promise<void> {
-		if (this.closedValue || this.closing || !this.socket.writable) {
+		// send() seals admission when closing; already-admitted writes must still drain.
+		if (this.closedValue || !this.socket.writable) {
 			return Promise.reject(new Error("Unix connection is closed"));
 		}
 		return new Promise<void>((resolve, reject) => {

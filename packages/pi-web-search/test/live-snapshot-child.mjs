@@ -5,6 +5,7 @@ import { existsSync, readdirSync } from "node:fs";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
 import { isFakeIpAddress, isPublicAddress } from "../src/network.ts";
+import { snapshotHost } from "./session-host.mjs";
 
 // Explicit opt-in live acceptance for the snapshot path: a real public page, the real loader and
 // the real isolated browser. Mirrors live-child.mjs isolation; never part of an offline suite.
@@ -89,8 +90,8 @@ try {
 	const loaded = await loadExtensions([env.PI_WEB_SEARCH_EXTENSION], process.cwd());
 	assert.deepEqual(loaded.errors, []);
 	const tool = loaded.extensions[0].tools.get("web_fetch").definition;
-	const ownerA = { liveOwner: "a" };
-	const ownerB = { liveOwner: "b" };
+	const ownerA = snapshotHost().sessionManager;
+	const ownerB = snapshotHost().sessionManager;
 	const call = (params, ctx) => tool.execute("live-snapshot", params, controller.signal, undefined, ctx);
 
 	// 1. One real capture, then every continuation must come from memory only.

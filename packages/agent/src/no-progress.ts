@@ -21,7 +21,9 @@ export function fingerprintAssistantTurn(message: AssistantMessage): string {
 /** Stable projection of a tool result: name, error flag, and model-visible content. */
 export function fingerprintToolResult(message: ToolResultMessage): string {
 	const content = message.content.map((block) =>
-		block.type === "text" ? { type: block.type, text: block.text } : { type: block.type, mimeType: block.mimeType },
+		block.type === "text"
+			? { type: block.type, text: block.text }
+			: { type: block.type, mimeType: block.mimeType, data: block.data },
 	);
 	return JSON.stringify({ toolName: message.toolName, isError: message.isError, content });
 }

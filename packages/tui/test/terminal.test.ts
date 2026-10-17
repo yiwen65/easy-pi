@@ -237,6 +237,38 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 	});
 });
 
+describe("ProcessTerminal titles", () => {
+	it("emits only one OSC title command for control-bearing titles", () => {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const previousWrite = process.stdout.write;
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+
+		try {
+			const titles = [
+				"项目 café 🦊",
+				"project\x07\x1b]52;c;cGF5bG9hZA==\x07",
+				"project\x1b\\\x1b]2;spoof\x1b\\",
+				"project\x9c\x9d52;c;cGF5bG9hZA==\x9c",
+				"project\r\n\t\0\x08\x7f\x85",
+			];
+			for (const title of titles) terminal.setTitle(title);
+			assert.equal(writes.length, titles.length);
+			assert.equal(writes[0], "\x1b]0;项目 café 🦊\x07");
+			for (const output of writes) {
+				assert.ok(output.startsWith("\x1b]0;"));
+				assert.ok(output.endsWith("\x07"));
+				assert.doesNotMatch(output.slice(4, -1), /[\x00-\x1f\x7f-\x9f]/);
+			}
+		} finally {
+			process.stdout.write = previousWrite;
+		}
+	});
+});
+
 describe("ProcessTerminal progress", () => {
 	it("writes a valid OSC 9;4 clear sequence", () => {
 		const terminal = new ProcessTerminal();

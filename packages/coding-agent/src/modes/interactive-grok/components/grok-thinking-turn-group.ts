@@ -7,6 +7,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { sanitizeDisplayText } from "../../../core/tools/render-utils.ts";
 import { LiveLineScroller } from "../../interactive/components/live-line-scroller.ts";
 import { theme } from "../../interactive/theme/theme.ts";
 import { flattenInline } from "./grok-inline-text.ts";
@@ -48,7 +49,7 @@ export class GrokThinkingTurnGroupComponent extends Container {
 	}
 
 	updateThinking(owner: object, thinking: string): void {
-		const normalized = thinking.trim();
+		const normalized = sanitizeDisplayText(thinking).trim();
 		if (normalized) this.entries.set(owner, normalized);
 		else this.entries.delete(owner);
 		this.rebuildMarkdown();

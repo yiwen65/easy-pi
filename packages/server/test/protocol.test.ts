@@ -1,5 +1,5 @@
 import type { Api, AssistantMessage, Model, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
-import { encodeServerMessage, PROTOCOL_VERSION } from "@earendil-works/pi-protocol";
+import { decodeCbor, encodeCbor, encodeServerMessage, PROTOCOL_VERSION } from "@earendil-works/pi-protocol";
 import { describe, expect, test } from "vitest";
 import {
 	sanitizeProtocolDetails,
@@ -323,6 +323,33 @@ describe("pi-ai protocol bridge", () => {
 		expect(() =>
 			toProtocolUserMessage({ role: "user", content: "hello", timestamp: Number.NaN }, { id: "user-1" }),
 		).toThrow(/timestamp/i);
+	});
+
+	test.each(["scalar", 42, false, null, { nested: true }])("preserves own __proto__ JSON properties (%j)", (value) => {
+		const prototype = Object.getOwnPropertyDescriptors(Object.prototype);
+		const input = { ["__proto__"]: value, nested: { ["__proto__"]: value } };
+		for (const convert of [toProtocolJsonValue, sanitizeProtocolDetails]) {
+			const result = convert(input);
+			expect(result).toEqual(input);
+			expect(Object.getOwnPropertyDescriptor(result, "__proto__")?.value).toEqual(value);
+			expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+			expect(decodeCbor(encodeCbor(result))).toEqual(input);
+		}
+		const item = toProtocolToolResultMessage(
+			{
+				role: "toolResult",
+				toolCallId: "reserved-call",
+				toolName: "inspect",
+				content: [],
+				details: input,
+				isError: false,
+				timestamp: 1,
+			},
+			{ id: "reserved-result", call: { type: "toolCall", id: "reserved-call", name: "inspect", arguments: input } },
+		);
+		assertValidServerPayload(item);
+		expect(decodeCbor(encodeCbor(item))).toEqual(item);
+		expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype);
 	});
 
 	test("rejects lossy tool input conversions", () => {

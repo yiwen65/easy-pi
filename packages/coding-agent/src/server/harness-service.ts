@@ -134,7 +134,8 @@ export class HarnessPiServerService implements PiServerService {
 		if (!meta) throw new PiServerError("not_found", `Session not found: ${sessionId}`);
 		const session = await this.options.repo.open(meta);
 		try {
-			return await this.openRuntime(session, this.options.defaultCwd ?? process.cwd(), {});
+			const metadata: HarnessSessionMetadata & { cwd?: string } = await session.getMetadata();
+			return await this.openRuntime(session, metadata.cwd ?? this.options.defaultCwd ?? process.cwd(), {});
 		} catch (error) {
 			await release(session);
 			throw error;
@@ -250,12 +251,17 @@ class HarnessSessionRuntime implements PiSessionRuntime {
 		const operation = lanes.find((lane) => lane.name === "main")?.operation ?? null;
 		this.phase = phaseOf(operation);
 		const watch = await harness.watch();
-		const queuedSteer: UserTranscriptItem[] = watch.snapshot.queues.steer
-			.map((item) => {
-				const message = item.message;
-				return message.role === "user" ? toProtocolUserMessage(message, { id: item.entryId }) : undefined;
-			})
-			.filter((item): item is UserTranscriptItem => item !== undefined);
+		let queuedSteer: UserTranscriptItem[];
+		try {
+			queuedSteer = watch.snapshot.queues.steer
+				.map((item) => {
+					const message = item.message;
+					return message.role === "user" ? toProtocolUserMessage(message, { id: item.entryId }) : undefined;
+				})
+				.filter((item): item is UserTranscriptItem => item !== undefined);
+		} finally {
+			watch.unsubscribe();
+		}
 		return {
 			id: meta.id,
 			...(name ? { name } : {}),
@@ -359,15 +365,10 @@ class HarnessSessionRuntime implements PiSessionRuntime {
 	async dispose(): Promise<void> {
 		this.state.unsubscribe();
 		this.state.listeners.clear();
-		try {
-			await this.state.harness.close();
-		} finally {
-			try {
-				await release(this.session);
-			} finally {
-				this.onDispose();
-			}
-		}
+		// A failed close can leave a physical tool running. Keep its writer and live owner for retry.
+		await this.state.harness.close();
+		await release(this.session);
+		this.onDispose();
 	}
 }
 

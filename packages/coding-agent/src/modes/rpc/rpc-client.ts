@@ -474,7 +474,15 @@ export class RpcClient {
 	 * Collect events until agent becomes idle.
 	 */
 	collectEvents(timeout = 60000): Promise<JsonAgentSessionEvent[]> {
-		return new Promise((resolve, reject) => {
+		return this.createEventCollector(timeout).promise;
+	}
+
+	private createEventCollector(timeout: number): {
+		promise: Promise<JsonAgentSessionEvent[]>;
+		cancel: () => void;
+	} {
+		let cancel = () => {};
+		const promise = new Promise<JsonAgentSessionEvent[]>((resolve, reject) => {
 			const events: JsonAgentSessionEvent[] = [];
 			const timer = setTimeout(() => {
 				unsubscribe();
@@ -483,22 +491,28 @@ export class RpcClient {
 
 			const unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_settled") {
-					clearTimeout(timer);
-					unsubscribe();
-					resolve(events);
-				}
+				if (event.type === "agent_settled") cancel();
 			});
+			cancel = () => {
+				clearTimeout(timer);
+				unsubscribe();
+				resolve(events);
+			};
 		});
+		return { promise, cancel };
 	}
 
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<JsonAgentSessionEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		return eventsPromise;
+		const collector = this.createEventCollector(timeout);
+		try {
+			const [, events] = await Promise.all([this.prompt(message, images), collector.promise]);
+			return events;
+		} finally {
+			collector.cancel();
+		}
 	}
 
 	// =========================================================================
@@ -569,7 +583,8 @@ export class RpcClient {
 			this.pendingRequests.set(id, {
 				resolve: (response) => {
 					clearTimeout(timeout);
-					resolve(response);
+					if (response.success) resolve(response);
+					else reject(new Error(response.error));
 				},
 				reject: (error) => {
 					clearTimeout(timeout);

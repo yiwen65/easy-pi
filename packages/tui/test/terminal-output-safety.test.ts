@@ -17,6 +17,16 @@ describe("terminal output safety", () => {
 		assert.strictEqual(normalizeTerminalOutput(output), "beforeafter");
 	});
 
+	it("preserves host-generated hyperlinks and image protocol output", () => {
+		const hyperlink = "\x1b]8;;https://example.test/docs\x1b\\docs\x1b]8;;\x1b\\";
+		const kittyImage = "\x1b_Ga=T,f=100;UE5H\x1b\\";
+		const itermImage = "\x1b]1337;File=inline=1:UE5H\x07";
+		assert.strictEqual(
+			normalizeTerminalOutput(hyperlink + kittyImage + itermImage),
+			hyperlink + kittyImage + itermImage,
+		);
+	});
+
 	it("preserves safe SGR styling", () => {
 		assert.strictEqual(normalizeTerminalOutput("\x1b[31mred\x1b[0m"), "\x1b[31mred\x1b[0m");
 	});

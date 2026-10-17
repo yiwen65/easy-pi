@@ -180,7 +180,9 @@ The `key` field supports command execution, environment interpolation, and liter
   { "type": "api_key", "key": "public" }
   ```
 
-OAuth credentials are also stored here after `/login` and managed automatically.
+A defined stored `key` must resolve to a nonempty value. Missing environment references, failed or empty command output, and an empty stored key fail closed instead of selecting another ambient credential. Deliberately omitting `key` remains available for provider handlers that use ambient authentication (for example an AWS profile or ADC); omission is not equivalent to a broken key expression. When CLI auth checking encounters this specific unavailable-key resolution failure, it reports `not_ready` / `credentials_not_configured`; malformed credential state remains `invalid` / `invalid_state`. That status distinction does not permit request fallback, and read-only checks do not execute key commands.
+
+OAuth credentials are also stored here after `/login` and managed automatically. Anthropic/Codex token errors and Codex device-code startup/poll errors retain HTTP status or expected-field diagnostics, not raw credential-bearing response bodies. Custom provider errors are not covered by a blanket redaction guarantee.
 
 ## Cloud Providers
 
@@ -313,3 +315,5 @@ When resolving credentials for a provider:
 2. `auth.json` entry (API key or OAuth token)
 3. Environment variable
 4. Custom provider keys from `models.json`
+
+An explicit per-request access token (including CLI `--api-key`) can override an OAuth-only provider's stored auth without refreshing it. This does not add an API-key login method or persist the override. A broken stored credential does not silently fall through to the lower-priority sources.

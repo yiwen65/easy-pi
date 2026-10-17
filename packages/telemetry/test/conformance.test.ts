@@ -20,6 +20,23 @@ describe("InMemoryTelemetryContext conformance", () => {
 		});
 	}
 
+	it("detaches reserved attribute arrays from inputs and snapshots", async () => {
+		const context = new InMemoryTelemetryContext();
+		const values = ["original"];
+		await context.startSpan({ name: "reserved", attributes: { ["__proto__"]: values } }, (span) => {
+			span.addEvent("reserved", { ["__proto__"]: values });
+		});
+		values.push("input mutation");
+		const first = context.getSpans()[0]!;
+		expect(Object.getPrototypeOf(first.attributes)).toBe(Object.prototype);
+		expect(first.attributes.__proto__).toEqual(["original"]);
+		(first.attributes.__proto__ as string[]).push("snapshot mutation");
+		(first.events[0]!.attributes.__proto__ as string[]).push("event mutation");
+		const second = context.getSpans()[0]!;
+		expect(second.attributes).toEqual({ ["__proto__"]: ["original"] });
+		expect(second.events[0]!.attributes).toEqual({ ["__proto__"]: ["original"] });
+	});
+
 	it("returns detached snapshots without exposing mutable recording state", async () => {
 		const context = new InMemoryTelemetryContext();
 		let openSettled: boolean | undefined;

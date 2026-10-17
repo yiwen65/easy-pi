@@ -25,7 +25,7 @@ assert.equal(typeof native.CollaborationController, "function");
 assert.equal(native.RunLedger, undefined);
 assert.equal(native.createSubagentExtension, undefined);
 assert.throws(() => native.parseCollaborationArguments("spawn_agent", { task_name: "legacy", message: "obsolete" }), { code: "invalid_arguments" });
-assert.deepEqual(native.validateDelegationResult("unstructured retained output", "completed"), { contract: "invalid", acceptance: "not_reviewed" });
+assert.deepEqual(native.validateDelegationResult("unstructured retained output", "completed"), { contract: "invalid" });
 assert.equal(existsSync(join(product, "dist/extensions/product-launcher.js")), false);
 const require = createRequire(join(product, "dist/cli.js"));
 for (const name of ["extension", "ledger", "process-runner", "dag-orchestrator", "worktree", "child-protocol-extension", "collaboration-storage-guard"]) {
@@ -56,7 +56,7 @@ try {
 			return fauxAssistantMessage("compiled child completed");
 		}
 		return rootTurns++ === 0
-			? fauxAssistantMessage(fauxToolCall("spawn_agent", { task_name: "worker", delegation: { version: 1, task: { relationship: "continue", objective: "offline smoke", scope: "synthetic data only", material: [], deliverables: ["Acknowledgement"], acceptance: ["No file changes"] }, context: { mode: "isolated" }, capabilities: { tools: "inherit" } } }), { stopReason: "toolUse" })
+			? fauxAssistantMessage(fauxToolCall("spawn_agent", { task_name: "worker", task: { objective: "Offline smoke: acknowledge synthetic data only; do not modify files." }, relationship: "continue", context: "isolated", tools: ["read"] }), { stopReason: "toolUse" })
 			: fauxAssistantMessage("compiled root completed");
 	}));
 	await session.prompt("delegate synthetic work");
@@ -80,9 +80,6 @@ try {
 	}
 	console.log("Compiled native spawn, tool catalog, retired exports, CLI metadata and both npm pack inventories passed (offline).");
 } finally {
-	if (session) {
-		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		session.dispose();
-	}
+	if (session) await session.shutdown();
 	rmSync(cwd, { recursive: true, force: true });
 }

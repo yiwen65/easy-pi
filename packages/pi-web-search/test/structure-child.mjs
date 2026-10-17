@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { setupBrowserFixtures } from "./browser-harness.mjs";
 import { fixturePage } from "./structure-fixtures.mjs";
+import { snapshotHost } from "./session-host.mjs";
 
 const { readPage, stats } = await setupBrowserFixtures({
 	fixturePage,
@@ -21,8 +22,8 @@ const { loadExtensions } = await import(
 const loaded = await loadExtensions([fileURLToPath(new URL("../src/index.ts", import.meta.url))], process.cwd());
 assert.deepEqual(loaded.errors, [], "the real loader must load this extension");
 const tool = loaded.extensions[0].tools.get("web_fetch").definition;
-/** One owner object per session, exactly like the host object the store is keyed on. */
-const owner = { sessionManager: {} };
+/** One real session/branch anchor per host. */
+const owner = snapshotHost();
 const clean = (value) => stripVTControlCharacters(value).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 const call = (params) => tool.execute("structure-call", params, undefined, undefined, owner);
 const dataOf = (result) => result.structuredContent;
@@ -163,7 +164,7 @@ test("O01: text mode does not regress, and markdown keeps the page's own structu
 	assert.equal(link.links[0].title, "O01 block title");
 	assert.equal(blocks.slice(link), `[O01_BLOCK_LINK](${url("/o01-block-link")})`);
 	// A continuation of the markdown capture keeps the format and reports the same structure.
-	const mdOwner = { sessionManager: {} };
+	const mdOwner = snapshotHost();
 	const stored = await tool.execute("structure-md", { url: url(path), format: "markdown", max_chars: 30 }, undefined, undefined, mdOwner);
 	const snapshotId = dataOf(stored).snapshot_id;
 	assert.equal(typeof snapshotId, "string");

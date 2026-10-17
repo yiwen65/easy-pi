@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai/compat";
+import { COMPACTION_DIAGNOSTICS_ENTRY_TYPE } from "./compaction/subsystem/observability.ts";
 import type { SessionEntry } from "./session-manager.ts";
 
 export interface UsageTotals {
@@ -27,6 +28,38 @@ export function addUsageToTotals(totals: UsageTotals, usage: Usage): void {
 	totals.cost += usage.cost.total;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isReportedUsage(value: unknown): value is Usage {
+	if (!isRecord(value) || !isRecord(value.cost)) return false;
+	const cost = value.cost;
+	const finite = (candidate: unknown): candidate is number =>
+		typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0;
+	return (
+		["input", "output", "cacheRead", "cacheWrite", "totalTokens"].every((key) => finite(value[key])) &&
+		["cacheWrite1h", "reasoning"].every((key) => value[key] === undefined || finite(value[key])) &&
+		["input", "output", "cacheRead", "cacheWrite", "total"].every((key) => finite(cost[key]))
+	);
+}
+
+/** Activated summaries are counted on their checkpoint; unsuccessful attempts have diagnostics only. */
+export function getUnactivatedCompactionUsages(entry: unknown): Usage[] {
+	if (!isRecord(entry) || entry.type !== "custom" || entry.customType !== COMPACTION_DIAGNOSTICS_ENTRY_TYPE) return [];
+	const data = entry.data;
+	if (
+		!isRecord(data) ||
+		data.version !== 1 ||
+		(data.outcome !== "failed" && data.outcome !== "aborted") ||
+		!Array.isArray(data.attempts)
+	)
+		return [];
+	return data.attempts.flatMap((attempt: unknown) =>
+		isRecord(attempt) && isReportedUsage(attempt.usage) ? [attempt.usage] : [],
+	);
+}
+
 export interface UsageCostBreakdownEntry {
 	key: string;
 	cost: number;
@@ -38,26 +71,29 @@ export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdo
 	const totalsByKey = new Map<string, UsageTotals>();
 
 	for (const entry of entries) {
-		let key: string | undefined;
-		let usage: Usage | undefined;
+		let key: string;
+		let usages: Usage[] = [];
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			key = `${entry.message.provider}/${entry.message.responseModel ?? entry.message.model}`;
-			usage = entry.message.usage;
+			usages = entry.message.usage ? [entry.message.usage] : [];
 		} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 			key = "Tools/summaries";
-			usage = entry.message.usage;
+			usages = [entry.message.usage];
 		} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 			key = "Tools/summaries";
-			usage = entry.usage;
+			usages = [entry.usage];
+		} else {
+			key = "Tools/summaries";
+			usages = getUnactivatedCompactionUsages(entry);
 		}
-		if (!key || !usage) continue;
+		if (usages.length === 0) continue;
 
 		let totals = totalsByKey.get(key);
 		if (!totals) {
 			totals = createUsageTotals();
 			totalsByKey.set(key, totals);
 		}
-		addUsageToTotals(totals, usage);
+		for (const usage of usages) addUsageToTotals(totals, usage);
 	}
 
 	return Array.from(totalsByKey, ([key, totals]) => ({

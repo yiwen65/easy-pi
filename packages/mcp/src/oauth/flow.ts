@@ -224,6 +224,8 @@ async function tokenRequest(
 		method: "POST",
 		headers,
 		body: params,
+		// Token credentials belong only to the validated endpoint, never a redirect destination.
+		redirect: "error",
 		signal: options.signal,
 	});
 	const text = await response.text();

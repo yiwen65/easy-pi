@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	fauxAssistantMessage,
+	fauxProvider,
+	InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
 import { COLLABORATION_LIMITS } from "@easy-pi/subagent/collaboration-contract";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
@@ -112,6 +117,57 @@ test("resource-busy loaded capacity rejects new loading without stopping tasks o
 	await f.complete("after-task-settled");
 	expect(f.detached).toEqual(["/root/busy0"]);
 });
+
+test.each(["abort", "dispose"] as const)(
+	"child %s cancels an awaited automatic summary before draining",
+	async (operation) => {
+		const f = await fixture({ compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } });
+		const child = await f.host.create({
+			...f.caller,
+			agentPath: "/root/compacting",
+			cwd: f.cwd,
+			agentDir: f.cwd,
+			model: f.model,
+			storage: { kind: "memory" },
+			getPermissions: full,
+		});
+		const native = f.natives.get("/root/compacting")!;
+		let started!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let finish!: () => void;
+		let summarySignal: AbortSignal | undefined;
+		f.faux.setResponses([
+			fauxAssistantMessage("partial", { stopReason: "length" }),
+			(_context, options) =>
+				new Promise<AssistantMessage>((resolve) => {
+					summarySignal = options?.signal;
+					finish = () => resolve(fauxAssistantMessage("handoff must not publish"));
+					summarySignal?.addEventListener("abort", finish, { once: true });
+					started();
+				}),
+			fauxAssistantMessage("must not continue"),
+		]);
+		const run = child.run("x".repeat(5000));
+		await entered;
+		const stopping = child[operation]();
+		// dispose reserves cleanup before executing it in the next microtask.
+		await Promise.resolve();
+		try {
+			expect(summarySignal?.aborted).toBe(true);
+		} finally {
+			finish();
+			await stopping;
+			await run;
+			await child.dispose();
+		}
+		expect(native.isIdle).toBe(true);
+		expect(native.sessionManager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+		expect(f.faux.state.callCount).toBe(2);
+		expect(await run).toMatchObject({ status: "interrupted" });
+	},
+);
 
 test("native child disposal reports an incomplete resource drain instead of declaring success", async () => {
 	const f = await fixture();

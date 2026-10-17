@@ -59,6 +59,8 @@ await sandbox.close();
 
 `memoryLimitBytes` caps the VM's heap. Allocations beyond it fail inside the script as `InternalError: out of memory`.
 
+Each execution admits at most 1024 host calls in total, including injected globals even though globals are omitted from `result.calls`. The next call fails the execution with a `RangeError` before dispatch, including when `timeoutMs` is `Infinity`. Pending calls are signalled to cancel; earlier external effects are not rolled back.
+
 ## Store
 
 `store`/`load` let scripts keep values across executions. The sandbox does not persist anything itself: pass the current values as `options.store`, and a successful result reports what the script changed as `result.storeWrites` (`{ set, delete }`). Failed executions report no writes.
@@ -71,7 +73,7 @@ if (result.ok) {
 }
 ```
 
-`load` returns a copy, so mutating it does not change the store. Storing `undefined` deletes the key. A value may be at most `MAX_STORE_VALUE_CHARS` (256 Ki) characters of JSON and all values together at most `MAX_STORE_TOTAL_CHARS` (1 Mi); larger writes throw a `RangeError` inside the script.
+`load` returns a copy, so mutating it does not change the store. Storing `undefined` deletes the key. A value may be at most `MAX_STORE_VALUE_CHARS` (262144) characters of JSON; live keys plus serialized values share `MAX_STORE_TOTAL_CHARS` (1048576). The serialized mutation payload has a separate 1048576-character limit, including escaped keys, values, deletion entries and JSON framing. These are JavaScript string lengths, not UTF-8 byte limits. Oversized writes throw a `RangeError` before changing state; the host also validates the serialized writes before accepting them. Discarding store writes does not undo tool effects.
 
 ## Source format
 

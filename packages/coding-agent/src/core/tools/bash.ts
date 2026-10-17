@@ -28,7 +28,7 @@ import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import type { ManagedToolOutputFile } from "../tool-output-storage.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { getTextOutput, invalidArgText, sanitizeDisplayText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "./truncate.ts";
 
@@ -280,8 +280,9 @@ function formatBashCall(args: { command?: string; cwd?: string; timeout?: number
 	const metadata = [args?.cwd ? `cwd ${args.cwd}` : undefined, timeout ? `timeout ${timeout}s` : undefined].filter(
 		Boolean,
 	);
-	const timeoutSuffix = metadata.length ? theme.fg("muted", ` (${metadata.join(", ")})`) : "";
-	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
+	const timeoutSuffix = metadata.length ? theme.fg("muted", ` (${sanitizeDisplayText(metadata.join(", "))})`) : "";
+	const commandDisplay =
+		command === null ? invalidArgText(theme) : command ? sanitizeDisplayText(command) : theme.fg("toolOutput", "...");
 	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
 }
 

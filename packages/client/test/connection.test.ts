@@ -176,6 +176,48 @@ describe("PiClient", () => {
 		expect(first.clientCloseCount).toBe(1);
 	});
 
+	test("ignores remaining coalesced frames after a listener reconnects", async () => {
+		for (let attempt = 0; attempt < 10; attempt++) {
+			const first = new MemoryByteServer();
+			const second = new MemoryByteServer();
+			let connection = 0;
+			for (const server of [first, second]) {
+				server.onMessage((message) => {
+					if (message.type !== "hello") return;
+					server.send({
+						type: "hello",
+						version: PROTOCOL_VERSION,
+						connectionId: `connection-${connection}`,
+						snapshot: { ...baseServerSnapshot, revision: connection },
+					});
+				});
+			}
+			const client = new PiClient({
+				transportFactory: (handlers) => (connection++ === 0 ? first : second).connect(handlers),
+			});
+			await client.connect();
+			let reconnect: Promise<ServerSnapshot> | undefined;
+			const events: string[] = [];
+			client.onEvent((event) => {
+				events.push(event.type);
+				client.disconnect();
+				reconnect = client.reconnect();
+			});
+			first.sendTogether([
+				{ type: "event", event: { type: "session_removed", sessionId: "first" } },
+				{ type: "event", event: { type: "session_removed", sessionId: "stale" } },
+			]);
+			try {
+				expect(reconnect).toBeDefined();
+				await expect(reconnect).resolves.toMatchObject({ revision: 2 });
+				expect(events).toEqual(["session_removed"]);
+				expect(client.connectionState).toBe("connected");
+			} finally {
+				await client.dispose();
+			}
+		}
+	});
+
 	test("rejects a typed handshake version error", async () => {
 		const server = new MemoryByteServer();
 		server.onMessage(() => {

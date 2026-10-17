@@ -6,6 +6,7 @@ import {
 	mkdtempSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 	writeSync,
@@ -22,7 +23,7 @@ describe("loadEntriesFromFile", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "session-test-")));
 	});
 
 	afterEach(() => {
@@ -149,7 +150,7 @@ describe("findMostRecentSession", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "session-test-")));
 	});
 
 	afterEach(() => {
@@ -240,7 +241,7 @@ describe("SessionManager custom flat session directory", () => {
 	let projectB: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "session-test-")));
 		projectA = join(tempDir, "project-a");
 		projectB = join(tempDir, "project-b");
 		mkdirSync(projectA, { recursive: true });
@@ -298,7 +299,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "session-test-"));
+		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "session-test-")));
 	});
 
 	afterEach(() => {

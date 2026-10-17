@@ -1,4 +1,5 @@
-import type { CredentialStore } from "@earendil-works/pi-ai";
+import { type CredentialStore, ModelsError } from "@earendil-works/pi-ai";
+import { StoredApiKeyUnavailableError } from "../core/auth-storage.ts";
 import { resolveCliModel } from "../core/model-resolver.ts";
 import { ModelRuntime } from "../core/model-runtime.ts";
 import { InMemoryCodingAgentModelsStore } from "../core/models-store.ts";
@@ -47,7 +48,15 @@ export async function checkProviderAuth(
 			return { status: "not_ready", provider, reason: "credentials_not_configured" };
 		}
 		return { status: "ready", provider, authType: auth.type };
-	} catch {
+	} catch (error) {
+		if (
+			error instanceof ModelsError &&
+			error.code === "auth" &&
+			error.cause instanceof StoredApiKeyUnavailableError &&
+			error.cause.providerId === provider
+		) {
+			return { status: "not_ready", provider, reason: "credentials_not_configured" };
+		}
 		return { status: "invalid", provider, reason: "invalid_state" };
 	}
 }

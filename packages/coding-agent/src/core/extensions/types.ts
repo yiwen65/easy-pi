@@ -694,10 +694,11 @@ export interface SessionBeforeForkEvent {
 	position: "before" | "at";
 }
 
-/** Fired before context compaction (can be cancelled or customized) */
+/** Fired before context compaction (can be observed or cancelled) */
 export interface SessionBeforeCompactEvent {
 	type: "session_before_compact";
-	preparation: CompactionPreparation;
+	/** Legacy cut metadata only; undefined when no legacy cut exists, even if modern compaction can run. */
+	preparation: CompactionPreparation | undefined;
 	branchEntries: SessionEntry[];
 	customInstructions?: string;
 	/** What triggered the compaction: manual /compact, the context threshold, or context overflow recovery */

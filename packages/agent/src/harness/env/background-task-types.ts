@@ -33,7 +33,14 @@ export interface BackgroundTaskOutput {
 export interface BackgroundTaskManagerLike {
 	start(
 		command: string,
-		options: { cwd: string; env?: Record<string, string | undefined>; inheritEnv?: boolean; timeoutMs?: number },
+		options: {
+			cwd: string;
+			env?: Record<string, string | undefined>;
+			inheritEnv?: boolean;
+			timeoutMs?: number;
+			/** Cancels launch admission only; an admitted task is independent of this signal. */
+			signal?: AbortSignal;
+		},
 	): Promise<Result<BackgroundTaskRecord, ExecutionError>>;
 	get(id: string): BackgroundTaskRecord | undefined;
 	list(options?: { activeOnly?: boolean }): BackgroundTaskRecord[];

@@ -6,7 +6,14 @@ import {
 	type RetryCallbacks,
 	type RetryPolicy,
 } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Model, SimpleStreamOptions, ThinkingBudgets, Tool } from "@earendil-works/pi-ai/compat";
+import type {
+	AssistantMessage,
+	Model,
+	SimpleStreamOptions,
+	ThinkingBudgets,
+	Tool,
+	Usage,
+} from "@earendil-works/pi-ai/compat";
 import { createCompactionSummaryMessage } from "../../messages.ts";
 import {
 	buildSessionContext,
@@ -107,7 +114,7 @@ export interface CheckpointCandidate {
 	replacementHistory: AgentMessage[];
 	tokensBefore: number;
 	tokensAfter: number;
-	modelUsage?: { input: number; output: number };
+	modelUsage?: Usage;
 }
 
 export interface CompactResult {
@@ -117,6 +124,19 @@ export interface CompactResult {
 
 function estimateText(text: string): number {
 	return Math.ceil(text.length / 4);
+}
+
+/** Aggregate reported attempts without mutating provider responses or losing optional breakdowns. */
+function accumulateUsage(total: Usage | undefined, usage: Usage | undefined): Usage | undefined {
+	if (!usage) return total;
+	if (!total) return structuredClone(usage);
+	for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) total[key] += usage[key];
+	for (const key of ["cacheWrite1h", "reasoning"] as const) {
+		if (usage[key] !== undefined) total[key] = (total[key] ?? 0) + usage[key];
+	}
+	for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const)
+		total.cost[key] += usage.cost[key];
+	return total;
 }
 
 function selectLatestUnansweredUserMessage(messages: readonly AgentMessage[], tokenBudget: number): AgentMessage[] {
@@ -510,16 +530,22 @@ export class HfCompactionHost {
 				currentInputExtraTokens,
 				outputReserve,
 			});
-			if (!options.complete) {
+			const complete = options.complete;
+			if (!complete) {
 				const reason = "No local compaction model is configured";
 				return { activated: false, summaryText: reason, result: { status: "rejected", reason } };
 			}
 			generationStartedAt = performance.now();
+			let modelUsage: Usage | undefined;
 			const generated = await generateCompactionItem({
 				messages: activeMessages,
 				systemPrompt,
 				tools: this.getTools?.(),
-				complete: options.complete,
+				complete: async (request) => {
+					const response = await complete(request);
+					modelUsage = accumulateUsage(modelUsage, response.usage);
+					return response;
+				},
 				signal: options.signal,
 				customInstructions: options.customInstructions,
 				messageTokenBudget,
@@ -532,7 +558,6 @@ export class HfCompactionHost {
 					result: { status: "rejected", reason: generated.reason },
 				};
 			}
-			const modelUsage = generated.modelUsage;
 			const toolEvidence = this.getToolEvidenceSummary?.()?.trim();
 			const summary = toolEvidence ? `${generated.text}\n\n${toolEvidence}` : generated.text;
 			const summaryMessage = createCompactionSummaryMessage(summary, before.total, new Date().toISOString());
@@ -663,6 +688,7 @@ export function createPiAiCompleteFn(options: {
 	let requestIndex = 0;
 	return async (request) => {
 		const currentRequestIndex = ++requestIndex;
+		let usage: Usage | undefined;
 		const response = await completeSummarization(
 			options.model,
 			{
@@ -695,22 +721,20 @@ export function createPiAiCompleteFn(options: {
 						},
 					}
 				: options.callbacks,
-			options.diagnostics
-				? (metrics) => {
-						options.diagnostics?.recordAttempt({
-							...metrics,
-							provider: options.model.provider,
-							model: options.model.id,
-							api: options.model.api,
-							reasoning: options.thinkingLevel,
-							requestIndex: currentRequestIndex,
-							promptVersion: request.promptVersion,
-							messageCount: request.messages.length,
-						});
-					}
-				: undefined,
+			(metrics) => {
+				usage = accumulateUsage(usage, metrics.usage);
+				options.diagnostics?.recordAttempt({
+					...metrics,
+					provider: options.model.provider,
+					model: options.model.id,
+					api: options.model.api,
+					reasoning: options.thinkingLevel,
+					requestIndex: currentRequestIndex,
+					promptVersion: request.promptVersion,
+					messageCount: request.messages.length,
+				});
+			},
 		);
-		const usage = { input: response.usage.input, output: response.usage.output };
 		if (response.stopReason === "error") {
 			return { text: "", stopReason: "error", errorMessage: response.errorMessage ?? "unknown", usage };
 		}
@@ -734,8 +758,8 @@ export function createPiAiCompleteFn(options: {
 				text,
 				stopReason: "length",
 				errorMessage: isRecoverableLength(response, options.model.maxTokens)
-					? `summarization was truncated below the ${options.model.maxTokens} token output limit after ${usage.output} output tokens`
-					: `summarization reached the ${options.model.maxTokens} token output limit after ${usage.output} output tokens`,
+					? `summarization was truncated below the ${options.model.maxTokens} token output limit after ${response.usage.output} output tokens`
+					: `summarization reached the ${options.model.maxTokens} token output limit after ${response.usage.output} output tokens`,
 				usage,
 			};
 		}

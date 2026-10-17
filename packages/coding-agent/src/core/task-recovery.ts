@@ -108,7 +108,10 @@ export class TaskRecoveryJournal {
 		const entry = branch
 			.slice()
 			.reverse()
-			.find((entry) => entry.type === "custom" && entry.customType === ENTRY_TYPE);
+			.find(
+				(entry) =>
+					entry.type === "custom" && entry.customType === ENTRY_TYPE && entry.sourceSessionId === undefined,
+			);
 		if (!entry || entry.type !== "custom") return undefined;
 		const stored = entry.data as StoredTaskRecoveryState | undefined;
 		if (
@@ -255,7 +258,10 @@ export class TaskRecoveryJournal {
 		prompt: AgentMessage[],
 		systemPrompt?: string,
 		promptEntryIds: string[] = prompt.map(() => randomUUID()),
+		/** A new host-owned assignment can retain prior inputs only as historical/suspended facts. */
+		options?: { inheritQueuedInputs?: boolean },
 	): void {
+		const inheritQueuedInputs = options?.inheritQueuedInputs ?? true;
 		const branchIds = new Set(this.manager.getBranch().map((entry) => entry.id));
 		const previous = this.state;
 		const suspendedTasks = previous?.suspendedTasks ?? [];
@@ -274,17 +280,18 @@ export class TaskRecoveryJournal {
 				state: {
 					...paused,
 					status: unknown ? "needs_reconciliation" : "interrupted",
-					queued: paused.queued.filter((group) => group.kind !== "nextTurn"),
+					queued: inheritQueuedInputs ? paused.queued.filter((group) => group.kind !== "nextTurn") : paused.queued,
 				},
 			});
 		}
-		const queued =
-			previous?.queued.filter(
-				(group) =>
-					(!suspending || group.kind === "nextTurn") &&
-					!group.cancelled &&
-					group.entryIds.some((id) => !branchIds.has(id)),
-			) ?? [];
+		const queued = inheritQueuedInputs
+			? (previous?.queued.filter(
+					(group) =>
+						(!suspending || group.kind === "nextTurn") &&
+						!group.cancelled &&
+						group.entryIds.some((id) => !branchIds.has(id)),
+				) ?? [])
+			: [];
 		this.save({
 			version: 2,
 			id: randomUUID(),

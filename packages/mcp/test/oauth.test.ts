@@ -533,6 +533,49 @@ describe("MCP OAuth", () => {
 		expect(codes).toEqual(["matching", "omitted", "no-metadata"]);
 	});
 
+	it.each([307, 308])("does not forward token credentials through HTTP %i redirects", async (status) => {
+		const forwarded: string[] = [];
+		const target = await listen(async (request, response) => {
+			forwarded.push(await readBody(request));
+			response.setHeader("content-type", "application/json");
+			response.end(JSON.stringify({ access_token: "redirected-token", token_type: "Bearer" }));
+		});
+		const received: string[] = [];
+		const origin = await listen(async (request, response) => {
+			received.push(await readBody(request));
+			response.writeHead(status, { location: `${target}/token` }).end();
+		});
+		for (const grant of ["code", "refresh"] as const) {
+			const provider = new TestOAuthProvider("http://127.0.0.1/callback");
+			provider.client = { client_id: "client", client_secret: "test-client-secret" };
+			provider.verifier = "test-code-verifier";
+			provider.discovery = {
+				authorizationServerUrl: origin,
+				authorizationServerMetadata: {
+					issuer: origin,
+					authorization_endpoint: `${origin}/authorize`,
+					token_endpoint: `${origin}/token`,
+					token_endpoint_auth_methods_supported: ["client_secret_post"],
+					response_types_supported: ["code"],
+				},
+			};
+			const existing = { access_token: "old", refresh_token: "test-refresh-token", token_type: "Bearer" };
+			if (grant === "refresh") provider.tokenSet = existing;
+			const result = await authorizeMcp(provider, {
+				serverUrl: `${origin}/mcp`,
+				...(grant === "code" ? { authorizationCode: "test-code" } : {}),
+			}).catch((error: unknown) => error);
+			// A failed refresh may ask for a fresh authorization, but must not save redirected tokens.
+			expect.soft(result).not.toBe("AUTHORIZED");
+			expect.soft(provider.tokenSet).toEqual(grant === "refresh" ? existing : undefined);
+		}
+		expect(received).toHaveLength(2);
+		expect(received[0]).toContain("code_verifier=test-code-verifier");
+		expect(received[1]).toContain("refresh_token=test-refresh-token");
+		expect(received.every((body) => body.includes("client_secret=test-client-secret"))).toBe(true);
+		expect(forwarded).toEqual([]);
+	});
+
 	// #10565
 	it("stops when its signal aborts, without falling back to a redirect", async () => {
 		const stalled: string[] = [];

@@ -2,7 +2,7 @@
  * Verify the documentation example from extensions.md compiles and works.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { assert, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, SessionBeforeCompactEvent, SessionCompactEvent } from "../src/core/extensions/index.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -19,6 +19,7 @@ describe("Documentation example", () => {
 			pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx) => {
 				// All these should be accessible on the event
 				const { preparation, branchEntries, reason, willRetry, signal } = event;
+				assert(preparation, "This fixture expects legacy cut metadata");
 				const { messagesToSummarize, turnPrefixMessages, tokensBefore, isSplitTurn } = preparation;
 
 				// Verify types
@@ -74,6 +75,14 @@ describe("Documentation example", () => {
 			ctx,
 		);
 		expect(allowed).toBeUndefined();
+		expect(notify).not.toHaveBeenCalled();
+
+		// Modern compaction can run without a legacy cut. Do not invent token metadata.
+		const withoutLegacyPreparation = await handlers.get("session_before_compact")!(
+			{ ...smallEvent, preparation: undefined },
+			ctx,
+		);
+		expect(withoutLegacyPreparation).toBeUndefined();
 		expect(notify).not.toHaveBeenCalled();
 
 		// The persisted checkpoint is reported.

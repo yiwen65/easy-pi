@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import { randomUUID } from "node:crypto";
 import dgram from "node:dgram";
 import dns from "node:dns/promises";
+import { writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { homedir } from "node:os";
@@ -11,6 +13,7 @@ import { afterEach, test } from "node:test";
 import tls from "node:tls";
 import { pathToFileURL } from "node:url";
 import { mockBrowser } from "./browser-mock.mjs";
+import { snapshotHost as host } from "./session-host.mjs";
 
 assert.equal(process.env.PI_WEB_SEARCH_OFFLINE, "1", "Use node test/run.mjs; do not run this file in your normal environment.");
 assert.match(homedir(), /^\/tmp\/pi-web-search-offline-[^/]+\/home$/);
@@ -93,10 +96,6 @@ async function failure(promise) {
 	}
 	throw new Error("Expected the call to fail, but it resolved");
 }
-/** One owner object per capture: the store is keyed on this object and must be stable across calls. */
-function host() {
-	return { sessionManager: {} };
-}
 function cleaned(value) {
 	return stripVTControlCharacters(value).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 }
@@ -107,6 +106,90 @@ function expectPageShownInContent(result) {
 	const page = result.structuredContent.text;
 	assert.ok(text(result).endsWith(`\n\n${page}`), "content must end with exactly the page structuredContent carries");
 	return page;
+}
+
+test("snapshots follow capture anchors, not mutable manager identity or the current leaf", async (t) => {
+	const mock = mockBrowser(t, { text: "anchored capture" });
+	const ctx = host();
+	const manager = ctx.sessionManager;
+	const parent = manager.getLeafId();
+	const anchor = manager.appendMessage({ role: "user", content: "branch A", timestamp: Date.now() });
+	const first = await execute({ url: PAGE_URL }, { ctx });
+	const snapshot_id = first.structuredContent.snapshot_id;
+	assert.equal(typeof snapshot_id, "string");
+	manager.appendMessage({ role: "user", content: "ordinary append", timestamp: Date.now() });
+	assert.equal((await execute({ snapshot_id }, { ctx })).structuredContent.text, "anchored capture");
+	manager.branch(parent);
+	const rewind = await failure(execute({ snapshot_id }, { ctx }));
+	assert.equal(rewind.code, "snapshot-unavailable");
+	manager.appendMessage({ role: "user", content: "branch B", timestamp: Date.now() });
+	const sibling = await failure(execute({ snapshot_id }, { ctx }));
+	assert.equal(sibling.message, rewind.message);
+	manager.branch(anchor);
+	assert.equal((await execute({ snapshot_id }, { ctx })).structuredContent.text, "anchored capture");
+	manager.createBranchedSession(anchor);
+	assert.equal((await failure(execute({ snapshot_id }, { ctx }))).code, "snapshot-unavailable", "copied entry IDs are not the same logical session");
+	const next = await execute({ url: PAGE_URL }, { ctx });
+	manager.newSession();
+	assert.equal((await failure(execute({ snapshot_id: next.structuredContent.snapshot_id }, { ctx }))).code, "snapshot-unavailable");
+	assert.equal(mock.calls.length, 2, "refusals never trigger a new capture");
+});
+
+test("replacing a session file rejects snapshots even when the copied branch has the same entry IDs", async (t) => {
+	const mock = mockBrowser(t, { text: "original session" });
+	const ctx = host();
+	const manager = ctx.sessionManager;
+	const first = await execute({ url: PAGE_URL }, { ctx });
+	const anchor = manager.getLeafId();
+	const sessionId = manager.getSessionId();
+	const path = join(process.env.TMPDIR, `${randomUUID()}.jsonl`);
+	writeFileSync(path, [
+		JSON.stringify({ ...manager.getHeader(), id: randomUUID() }),
+		...manager.getEntries().map((entry) => JSON.stringify(entry)),
+	].join("\n") + "\n");
+	manager.setSessionFile(path);
+	assert.notEqual(manager.getSessionId(), sessionId);
+	assert.equal(manager.getLeafId(), anchor);
+	assert.equal((await failure(execute({ snapshot_id: first.structuredContent.snapshot_id }, { ctx }))).code, "snapshot-unavailable");
+	assert.equal(mock.calls.length, 1);
+});
+
+test("a host with no provable capture anchor keeps no snapshot", async (t) => {
+	mockBrowser(t, { text: "unanchored capture" });
+	const empty = host();
+	empty.sessionManager.resetLeaf();
+	for (const ctx of [empty, { sessionManager: {} }]) {
+		const result = await execute({ url: PAGE_URL }, { ctx });
+		assert.equal(result.structuredContent.text, "unanchored capture");
+		assert.equal(result.structuredContent.snapshot_id, null);
+		assert.match(text(result), /ownership was unavailable or changed/);
+	}
+});
+
+for (const transition of ["branch", "newSession", "append"]) {
+	test(`capture completion checks ownership after ${transition}`, async (t) => {
+		const ctx = host();
+		const manager = ctx.sessionManager;
+		const parent = manager.getLeafId();
+		manager.appendMessage({ role: "user", content: "capture branch", timestamp: Date.now() });
+		let moved = false;
+		mockBrowser(t, { text: "racing capture", onCommand(command) {
+			if (command.method !== "Page.navigate" || moved) return;
+			moved = true;
+			if (transition === "branch") manager.branch(parent);
+			else if (transition === "newSession") manager.newSession();
+			else manager.appendMessage({ role: "user", content: "normal append", timestamp: Date.now() });
+		} });
+		const result = await execute({ url: PAGE_URL }, { ctx });
+		assert.equal(moved, true);
+		if (transition === "append") {
+			assert.equal(typeof result.structuredContent.snapshot_id, "string");
+			assert.equal((await execute({ snapshot_id: result.structuredContent.snapshot_id }, { ctx })).structuredContent.text, "racing capture");
+		} else {
+			assert.equal(result.structuredContent.snapshot_id, null, "a late capture must not publish a handle into changed ownership");
+			assert.match(text(result), /No snapshot was kept/);
+		}
+	});
 }
 
 test("P01: one capture serves four snapshot pages, from one browser spawn, one proxy and one navigation", async (t) => {

@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI } from "@earendil-works/pi-tui";
+import { resetCapabilitiesCache, setCapabilities, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
@@ -10,6 +10,7 @@ import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import * as imageConvert from "../src/utils/image-convert.ts";
 
 function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
 	return {
@@ -29,6 +30,123 @@ function createFakeTui(): TUI {
 		requestRender: () => {},
 	} as unknown as TUI;
 }
+
+describe("ToolExecutionComponent Kitty image identity", () => {
+	beforeAll(() => initTheme("dark"));
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetCapabilitiesCache();
+	});
+
+	for (const finalMimeType of ["image/png", "image/jpeg"]) {
+		test(`ignores late conversion of a replaced image when the final image is ${finalMimeType}`, async () => {
+			setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+			const a = Promise.withResolvers<Awaited<ReturnType<typeof imageConvert.convertToPng>>>();
+			const b = Promise.withResolvers<Awaited<ReturnType<typeof imageConvert.convertToPng>>>();
+			const convert = vi
+				.spyOn(imageConvert, "convertToPng")
+				.mockReturnValueOnce(a.promise)
+				.mockReturnValueOnce(b.promise);
+			const requestRender = vi.fn();
+			const component = new ToolExecutionComponent(
+				"custom_tool",
+				"image-update",
+				{},
+				{},
+				undefined,
+				{ requestRender } as unknown as TUI,
+				process.cwd(),
+			);
+			component.updateResult(
+				{ content: [{ type: "image", data: "c291cmNlLWE=", mimeType: "image/jpeg" }], isError: false },
+				true,
+			);
+			component.updateResult({
+				content: [{ type: "image", data: "c291cmNlLWI=", mimeType: finalMimeType }],
+				isError: false,
+			});
+			if (finalMimeType === "image/jpeg") {
+				b.resolve({ data: "Y29udmVydGVkLWI=", mimeType: "image/png" });
+				await b.promise;
+			}
+			const requestsBeforeStale = requestRender.mock.calls.length;
+			a.resolve({ data: "Y29udmVydGVkLWE=", mimeType: "image/png" });
+			await a.promise;
+			const rendered = component.render(100).join("\n");
+			expect(rendered).toContain(finalMimeType === "image/png" ? "c291cmNlLWI=" : "Y29udmVydGVkLWI=");
+			expect(rendered).not.toContain("Y29udmVydGVkLWE=");
+			expect(requestRender).toHaveBeenCalledTimes(requestsBeforeStale);
+			expect(convert).toHaveBeenCalledTimes(finalMimeType === "image/png" ? 1 : 2);
+		});
+	}
+
+	test("does not resurrect removed images or let a stale failure evict a new conversion", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const removed = Promise.withResolvers<Awaited<ReturnType<typeof imageConvert.convertToPng>>>();
+		const failed = Promise.withResolvers<Awaited<ReturnType<typeof imageConvert.convertToPng>>>();
+		const convert = vi
+			.spyOn(imageConvert, "convertToPng")
+			.mockReturnValueOnce(removed.promise)
+			.mockReturnValueOnce(failed.promise)
+			.mockResolvedValue({ data: "Y29udmVydGVkLWI=", mimeType: "image/png" });
+		const requestRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"image-removed",
+			{},
+			{},
+			undefined,
+			{ requestRender } as unknown as TUI,
+			process.cwd(),
+		);
+		const image = { type: "image", data: "c291cmNlLWE=", mimeType: "image/jpeg" };
+		component.updateResult({ content: [image], isError: false }, true);
+		component.updateResult({ content: [], isError: false });
+		removed.resolve({ data: "cmVtb3ZlZA==", mimeType: "image/png" });
+		await removed.promise;
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(component.render(100).join("\n")).not.toContain("\x1b_G");
+		component.updateResult({ content: [image], isError: false }, true);
+		component.updateResult({ content: [{ ...image, data: "c291cmNlLWI=" }], isError: false });
+		failed.reject(new Error("conversion failed"));
+		await failed.promise.catch(() => {});
+		component.updateResult({ content: [{ ...image, data: "c291cmNlLWI=" }], isError: false });
+		expect(convert).toHaveBeenCalledTimes(3);
+		expect(component.render(100).join("\n")).toContain("Y29udmVydGVkLWI=");
+	});
+
+	test("reuses identical in-flight and completed images, but converts changed content at the same index", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const pending = Promise.withResolvers<Awaited<ReturnType<typeof imageConvert.convertToPng>>>();
+		const convert = vi
+			.spyOn(imageConvert, "convertToPng")
+			.mockReturnValueOnce(pending.promise)
+			.mockResolvedValue({ data: "Y29udmVydGVkLWI=", mimeType: "image/png" });
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"image-cache",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		const image = { type: "image", data: "c291cmNlLWE=", mimeType: "image/jpeg" };
+		component.updateResult({ content: [{ ...image }], isError: false }, true);
+		component.updateResult({ content: [{ ...image }], isError: false }, true);
+		expect(convert).toHaveBeenCalledTimes(1);
+		pending.resolve({ data: "Y29udmVydGVkLWE=", mimeType: "image/png" });
+		await pending.promise;
+		component.updateResult({ content: [{ ...image }], isError: false });
+		expect(convert).toHaveBeenCalledTimes(1);
+		expect(component.render(100).join("\n")).toContain("Y29udmVydGVkLWE=");
+		component.updateResult({ content: [{ ...image, data: "c291cmNlLWI=" }], isError: false });
+		await Promise.resolve();
+		expect(convert).toHaveBeenCalledTimes(2);
+		expect(component.render(100).join("\n")).toContain("Y29udmVydGVkLWI=");
+		expect(component.render(100).join("\n")).not.toContain("Y29udmVydGVkLWE=");
+	});
+});
 
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
@@ -134,6 +252,136 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("README.md");
 	});
 
+	test.each(["unknown", "missing-renderer", "throwing-renderer", "self-shell-error"] as const)(
+		"sanitizes raw tool-name prefixes in the %s fallback before dispatch and after errors",
+		(kind) => {
+			const attacks = [
+				"\x1b]52;c;cGF5bG9hZA==\x07",
+				"\x1b]52;c;cGF5bG9hZA==\x1b\\",
+				"\x9d52;c;cGF5bG9hZA==\x9c",
+				"\x1b[999;999H\x9b2J",
+				"\x1b_Ga=T,f=100;payload\x1b\\",
+				"\0\x07\x08\x0b\r\x7f\x85",
+			];
+			for (const attack of attacks) {
+				for (let end = 1; end <= attack.length; end++) {
+					const name = `项目_café_🦊_${attack.slice(0, end)}`;
+					const call = Object.freeze({ id: "raw-name", name, arguments: Object.freeze({ value: "safe" }) });
+					const definition: ToolDefinition | undefined =
+						kind === "unknown"
+							? undefined
+							: {
+									...createBaseToolDefinition(name),
+									...(kind === "self-shell-error" ? { renderShell: "self" as const } : {}),
+									...(kind === "missing-renderer"
+										? {}
+										: {
+												renderCall: () => {
+													throw new Error("renderer failed");
+												},
+											}),
+								};
+					const component = new ToolExecutionComponent(
+						call.name,
+						call.id,
+						call.arguments,
+						{},
+						definition,
+						createFakeTui(),
+						process.cwd(),
+					);
+					for (const failed of [false, true]) {
+						const result = { content: [{ type: "text", text: `Tool ${name} not found` }], isError: true };
+						if (failed) component.updateResult(result);
+						for (const expanded of [false, true]) {
+							component.setExpanded(expanded);
+							component.invalidate();
+							const rendered = component.render(200).join("\n");
+							expect(rendered.replace(/\x1b\[[\d;]*m/g, "")).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+							expect(rendered).toContain("项目_café_🦊_");
+							expect(call.name).toBe(name);
+							if (definition) expect(definition.name).toBe(name);
+							expect(result.content[0].text).toBe(`Tool ${name} not found`);
+						}
+					}
+				}
+			}
+		},
+	);
+
+	test("does not turn a sanitized display name into a built-in registry match", () => {
+		const name = "bash\x1b]52;c;cGF5bG9hZA==\x07";
+		const args = Object.freeze({ command: "echo safe" });
+		const component = new ToolExecutionComponent(
+			name,
+			"unknown-bash",
+			args,
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setExpanded(true);
+		const rendered = stripAnsi(component.render(200).join("\n"));
+		expect(rendered).toContain("bash");
+		expect(rendered).toContain('"command": "echo safe"');
+		expect(rendered).not.toContain("$ echo safe");
+	});
+
+	test.each(["command", "cwd"])("sanitizes untrusted bash %s previews before host styling", (field) => {
+		const attacks = [
+			"\x1b]52;c;cGF5bG9hZA==\x07",
+			"\x1b]52;c;cGF5bG9hZA==\x1b\\",
+			"\x9d52;c;cGF5bG9hZA==\x9c",
+			"\x1b[2J\x1b[1;1H\x9b2J",
+			"\0\x07\x08\x0b\r\x7f\x85",
+		];
+		const component = new ToolExecutionComponent(
+			"bash",
+			"safe-preview",
+			{},
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		for (const attack of attacks) {
+			for (let end = 1; end <= attack.length; end++) {
+				const args = { command: "echo 项目", cwd: "/work", [field]: `visible ${attack.slice(0, end)}` };
+				component.updateArgs(args);
+				const rendered = component.render(200).join("\n");
+				const plain = rendered.replace(/\x1b\[[\d;]*m/g, "");
+				expect(plain).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+				expect(plain).toContain("visible");
+				expect(args[field as "command" | "cwd"]).toBe(`visible ${attack.slice(0, end)}`);
+			}
+		}
+	});
+
+	test.each(["bash", "custom_tool"])(
+		"strips C1 and incomplete controls from %s result text without stripping host colors",
+		(toolName) => {
+			const component = new ToolExecutionComponent(
+				toolName,
+				"safe-result",
+				{ command: "echo" },
+				{},
+				undefined,
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.setExpanded(true);
+			component.updateResult({
+				content: [{ type: "text", text: "项目\x9d52;c;cGF5bG9hZA==\x9c\x7f\x85\x1b]" }],
+				isError: false,
+			});
+			const rendered = component.render(200).join("\n");
+			expect(rendered).toMatch(/\x1b\[[\d;]*m/);
+			expect(rendered.replace(/\x1b\[[\d;]*m/g, "")).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+			expect(rendered).toContain("项目");
+		},
+	);
+
 	test("bash execute emits an initial empty partial update before output arrives", async () => {
 		const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
 		const operations: BashOperations = {
@@ -236,8 +484,39 @@ describe("ToolExecutionComponent parity", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("latest");
 		expect(rendered).toContain("Command exited with code 7");
-		expect(rendered.match(/Full output:/g)).toHaveLength(1);
+		expect(rendered.match(/Output log:/g)).toHaveLength(1);
+		expect(rendered.match(/\/tmp\/bash\.log/g)).toHaveLength(1);
+		expect(rendered).not.toContain("Full output:");
 		expect(rendered).toContain("Truncated: showing 1 of 2 lines");
+	});
+
+	test("bash renderer labels capped logs without promising complete output", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"capped-log",
+			{ command: "generate output" },
+			{},
+			undefined,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setExpanded(true);
+		component.updateResult({
+			content: [{ type: "text", text: "latest\n\n[Showing lines 2-2 of 2. Truncated output log: /tmp/capped.log]" }],
+			details: {
+				truncation: { truncated: true, truncatedBy: "lines", outputLines: 1, totalLines: 2 },
+				fullOutputPath: "/tmp/capped.log",
+				logTruncated: true,
+			},
+			isError: false,
+		});
+		const rendered = stripAnsi(component.render(200).join("\n"));
+		expect(rendered.match(/Truncated output log:/g)).toHaveLength(1);
+		expect(rendered.match(/\/tmp\/capped\.log/g)).toHaveLength(1);
+		expect(rendered).toContain("Full output log truncated at its byte budget");
+		expect(rendered).toContain("Truncated: showing 1 of 2 lines");
+		expect(rendered).not.toContain("[Showing lines");
+		expect(rendered).not.toContain("Full output:");
 	});
 
 	test("bash renderer refreshes elapsed time for silent partial execution and stops after final output", () => {
@@ -306,9 +585,10 @@ describe("ToolExecutionComponent parity", () => {
 		component.updateResult({ ...result, isError: false }, false);
 
 		const rendered = stripAnsi(component.render(200).join("\n"));
-		expect(rendered.match(/Full output:/g)?.length ?? 0).toBe(1);
-		expect(rendered).toMatch(/line-4000[^\n]*\n[^\S\n]*\n \[Full output:/);
-		expect(rendered).not.toMatch(/line-4000[^\n]*\n[^\S\n]*\n[^\S\n]*\n \[Full output:/);
+		expect(rendered.match(/Output log:/g)?.length ?? 0).toBe(1);
+		expect(rendered.split(result.details.fullOutputPath!).length - 1).toBe(1);
+		expect(rendered).toMatch(/line-4000[^\n]*\n[^\S\n]*\n \[Output log:/);
+		expect(rendered).not.toMatch(/line-4000[^\n]*\n[^\S\n]*\n[^\S\n]*\n \[Output log:/);
 		expect(rendered).toContain("Truncated: showing 2000 of 4000 lines");
 		expect(rendered).not.toContain("[Showing lines 2001-4000 of 4000. Full output:");
 	});

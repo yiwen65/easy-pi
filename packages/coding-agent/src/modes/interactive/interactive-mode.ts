@@ -74,7 +74,6 @@ import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
 	ExtensionCommandContext,
-	ExtensionContext,
 	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -580,6 +579,7 @@ export class InteractiveMode {
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
+	private editorGeneration = 0;
 	private editorComponentFactory: EditorFactory | undefined;
 	private autocompleteProvider: AutocompleteProvider | undefined;
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
@@ -587,6 +587,7 @@ export class InteractiveMode {
 	private editorContainer: Container;
 	private activeSelectorToken?: object;
 	private activeSelectorDispose?: () => void;
+	private selectorGeneration = 0;
 	private footer: FooterComponent;
 	private footerContainer: Container;
 	private footerDataProvider: FooterDataProvider;
@@ -676,10 +677,8 @@ export class InteractiveMode {
 	// Shutdown state
 	private shutdownRequested = false;
 
-	// Extension UI state
-	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
-	private extensionInput: ExtensionInputComponent | undefined = undefined;
-	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
+	// Includes pending custom factories, so reset also cancels UI not yet mounted.
+	private extensionCustomDisposers?: Set<() => void>;
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -2270,51 +2269,17 @@ export class InteractiveMode {
 		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 		if (shortcuts.size === 0) return;
 
-		// Create a context for shortcut handlers
-		const createContext = (): ExtensionContext => ({
-			ui: this.createExtensionUIContext(),
-			mode: "tui",
-			hasUI: true,
-			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
-			modelRegistry: extensionRunner.getModelRegistry(),
-			model: this.session.model,
-			scopedModels: this.session.scopedModels,
-			thinkingLevel: this.session.thinkingLevel,
-			isIdle: () => this.session.isIdle,
-			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-			signal: this.session.agent.signal,
-			abort: () => {
-				this.restoreQueuedMessagesToEditor({ abort: true });
-			},
-			hasPendingMessages: () => this.session.pendingMessageCount > 0,
-			shutdown: () => {
-				this.shutdownRequested = true;
-			},
-			getContextUsage: () => this.session.getContextUsage(),
-			compact: (options) => {
-				void (async () => {
-					try {
-						const result = await this.session.compact(options?.customInstructions);
-						options?.onComplete?.(result);
-					} catch (error) {
-						const err = error instanceof Error ? error : new Error(String(error));
-						options?.onError?.(err);
-					}
-				})();
-			},
-			getSystemPrompt: () => this.session.systemPrompt,
-		});
-
 		// Set up the extension shortcut handler on the default editor
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
 			for (const [shortcutStr, shortcut] of shortcuts) {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
 					// Run handler async, don't block input
-					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
-						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
-					});
+					Promise.resolve()
+						.then(() => shortcut.handler(extensionRunner.createContext()))
+						.catch((err) => {
+							this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
+						});
 					return true;
 				}
 			}
@@ -2477,16 +2442,9 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
-		if (this.extensionSelector) {
-			this.hideExtensionSelector();
-		}
-		if (this.extensionInput) {
-			this.hideExtensionInput();
-		}
-		if (this.extensionEditor) {
-			this.hideExtensionEditor();
-		}
-		this.ui.hideOverlay();
+		this.editorGeneration++;
+		this.disposeActiveSelector();
+		for (const dispose of [...(this.extensionCustomDisposers ?? [])]) dispose();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -2688,7 +2646,10 @@ export class InteractiveMode {
 			setTitle: (title) => this.ui.terminal.setTitle(title),
 			custom: (factory, options) => this.showExtensionCustom(factory, options),
 			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
-			setEditorText: (text) => this.editor.setText(text),
+			setEditorText: (text) => {
+				this.editorGeneration++;
+				this.editor.setText(text);
+			},
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
 			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
 			addAutocompleteProvider: (factory) => {
@@ -2733,46 +2694,27 @@ export class InteractiveMode {
 				return;
 			}
 
-			const onAbort = () => {
-				this.hideExtensionSelector();
-				resolve(undefined);
-			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-			this.extensionSelector = new ExtensionSelectorComponent(
-				title,
-				options,
-				(option) => {
+			this.showSelector((done) => {
+				let settled = false;
+				const finish = (value: string | undefined) => {
+					if (settled) return;
+					settled = true;
 					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(option);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(undefined);
-				},
-				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
-			);
-
-			this.disposeActiveSelector();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionSelector);
-			this.ui.setFocus(this.extensionSelector);
-			this.ui.requestRender();
+					selector.dispose();
+					done();
+					resolve(value);
+					this.ui.requestRender();
+				};
+				const onAbort = () => finish(undefined);
+				const selector = new ExtensionSelectorComponent(title, options, finish, onAbort, {
+					tui: this.ui,
+					timeout: opts?.timeout,
+					onToggleToolsExpanded: () => this.toggleToolOutputExpansion(),
+				});
+				opts?.signal?.addEventListener("abort", onAbort, { once: true });
+				return { component: selector, focus: selector, dispose: onAbort };
+			});
 		});
-	}
-
-	/**
-	 * Hide the extension selector.
-	 */
-	private hideExtensionSelector(): void {
-		this.extensionSelector?.dispose();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
-		this.extensionSelector = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
 	}
 
 	/**
@@ -2809,46 +2751,26 @@ export class InteractiveMode {
 				return;
 			}
 
-			const onAbort = () => {
-				this.hideExtensionInput();
-				resolve(undefined);
-			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-			this.extensionInput = new ExtensionInputComponent(
-				title,
-				placeholder,
-				(value) => {
+			this.showSelector((done) => {
+				let settled = false;
+				const finish = (value: string | undefined) => {
+					if (settled) return;
+					settled = true;
 					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
+					input.dispose();
+					done();
 					resolve(value);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(undefined);
-				},
-				{ tui: this.ui, timeout: opts?.timeout },
-			);
-
-			this.disposeActiveSelector();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionInput);
-			this.ui.setFocus(this.extensionInput);
-			this.ui.requestRender();
+					this.ui.requestRender();
+				};
+				const onAbort = () => finish(undefined);
+				const input = new ExtensionInputComponent(title, placeholder, finish, onAbort, {
+					tui: this.ui,
+					timeout: opts?.timeout,
+				});
+				opts?.signal?.addEventListener("abort", onAbort, { once: true });
+				return { component: input, focus: input, dispose: onAbort };
+			});
 		});
-	}
-
-	/**
-	 * Hide the extension input.
-	 */
-	private hideExtensionInput(): void {
-		this.extensionInput?.dispose();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
-		this.extensionInput = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
 	}
 
 	/**
@@ -2856,40 +2778,28 @@ export class InteractiveMode {
 	 */
 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
-			this.extensionEditor = new ExtensionEditorComponent(
-				this.ui,
-				this.keybindings,
-				title,
-				prefill,
-				(value) => {
-					this.hideExtensionEditor();
+			this.showSelector((done) => {
+				let settled = false;
+				const finish = (value: string | undefined) => {
+					if (settled) return;
+					settled = true;
+					done();
 					resolve(value);
-				},
-				() => {
-					this.hideExtensionEditor();
-					resolve(undefined);
-				},
-				undefined,
-				this.settingsManager.getExternalEditorCommand(),
-			);
-
-			this.disposeActiveSelector();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.extensionEditor);
-			this.ui.setFocus(this.extensionEditor);
-			this.ui.requestRender();
+					this.ui.requestRender();
+				};
+				const editor = new ExtensionEditorComponent(
+					this.ui,
+					this.keybindings,
+					title,
+					prefill,
+					finish,
+					() => finish(undefined),
+					undefined,
+					this.settingsManager.getExternalEditorCommand(),
+				);
+				return { component: editor, focus: editor, dispose: () => finish(undefined) };
+			});
 		});
-	}
-
-	/**
-	 * Hide the extension editor.
-	 */
-	private hideExtensionEditor(): void {
-		this.editorContainer.clear();
-		this.editorContainer.addChild(this.editor);
-		this.extensionEditor = undefined;
-		this.ui.setFocus(this.editor);
-		this.ui.requestRender();
 	}
 
 	/**
@@ -2897,6 +2807,7 @@ export class InteractiveMode {
 	 * Pass undefined to restore the default editor.
 	 */
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
+		this.editorGeneration++;
 		this.editorComponentFactory = factory;
 
 		// Save text and attachment payloads from the current editor before switching.
@@ -2999,36 +2910,59 @@ export class InteractiveMode {
 		const savedText = this.editor.getTextForEditorTransfer?.() ?? this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
 
-		const restoreEditor = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.editor.setText(savedText);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
-		};
-
 		return new Promise((resolve, reject) => {
-			let component: Component & { dispose?(): void };
+			let component: (Component & { dispose?(): void }) | undefined;
+			let handle: OverlayHandle | undefined;
+			let restoreEditor: (() => void) | undefined;
 			let closed = false;
+			this.extensionCustomDisposers ??= new Set();
+			const disposers = this.extensionCustomDisposers;
 
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
+			const disposeComponent = () => {
+				const current = component;
+				component = undefined;
 				try {
-					component?.dispose?.();
+					current?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const cleanup = () => {
+				closed = true;
+				disposers.delete(cancel);
+				if (isOverlay) {
+					handle?.hide();
+				} else {
+					// A replacement owns the editor slot now; never restore an old draft over it.
+					if (this.activeSelectorDispose === cancel) this.editor.setText(savedText);
+					restoreEditor?.();
+					this.ui.requestRender();
+				}
+				disposeComponent();
+			};
+			const close = (result: T) => {
+				if (closed) return;
+				cleanup();
+				resolve(result);
+			};
+			// Like other extension UI cancellation, reset/replacement returns no selection.
+			const cancel = () => close(undefined as T);
+			disposers.add(cancel);
+			if (!isOverlay) {
+				// Claim the slot before awaiting the factory, so a later dialog can cancel it.
+				this.showSelector((done) => {
+					restoreEditor = done;
+					return { component: this.editor, focus: this.editor, dispose: cancel };
+				});
+			}
 
-			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
-				.then((c) => {
-					if (closed) return;
-					component = c;
+			void (async () => {
+				try {
+					component = await factory(this.ui, theme, this.keybindings, close);
+					if (closed) {
+						disposeComponent();
+						return;
+					}
 					if (isOverlay) {
 						// Resolve overlay options - can be static or dynamic function
 						const resolveOptions = (): OverlayOptions | undefined => {
@@ -3043,22 +2977,24 @@ export class InteractiveMode {
 							const w = (component as { width?: number }).width;
 							return w ? { width: w } : undefined;
 						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
+						const overlayOptions = resolveOptions();
+						if (closed) return;
+						handle = this.ui.showOverlay(component, overlayOptions);
 						// Expose handle to caller for visibility control
 						options?.onHandle?.(handle);
 					} else {
-						this.disposeActiveSelector();
+						// Transfer focus before unmounting the placeholder, retaining overlay deferral.
+						this.ui.setFocus(component);
 						this.editorContainer.clear();
 						this.editorContainer.addChild(component);
-						this.ui.setFocus(component);
 						this.ui.requestRender();
 					}
-				})
-				.catch((err) => {
+				} catch (err) {
 					if (closed) return;
-					if (!isOverlay) restoreEditor();
+					cleanup();
 					reject(err);
-				});
+				}
+			})();
 		});
 	}
 
@@ -3145,6 +3081,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.prompt.list", () => this.showPromptJumpSelector());
 
 		this.defaultEditor.onChange = (text: string) => {
+			this.editorGeneration++;
 			const wasBashMode = this.isBashMode;
 			this.isBashMode = text.trimStart().startsWith("!");
 			if (wasBashMode !== this.isBashMode) {
@@ -3163,9 +3100,17 @@ export class InteractiveMode {
 		const target = this.renderer.getFocusedComponent();
 		const handleInput = target?.handleInput;
 		if (!target || !handleInput) return;
+		const session = this.session;
+		const generation = this.editorGeneration;
 		try {
 			const text = await readClipboardText();
-			if (!text || this.renderer.getFocusedComponent() !== target) return;
+			if (
+				!text ||
+				this.renderer.getFocusedComponent() !== target ||
+				this.session !== session ||
+				this.editorGeneration !== generation
+			)
+				return;
 			handleInput.call(target, `\x1b[200~${text}\x1b[201~`);
 			this.ui.requestRender();
 		} catch {
@@ -3174,10 +3119,17 @@ export class InteractiveMode {
 	}
 
 	private async handleClipboardPaste(): Promise<void> {
+		const editor = this.editor;
+		const session = this.session;
+		const generation = this.editorGeneration;
+		// Clipboard helpers cannot be cancelled; discard results after any draft/session change.
+		const isCurrent = () =>
+			this.editor === editor && this.session === session && this.editorGeneration === generation;
 		try {
 			const image = await readClipboardImage();
+			if (!isCurrent()) return;
 			if (image) {
-				if (!this.editor.insertAttachmentAtCursor) {
+				if (!editor.insertAttachmentAtCursor) {
 					this.showWarning("The active custom editor does not support image attachments");
 					return;
 				}
@@ -3186,14 +3138,15 @@ export class InteractiveMode {
 					mimeType: image.mimeType,
 					data: Buffer.from(image.bytes).toString("base64"),
 				};
-				this.editor.insertAttachmentAtCursor("Image", attachment);
+				editor.insertAttachmentAtCursor("Image", attachment);
 				this.ui.requestRender();
 				return;
 			}
 
 			const text = await readClipboardText();
+			if (!isCurrent()) return;
 			if (text) {
-				this.editor.insertTextAtCursor?.(text);
+				editor.insertTextAtCursor?.(text);
 				this.ui.requestRender();
 			}
 		} catch {
@@ -3208,6 +3161,7 @@ export class InteractiveMode {
 
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string, attachments: readonly unknown[] = []) => {
+			this.editorGeneration++;
 			text = text.trim();
 			if (!text) return;
 			const attachmentValues =
@@ -4549,6 +4503,7 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
+		this.editorGeneration++;
 		if (/^\/fast(?:\s|$)/.test(text)) {
 			this.handleFastCommand(text);
 			this.editor.setText("");
@@ -5006,6 +4961,7 @@ export class InteractiveMode {
 	// =========================================================================
 
 	clearEditor(): void {
+		this.editorGeneration++;
 		this.editor.setText("");
 		this.ui.requestRender();
 	}
@@ -5225,6 +5181,8 @@ export class InteractiveMode {
 	// =========================================================================
 
 	private disposeActiveSelector(): void {
+		// Replacement/reset invalidates awaiting workflows; a user's done() does not.
+		this.selectorGeneration++;
 		const dispose = this.activeSelectorDispose;
 		this.activeSelectorToken = undefined;
 		this.activeSelectorDispose = undefined;
@@ -5254,9 +5212,10 @@ export class InteractiveMode {
 		this.disposeActiveSelector();
 		this.activeSelectorToken = token;
 		this.activeSelectorDispose = dispose;
+		// Keep the previous focus mounted until ownership transfers, so an overlay stays deferred.
+		this.ui.setFocus(created.focus);
 		this.editorContainer.clear();
 		this.editorContainer.addChild(created.component);
-		this.ui.setFocus(created.focus);
 		this.ui.requestRender();
 	}
 
@@ -5871,11 +5830,14 @@ export class InteractiveMode {
 					// Check if we should skip the prompt (user preference to always default to no summary)
 					if (!this.settingsManager.getBranchSummarySkipPrompt()) {
 						while (true) {
-							const summaryChoice = await this.showExtensionSelector("Summarize branch?", [
+							const summaryPromise = this.showExtensionSelector("Summarize branch?", [
 								"No summary",
 								"Summarize",
 								"Summarize with custom prompt",
 							]);
+							const summaryGeneration = this.selectorGeneration;
+							const summaryChoice = await summaryPromise;
+							if (this.selectorGeneration !== summaryGeneration) return;
 
 							if (summaryChoice === undefined) {
 								// User pressed escape - re-show tree selector with same selection
@@ -5886,7 +5848,10 @@ export class InteractiveMode {
 							wantsSummary = summaryChoice !== "No summary";
 
 							if (summaryChoice === "Summarize with custom prompt") {
-								customInstructions = await this.showExtensionEditor("Custom summarization instructions");
+								const instructionsPromise = this.showExtensionEditor("Custom summarization instructions");
+								const instructionsGeneration = this.selectorGeneration;
+								customInstructions = await instructionsPromise;
+								if (this.selectorGeneration !== instructionsGeneration) return;
 								if (customInstructions === undefined) {
 									// User cancelled - loop back to summary selector
 									continue;

@@ -30,6 +30,12 @@ interface Component {
 
 The TUI appends a full SGR reset and OSC 8 reset at the end of each rendered line. Styles do not carry across lines. If you emit multi-line text with styling, reapply styles per line or use `wrapTextWithAnsi()` so styles are preserved for each wrapped line.
 
+## Terminal text boundaries
+
+The standard assistant-message renderer sanitizes untrusted text, thinking, errors and abort notices before Markdown transforms or host styling, including partial streaming text. The standard Bash renderer likewise sanitizes command/cwd previews, and built-in tool text rendering sanitizes result text. Grok's collapsed thinking, turn-level thinking, compact tool names and argument summaries use the same ingress sanitizer before styling or scrolling. Generic/fallback tool-name headers are sanitized too, without changing the raw identity used for lookup, dispatch or special-name grouping. These display transformations remove terminal control sequences without rewriting stored messages or execution arguments; tabs and newlines remain available for layout. This is not a guarantee for every widget or custom renderer.
+
+`ProcessTerminal.setTitle()` accepts plain text and removes C0/C1 controls and DEL before writing the title sequence. Host-generated styles, hyperlinks and image protocols remain separate from untrusted text. Trusted extension components and Markdown transformers can still produce terminal output and must sanitize their own untrusted inputs before adding controls. These are display boundaries, not an OS sandbox or containment for extension code.
+
 ## Focusable Interface (IME Support)
 
 Components that display a text cursor and need IME (Input Method Editor) support should implement the `Focusable` interface:

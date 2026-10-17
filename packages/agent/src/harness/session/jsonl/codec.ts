@@ -1,35 +1,17 @@
 import { err, ok, type Result } from "../../types.ts";
 import type { SessionMutation } from "../state.ts";
 import type { Entry, LaneRecord } from "../types.ts";
+import { assertDurableEntry, assertDurableRecord } from "../validation.ts";
 import { JsonlDecodeError } from "./errors.ts";
 import type { JsonlSessionMetadata, JsonlV4Header } from "./types.ts";
 
-const ENTRY_TYPES = new Set<Entry["type"]>([
-	"message",
-	"model_change",
-	"thinking_level_change",
-	"active_tools_change",
-	"compaction",
-	"branch_summary",
-	"custom",
-]);
-const RECORD_TYPES = new Set<LaneRecord["type"]>([
-	"operation_started",
-	"abort_requested",
-	"pause_requested",
-	"pause_cleared",
-	"operation_finished",
-	"step_attempt",
-	"tool_started",
-	"tool_reconciliation",
-	"tool_reconciled",
-	"assistant_checkpoint",
-	"queue_enqueued",
-	"queue_cancelled",
-	"write_deferred",
-	"usage",
-]);
-const OPERATION_KINDS = new Set(["run", "compaction", "navigation"]);
+function validatePayload(value: unknown, validate: (value: unknown) => void): void {
+	try {
+		validate(value);
+	} catch (error) {
+		throw new JsonlDecodeError("schema", error instanceof Error ? error.message : "has invalid payload");
+	}
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -137,12 +119,9 @@ function parseEntryMutation(value: Record<string, unknown>, seq: number): Extrac
 	const lane = value.lane === undefined ? undefined : requireString(value.lane, "lane");
 	const id = requireString(value.id, "id");
 	const type = requireString(value.type, "entry type");
-	if (!ENTRY_TYPES.has(type as Entry["type"])) {
-		throw new JsonlDecodeError("schema", `has unknown entry type ${type}`);
-	}
+	validatePayload(value, assertDurableEntry);
 	const parentId = requireNullableId(value.parentId, "parentId");
 	const timestamp = requireTimestamp(value.timestamp);
-	if (type === "custom") requireString(value.customType, "customType");
 	const { kind: _kind, lane: _lane, ...entryFields } = value;
 	const entry = { ...entryFields, id, type, parentId, seq, timestamp } as unknown as Entry;
 	return lane === undefined ? { kind: "entry", entry } : { kind: "entry", lane, entry };
@@ -155,46 +134,8 @@ function parseRecordMutation(
 	const id = requireString(value.id, "id");
 	const lane = requireString(value.lane, "lane");
 	const type = requireString(value.type, "record type");
-	if (!RECORD_TYPES.has(type as LaneRecord["type"])) {
-		throw new JsonlDecodeError("schema", `has unknown record type ${type}`);
-	}
+	validatePayload(value, assertDurableRecord);
 	const timestamp = requireTimestamp(value.timestamp);
-	if (type === "operation_started") {
-		if (!isObject(value.intent)) throw new JsonlDecodeError("schema", "has invalid intent");
-		const operationKind = requireString(value.intent.kind, "operation kind");
-		if (!OPERATION_KINDS.has(operationKind)) {
-			throw new JsonlDecodeError("schema", `has unknown operation kind ${operationKind}`);
-		}
-	}
-	if (type === "operation_finished") requireString(value.runId, "runId");
-	if (type === "tool_reconciliation" || type === "tool_reconciled") {
-		requireString(value.runId, "runId");
-		requireString(value.toolCallId, "toolCallId");
-		requireString(value.resultEntryId, "resultEntryId");
-		if (type === "tool_reconciliation") requireString(value.reason, "reason");
-		if (
-			value.diagnostic !== undefined &&
-			(!isObject(value.diagnostic) ||
-				value.diagnostic.role !== "toolResult" ||
-				value.diagnostic.toolCallId !== value.toolCallId ||
-				typeof value.diagnostic.toolName !== "string" ||
-				!Array.isArray(value.diagnostic.content))
-		)
-			throw new JsonlDecodeError("schema", "has invalid tool diagnostic");
-	}
-	if (type === "assistant_checkpoint") {
-		requireString(value.runId, "runId");
-		requireString(value.resultEntryId, "resultEntryId");
-		if (
-			!Number.isSafeInteger(value.attempt) ||
-			(value.attempt as number) < 1 ||
-			!isObject(value.message) ||
-			value.message.role !== "assistant" ||
-			value.message.isResponseCheckpoint !== true ||
-			!Array.isArray(value.message.content)
-		)
-			throw new JsonlDecodeError("schema", "has invalid assistant checkpoint");
-	}
 	const { kind: _kind, ...recordFields } = value;
 	return {
 		kind: "record",

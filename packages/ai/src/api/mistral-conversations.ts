@@ -14,12 +14,14 @@ import type {
 	ToolCall,
 } from "../types.ts";
 import { combineAbortSignals } from "../utils/abort-signals.ts";
+import { readProviderErrorBody } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
+import { lazyStream } from "./lazy.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -183,25 +185,31 @@ export const streamSimple: StreamFunction<"mistral-conversations", SimpleStreamO
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	return lazyStream(
+		model,
+		async () => {
+			const apiKey = options?.apiKey;
+			if (!apiKey) {
+				throw new Error(`No API key for provider: ${model.provider}`);
+			}
 
-	const base = {
-		...buildBaseOptions(model, context, options, apiKey),
-		toolChoice: options?.toolChoice,
-	} satisfies MistralOptions;
-	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoning = clampedReasoning === "off" ? undefined : clampedReasoning;
-	const shouldUseReasoning = model.reasoning && reasoning !== undefined;
+			const base = {
+				...buildBaseOptions(model, context, options, apiKey),
+				toolChoice: options?.toolChoice,
+			} satisfies MistralOptions;
+			const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+			const reasoning = clampedReasoning === "off" ? undefined : clampedReasoning;
+			const shouldUseReasoning = model.reasoning && reasoning !== undefined;
 
-	return stream(model, context, {
-		...base,
-		promptMode: shouldUseReasoning && usesPromptModeReasoning(model) ? "reasoning" : undefined,
-		reasoningEffort:
-			shouldUseReasoning && usesReasoningEffort(model) ? mapReasoningEffort(model, reasoning) : undefined,
-	} satisfies MistralOptions);
+			return stream(model, context, {
+				...base,
+				promptMode: shouldUseReasoning && usesPromptModeReasoning(model) ? "reasoning" : undefined,
+				reasoningEffort:
+					shouldUseReasoning && usesReasoningEffort(model) ? mapReasoningEffort(model, reasoning) : undefined,
+			} satisfies MistralOptions);
+		},
+		options?.signal,
+	);
 };
 
 function createOutput(model: Model<"mistral-conversations">): AssistantMessage {
@@ -316,10 +324,15 @@ async function requestMistralStream(
 		combinedSignal.cleanup();
 	}
 
-	await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+	try {
+		await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+	} catch (error) {
+		await response.body?.cancel().catch(() => {});
+		throw error;
+	}
 
 	if (!response.ok) {
-		const body = await response.text();
+		const body = await readProviderErrorBody(response, options?.signal);
 		throw new MistralHttpError(response.status, body, response.statusText);
 	}
 	if (!response.body) {

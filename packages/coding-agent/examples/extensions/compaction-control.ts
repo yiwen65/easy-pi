@@ -6,7 +6,7 @@
  * controls compaction only by cancelling it and by observing the persisted checkpoint.
  *
  * This example:
- * 1. cancels compaction while the history is too small for a summary to pay off;
+ * 1. cancels compaction when available legacy token metadata is below the chosen threshold;
  * 2. reports every checkpoint the subsystem persists.
  *
  * Usage:
@@ -21,7 +21,8 @@ const MIN_COMPACTION_TOKENS = 50_000;
 export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
 		const { preparation, reason } = event;
-		if (preparation.tokensBefore >= MIN_COMPACTION_TOKENS) return;
+		// Modern compaction may have no legacy cut metadata; let the subsystem decide in that case.
+		if (!preparation || preparation.tokensBefore >= MIN_COMPACTION_TOKENS) return;
 
 		ctx.ui.notify(
 			`Skipping ${reason} compaction: ${preparation.tokensBefore.toLocaleString()} tokens is below ${MIN_COMPACTION_TOKENS.toLocaleString()}`,

@@ -542,8 +542,10 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setTitle(title: string): void {
-		// OSC 0;title BEL - set terminal window title
-		process.stdout.write(`\x1b]0;${title}\x07`);
+		// Titles are plain text, not terminal output. Strip all C0/C1 controls so
+		// neither BEL/ST nor a nested escape sequence can terminate the OSC payload.
+		const safeTitle = title.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+		process.stdout.write(`\x1b]0;${safeTitle}\x07`);
 	}
 
 	setProgress(active: boolean): void {

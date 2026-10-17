@@ -79,6 +79,20 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		unsubscribe = session.subscribe((event) => {
+			if (mode !== "json") return;
+			const jsonEvent = jsonProfile === "compact" ? toCompactJsonEvent(event) : toJsonEvent(event);
+			if (jsonEvent) writeRawStdout(`${JSON.stringify(jsonEvent)}\n`);
+		});
+		unsubscribeBackpressure =
+			mode === "json"
+				? session.agent.subscribe(async () => {
+						await waitForRawStdoutBackpressure();
+					})
+				: undefined;
+
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
 			commandContextActions: {
@@ -108,20 +122,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
 			},
 		});
-
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			if (mode !== "json") return;
-			const jsonEvent = jsonProfile === "compact" ? toCompactJsonEvent(event) : toJsonEvent(event);
-			if (jsonEvent) writeRawStdout(`${JSON.stringify(jsonEvent)}\n`);
-		});
-		unsubscribeBackpressure =
-			mode === "json"
-				? session.agent.subscribe(async () => {
-						await waitForRawStdoutBackpressure();
-					})
-				: undefined;
 	};
 
 	try {

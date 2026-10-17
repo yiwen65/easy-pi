@@ -140,15 +140,13 @@ export class JsonlSessionRepo
 		return this.claimCreateDestination(destination, async () => {
 			const { header, path } = await this.prepareCreate(destination, options);
 			const storage = await JsonlSessionStorage.create(this.fs, path, header);
-			this.activeStorages.set(path, storage);
-			return new Session(storage);
+			return this.registerStorage(path, storage);
 		});
 	}
 
 	async open(metadata: JsonlSessionMetadata): Promise<Session<JsonlSessionMetadata>> {
 		const storage = await this.loadStorage(metadata);
-		this.activeStorages.set(metadata.path, storage);
-		return new Session(storage);
+		return this.registerStorage(metadata.path, storage);
 	}
 
 	async list(options: JsonlSessionListOptions = {}): Promise<JsonlSessionMetadata[]> {
@@ -161,7 +159,6 @@ export class JsonlSessionRepo
 
 	async delete(metadata: JsonlSessionMetadata): Promise<void> {
 		await this.activeStorages.get(metadata.path)?.release();
-		this.activeStorages.delete(metadata.path);
 		if (!fileResult(await this.fs.exists(metadata.path), `Failed to check session ${metadata.path}`)) return;
 		const writer = await claimJsonlWriter(this.fs, metadata.path);
 		try {
@@ -187,12 +184,19 @@ export class JsonlSessionRepo
 			return await this.claimCreateDestination(destination, async () => {
 				const { header, path } = await this.prepareCreate(destination, createOptions);
 				const storage = await sourceStorage.fork(path, header, options);
-				this.activeStorages.set(path, storage);
-				return new Session(storage);
+				return this.registerStorage(path, storage);
 			});
 		} finally {
 			if (sourceStorage !== existing) await sourceStorage.release();
 		}
+	}
+
+	private registerStorage(path: string, storage: JsonlSessionStorage): Session<JsonlSessionMetadata> {
+		this.activeStorages.set(path, storage);
+		storage.setReleaseCallback(() => {
+			if (this.activeStorages.get(path) === storage) this.activeStorages.delete(path);
+		});
+		return new Session(storage);
 	}
 
 	private async loadStorage(metadata: JsonlSessionMetadata): Promise<JsonlSessionStorage> {

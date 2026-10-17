@@ -6,6 +6,7 @@
  */
 
 import type { Server } from "node:http";
+import { raceWithAbortSignal } from "../../utils/abort.ts";
 import { getProviderEnvValue } from "../../utils/provider-env.ts";
 import type { OAuthAuth, OAuthCredential, ProviderAuthInteraction } from "../types.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
@@ -181,10 +182,34 @@ async function postJson(url: string, body: Record<string, string | number>, sign
 	const responseBody = await response.text();
 
 	if (!response.ok) {
-		throw new Error(`HTTP request failed. status=${response.status}; url=${url}; body=${responseBody}`);
+		throw new Error(`HTTP request failed. status=${response.status}; url=${url}`);
 	}
 
 	return responseBody;
+}
+
+function parseTokenResponse(responseBody: string): OAuthCredential {
+	let data: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown } | null;
+	try {
+		data = JSON.parse(responseBody);
+	} catch {
+		// JSON parser errors can quote the input, so do not retain their messages or causes.
+		throw new Error("Anthropic token response returned invalid JSON");
+	}
+	if (
+		typeof data?.access_token !== "string" ||
+		!data.access_token.trim() ||
+		typeof data.refresh_token !== "string" ||
+		!data.refresh_token.trim() ||
+		typeof data.expires_in !== "number" ||
+		!Number.isFinite(data.expires_in) ||
+		data.expires_in <= 0
+	) {
+		throw new Error("Anthropic token response has invalid access_token, refresh_token, or expires_in fields");
+	}
+	const expires = Date.now() + data.expires_in * 1000 - 5 * 60 * 1000;
+	if (!Number.isFinite(expires)) throw new Error("Anthropic token response has invalid expires_in field");
+	return { type: "oauth", access: data.access_token, refresh: data.refresh_token, expires };
 }
 
 async function exchangeAuthorizationCode(
@@ -214,28 +239,17 @@ async function exchangeAuthorizationCode(
 		);
 	}
 
-	let tokenData: { access_token: string; refresh_token: string; expires_in: number };
-	try {
-		tokenData = JSON.parse(responseBody) as { access_token: string; refresh_token: string; expires_in: number };
-	} catch (error) {
-		throw new Error(
-			`Token exchange returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
-		);
-	}
-
-	return {
-		type: "oauth",
-		refresh: tokenData.refresh_token,
-		access: tokenData.access_token,
-		expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
-	};
+	return parseTokenResponse(responseBody);
 }
 
 async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAuthCredential> {
 	const { verifier, challenge } = await generatePKCE();
 	const server = await startCallbackServer(verifier);
 	const manualAbort = new AbortController();
-	const onAbort = () => server.cancelWait();
+	const onAbort = () => {
+		manualAbort.abort(interaction.signal.reason);
+		server.cancelWait();
+	};
 	interaction.signal.addEventListener("abort", onAbort, { once: true });
 	if (interaction.signal.aborted) onAbort();
 	let code: string | undefined;
@@ -244,6 +258,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 	let manualError: Error | undefined;
 
 	try {
+		interaction.signal.throwIfAborted();
 		const authParams = new URLSearchParams({
 			code: "true",
 			client_id: CLIENT_ID,
@@ -278,6 +293,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 			});
 
 		const result = await server.waitForCode();
+		interaction.signal.throwIfAborted();
 		if (manualError) throw manualError;
 		if (result?.code) {
 			code = result.code;
@@ -290,7 +306,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 		}
 
 		if (!code) {
-			await manualPromise;
+			await raceWithAbortSignal(manualPromise, interaction.signal);
 			if (manualError) throw manualError;
 			if (manualInput) {
 				const parsed = parseAuthorizationInput(manualInput);
@@ -300,6 +316,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 			}
 		}
 
+		interaction.signal.throwIfAborted();
 		if (!code) throw new Error("Missing authorization code");
 		if (!state) throw new Error("Missing OAuth state");
 		interaction.notify({ type: "progress", message: "Exchanging authorization code for tokens..." });
@@ -330,26 +347,7 @@ async function refreshAnthropicToken(refreshToken: string, signal: AbortSignal):
 		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
 	}
 
-	let data: { access_token: string; refresh_token: string; expires_in: number; scope?: string };
-	try {
-		data = JSON.parse(responseBody) as {
-			access_token: string;
-			refresh_token: string;
-			expires_in: number;
-			scope?: string;
-		};
-	} catch (error) {
-		throw new Error(
-			`Anthropic token refresh returned invalid JSON. url=${TOKEN_URL}; body=${responseBody}; details=${formatErrorDetails(error)}`,
-		);
-	}
-
-	return {
-		type: "oauth",
-		refresh: data.refresh_token,
-		access: data.access_token,
-		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-	};
+	return parseTokenResponse(responseBody);
 }
 
 export const anthropicOAuth: OAuthAuth = {

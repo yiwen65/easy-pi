@@ -55,7 +55,9 @@ Batch is sequential, **not atomic**, and stops at the first error. It accepts at
 
 Ref actions default to strict headless AX delivery. `headed: true` explicitly permits physical delivery/focus side effects. Keyboard commands can change focus. User confirmation for deletion, sending messages, or other sensitive effects remains the agent's responsibility: this wrapper is **not a security sandbox**.
 
-CLI JSON envelopes and partial batch results are preserved in MCP text and structured content. Failed batch entries set MCP `isError`, even when the outer CLI envelope says `ok: true`. Each CLI invocation has a 45-second deadline (native batch budget: 40 seconds); there is no automatic retry. A timeout or interruption may follow a successful desktop mutation: inspect state before retrying.
+CLI JSON envelopes and partial batch results are preserved in MCP text and structured content. Failed batch entries set MCP `isError`, even when the outer CLI envelope says `ok: true`. Each CLI invocation has a 45-second deadline (native batch budget: 40 seconds); there is no automatic retry.
+
+Cancellation is checked before queueing and again when the queue slot opens, so a cancelled queued action never starts the CLI. Active calls forward the request's `AbortSignal` to `execFile`; interruption does not prove that desktop effects stopped. Timeouts, interruptions and malformed CLI replies carry `_meta["io.easy-pi/execution-outcome"] = "unknown"`. Easy Pi treats that marker as an uncertain effect, not a confirmed failure, and requires verification before replay. Genuine native error envelopes remain confirmed responses. Inspect desktop state before retrying; neither cancellation nor batch failure rolls back earlier actions.
 
 ## Verification
 

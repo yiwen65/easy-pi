@@ -317,6 +317,9 @@ export class NodeProcessExecutor {
 		});
 		if (options.timeoutMs !== undefined) {
 			timeoutId = setTimeout(() => {
+				// Cancellation/callback failure already requested termination. Keep observing
+				// that process; a deadline cannot transfer its ownership or replace the failure.
+				if (options.abortSignal?.aborted || callbackError) return;
 				timedOut = true;
 				if (options.promoteOnTimeout && !observer.settled() && promotedTaskId === undefined) {
 					try {

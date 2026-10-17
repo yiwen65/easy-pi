@@ -367,6 +367,25 @@ function logLease(path: string, kind: "session" | "writer" | "maintenance"): boo
 	}
 }
 
+/** Native task ownership is distinct from the team owner and must protect directly opened child sessions. */
+function taskLock(path: string): boolean {
+	const owner = object(jsonFile(path));
+	if (
+		!keys(owner, "pid,token") ||
+		!Number.isSafeInteger(owner.pid) ||
+		Number(owner.pid) <= 0 ||
+		typeof owner.token !== "string" ||
+		!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(owner.token)
+	)
+		throw new Error("Invalid task writer lock");
+	try {
+		process.kill(Number(owner.pid), 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
+
 function scan(
 	options: CollaborationStorageOptions,
 	budget = scanBudget(options),
@@ -449,7 +468,17 @@ function scan(
 							throw new Error("Unknown team entry");
 					} else if (parts.length === 1) {
 						const child = children.get(parts[0]);
-						if (
+						if (child?.sessionFile && entry.isFile() && entry.name === `${child.sessionFile}.task.lock`) {
+							if (taskLock(next)) stats.protectedReasons.push("live_task_writer");
+						} else if (
+							child?.sessionFile &&
+							entry.isDirectory() &&
+							entry.name === `${child.sessionFile}.task.lock.claim`
+						) {
+							// Claim directories have no owner receipt: a stale or in-flight claim is uncertain.
+							stats.incomplete = true;
+							stats.protectedReasons.push("task_ownership_claim");
+						} else if (
 							!child ||
 							(!(entry.isFile() && entry.name === child.sessionFile) &&
 								!(entry.isDirectory() && /^[A-Za-z0-9._-]+\.logs$/.test(entry.name)))
@@ -586,6 +615,12 @@ function verifyManifest(directory: string, marker: Marker): void {
 			(expected.kind === "directory" ? !actual.isDirectory() : !actual.isFile() || actual.nlink !== 1)
 		)
 			throw new Error("Quarantine no longer matches deletion proof");
+		if (actual.isFile() && basename(path).endsWith(".jsonl.task.lock") && taskLock(path)) {
+			throw new CollaborationError("busy", "A live or unknown task writer protects deletion retry");
+		}
+		if (actual.isDirectory() && basename(path).endsWith(".jsonl.task.lock.claim")) {
+			throw new CollaborationError("busy", "An uncertain task claim protects deletion retry");
+		}
 		if (actual.isFile() && /^lease-[0-9a-f-]{36}\.json$/.test(basename(path))) {
 			const lease = object(jsonFile(path));
 			if ((lease.kind !== "session" && lease.kind !== "writer") || logLease(path, lease.kind)) {

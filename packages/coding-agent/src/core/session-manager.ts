@@ -129,6 +129,8 @@ export interface CustomEntry<T = unknown> extends SessionEntryBase {
 	type: "custom";
 	customType: string;
 	data?: T;
+	/** Native recovery copied from this session is audit history, not execution authority. */
+	sourceSessionId?: string;
 }
 
 /** Label entry for user-defined bookmarks/markers on entries. */
@@ -350,9 +352,27 @@ function buildEntryIndex(entries: SessionEntry[], byId?: Map<string, SessionEntr
 	if (byId) return byId;
 	const index = new Map<string, SessionEntry>();
 	for (const entry of entries) {
+		if (typeof entry.id !== "string" || !entry.id.trim()) throw new Error("Session entry id must be non-empty");
+		if (index.has(entry.id)) throw new Error(`Duplicate session entry id: ${entry.id}`);
 		index.set(entry.id, entry);
 	}
 	return index;
+}
+
+/** Validate detached loaded entries before replacing a manager or publishing a fork. Orphans remain supported. */
+function validateSessionGraph(entries: FileEntry[]): void {
+	const index = buildEntryIndex(entries.filter((entry): entry is SessionEntry => entry.type !== "session"));
+	const checked = new Set<string>();
+	for (const entry of index.values()) {
+		const visiting = new Set<string>();
+		let current: SessionEntry | undefined = entry;
+		while (current && !checked.has(current.id)) {
+			if (visiting.has(current.id)) throw new Error(`Cycle in session parent links: ${current.id}`);
+			visiting.add(current.id);
+			current = current.parentId ? index.get(current.parentId) : undefined;
+		}
+		for (const id of visiting) checked.add(id);
+	}
 }
 
 function buildSessionPath(
@@ -374,8 +394,11 @@ function buildSessionPath(
 	}
 
 	const path: SessionEntry[] = [];
+	const visited = new Set<string>();
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
+		if (visited.has(current.id)) throw new Error(`Cycle in session parent links: ${current.id}`);
+		visited.add(current.id);
 		path.push(current);
 		current = current.parentId ? index.get(current.parentId) : undefined;
 	}
@@ -1275,7 +1298,13 @@ export class SessionManager {
 			if (this.persist) writeSessionFile(path, [header], !existsSync(path));
 			entries.push(header);
 		} else {
-			repairPending = migrateToCurrentVersion(entries) || loaded.repair;
+			try {
+				repairPending = migrateToCurrentVersion(entries) || loaded.repair;
+				validateSessionGraph(entries);
+			} catch (error) {
+				loaded.recoverySource?.close();
+				throw error;
+			}
 		}
 		this.sessionFile = this.persist ? realpathSync(path) : path;
 		this.committedSize = this.persist ? (hadEntries ? loaded.size : statSync(path).size) : 0;
@@ -1672,8 +1701,11 @@ export class SessionManager {
 	getBranch(fromId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
+		const visited = new Set<string>();
 		let current = startId ? this.byId.get(startId) : undefined;
 		while (current) {
+			if (visited.has(current.id)) throw new Error(`Cycle in session parent links: ${current.id}`);
+			visited.add(current.id);
 			path.push(current);
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}
@@ -1844,6 +1876,7 @@ export class SessionManager {
 			const copy = Object.defineProperties({}, Object.getOwnPropertyDescriptors(entry)) as SessionEntry;
 			copy.parentId = pathParentId;
 			if (isRecoveryEntry(entry) && isRecoveryEntry(copy)) {
+				copy.sourceSessionId ??= this.sessionId;
 				const receipts = recoveryResultReceipts.get(entry);
 				if (receipts) recoveryResultReceipts.set(copy, receipts);
 			}
@@ -2013,6 +2046,13 @@ export class SessionManager {
 		const sourceHeader = sourceEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 		if (!sourceHeader) {
 			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
+		}
+
+		// Preserve the original version until detached history has been migrated and validated.
+		migrateToCurrentVersion(sourceEntries);
+		validateSessionGraph(sourceEntries);
+		for (const entry of sourceEntries) {
+			if (isRecoveryEntry(entry)) entry.sourceSessionId ??= sourceHeader.id;
 		}
 
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);

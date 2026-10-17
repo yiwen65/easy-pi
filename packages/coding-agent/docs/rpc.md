@@ -23,7 +23,7 @@ Common options:
 - **Responses**: JSON objects with `type: "response"` indicating command success/failure
 - **Events**: Agent events streamed to stdout as JSON lines
 
-All commands support an optional `id` field for request/response correlation. If provided, the corresponding response will include the same `id`. `bash_execution_update` events also include the `id` of their originating `bash` command.
+Each command envelope must be a non-array JSON object with a non-empty string `type` and an optional string `id`. If a valid `id` is provided, the corresponding response includes it, including unknown-command errors. Invalid JSON or malformed envelopes produce a `command: "parse"`, `success: false` response without dispatching a command; later valid input remains usable. Envelope validation is not a complete schema validator for every command payload. `bash_execution_update` events also include the `id` of their originating `bash` command.
 
 ### Framing
 
@@ -35,6 +35,12 @@ This matters for clients:
 - Do not use generic line readers that treat Unicode separators as newlines
 
 In particular, Node `readline` is not protocol-compliant for RPC mode because it also splits on `U+2028` and `U+2029`, which are valid inside JSON strings.
+
+### Startup, replacement and shutdown
+
+RPC installs its input/signal handlers and event subscriptions before extension binding and startup recovery. Ordinary commands wait for startup or replacement binding to finish; `extension_ui_response`, `abort`, `abort_retry` and `abort_bash` remain available during that wait. Clients must handle startup dialogs and events immediately rather than waiting for an ordinary command response first. Replacement sessions bind once through the runtime's rebind callback.
+
+An extension's `ctx.shutdown()` request waits for binding, accepted commands/prompts, compaction and the session run to settle, including response backpressure. Input EOF and process signals initiate shutdown directly rather than waiting for the idle gate. Prompt acceptance remains separate from run completion.
 
 ## Commands
 
@@ -392,7 +398,7 @@ Response:
   "success": true,
   "data": {
     "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
+    "firstKeptEntryId": "",
     "tokensBefore": 150000,
     "estimatedTokensAfter": 32000,
     "usage": {
@@ -408,7 +414,7 @@ Response:
 }
 ```
 
-`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count. `usage` reports the LLM call or calls that generated the summary and may be omitted by custom compaction handlers.
+`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count. Modern compaction persists `replacementHistory`; `firstKeptEntryId` in this result is an empty legacy placeholder, not a cut boundary. `usage`, when available, reports full summary-generation usage including retries and overflow fallback; injected completion functions may omit it. Extension-provided free-text summaries are ignored. See [Context compaction](compaction.md).
 
 #### set_auto_compaction
 
@@ -567,7 +573,7 @@ Response:
 }
 ```
 
-`tokens` and `cost` include assistant messages, usage reported by tools, and compaction/branch-summary generation across the full session. `contextUsage` contains the actual current context-window estimate used for compaction and footer display.
+`tokens` and `cost` include assistant messages, usage reported by tools, and compaction/branch-summary generation across the full session. Known failed/aborted/rejected compaction usage is included from valid retained version-1 diagnostics; activated attempts are counted only through checkpoint `usage`. Missing or malformed diagnostic usage is not estimated or backfilled. See [compaction diagnostics](compaction.md#model-effort-and-latency-diagnostics). `contextUsage` contains the actual current context-window estimate used for compaction and footer display.
 
 `contextUsage` is omitted when no model or context window is available. `contextUsage.tokens` and `contextUsage.percent` are `null` immediately after compaction until a fresh post-compaction assistant response provides valid usage data.
 
@@ -1053,7 +1059,7 @@ The `reason` field is `"manual"`, `"threshold"`, or `"overflow"`.
   "reason": "threshold",
   "result": {
     "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
+    "firstKeptEntryId": "",
     "tokensBefore": 150000,
     "estimatedTokensAfter": 32000,
     "usage": {
@@ -1335,7 +1341,7 @@ Set the text in the input editor. Fire-and-forget.
 
 ### Extension UI Responses (stdin)
 
-Responses are sent for dialog methods only (`select`, `confirm`, `input`, `editor`). The `id` must match the request.
+Responses are sent for dialog methods only (`select`, `confirm`, `input`, `editor`). The string `id` must match the request. Supply a string `value`, boolean `confirmed`, or literal `cancelled: true`; malformed response metadata receives a parse error and does not resolve the pending dialog.
 
 #### Value response (select, input, editor)
 
@@ -1380,6 +1386,8 @@ Parse errors:
   "error": "Failed to parse command: Unexpected token..."
 }
 ```
+
+The typed `RpcClient` rejects every `success: false` command response, including methods that otherwise return `void`. `promptAndWait()` subscribes before sending the prompt so early events are retained, and removes its collector listener/timer when prompt submission fails or collection ends. Failures after prompt acceptance still arrive through the event/message stream, not a second command response.
 
 ## Types
 

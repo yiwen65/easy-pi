@@ -1,13 +1,14 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { InMemoryModelsStore, ModelsError } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import { checkProviderAuth, createAuthCheckModelRuntime, getProviderCredential } from "../src/cli/auth-check.ts";
 import { parseAuthCommand } from "../src/cli/auth-command.ts";
-import { AuthStorage, ReadOnlyAuthStorage } from "../src/core/auth-storage.ts";
+import { AuthStorage, ReadOnlyAuthStorage, StoredApiKeyUnavailableError } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
+import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
 
 const tempDir = join(tmpdir(), `pi-test-auth-check-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
@@ -29,6 +30,9 @@ describe("auth check command", () => {
 
 	afterEach(() => {
 		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
+		clearConfigValueCache();
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
 	});
 
 	test("reports a configured provider as ready", async () => {
@@ -121,16 +125,118 @@ describe("auth check command", () => {
 		});
 	});
 
-	test("reports malformed auth state as invalid", async () => {
-		const authPath = join(tempDir, "auth.json");
-		writeFileSync(authPath, "{invalid-json", "utf-8");
-		const runtime = await createRuntime(new ReadOnlyAuthStorage(authPath));
+	for (const readOnly of [false, true]) {
+		for (const refresh of [false, true]) {
+			// Read-only storage deliberately does not execute command-backed keys.
+			const keys = ["$T162_MISSING_AUTH_KEY", "$T162_EMPTY_AUTH_KEY", ""];
+			if (!readOnly) keys.push("!exit 7", "!printf ''");
+			test.each(keys)(
+				`reports unresolved stored keys as not ready without ambient fallback: %s (readOnly=${readOnly}, refresh=${refresh})`,
+				async (key) => {
+					vi.stubEnv("T162_MISSING_AUTH_KEY", undefined);
+					vi.stubEnv("T162_EMPTY_AUTH_KEY", "");
+					vi.stubEnv("ANTHROPIC_API_KEY", "synthetic-ambient-key");
+					const authPath = join(tempDir, "auth.json");
+					writeFileSync(authPath, JSON.stringify({ anthropic: { type: "api_key", key } }));
+					const credentials = readOnly ? new ReadOnlyAuthStorage(authPath) : AuthStorage.create(authPath);
+					const runtime = await createRuntime(credentials);
+					const provider = runtime.getProvider("anthropic")!;
+					const resolve = vi.spyOn(provider.auth.apiKey!, "resolve");
+					const oauthRefresh = vi
+						.spyOn(provider.auth.oauth!, "refresh")
+						.mockRejectedValue(new Error("must not refresh"));
+					const dispatch = vi.spyOn(provider, "streamSimple").mockImplementation(() => {
+						throw new Error("must not dispatch");
+					});
+					const status = await checkProviderAuth(parseArgs(["--provider", "anthropic"]), runtime, { refresh });
+					const message = await runtime.completeSimple(provider.getModels()[0], { messages: [] });
+					expect(message.stopReason).toBe("error");
+					expect(message.errorMessage).toContain("Failed to resolve stored API key");
+					expect(resolve).not.toHaveBeenCalled();
+					expect(oauthRefresh).not.toHaveBeenCalled();
+					expect(dispatch).not.toHaveBeenCalled();
+					expect(status).toEqual({
+						status: "not_ready",
+						provider: "anthropic",
+						reason: "credentials_not_configured",
+					});
+				},
+			);
+		}
 
-		await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), runtime)).resolves.toEqual({
+		test(`keeps intentionally omitted keys eligible for ambient auth (readOnly=${readOnly})`, async () => {
+			vi.stubEnv("OPENAI_API_KEY", "synthetic-ambient-key");
+			const authPath = join(tempDir, "auth.json");
+			writeFileSync(authPath, JSON.stringify({ openai: { type: "api_key" } }));
+			const runtime = await createRuntime(
+				readOnly ? new ReadOnlyAuthStorage(authPath) : AuthStorage.create(authPath),
+			);
+			for (const refresh of [false, true]) {
+				expect(await checkProviderAuth(parseArgs(["--provider", "openai"]), runtime, { refresh })).toEqual({
+					status: "ready",
+					provider: "openai",
+					authType: "api_key",
+				});
+			}
+			expect((await runtime.getAuth("openai"))?.auth.apiKey).toBe("synthetic-ambient-key");
+		});
+	}
+
+	test("classifies an unavailable key encountered only during refresh-time auth resolution", async () => {
+		vi.stubEnv("T162_MISSING_AUTH_KEY", undefined);
+		vi.stubEnv("OPENAI_API_KEY", "synthetic-ambient-key");
+		const credentials = AuthStorage.inMemory({ openai: { type: "api_key", key: "$T162_MISSING_AUTH_KEY" } });
+		const read = vi.spyOn(credentials, "read");
+		const runtime = await createRuntime(credentials);
+		vi.spyOn(runtime, "checkAuth").mockResolvedValue({ type: "api_key" });
+		const getAuth = vi.spyOn(runtime, "getAuth");
+		expect(await checkProviderAuth(parseArgs(["--provider", "openai"]), runtime, { refresh: true })).toEqual({
+			status: "not_ready",
+			provider: "openai",
+			reason: "credentials_not_configured",
+		});
+		expect(read).toHaveBeenCalledOnce();
+		expect(getAuth).toHaveBeenCalledOnce();
+	});
+
+	test.each([
+		[
+			"untyped cause",
+			new ModelsError("auth", "read failed", {
+				cause: new Error('Failed to resolve stored API key for provider "openai"'),
+			}),
+		],
+		[
+			"other provider",
+			new ModelsError("auth", "read failed", { cause: new StoredApiKeyUnavailableError("anthropic") }),
+		],
+		[
+			"non-auth failure",
+			new ModelsError("oauth", "refresh failed", { cause: new StoredApiKeyUnavailableError("openai") }),
+		],
+		["arbitrary wrapper", new Error("read failed", { cause: new StoredApiKeyUnavailableError("openai") })],
+	])("keeps unrelated errors invalid: %s", async (_name, error) => {
+		const runtime = await createRuntime(AuthStorage.inMemory());
+		vi.spyOn(runtime, "checkAuth").mockRejectedValue(error);
+		expect(await checkProviderAuth(parseArgs(["--provider", "openai"]), runtime)).toEqual({
 			status: "invalid",
 			provider: "openai",
 			reason: "invalid_state",
 		});
+	});
+
+	test.each([false, true])("reports malformed auth state as invalid (readOnly=%s)", async (readOnly) => {
+		const authPath = join(tempDir, "auth.json");
+		writeFileSync(authPath, "{invalid-json", "utf-8");
+		const runtime = await createRuntime(readOnly ? new ReadOnlyAuthStorage(authPath) : AuthStorage.create(authPath));
+
+		for (const refresh of [false, true]) {
+			await expect(checkProviderAuth(parseArgs(["--provider", "openai"]), runtime, { refresh })).resolves.toEqual({
+				status: "invalid",
+				provider: "openai",
+				reason: "invalid_state",
+			});
+		}
 	});
 
 	test("does not create an auth file or its parent directory", async () => {

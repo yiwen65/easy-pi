@@ -33,6 +33,7 @@ import type {
 	CodemodeStoreWrites,
 	CodemodeTool,
 } from "../types.ts";
+import { MAX_STORE_TOTAL_CHARS, MAX_STORE_VALUE_CHARS } from "./prelude-source.ts";
 import {
 	type HostToWorkerMessage,
 	isWorkerToHostMessage,
@@ -41,6 +42,9 @@ import {
 } from "./protocol.ts";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
+// Bounds both retained records and in-flight calls, including globals. Keep every admitted record;
+// truncating history instead would hide real effects. This also applies when the deadline is disabled.
+const MAX_HOST_CALLS = 1024;
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const RESERVED_GLOBALS: ReadonlySet<string> = new Set([
 	"tools",
@@ -106,6 +110,7 @@ function parseBridgeJson(json: string, what: string): unknown {
 }
 
 function parseStoreWrites(json: string): CodemodeStoreWrites {
+	if (json.length > MAX_STORE_TOTAL_CHARS) throw new BridgeError("store writes exceed the serialized size limit");
 	const entries = parseBridgeJson(json, "store writes");
 	if (!Array.isArray(entries)) throw new BridgeError("store writes are not an array");
 	const writes: CodemodeStoreWrites = { set: {}, delete: [] };
@@ -118,6 +123,8 @@ function parseStoreWrites(json: string): CodemodeStoreWrites {
 			throw new BridgeError("store writes contain a malformed entry");
 		}
 		const [key, value] = entry as [string, string?];
+		if (value !== undefined && value.length > MAX_STORE_VALUE_CHARS)
+			throw new BridgeError("store value exceeds the size limit");
 		if (value === undefined) writes.delete.push(key);
 		else {
 			Object.defineProperty(writes.set, key, {
@@ -175,6 +182,7 @@ class Execution {
 	private readonly timer: ReturnType<typeof setTimeout> | undefined;
 	private readonly output: CodemodeOutputItem[] = [];
 	private readonly calls: CodemodeCall[] = [];
+	private callCount = 0;
 	private readonly pending = new Map<number, PendingCall>();
 	private finished = false;
 
@@ -273,6 +281,15 @@ class Execution {
 				break;
 			case "call":
 				if (this.pending.has(message.id)) throw new BridgeError(`duplicate call id ${message.id}`);
+				if (this.callCount >= MAX_HOST_CALLS) {
+					this.finish({
+						kind: "script",
+						name: "RangeError",
+						message: `Script exceeded ${MAX_HOST_CALLS} host calls (tools and globals). No further calls were dispatched; earlier effects are not undone.`,
+					});
+					return;
+				}
+				this.callCount++;
 				void this.handleCall(message);
 				break;
 			case "done":

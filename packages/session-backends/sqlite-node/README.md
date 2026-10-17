@@ -20,3 +20,11 @@ The FTS table and triggers are created lazily on the first non-blank search; whe
 FTS is first created, search performs a one-time rebuild from canonical entries.
 After that, SQLite triggers keep FTS in sync with canonical entry inserts, deletes,
 and payload updates.
+
+`close()` (including async disposal) is terminal: it synchronously seals repository
+admission, rejects later operations, drains already-admitted work, releases session
+writer leases/heartbeat timers, then closes the shared database. Concurrent closes
+join one promise; use a new repository instance for later work.
+
+Entry and record appends validate and clone inputs before queueing, so later caller
+mutation cannot change an admitted payload.

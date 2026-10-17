@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
+import { basename, join } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -17,7 +17,7 @@ import {
 	resolveSessionCacheAffinityId,
 } from "./session-cache-affinity.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionManager } from "./session-manager.ts";
+import { loadEntriesFromFile, SessionManager } from "./session-manager.ts";
 
 /**
  * Result returned by runtime creation.
@@ -407,23 +407,41 @@ export class AgentSessionRuntime {
 		}
 
 		const sessionDir = this.session.sessionManager.getSessionDir();
-		if (!existsSync(sessionDir)) {
-			mkdirSync(sessionDir, { recursive: true });
-		}
-
 		const destinationPath = join(sessionDir, basename(resolvedPath));
 		const beforeResult = await this.emitBeforeSwitch("resume", destinationPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
 
-		const previousSessionFile = this.session.sessionFile;
-		if (resolve(destinationPath) !== resolvedPath) {
-			copyFileSync(resolvedPath, destinationPath);
+		// Opening an empty file initializes it, which is not validation of an import.
+		if (loadEntriesFromFile(resolvedPath).length === 0) {
+			throw new Error(`Cannot import: source session file is empty or invalid: ${resolvedPath}`);
 		}
-
-		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
+		let sessionManager = SessionManager.open(resolvedPath, sessionDir, cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
+		const previousSessionFile = this.session.sessionFile;
+		if (!existsSync(destinationPath) || realpathSync(destinationPath) !== realpathSync(resolvedPath)) {
+			if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
+			// Reject collisions atomically, including another process publishing after validation.
+			copyFileSync(resolvedPath, destinationPath, constants.COPYFILE_EXCL);
+			const copied = lstatSync(destinationPath);
+			try {
+				if (loadEntriesFromFile(destinationPath).length === 0) {
+					throw new Error(`Cannot import: copied session file is empty or invalid: ${destinationPath}`);
+				}
+				sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
+				assertSessionCwdExists(sessionManager, this.cwd);
+			} catch (error) {
+				// A changed source may invalidate the copy. Remove only our published inode.
+				try {
+					const current = lstatSync(destinationPath);
+					if (current.dev === copied.dev && current.ino === copied.ino) unlinkSync(destinationPath);
+				} catch {
+					/* Preserve the validation failure; retain anything not safely removable. */
+				}
+				throw error;
+			}
+		}
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		await this.replace({
 			cwd: sessionManager.getCwd(),

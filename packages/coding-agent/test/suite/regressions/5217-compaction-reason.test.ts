@@ -28,6 +28,7 @@ function recordingExtension(recorded: RecordedCompactionEvent[]): ExtensionFacto
 	return (pi) => {
 		pi.on("session_before_compact", async (event) => {
 			recorded.push({ type: event.type, reason: event.reason, willRetry: event.willRetry });
+			if (!event.preparation) return;
 			return {
 				compaction: {
 					summary: "summary from extension",

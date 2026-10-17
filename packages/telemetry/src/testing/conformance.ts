@@ -203,6 +203,26 @@ export function createTelemetryAdapterConformance(
 			]);
 		}),
 
+		createCase(factory, "recording", "preserves reserved own attribute names", async (fixture) => {
+			const start = { ["__proto__"]: "start", constructor: 1, toString: true };
+			const updated = { ["__proto__"]: ["updated"] };
+			await fixture.context.startSpan({ name: "reserved-start", attributes: start }, (span) => {
+				span.addEvent("reserved-event", updated);
+			});
+			await fixture.context.startSpan({ name: "reserved-update", attributes: start }, (span) => {
+				span.setAttributes(updated);
+				span.setAttributes({ ["__proto__"]: undefined });
+			});
+			const spans = await fixture.getSpans();
+			const initial = findSpan(spans, "reserved-start");
+			deepStrictEqual(initial.attributes, start);
+			strictEqual(Object.hasOwn(initial.attributes, "__proto__"), true);
+			deepStrictEqual(initial.events, [{ name: "reserved-event", attributes: updated }]);
+			const changed = findSpan(spans, "reserved-update");
+			deepStrictEqual(changed.attributes, { ...start, ...updated });
+			strictEqual(Object.hasOwn(changed.attributes, "__proto__"), true);
+		}),
+
 		createCase(factory, "recording", "ignores failed attribute calls atomically", async (fixture) => {
 			await fixture.context.startSpan({ name: "atomic-attributes", attributes: { retained: "value" } }, (span) => {
 				const attributes: SpanAttributes = {

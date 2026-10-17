@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { createExternalMutationJournal } from "../src/external-mutation-journal.ts";
 import {
 	assessBash,
@@ -50,6 +51,89 @@ test("catastrophic deletion refusals remain active in Full Access", () => {
 	assert.equal(decision("bash", { command: "printenv" }).decision, "allow");
 	assert.equal(decision("read", { path: ".env" }).decision, "allow");
 	assert.equal(decision("read", { path: ".env.example" }).decision, "allow");
+});
+
+test("Bash cwd resolves targets without replacing the protected session roots", () => {
+	for (const invocationCwd of ["..", "/tmp", pathToFileURL("/tmp").href]) {
+		assert.equal(
+			decision("bash", { command: "rm -rf wj-workspace", cwd: invocationCwd }).decision,
+			"deny",
+			invocationCwd,
+		);
+	}
+	for (const invocationCwd of ["./scratch", "/tmp/wj-scratch"]) {
+		for (const command of ["rm -rf .", "find . -delete", "git clean -fdx", "bash -c 'rm -rf .'"]) {
+			assert.equal(decision("bash", { command, cwd: invocationCwd }).decision, "allow", command);
+		}
+	}
+	assert.equal(decision("bash", { command: "rm -rf .", cwd: "." }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf .", cwd: "~" }).decision, "deny");
+	assert.equal(decision("bash", { command: "rm -rf .", cwd: "~/" }).decision, "deny");
+	assert.equal(
+		decision("bash", { command: "bash -c 'rm -rf ../wj-workspace'", cwd: "../wj-scratch" }).decision,
+		"deny",
+	);
+	assert.equal(
+		decidePermission({
+			mode: "full-access",
+			toolName: "bash",
+			input: { command: "rm -rf inherited", cwd: "/tmp" },
+			cwd,
+			sessionGrants: new Set(),
+			protectedRoots: ["/tmp/inherited"],
+		}).decision,
+		"deny",
+	);
+});
+
+test("Bash cwd resolves symlinks physically before assessing relative deletion targets", async () => {
+	const root = await mkdtemp(join(tmpdir(), "wj-cwd-symlink-"));
+	try {
+		const workspace = join(root, "workspace");
+		const subdirectory = join(workspace, "sub");
+		const outside = join(root, "outside");
+		const entry = join(outside, "entry");
+		await mkdir(subdirectory, { recursive: true });
+		await mkdir(outside);
+		await symlink(subdirectory, entry);
+		assert.equal(await realpath(entry), await realpath(subdirectory));
+		// Execution first normalizes cwd lexically: entry/.. is outside, not the physical workspace.
+		assert.equal(
+			decidePermission({
+				mode: "full-access",
+				toolName: "bash",
+				input: { cwd: `${entry}/..`, command: "rm -rf ." },
+				cwd: workspace,
+				sessionGrants: new Set(),
+			}).decision,
+			"allow",
+		);
+		for (const invocationCwd of [entry, "../outside/entry", pathToFileURL(entry).href]) {
+			for (const command of ["rm -rf ../*", "find .. -delete", "git clean -fd -- ..", "bash -c 'rm -rf ../*'"]) {
+				const outcome = decidePermission({
+					mode: "full-access",
+					toolName: "bash",
+					input: { cwd: invocationCwd, command },
+					cwd: workspace,
+					sessionGrants: new Set(),
+				});
+				assert.equal(outcome.decision, "deny", `${invocationCwd}: ${command}`);
+			}
+			// The physical invocation directory is not an additional protected root.
+			assert.equal(
+				decidePermission({
+					mode: "full-access",
+					toolName: "bash",
+					input: { cwd: invocationCwd, command: "rm -rf ." },
+					cwd: workspace,
+					sessionGrants: new Set(),
+				}).decision,
+				"allow",
+			);
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 test("catastrophic deletion breaker ignores unresolved targets and non-executable shell text", () => {

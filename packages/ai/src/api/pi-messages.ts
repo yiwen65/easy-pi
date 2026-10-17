@@ -186,7 +186,7 @@ function createEventConverter(model: Model<"pi-messages">) {
 	};
 	const toolJson = new Map<number, string>();
 
-	return (event: PiMessagesEvent): AssistantMessageEvent => {
+	const convertEvent = (event: PiMessagesEvent): AssistantMessageEvent => {
 		switch (event.type) {
 			case "done":
 				Object.assign(partial, {
@@ -261,16 +261,29 @@ function createEventConverter(model: Model<"pi-messages">) {
 
 		return { ...event, partial } as AssistantMessageEvent;
 	};
+	return {
+		convertEvent,
+		createError: (error: unknown, aborted: boolean) => createErrorEvent(partial, error, aborted),
+	};
 }
 
-async function* readPiMessagesEvents(stream: ReadableStream<Uint8Array>): AsyncGenerator<PiMessagesEvent> {
+async function* readPiMessagesEvents(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+): AsyncGenerator<PiMessagesEvent> {
 	const decoder = new TextDecoder();
 	const reader = stream.getReader();
 	let buffer = "";
+	const onAbort = () => {
+		void reader.cancel().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
 		while (true) {
+			signal?.throwIfAborted();
 			const { done, value } = await reader.read();
+			signal?.throwIfAborted();
 			buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
 			buffer = buffer.replace(/\r\n/g, "\n");
 
@@ -296,6 +309,10 @@ async function* readPiMessagesEvents(stream: ReadableStream<Uint8Array>): AsyncG
 			}
 		}
 	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		try {
+			await reader.cancel();
+		} catch {}
 		reader.releaseLock();
 	}
 }
@@ -310,19 +327,10 @@ function parsePiMessagesEvent(raw: string): PiMessagesEvent | undefined {
 	return data && data !== "[DONE]" ? (JSON.parse(data) as PiMessagesEvent) : undefined;
 }
 
-function createErrorEvent(model: Model<"pi-messages">, error: unknown, aborted: boolean): AssistantMessageEvent {
+function createErrorEvent(assistantMessage: AssistantMessage, error: unknown, aborted: boolean): AssistantMessageEvent {
 	const reason = aborted ? "aborted" : "error";
-	const assistantMessage: AssistantMessage = {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: createEmptyUsage(),
-		stopReason: reason,
-		errorMessage: error instanceof Error ? error.message : String(error),
-		timestamp: Date.now(),
-	};
+	assistantMessage.stopReason = reason;
+	assistantMessage.errorMessage = error instanceof Error ? error.message : String(error);
 
 	if (!aborted && error instanceof PiMessagesResponseError) {
 		appendAssistantMessageDiagnostic(
@@ -348,7 +356,7 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 	options?: PiMessagesOptions,
 ): AssistantMessageEventStream => {
 	const eventStream = new AssistantMessageEventStream();
-	const convertEvent = createEventConverter(model);
+	const { convertEvent, createError } = createEventConverter(model);
 
 	void (async () => {
 		try {
@@ -391,7 +399,12 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 				signal: options?.signal,
 			});
 
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			try {
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			} catch (error) {
+				await response.body?.cancel().catch(() => {});
+				throw error;
+			}
 
 			if (!response.ok) {
 				const body = await response.text();
@@ -401,17 +414,22 @@ export const stream: StreamFunction<"pi-messages", PiMessagesOptions> = (
 				throw new Error(`${model.provider} response has no body`);
 			}
 
-			for await (const piEvent of readPiMessagesEvents(response.body)) {
+			let terminal: AssistantMessageEvent | undefined;
+			for await (const piEvent of readPiMessagesEvents(response.body, options?.signal)) {
 				const event = convertEvent(piEvent);
-				eventStream.push(event);
 				if (event.type === "done" || event.type === "error") {
-					return;
+					terminal = event;
+					break;
 				}
+				eventStream.push(event);
 			}
-
-			throw new Error(`${model.provider} stream ended without a terminal event`);
+			if (!terminal) throw new Error(`${model.provider} stream ended without a terminal event`);
+			// Finalize only after closing the iterator has released the response body.
+			eventStream.push(terminal);
 		} catch (error) {
-			eventStream.push(createErrorEvent(model, error, options?.signal?.aborted ?? false));
+			eventStream.push(createError(error, options?.signal?.aborted ?? false));
+		} finally {
+			eventStream.end();
 		}
 	})();
 

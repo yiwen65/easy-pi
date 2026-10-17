@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AgentToolError } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	type Context,
@@ -15,6 +16,7 @@ import {
 	COLLABORATION_LIMITS,
 	DELIVER_RESULT_TOOL_NAME,
 	DelegationResultSchema,
+	REPORT_PROGRESS_TOOL_NAME,
 	validateDelegation,
 } from "@easy-pi/subagent/collaboration-contract";
 import { CollaborationController } from "@easy-pi/subagent/collaboration-controller";
@@ -25,6 +27,7 @@ import { afterEach, expect, test } from "vitest";
 import type { ExtensionAPI, InlineExtension } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { TaskRecoveryJournal } from "../src/core/task-recovery.ts";
 import { createPiChildSessionHost, preparePiCollaborationFork } from "../src/extensions/pi-child-session-host.ts";
 import { taskContract } from "./collaboration-fixture.ts";
 
@@ -385,6 +388,63 @@ test("startup cancellation cleans native bindings after an asynchronous extensio
 	expect(f.shutdowns).toEqual(["cancelled-start"]);
 	expect(f.faux.state.callCount).toBe(0);
 });
+
+test.each(["loaded", "running"] as const)(
+	"a cancelled startup at the %s notification does not poison a retained child's next turn",
+	async (boundary) => {
+		const f = await fixture();
+		const caller = { rootSessionId: "cancelled-startup-reuse", agentPath: "/root" };
+		const store = new CollaborationStore({ path: ":memory:", cwd: f.cwd, rootSessionId: caller.rootSessionId });
+		const controller = new CollaborationController({ store, host: f.host, agentDir: f.root, getPermissions: full });
+		cleanups.push(() => controller.shutdown());
+		const startup = new AbortController();
+		let cancelled = false;
+		const unsubscribe = controller.subscribe(() => {
+			const child = controller.list(caller)[0];
+			if (cancelled || !child?.loaded || (boundary === "running" && child.status !== "running")) return;
+			cancelled = true;
+			startup.abort();
+		});
+		const creating = controller.spawn(
+			caller,
+			"worker",
+			"cancel before first execution",
+			{
+				provider: f.faux.provider.id,
+				id: f.faux.getModel().id,
+				thinkingLevel: "off",
+			},
+			undefined,
+			startup.signal,
+		);
+		if (boundary === "loaded") await expect(creating).rejects.toMatchObject({ code: "interrupted" });
+		else await creating;
+		await controller.settled();
+		unsubscribe();
+		expect(cancelled).toBe(true);
+		expect(startup.signal.aborted).toBe(true);
+		expect(controller.list(caller)[0]).toMatchObject({ loaded: true, status: "interrupted" });
+		expect(f.faux.state.callCount).toBe(0);
+		const delivered = { summary: "Warm followup completed", outcome: "succeeded" as const };
+		f.faux.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall(REPORT_PROGRESS_TOOL_NAME, { summary: "Fresh current-turn progress" }),
+					fauxToolCall(DELIVER_RESULT_TOOL_NAME, delivered),
+				],
+				{ stopReason: "toolUse" },
+			),
+		]);
+		await controller.followup(caller, "worker", "fresh explicit followup");
+		await controller.settled();
+		expect(f.faux.state.callCount).toBe(1);
+		expect(store.read().agents[0]).toMatchObject({
+			status: "completed",
+			result: JSON.stringify(delivered),
+			progress: { summary: "Fresh current-turn progress", revision: 1 },
+		});
+	},
+);
 
 test("abort before asynchronous preflight completes cannot start a provider request", async () => {
 	const entered = deferred();
@@ -823,6 +883,213 @@ test("oversized multibyte artifact delivery can be compacted within the expanded
 	});
 	expect(f.faux.state.callCount).toBe(2);
 	expect(JSON.stringify(child.session.context())).toContain(`${COLLABORATION_LIMITS.maxResultBytes}-byte budget`);
+});
+
+test.each([false, true])(
+	"cold loading retains a running journal without replaying its old tool (dispatched=%s)",
+	async (dispatched) => {
+		const f = await fixture();
+		const directory = join(f.root, "running-journal");
+		const first = await f.create("running-journal", full, { kind: "file", directory });
+		const file = first.session.sessionFile!;
+		await first.session.dispose();
+		const manager = SessionManager.open(file);
+		const journal = new TaskRecoveryJournal(manager);
+		const user = { role: "user" as const, content: "old task", timestamp: 1 };
+		journal.start([user]);
+		manager.appendMessage(user, journal.state?.promptEntryIds[0]);
+		const call = fauxToolCall("write", { path: "old-task.txt", content: "unexpected" });
+		const assistant = fauxAssistantMessage(call, { stopReason: "toolUse" });
+		journal.beginStep(assistant);
+		journal.commitAssistant(assistant, manager.appendMessage(assistant));
+		if (dispatched) journal.dispatch(call, call.arguments, false);
+		journal.queue("steer", [{ role: "user", content: "old dependent steering", timestamp: 2 }]);
+		journal.queue("followUp", [{ role: "user", content: "old dependent followup", timestamp: 3 }]);
+		journal.queue("nextTurn", [
+			{ role: "custom", customType: "old-context", content: "old dependent aside", display: false, timestamp: 4 },
+		]);
+		const retained = journal.state;
+		f.faux.setResponses([
+			(context) => {
+				expect(JSON.stringify(context.messages)).not.toContain("old dependent");
+				return fauxAssistantMessage("new explicit result");
+			},
+			fauxAssistantMessage("extra result"),
+		]);
+		const reopened = await f.create("running-journal", full, { kind: "file", directory, sessionFile: file });
+		expect(f.faux.state.callCount).toBe(0);
+		expect(existsSync(join(f.cwd, "old-task.txt"))).toBe(false);
+		expect(new TaskRecoveryJournal(SessionManager.open(file)).state).toEqual(retained);
+		expect(await reopened.session.run("new explicit assignment")).toMatchObject({ text: "new explicit result" });
+		expect(f.faux.state.callCount).toBe(1);
+		expect(existsSync(join(f.cwd, "old-task.txt"))).toBe(false);
+		const after = new TaskRecoveryJournal(SessionManager.open(file));
+		expect(after.allUnknownTools).toHaveLength(dispatched ? 1 : 0);
+		expect(after.suspendedTasks[0].state.queued).toEqual(retained?.queued);
+	},
+);
+
+test.each(["steer", "followUp", "nextTurn"] as const)(
+	"controller cold followup executes only its new assignment despite a retained %s queue",
+	async (kind) => {
+		const f = await fixture();
+		const path = join(f.root, "recovery-controller", "registry.sqlite");
+		const caller = { rootSessionId: "recovery-controller", agentPath: "/root" };
+		const make = () => {
+			const store = new CollaborationStore({ path, cwd: f.cwd, rootSessionId: caller.rootSessionId });
+			const controller = new CollaborationController({
+				store,
+				host: f.host,
+				agentDir: f.root,
+				getPermissions: full,
+			});
+			cleanups.push(() => controller.shutdown());
+			return { store, controller };
+		};
+		const first = make();
+		f.faux.setResponses([fauxAssistantMessage("initial result")]);
+		await first.controller.spawn(caller, "worker", "initial assignment", {
+			provider: f.faux.provider.id,
+			id: f.faux.getModel().id,
+			thinkingLevel: "off",
+		});
+		await first.controller.settled();
+		const record = first.store.read().agents[0];
+		const file = join(first.store.directory!, record.id, record.sessionFile!);
+		await first.controller.shutdown();
+		const journal = new TaskRecoveryJournal(SessionManager.open(file));
+		journal.start([{ role: "user", content: "never submitted old intent", timestamp: 1 }]);
+		journal.queue(kind, [
+			kind === "nextTurn"
+				? {
+						role: "custom",
+						customType: "old-context",
+						content: "never admitted old queued task",
+						display: false,
+						timestamp: 2,
+					}
+				: { role: "user", content: "never admitted old queued task", timestamp: 2 },
+		]);
+		const retained = SessionManager.open(file).getLeafEntry()!;
+		const second = make();
+		const requests: Context[] = [];
+		f.faux.setResponses([
+			...Array.from({ length: 2 }, () => (context: Context) => {
+				requests.push(context);
+				return fauxAssistantMessage("new admitted result");
+			}),
+		]);
+		await second.controller.followup(caller, "worker", "new admitted assignment");
+		await second.controller.settled();
+		expect(requests).toHaveLength(1);
+		expect(JSON.stringify(requests[0].messages)).toContain("new admitted assignment");
+		expect(JSON.stringify(requests[0].messages)).not.toContain("never submitted old intent");
+		expect(JSON.stringify(requests[0].messages)).not.toContain("never admitted old queued task");
+		expect(second.store.read().agents[0]).toMatchObject({ status: "completed", result: "new admitted result" });
+		expect(SessionManager.open(file).getEntry(retained.id)).toEqual(retained);
+		f.faux.setResponses([
+			(context) => {
+				expect(JSON.stringify(context.messages)).not.toContain("never admitted old queued task");
+				return fauxAssistantMessage("later explicit result");
+			},
+		]);
+		await second.controller.followup(caller, "worker", "later explicit assignment");
+		await second.controller.settled();
+		expect(second.store.read().agents[0]).toMatchObject({ status: "completed", result: "later explicit result" });
+		expect(f.faux.state.callCount).toBe(3);
+		expect(SessionManager.open(file).getEntry(retained.id)).toEqual(retained);
+	},
+);
+
+test("startup cancellation during binding cannot resume a retained running task", async () => {
+	const entered = deferred();
+	const release = deferred();
+	let coldLoad = false;
+	const f = await fixture(() => [
+		(pi) => {
+			pi.on("session_start", async () => {
+				if (!coldLoad) return;
+				entered.resolve();
+				await release.promise;
+			});
+		},
+	]);
+	const directory = join(f.root, "cancelled-running-journal");
+	const first = await f.create("cancelled-running-journal", full, { kind: "file", directory });
+	const file = first.session.sessionFile!;
+	await first.session.dispose();
+	const manager = SessionManager.open(file);
+	const journal = new TaskRecoveryJournal(manager);
+	journal.start([{ role: "user", content: "unsubmitted old intent", timestamp: 1 }]);
+	journal.queue("steer", [{ role: "user", content: "old steering", timestamp: 2 }]);
+	journal.queue("followUp", [{ role: "user", content: "old followup", timestamp: 3 }]);
+	journal.queue("nextTurn", [
+		{ role: "custom", customType: "old-context", content: "old aside", display: false, timestamp: 4 },
+	]);
+	const retained = journal.state;
+	coldLoad = true;
+	const abort = new AbortController();
+	f.faux.setResponses([fauxAssistantMessage("unassigned inference")]);
+	const creating = f.create(
+		"cancelled-running-journal",
+		full,
+		{ kind: "file", directory, sessionFile: file },
+		undefined,
+		abort.signal,
+	);
+	const rejected = expect(creating).rejects.toThrow();
+	await entered.promise;
+	abort.abort();
+	release.resolve();
+	await rejected;
+	expect(f.faux.state.callCount).toBe(0);
+	expect(new TaskRecoveryJournal(SessionManager.open(file)).state).toEqual(retained);
+});
+
+test("successful delivery does not start automatic unknown-effect investigation", async () => {
+	const f = await fixture(() => [
+		(pi) => {
+			pi.registerTool({
+				name: "uncertain_effect",
+				label: "Uncertain effect",
+				description: "A deterministic uncertain effect",
+				parameters: Type.Object({}),
+				async execute() {
+					throw new AgentToolError("Outcome is unknown", {});
+				},
+			});
+		},
+	]);
+	const child = await f.create("delivery-recovery", full, {
+		kind: "file",
+		directory: join(f.root, "delivery-recovery"),
+	});
+	const delivered = { summary: "Done with one unresolved effect", outcome: "partial" as const };
+	f.faux.setResponses([
+		fauxAssistantMessage([fauxToolCall(DELIVER_RESULT_TOOL_NAME, delivered), fauxToolCall("uncertain_effect", {})], {
+			stopReason: "toolUse",
+		}),
+		fauxAssistantMessage("unassigned investigation"),
+	]);
+	expect(await child.session.run("deliver and record an uncertain effect")).toMatchObject({
+		status: "completed",
+		text: JSON.stringify(delivered),
+	});
+	expect(f.faux.state.callCount).toBe(1);
+	expect(JSON.stringify(child.session.context())).not.toContain("unassigned investigation");
+	const retained = new TaskRecoveryJournal(SessionManager.open(child.session.sessionFile!));
+	expect(retained.state?.status).toBe("needs_reconciliation");
+	expect(retained.unknownTools.map((tool) => tool.call.name)).toEqual(["uncertain_effect"]);
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("probe_identity", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage("explicit followup completed"),
+	]);
+	expect(await child.session.run("perform independent followup")).toMatchObject({
+		status: "completed",
+		text: "explicit followup completed",
+	});
+	expect(f.faux.state.callCount).toBe(3);
+	expect(new TaskRecoveryJournal(SessionManager.open(child.session.sessionFile!)).allUnknownTools).toHaveLength(1);
 });
 
 test("a failed extension startup rejects the host instead of silently continuing without its hooks", async () => {

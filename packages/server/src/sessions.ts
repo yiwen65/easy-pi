@@ -13,6 +13,7 @@ interface LiveSession {
 	ready: boolean;
 	terminal: boolean;
 	disposing?: Promise<void>;
+	disposeFailed?: boolean;
 }
 
 interface LiveSessionManagerOptions {
@@ -84,6 +85,8 @@ export class LiveSessionManager {
 						await this.maybeDispose(live);
 					}
 					this.options.broadcastServerSnapshot();
+				} else if (live && (live.disposing || live.disposeFailed)) {
+					await this.maybeDispose(live);
 				}
 				return { command: "detach" as const, sessionId: command.sessionId };
 			}
@@ -135,7 +138,7 @@ export class LiveSessionManager {
 		const stored = await this.options.service.listSessions();
 		const liveSnapshots = await Promise.all(
 			[...this.liveSessions.values()]
-				.filter((live) => !live.disposing)
+				.filter((live) => !live.disposing && !live.disposeFailed)
 				.map(async (live) => [live.id, await this.normalizedSnapshot(live)] as const),
 		);
 		const liveById = new Map(liveSnapshots);
@@ -154,18 +157,7 @@ export class LiveSessionManager {
 		for (const result of openingResults) {
 			if (result.status === "rejected") this.options.reportError(result.reason);
 		}
-		const sessions = [...this.liveSessions.values()];
-		this.liveSessions.clear();
-		await Promise.all(
-			sessions.map(async (live) => {
-				if (live.disposing) {
-					await live.disposing;
-					return;
-				}
-				live.unsubscribe();
-				await live.runtime.dispose();
-			}),
-		);
+		await Promise.all([...this.liveSessions.values()].map((live) => this.dispose(live)));
 	}
 
 	private async runOperation(
@@ -187,11 +179,11 @@ export class LiveSessionManager {
 		for (;;) {
 			const existing = this.liveSessions.get(id);
 			if (existing) {
-				if (existing.terminal) throw new PiServerError("session_locked", `Session runtime is terminating: ${id}`);
-				if (existing.disposing) {
-					await existing.disposing;
+				if (existing.disposing || existing.disposeFailed) {
+					await this.dispose(existing);
 					continue;
 				}
+				if (existing.terminal) throw new PiServerError("session_locked", `Session runtime is terminating: ${id}`);
 				return existing;
 			}
 			const opening = this.openingSessions.get(id);
@@ -311,7 +303,7 @@ export class LiveSessionManager {
 			throw new PiServerError("invalid_request", `Connection is not attached to session ${sessionId}`);
 		}
 		const live = this.liveSessions.get(sessionId);
-		if (!live || live.terminal || live.disposing) {
+		if (!live || live.terminal || live.disposing || live.disposeFailed) {
 			throw new PiServerError("not_found", `Session is not live: ${sessionId}`);
 		}
 		return live;
@@ -332,15 +324,26 @@ export class LiveSessionManager {
 		) {
 			return live.disposing;
 		}
-		live.unsubscribe();
-		live.disposing = (async () => {
-			try {
-				await live.runtime.dispose();
-			} finally {
-				if (this.liveSessions.get(live.id) === live) this.liveSessions.delete(live.id);
-			}
-		})();
-		await live.disposing;
+		await this.dispose(live);
 		if (!this.options.isClosing()) this.options.broadcastServerSnapshot();
+	}
+
+	private dispose(live: LiveSession): Promise<void> {
+		if (live.disposing) return live.disposing;
+		live.disposing = Promise.resolve()
+			.then(() => {
+				live.unsubscribe();
+				return live.runtime.dispose();
+			})
+			.then(() => {
+				if (this.liveSessions.get(live.id) === live) this.liveSessions.delete(live.id);
+			})
+			.catch((error: unknown) => {
+				// The runtime may already reject commands, but still own an unsettled physical effect.
+				live.disposeFailed = true;
+				live.disposing = undefined;
+				throw error;
+			});
+		return live.disposing;
 	}
 }

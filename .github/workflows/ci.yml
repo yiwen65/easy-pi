@@ -42,6 +42,26 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify compiled native product
+        run: PI_OFFLINE=1 node scripts/check-native-subagent-product.mjs
+
+      # These private-package tests are not reached by the workspace test scripts.
+      - name: Verify native collaboration contracts
+        working-directory: packages/subagent
+        run: >-
+          node ../../node_modules/vitest/dist/cli.js --run
+          test/collaboration-contract.test.ts test/collaboration-controller.test.ts
+          test/collaboration-history-store.test.ts test/collaboration-lifecycle.test.ts
+          test/collaboration-mailbox.test.ts test/collaboration-progress.test.ts
+          test/collaboration-storage.test.ts test/collaboration-targeted-wait.test.ts
+          test/context-fork.test.ts
+
+      - name: Verify permission contracts
+        working-directory: packages/permissions
+        run: |
+          node --test test/permissions.test.ts
+          node ../../node_modules/vitest/dist/cli.js --run test/external-mutation-journal.test.ts
+
       - name: Check
         run: npm run check
 

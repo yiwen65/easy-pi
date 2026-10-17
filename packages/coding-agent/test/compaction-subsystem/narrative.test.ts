@@ -198,6 +198,23 @@ describe("local Remote V2-style compaction item", () => {
 		expect(JSON.stringify(requests[1].messages)).toContain("truncated before local compaction");
 	});
 
+	it("does not start an overflow fallback after local cancellation", async () => {
+		const controller = new AbortController();
+		let calls = 0;
+		const result = await generateCompactionItem({
+			messages,
+			systemPrompt: "CURRENT SYSTEM",
+			signal: controller.signal,
+			complete: async () => {
+				calls++;
+				controller.abort();
+				return { text: "", stopReason: "error", errorMessage: "overflow", contextOverflow: true };
+			},
+		});
+		expect(calls).toBe(1);
+		expect(result.rejected).toBe(true);
+	});
+
 	it("does not resend the same already-truncated request after provider overflow", async () => {
 		let calls = 0;
 		const result = await generateCompactionItem({
@@ -239,15 +256,23 @@ describe("local Remote V2-style compaction item", () => {
 	});
 
 	it("rejects a degenerate one-character handoff that a truncated provider returned as stop", async () => {
+		const usage = {
+			input: 763_998,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 763_999,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
 		const result = await generateCompactionItem({
 			messages,
 			systemPrompt: "CURRENT SYSTEM",
-			complete: async () => ({ text: "#", stopReason: "stop", usage: { input: 763_998, output: 1 } }),
+			complete: async () => ({ text: "#", stopReason: "stop", usage }),
 		});
 		expect(result.rejected).toBe(true);
 		expect(result.text).toBe("");
 		expect(result.reason).toContain("degenerate");
-		expect(result.modelUsage).toEqual({ input: 763_998, output: 1 });
+		expect(result.modelUsage).toEqual(usage);
 	});
 
 	it("rejects a short unstructured handoff once the history is large enough to matter", async () => {

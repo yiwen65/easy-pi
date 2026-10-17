@@ -691,6 +691,46 @@ export function createSessionBackendConformance(
 			});
 		}),
 
+		createCase(
+			factory,
+			"validation and immutability",
+			"snapshots entries and records before asynchronous admission",
+			async (repository) => {
+				const session = await repository.create({ id: "snapshot" });
+				const data: { nested: { value: number | undefined } } = { nested: { value: 1 } };
+				const custom = session.appendCustomEntry("note", data);
+				data.nested.value = undefined;
+				const args = { nested: { value: 2 } };
+				const recordInput = {
+					type: "tool_started" as const,
+					id: "tool",
+					lane: "main",
+					runId: "run",
+					assistantEntryId: "assistant",
+					toolIndex: 0,
+					toolCallId: "call",
+					toolName: "example",
+					effectiveArgs: args,
+					resultEntryId: "result",
+					replay: "never" as const,
+				};
+				const record = session.appendRecord(recordInput);
+				args.nested.value = Number.NaN;
+				recordInput.id = "mutated";
+				const customId = await custom;
+				const committed = await record;
+				strictEqual(committed.id, "tool");
+				deepStrictEqual(committed.effectiveArgs, { nested: { value: 2 } });
+				const entry = await session.getEntry(customId);
+				if (entry?.type !== "custom") throw new Error("Expected custom entry");
+				deepStrictEqual(entry.data, { nested: { value: 1 } });
+				const log = await session.getLog();
+				const metadata = await session.getMetadata();
+				await session.release();
+				deepStrictEqual(await (await repository.open(metadata)).getLog(), log);
+			},
+		),
+
 		createCase(factory, "entries and lanes", "validates lane lifecycle and targets", async (repository) => {
 			const session = await repository.create({ id: "session" });
 			await rejectsWithCode(session.createLane("main", null), "already_exists");

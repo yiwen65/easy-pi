@@ -300,6 +300,7 @@ export function createPiChildSessionHost(options: {
 												);
 											}
 											delivered = parsed;
+											boundSession?.stopAfterCurrentTurn();
 											return {
 												content: [{ type: "text", text: JSON.stringify({ delivered: true }) }],
 												details: { delivered: true },
@@ -315,7 +316,7 @@ export function createPiChildSessionHost(options: {
 										async execute(_toolCallId, input, signal) {
 											let effectMayHaveStarted = false;
 											try {
-												if (closed || interrupted || signal?.aborted || request.signal?.aborted)
+												if (closed || interrupted || signal?.aborted)
 													throw new CollaborationError("interrupted", "Child turn was interrupted");
 												const turnId = currentTurnId;
 												if (!turnId || !request.reportProgress)
@@ -402,9 +403,6 @@ export function createPiChildSessionHost(options: {
 						(!options.getTools || options.getTools().includes(name))),
 			}));
 			boundSession = session;
-			const previousShouldStopAfterTurn = session.agent.shouldStopAfterTurn;
-			session.agent.shouldStopAfterTurn = async (context, signal) =>
-				delivered !== undefined || (await previousShouldStopAfterTurn?.(context, signal)) === true;
 			if (cacheAffinity && model.api === "openai-codex-responses") {
 				session.agent.cacheAffinityId = cacheAffinity.id;
 				session.agent.promptCacheKey = cacheAffinity.key;
@@ -412,36 +410,17 @@ export function createPiChildSessionHost(options: {
 			}
 			let extensionFailed = false;
 			let stopObserving: (() => void) | undefined;
-			try {
-				request.signal?.throwIfAborted();
-				if (session.thinkingLevel !== request.model.thinkingLevel)
-					throw new CollaborationError("invalid_arguments", "Requested child reasoning effort is unsupported");
-				await session.bindExtensions({
-					mode: "rpc",
-					onError: () => {
-						extensionFailed = true;
-					},
-				});
-				request.signal?.throwIfAborted();
-				if (extensionFailed) throw new CollaborationError("invalid_arguments", "Child extension startup failed");
-				stopObserving = options.observeSession?.(identity, session);
-			} catch (error) {
-				try {
-					await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-				} finally {
-					await shutdownChildSession(session);
-				}
-				throw error;
-			}
 			let active: Promise<ChildTurnResult> | undefined;
 			let closing: Promise<void> | undefined;
 			const stream = session.agent.streamFunction;
 			let prefixVerified = !request.prefix;
 			let prefixRejected = false;
-			// abort() can race with asynchronous prompt preflight, before Agent has an abort controller.
-			// Guard the public stream seam as well, so delayed preflight cannot start a provider request.
+			// Install ownership before binding: startup hooks and recovery cannot execute an unadmitted turn.
+			// The stream seam also covers compaction and delayed prompt preflight after interruption.
+			// request.signal belongs to creation; the controller checks it until admission transfers to run().
 			session.agent.streamFunction = (model, context, streamOptions) => {
 				if (closed || interrupted) throw new CollaborationError("interrupted", "Child turn was interrupted");
+				if (!active) throw new CollaborationError("forbidden", "No child turn has been admitted");
 				if (extensionFailed) throw new CollaborationError("forbidden", "Child extension authority failed");
 				if (!prefixVerified && request.prefix) {
 					const expected = request.prefix;
@@ -470,6 +449,28 @@ export function createPiChildSessionHost(options: {
 				}
 				return stream(model, context, streamOptions);
 			};
+			try {
+				request.signal?.throwIfAborted();
+				if (session.thinkingLevel !== request.model.thinkingLevel)
+					throw new CollaborationError("invalid_arguments", "Requested child reasoning effort is unsupported");
+				await session.bindExtensions({
+					mode: "rpc",
+					recoveryPolicy: "host-controlled",
+					onError: () => {
+						extensionFailed = true;
+					},
+				});
+				request.signal?.throwIfAborted();
+				if (extensionFailed) throw new CollaborationError("invalid_arguments", "Child extension startup failed");
+				stopObserving = options.observeSession?.(identity, session);
+			} catch (error) {
+				try {
+					await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+				} finally {
+					await shutdownChildSession(session);
+				}
+				throw error;
+			}
 			return {
 				identity,
 				sessionId: session.sessionId,

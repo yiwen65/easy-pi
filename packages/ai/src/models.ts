@@ -796,6 +796,8 @@ class ModelsImpl implements MutableModels {
 		requestModel: TModel;
 		requestOptions: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 	}> {
+		const signal = operationSignal(options?.signal);
+		signal.throwIfAborted();
 		this.requireProvider(model);
 		const resolution = await this.getAuth(model, {
 			apiKey: options?.apiKey,
@@ -810,9 +812,13 @@ class ModelsImpl implements MutableModels {
 		// Explicit request options win per-field; the Models-only transform runs last.
 		const apiKey = options?.apiKey ?? auth.apiKey;
 		let headers = mergeHeaders(auth.headers, options?.headers);
-		if (options?.transformHeaders) headers = await options.transformHeaders(headers ?? {});
+		signal.throwIfAborted();
+		if (options?.transformHeaders) {
+			headers = await raceWithAbortSignal(Promise.resolve(options.transformHeaders(headers ?? {})), signal);
+		}
 		const env = resolution.env || options?.env ? { ...(resolution.env ?? {}), ...(options?.env ?? {}) } : undefined;
-		const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+		// Headers are already assembled/transformed; adapters must not reapply raw model defaults.
+		const requestModel = { ...model, baseUrl: auth.baseUrl || model.baseUrl, headers: undefined };
 		const { transformHeaders: _transformHeaders, ...providerOptions } = options ?? {};
 		const requestOptions = { ...providerOptions, apiKey, headers, env } as Omit<TOptions, "transformHeaders"> &
 			ProviderRequestOptions<TModel>;
@@ -826,14 +832,19 @@ class ModelsImpl implements MutableModels {
 		context: Context,
 		options?: ModelsApiStreamOptions<TApi>,
 	): AssistantMessageEventStream {
-		return lazyStream(model, async () => {
-			const provider = this.requireChatProvider(model);
-			const { requestModel, requestOptions } = await this.applyAuth(
-				model,
-				options as ModelsApiStreamOptions<Api> | undefined,
-			);
-			return provider.stream(requestModel as Model<TApi>, context, requestOptions as ApiStreamOptions<TApi>);
-		});
+		return lazyStream(
+			model,
+			async () => {
+				const provider = this.requireChatProvider(model);
+				const { requestModel, requestOptions } = await this.applyAuth(
+					model,
+					options as ModelsApiStreamOptions<Api> | undefined,
+				);
+				options?.signal?.throwIfAborted();
+				return provider.stream(requestModel as Model<TApi>, context, requestOptions as ApiStreamOptions<TApi>);
+			},
+			options?.signal,
+		);
 	}
 
 	async complete<TApi extends Api>(
@@ -845,11 +856,16 @@ class ModelsImpl implements MutableModels {
 	}
 
 	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
-		return lazyStream(model, async () => {
-			const provider = this.requireChatProvider(model);
-			const { requestModel, requestOptions } = await this.applyAuth(model, options);
-			return provider.streamSimple(requestModel, context, requestOptions as SimpleStreamOptions);
-		});
+		return lazyStream(
+			model,
+			async () => {
+				const provider = this.requireChatProvider(model);
+				const { requestModel, requestOptions } = await this.applyAuth(model, options);
+				options?.signal?.throwIfAborted();
+				return provider.streamSimple(requestModel, context, requestOptions as SimpleStreamOptions);
+			},
+			options?.signal,
+		);
 	}
 
 	async completeSimple(
@@ -865,14 +881,19 @@ class ModelsImpl implements MutableModels {
 		handle: DeferredHandle,
 		options?: ModelsDeferredFetchOptions,
 	): Promise<AssistantMessage> {
-		return lazyStream(model, async () => {
-			const provider = this.requireChatProvider(model);
-			if (!provider.fetchDeferred) {
-				throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
-			}
-			const { requestModel, requestOptions } = await this.applyAuth(model, options);
-			return provider.fetchDeferred(requestModel, handle, requestOptions as DeferredFetchOptions);
-		}).result();
+		return lazyStream(
+			model,
+			async () => {
+				const provider = this.requireChatProvider(model);
+				if (!provider.fetchDeferred) {
+					throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
+				}
+				const { requestModel, requestOptions } = await this.applyAuth(model, options);
+				options?.signal?.throwIfAborted();
+				return provider.fetchDeferred(requestModel, handle, requestOptions as DeferredFetchOptions);
+			},
+			options?.signal,
+		).result();
 	}
 
 	async cancelDeferred(
@@ -885,6 +906,7 @@ class ModelsImpl implements MutableModels {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 		}
 		const { requestModel, requestOptions } = await this.applyAuth(model, options);
+		options?.signal?.throwIfAborted();
 		await provider.cancelDeferred(requestModel, handle, requestOptions);
 	}
 
@@ -901,8 +923,8 @@ class ModelsImpl implements MutableModels {
 			const signal = operationSignal(options?.signal);
 			const operation = (async () => {
 				const { requestModel, requestOptions } = await this.applyAuth(model, { ...options, signal });
-				// Headers are already assembled/transformed; image adapters must not reapply model defaults.
-				return provider.generateImages!({ ...requestModel, headers: undefined }, context, requestOptions);
+				signal.throwIfAborted();
+				return provider.generateImages!(requestModel, context, requestOptions);
 			})();
 			return await raceWithAbortSignal(operation, signal);
 		} catch (error) {

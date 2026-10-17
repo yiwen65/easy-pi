@@ -270,13 +270,12 @@ describe("InteractiveMode.showExtensionCustom", () => {
 		let closeReplacement: (value: string) => void = () => {
 			throw new Error("closeReplacement was not initialized");
 		};
-		const fakeThis = {
+		const fakeThis = Object.assign(Object.create(InteractiveMode.prototype), {
 			editor,
 			editorContainer,
 			keybindings: {},
 			ui,
-			disposeActiveSelector: vi.fn(),
-		};
+		});
 		const showExtensionCustom = <T>(
 			factory: (tui: TUI, theme: unknown, keybindings: unknown, done: (result: T) => void) => Component,
 			options?: { overlay?: boolean },

@@ -163,7 +163,7 @@ import { BACKGROUND_TASK_TOOL_NAMES, createBackgroundTaskToolDefinitions } from 
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions, createBashToolDefinition } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
+import { addUsageToTotals, createUsageTotals, getUnactivatedCompactionUsages } from "./usage-totals.ts";
 
 export { type ParsedSkillBlock, parseSkillBlock } from "./messages.ts";
 
@@ -284,6 +284,8 @@ export interface AgentSessionConfig {
 }
 
 export interface ExtensionBindings {
+	/** Hosts that admit their own turns must not resume historical tasks while binding. */
+	recoveryPolicy?: "automatic" | "host-controlled";
 	uiContext?: ExtensionUIContext;
 	mode?: ExtensionMode;
 	commandContextActions?: ExtensionCommandContextActions;
@@ -375,6 +377,7 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 	private readonly _taskRecovery: TaskRecoveryJournal;
+	private _recoveryPolicy: NonNullable<ExtensionBindings["recoveryPolicy"]> = "automatic";
 	private _recoveringToolBatch = false;
 	private _taskInputIds = new WeakMap<object, string>();
 	private readonly _queuedTaskInputIds = new Set<string>();
@@ -385,6 +388,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	private _stopAfterCurrentTurn = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -877,6 +881,7 @@ export class AgentSession {
 		};
 		const previousStop = this.agent.shouldStopAfterTurn;
 		this.agent.shouldStopAfterTurn = async (context, signal) =>
+			this._stopAfterCurrentTurn ||
 			this._taskRecovery.state?.status === "needs_reconciliation" ||
 			(await previousStop?.(context, signal)) === true;
 		const previousItem = this.agent.onCompletedOutputItem;
@@ -1264,6 +1269,7 @@ export class AgentSession {
 		const entryId = this.sessionManager.appendCompactionCheckpoint(
 			candidate.replacementHistory,
 			candidate.tokensBefore,
+			candidate.modelUsage,
 		);
 		const entry = this.sessionManager.getEntry(entryId);
 		if (!entry || entry.type !== "compaction") {
@@ -2136,6 +2142,18 @@ export class AgentSession {
 		return this._taskRecovery.suspendedTasks;
 	}
 
+	/** Drop only the live mirrors of a prior host assignment; its durable receipts stay historical. */
+	private _clearLiveTaskQueues(): void {
+		const hadVisibleQueues = this.pendingMessageCount > 0;
+		this.agent.clearAllQueues();
+		this._steeringMessages = [];
+		this._followUpMessages = [];
+		this._queuedTaskInputIds.clear();
+		this._taskInputIds = new WeakMap();
+		this._pendingNextTurnMessages = [];
+		if (hadVisibleQueues) this._emitQueueUpdate();
+	}
+
 	private _restoreTaskQueues(): void {
 		this._taskRecovery.rebindQueuedReceipts();
 		const branchIds = new Set(this.sessionManager.getBranch().map((entry) => entry.id));
@@ -2230,6 +2248,7 @@ export class AgentSession {
 		let task: TaskRecoveryState = initialTask;
 		this._taskRecovery.acquire();
 		this._isAgentRunActive = true;
+		this._stopAfterCurrentTurn = false;
 		let failed = false;
 		try {
 			if (this.sessionFile) reclaimSessionAppendLock(this.sessionFile);
@@ -2398,7 +2417,10 @@ export class AgentSession {
 			} else {
 				await this.agent.continue();
 			}
-			while (await this._handlePostAgentRun()) await this.agent.continue();
+			while (await this._handlePostAgentRun()) {
+				if (!this._canContinueAgentRun()) break;
+				await this.agent.continue();
+			}
 		} catch (error) {
 			failed = true;
 			throw error;
@@ -2421,12 +2443,14 @@ export class AgentSession {
 		messages: AgentMessage | AgentMessage[],
 		onAccepted?: () => void,
 		systemPrompt?: string,
+		inheritQueuedInputs = true,
 	): Promise<void> {
 		if (this._disposed) {
 			throw new Error("AgentSession is disposed");
 		}
 		this._taskRecovery.acquire();
 		this._isAgentRunActive = true;
+		this._stopAfterCurrentTurn = false;
 		this._systemPromptOverride = systemPrompt;
 		this.agent.state.systemPrompt = systemPrompt ?? this._baseSystemPrompt;
 		let started = false;
@@ -2471,7 +2495,7 @@ export class AgentSession {
 				this._taskInputIds.set(message, id);
 				return id;
 			});
-			this._taskRecovery.start(prompts, this._systemPromptOverride, ids);
+			this._taskRecovery.start(prompts, this._systemPromptOverride, ids, { inheritQueuedInputs });
 			started = true;
 			const suspendedQueueIds = new Set(
 				this._taskRecovery.suspendedTasks.flatMap((task) => task.state.queued.flatMap((group) => group.entryIds)),
@@ -2490,7 +2514,7 @@ export class AgentSession {
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			await this.agent.prompt(messages);
 			let investigatedInterruption = false;
-			while (true) {
+			while (!this._stopAfterCurrentTurn) {
 				// Investigate an interrupted effect within this user turn, using the
 				// original goal and durable execution facts. Never loop on unknown effects.
 				if (
@@ -2534,7 +2558,7 @@ export class AgentSession {
 					});
 					this._restoreTaskQueues();
 				}
-				if (!(await this._handlePostAgentRun())) break;
+				if (!(await this._handlePostAgentRun()) || !this._canContinueAgentRun()) break;
 				// continue() snapshots agent.state, which already contains any projection
 				// activated after the preceding agent-core loop ended.
 				this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
@@ -2558,7 +2582,13 @@ export class AgentSession {
 		}
 	}
 
+	/** A continuation gets a fresh Agent abort scope, so recheck the logical run after awaited hooks. */
+	private _canContinueAgentRun(): boolean {
+		return !this._disposed && !this._stopAfterCurrentTurn && this.taskRecovery?.status !== "cancelled";
+	}
+
 	private async _handlePostAgentRun(): Promise<boolean> {
+		if (!this._canContinueAgentRun()) return false;
 		if (this._taskRecovery.unknownTools.length > 0) return false;
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
@@ -2601,7 +2631,8 @@ export class AgentSession {
 			msg.stopReason !== "aborted" &&
 			msg.stopReason !== "error" &&
 			msg.stopReason !== "length" &&
-			this._taskRecovery.state?.status !== "cancelled" &&
+			// Re-read after awaited retry/compaction work rather than relying on the entry-time status.
+			this.taskRecovery?.status !== "cancelled" &&
 			this.settingsManager.getBackgroundBashCompletionDelivery() === "wake"
 		) {
 			await this._backgroundTaskNotifications.drain((message) =>
@@ -2666,6 +2697,9 @@ export class AgentSession {
 			}
 			return;
 		}
+		// A host's explicit new assignment must not consume the prior task's queued context.
+		// Clear before input/preflight so old nextTurn messages cannot enter the new prompt.
+		if (this._recoveryPolicy === "host-controlled" && !this.isStreaming) this._clearLiveTaskQueues();
 		const promptGeneration = this._lifecycleGeneration;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
@@ -2835,6 +2869,7 @@ export class AgentSession {
 					preflightResult?.(true);
 				},
 				systemPrompt,
+				this._recoveryPolicy !== "host-controlled",
 			);
 		} catch (error) {
 			if (!accepted) preflightResult?.(false);
@@ -3127,6 +3162,11 @@ export class AgentSession {
 		return this._resourceLoader;
 	}
 
+	/** Finish the current tool batch without starting recovery, queued work, or another provider turn. */
+	stopAfterCurrentTurn(): void {
+		if (this._isAgentRunActive) this._stopAfterCurrentTurn = true;
+	}
+
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
@@ -3136,6 +3176,7 @@ export class AgentSession {
 				state.status = "cancelled";
 			});
 		this.abortRetry();
+		this.abortCompaction();
 		this.agent.abort();
 		await this.waitForIdle();
 	}
@@ -3438,13 +3479,13 @@ export class AgentSession {
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
 
-			// The subsystem owns cut/validation now; legacy preparation is computed
-			// only as hook input (best effort — skipped when nothing is cuttable).
+			// Legacy cut preparation is optional hook metadata, not an eligibility gate
+			// for the replacement-history compactor.
 			const preparation = this._extensionRunner.hasHandlers("session_before_compact")
 				? prepareCompaction(pathEntries, settings)
 				: undefined;
 
-			if (this._extensionRunner.hasHandlers("session_before_compact") && preparation) {
+			if (this._extensionRunner.hasHandlers("session_before_compact")) {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -3505,6 +3546,7 @@ export class AgentSession {
 				firstKeptEntryId: "",
 				tokensBefore: outcome.tokensBefore ?? 0,
 				estimatedTokensAfter: outcome.tokensAfter,
+				usage: outcome.checkpoint.modelUsage,
 			};
 			this._compactionAbortController = undefined;
 			await this._emitHfSessionCompact(compactionEntry, "manual", false);
@@ -3845,6 +3887,7 @@ export class AgentSession {
 			firstKeptEntryId: "",
 			tokensBefore: outcome.tokensBefore ?? 0,
 			estimatedTokensAfter: outcome.tokensAfter,
+			usage: outcome.checkpoint.modelUsage,
 		};
 		await this._emitHfSessionCompact(compactionEntry, reason, willRetry);
 		this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry }, diagnostics);
@@ -3898,7 +3941,7 @@ export class AgentSession {
 
 		try {
 			this._emit({ type: "compaction_start", reason });
-			if (this._extensionRunner.hasHandlers("session_before_compact") && preparation) {
+			if (this._extensionRunner.hasHandlers("session_before_compact")) {
 				const extensionResult = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -3986,6 +4029,8 @@ export class AgentSession {
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		if (bindings.recoveryPolicy !== undefined) this._recoveryPolicy = bindings.recoveryPolicy;
+		if (this._recoveryPolicy === "host-controlled" && this.isIdle) this._clearLiveTaskQueues();
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -4022,7 +4067,12 @@ export class AgentSession {
 		// Recovery continues a task left running by an earlier run. A task that is already executing in
 		// this session (for example one started by a session_start handler during the emission above)
 		// is not recoverable and must not be resumed.
-		if ((recovery?.status === "running" || recoveredFailure) && this.isIdle && !this.isCompacting) {
+		if (
+			this._recoveryPolicy !== "host-controlled" &&
+			(recovery?.status === "running" || recoveredFailure) &&
+			this.isIdle &&
+			!this.isCompacting
+		) {
 			try {
 				if (this._taskRecovery.unknownTools.length > 0) {
 					await this._runAgentPrompt({
@@ -5224,6 +5274,7 @@ export class AgentSession {
 		const usageTotals = createUsageTotals();
 
 		for (const entry of this.sessionManager.getEntries()) {
+			for (const usage of getUnactivatedCompactionUsages(entry)) addUsageToTotals(usageTotals, usage);
 			if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
 			}

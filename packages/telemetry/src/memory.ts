@@ -55,7 +55,14 @@ function copyAttributes(attributes?: SpanAttributes): SpanAttributes {
 	const copy: SpanAttributes = {};
 	if (!attributes) return copy;
 	for (const [name, value] of Object.entries(attributes)) {
-		if (value !== undefined) copy[name] = copyAttributeValue(value);
+		if (value !== undefined) {
+			Object.defineProperty(copy, name, {
+				value: copyAttributeValue(value),
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
 	}
 	return copy;
 }
@@ -63,7 +70,14 @@ function copyAttributes(attributes?: SpanAttributes): SpanAttributes {
 function mergeAttributes(current: SpanAttributes, attributes: SpanAttributes): SpanAttributes {
 	const merged = copyAttributes(current);
 	for (const [name, value] of Object.entries(attributes)) {
-		if (value !== undefined) merged[name] = copyAttributeValue(value);
+		if (value !== undefined) {
+			Object.defineProperty(merged, name, {
+				value: copyAttributeValue(value),
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+		}
 	}
 	return merged;
 }

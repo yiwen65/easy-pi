@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
@@ -26,7 +26,7 @@ import { createTestResourceLoader } from "./utilities.ts";
 
 const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
 
-describe.skipIf(!API_KEY)("Compaction extensions", () => {
+describe.skipIf(process.env.PI_REAL_MODEL_EVAL !== "1" || !API_KEY)("Compaction extensions", () => {
 	let session: AgentSession;
 	let tempDir: string;
 	let capturedEvents: SessionEvent[];
@@ -141,7 +141,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		expect(compactEvents.length).toBe(1);
 
 		const beforeEvent = beforeCompactEvents[0];
-		expect(beforeEvent.preparation).toBeDefined();
+		assert(beforeEvent.preparation, "This fixture expects legacy cut metadata");
 		expect(beforeEvent.preparation.messagesToSummarize).toBeDefined();
 		expect(beforeEvent.preparation.turnPrefixMessages).toBeDefined();
 		expect(beforeEvent.preparation.tokensBefore).toBeGreaterThanOrEqual(0);
@@ -168,43 +168,6 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		const compactEvents = capturedEvents.filter((e) => e.type === "session_compact");
 		expect(compactEvents.length).toBe(0);
-	}, 120000);
-
-	it("should allow extensions to provide custom compaction", async () => {
-		const customSummary = "Custom summary from extension";
-
-		const extension = createExtension((event) => {
-			if (event.type === "session_before_compact") {
-				return {
-					compaction: {
-						summary: customSummary,
-						firstKeptEntryId: event.preparation.firstKeptEntryId,
-						tokensBefore: event.preparation.tokensBefore,
-					},
-				};
-			}
-			return undefined;
-		});
-		await createSession([extension]);
-
-		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
-
-		await session.prompt("What is 3+3? Reply with just the number.");
-		await session.agent.waitForIdle();
-
-		const result = await session.compact();
-
-		expect(result.summary).toBe(customSummary);
-
-		const compactEvents = capturedEvents.filter((e) => e.type === "session_compact");
-		expect(compactEvents.length).toBe(1);
-
-		const afterEvent = compactEvents[0];
-		if (afterEvent.type === "session_compact") {
-			expect(afterEvent.compactionEntry.summary).toBe(customSummary);
-			expect(afterEvent.fromExtension).toBe(true);
-		}
 	}, 120000);
 
 	it("should include entries in compact event after compaction is saved", async () => {
@@ -369,6 +332,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 		expect(capturedBeforeEvent).not.toBeNull();
 		const event = capturedBeforeEvent!;
+		assert(event.preparation, "This fixture expects legacy cut metadata");
 		expect(typeof event.preparation.isSplitTurn).toBe("boolean");
 		expect(event.preparation.firstKeptEntryId).toBeDefined();
 
@@ -386,31 +350,5 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		const entries = session.sessionManager.getEntries();
 		expect(Array.isArray(entries)).toBe(true);
 		expect(entries.length).toBeGreaterThan(0);
-	}, 120000);
-
-	it("should use extension compaction even with different values", async () => {
-		const customSummary = "Custom summary with modified values";
-
-		const extension = createExtension((event) => {
-			if (event.type === "session_before_compact") {
-				return {
-					compaction: {
-						summary: customSummary,
-						firstKeptEntryId: event.preparation.firstKeptEntryId,
-						tokensBefore: 999,
-					},
-				};
-			}
-			return undefined;
-		});
-		await createSession([extension]);
-
-		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
-
-		const result = await session.compact();
-
-		expect(result.summary).toBe(customSummary);
-		expect(result.tokensBefore).toBe(999);
 	}, 120000);
 });

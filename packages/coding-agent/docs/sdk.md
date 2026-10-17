@@ -172,6 +172,14 @@ Important behavior:
 - creation returns diagnostics on `runtime.diagnostics`
 - if runtime creation or replacement fails, the method throws and the caller decides how to handle it
 
+`importFromJsonl()` validates the source session and its cwd before copying it into the current session directory. Publication uses an exclusive copy: a different existing file with the same basename causes rejection, not overwrite, before the current runtime is torn down. Importing the same resolved file needs no copy.
+
+Fork/clone operations and `SessionManager.forkFrom()` retain copied native recovery records as historical evidence, not executable tasks or queued inputs. Binding or reopening the new session does not resume those copied tasks; continuing work requires an explicit prompt. Legacy source entries are migrated before `forkFrom()` publishes the new-version header.
+
+For hosts that admit their own turns, `session.bindExtensions({ recoveryPolicy: "host-controlled" })` suppresses startup recovery and prevents inherited queued inputs from entering a new admitted task. This policy remains on that `AgentSession` across rebinding until explicitly changed; new sessions still default to `"automatic"`.
+
+Before new host-controlled prompt preflight, Pi clears prior live queue mirrors, including pending `nextTurn` context. Earlier intent and `steer`/`followUp`/`nextTurn` receipts remain historical or suspended with their unresolved-effect facts, not executable inputs for the new assignment. Clearing mirrors does not cancel or delete durable receipts. Default root queue/recovery behavior is unchanged. Hosts must still control their execution entry points; native children install their provider admission guard before binding. This does not sandbox trusted extension code.
+
 ```typescript
 let session = runtime.session;
 let unsubscribe = session.subscribe(() => {});
@@ -603,7 +611,7 @@ const { session } = await createAgentSession({
 
 #### Bash contract and migration
 
-Bash accepts `{ command: string, cwd?: string, timeout?: number }`. `cwd` defaults to the session working directory; `timeout` is in seconds with no default deadline. Working-directory resolution and validation use the execution environment and applicable workspace policy, or the native capture adapter for host-specific paths. Custom `BashOperations` owns its path semantics: without an explicit workspace policy, its `cwd` is passed through rather than expanded using the local home directory or path separators. A working directory is not a sandbox.
+Bash accepts `{ command: string, cwd?: string, timeout?: number }`. `cwd` defaults to the session working directory; `timeout` is in seconds with no default deadline. Working-directory resolution and validation use the execution environment and applicable workspace policy, or the native capture adapter for host-specific paths. Custom `BashOperations` owns its path semantics: without an explicit workspace policy, its `cwd` is passed through rather than expanded using the local home directory or path separators. A working directory is not a sandbox. In the default local permission harness, Bash `input.cwd` changes deletion-target resolution but does not replace the protected session directory or inherited protected roots; the catastrophic-deletion check remains best-effort, not shell containment.
 
 Final successful results include `BashToolDetails`:
 
@@ -619,6 +627,10 @@ Successful text content keeps Bash's existing output, truncation notice, and `(n
 Bash retains the core `prepare` API and coding-agent `BashOperations`, `createLocalBashOperations`, `spawnHook`, `commandPrefix`, shell configuration, and session-environment APIs. Session `PI_*` values and dynamic command prefixes are resolved per invocation. An injected `ExecutionEnv` remains host-owned; remote execution is not validated by assuming its paths are local.
 
 Local sessions include managed background bash tasks: `bash(run_in_background=true)` starts a command in the background and returns a task ID immediately, and `createBashTool(cwd, { backgroundTasks, promotion })` callers can enable Kimi-style foreground promotion (default 60s, max 300s) so a timed-out foreground command keeps running as a background task instead of being killed. Tasks are managed with the built-in `task_list`, `task_output`, `task_stop`, and `wait_for` tools; output streams to a per-task log file, and stopping is two-phase (SIGTERM, then SIGKILL after 5s). Background runtime is uncapped by default: long tasks run until they finish or are stopped, `backgroundBashTaskTimeoutSeconds` opts into a hard cap (`0`/unset = no cap), and a task with no output for `backgroundBashStallTimeoutSeconds` (default 1800, `0` disables) only emits a stall notice — it is never stopped automatically. Concurrency and log growth are bounded by `backgroundBashMaxTasks` (default 8, `0` = no cap) and `backgroundBashMaxLogBytes` (default 64MB per task, `0` = unlimited, capped logs end with a truncation marker). `backgroundBashCompletionDelivery` selects how completions reach the model: `nextRequest` (default), `followUp`, or `wake`; local sessions also see `background_task_started` / `background_task_completed` / `background_task_stalled` on `session.subscribe(...)`. Background tasks are tied to the local process environment and are not available with remote or custom execution environments without a background task manager. The shared core still does not add interactive PTYs or OS sandbox guarantees.
+
+Background launch cancellation is admission-only: cancellation during cwd/shell/preparation checks prevents launch, but an admitted background task or successfully adopted foreground process is independent of the original call's signal. Stop it through the task manager rather than treating cancellation of the launching call as proof it stopped.
+
+Background-manager shutdown waits for both owned processes and output writers. A terminal task status alone does not prove its log writer closed. An incomplete shutdown retains ownership; a later shutdown/cleanup call can observe eventual settlement instead of reusing a stale incomplete report. This is not rollback of process effects.
 
 To migrate:
 

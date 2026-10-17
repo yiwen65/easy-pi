@@ -6,13 +6,18 @@ import {
 	fauxAssistantMessage,
 	fauxProvider,
 	InMemoryCredentialStore,
+	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, expect, test } from "vitest";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
-import { recordedCacheAffinityId, SESSION_CACHE_AFFINITY_ENTRY } from "../src/core/session-cache-affinity.ts";
+import {
+	readSessionCacheAffinityHint,
+	recordedCacheAffinityId,
+	SESSION_CACHE_AFFINITY_ENTRY,
+} from "../src/core/session-cache-affinity.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -55,6 +60,7 @@ async function fixture(api: "openai-codex-responses" | "faux-other" = "openai-co
 			return fauxAssistantMessage("ack");
 		}),
 	);
+	let selectedModel: Model<string> | undefined = faux.getModel();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd: targetCwd,
 		sessionManager,
@@ -75,7 +81,7 @@ async function fixture(api: "openai-codex-responses" | "faux-other" = "openai-co
 			services,
 			sessionManager,
 			cacheAffinityId,
-			model: faux.getModel(),
+			model: selectedModel,
 			thinkingLevel: "off",
 			noTools: "all",
 		});
@@ -89,7 +95,17 @@ async function fixture(api: "openai-codex-responses" | "faux-other" = "openai-co
 	cleanups.push(async () => {
 		await runtimeHandle.dispose();
 	});
-	return { cwd, sessionDir, agentDir, faux, requests, runtime: runtimeHandle };
+	return {
+		cwd,
+		sessionDir,
+		agentDir,
+		faux,
+		requests,
+		runtime: runtimeHandle,
+		restoreStoredModel: () => {
+			selectedModel = undefined;
+		},
+	};
 }
 
 test("clone and fork join the parent cache lineage without sharing session identity", async () => {
@@ -258,30 +274,59 @@ test("switching model after cloning drops the inherited lineage", async () => {
 	expect(clone.agent.transport).toBe("auto");
 });
 
-test("a lineage bound to another model is not restored when the session is reopened", async () => {
-	const f = await fixture();
-	await f.runtime.session.prompt("parent message");
-	const parentId = f.runtime.session.sessionId;
-	await f.runtime.fork(f.runtime.session.sessionManager.getLeafId()!, { position: "at" });
-	const cloneFile = f.runtime.session.sessionManager.getSessionFile()!;
-	await f.runtime.session.prompt("clone message");
-	// The recorded lineage names the model it was cached under.
-	const { readSessionCacheAffinityHint } = await import("../src/core/session-cache-affinity.ts");
-	expect(readSessionCacheAffinityHint(cloneFile)).toMatchObject({
-		affinityId: parentId,
-		boundModel: { provider: "session-cache-faux", id: f.faux.getModel().id },
-	});
+test.each(["provider", "model"])(
+	"a lineage bound to another %s is not restored when the session is reopened",
+	async (changed) => {
+		const f = await fixture();
+		await f.runtime.session.prompt("parent message");
+		const parentId = f.runtime.session.sessionId;
+		await f.runtime.fork(f.runtime.session.sessionManager.getLeafId()!, { position: "at" });
+		const cloneFile = f.runtime.session.sessionManager.getSessionFile()!;
+		await f.runtime.session.prompt("clone message");
+		// The recorded lineage names the model it was cached under.
+		expect(readSessionCacheAffinityHint(cloneFile)).toMatchObject({
+			affinityId: parentId,
+			boundModel: { provider: "session-cache-faux", id: f.faux.getModel().id },
+		});
 
-	// The app factory resolves the lineage from the file; a different model must not inherit it.
-	const otherModel = { provider: "session-cache-other", id: "other-1" };
-	expect(recordedCacheAffinityId(SessionManager.open(cloneFile, f.sessionDir), otherModel)).toBeUndefined();
-	expect(
-		recordedCacheAffinityId(SessionManager.open(cloneFile, f.sessionDir), {
-			provider: "session-cache-faux",
-			id: f.faux.getModel().id,
-		}),
-	).toBe(parentId);
-});
+		// The app factory resolves the lineage from the file; a different model must not inherit it.
+		const otherModel = { provider: "session-cache-other", id: "other-1" };
+		expect(recordedCacheAffinityId(SessionManager.open(cloneFile, f.sessionDir), otherModel)).toBeUndefined();
+		expect(
+			recordedCacheAffinityId(SessionManager.open(cloneFile, f.sessionDir), {
+				provider: "session-cache-faux",
+				id: f.faux.getModel().id,
+			}),
+		).toBe(parentId);
+
+		const other = fauxProvider({
+			provider: changed === "provider" ? "session-cache-other" : "session-cache-faux",
+			api: "openai-codex-responses",
+			models: [{ id: "new-model" }],
+			tokensPerSecond: 0,
+		});
+		f.runtime.session.modelRuntime.registerNativeProvider(other.provider);
+		await f.runtime.session.setModel(other.getModel());
+		f.restoreStoredModel();
+		await f.runtime.switchSession(cloneFile);
+		expect(f.runtime.session.model?.provider).toBe(other.getModel().provider);
+		expect(f.runtime.session.model?.id).toBe(other.getModel().id);
+		expect(f.runtime.session.agent.cacheAffinityId).toBeUndefined();
+		expect(f.runtime.session.agent.promptCacheKey).toBeUndefined();
+		expect(f.runtime.session.agent.transport).toBe("auto");
+		let request: SimpleStreamOptions | undefined;
+		other.setResponses([
+			(_context, options) => {
+				request = options;
+				return fauxAssistantMessage("new model");
+			},
+		]);
+		await f.runtime.session.prompt("use the selected model");
+		expect(request?.cacheAffinityId).toBeUndefined();
+		expect(request?.promptCacheKey).not.toBe(parentId);
+		expect(request?.transport).toBe("auto");
+	},
+);
 
 test("non-Codex providers keep their configured transport", async () => {
 	const f = await fixture("faux-other");

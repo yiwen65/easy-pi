@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type Component, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import { sanitizeDisplayText } from "../../../core/tools/render-utils.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -133,9 +134,16 @@ export class AssistantMessageComponent extends Container {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
-					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
-						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
-					}),
+					new Markdown(
+						sanitizeDisplayText(content.text).trim(),
+						this.outputPad,
+						0,
+						this.markdownTheme,
+						undefined,
+						{
+							transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+						},
+					),
 				);
 			} else if (content.type === "thinking") {
 				const thinkingBlocks: string[] = [];
@@ -144,7 +152,7 @@ export class AssistantMessageComponent extends Container {
 					if (thinkingContent.type !== "thinking") {
 						break;
 					}
-					const thinking = thinkingContent.thinking.trim();
+					const thinking = sanitizeDisplayText(thinkingContent.thinking).trim();
 					if (thinking) {
 						thinkingBlocks.push(thinking);
 					}
@@ -211,9 +219,11 @@ export class AssistantMessageComponent extends Container {
 						? message.errorMessage
 						: "Operation aborted";
 				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
+				this.contentContainer.addChild(
+					new Text(theme.fg("error", sanitizeDisplayText(abortMessage)), this.outputPad, 0),
+				);
 			} else if (message.stopReason === "error" && this.errorVisible) {
-				const errorMsg = message.errorMessage || "Unknown error";
+				const errorMsg = sanitizeDisplayText(message.errorMessage || "Unknown error");
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}

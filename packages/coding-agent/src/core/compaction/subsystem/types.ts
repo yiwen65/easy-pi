@@ -1,4 +1,4 @@
-import type { Message, Tool } from "@earendil-works/pi-ai/compat";
+import type { Message, Tool, Usage } from "@earendil-works/pi-ai/compat";
 
 /** Minimal contracts for local Codex Remote V2-style compaction. */
 
@@ -28,7 +28,8 @@ export interface CompactionLLMResponse {
 	errorMessage?: string;
 	/** The provider accepted or reported an input larger than the configured context window. */
 	contextOverflow?: boolean;
-	usage?: { input: number; output: number };
+	/** Full reported usage across all provider attempts made by this completion. */
+	usage?: Usage;
 }
 
 export type CompleteFn = (request: CompactionLLMRequest) => Promise<CompactionLLMResponse>;

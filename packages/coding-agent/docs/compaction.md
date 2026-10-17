@@ -22,7 +22,9 @@ The version-1 `data` payload contains:
 - `requestIndex`: retries within one summary request share an index; an overflow fallback starts another request;
 - `retryCount` and `scheduledRetryDelayMs`: outer retry count and requested sleep total. Actual waits are included in generation time; provider-internal retries remain inside their invocation's duration.
 
-An injected `config.complete` bypasses the production adapter, so its per-provider attempts are unavailable; host phases and total duration are still recorded. A diagnostic write failure never fails compaction or masks its original error. Inspect the session JSONL to compare a slow request's first-text latency, generation interval, cache usage, output/reasoning tokens, and retries before changing models or retry policy. These diagnostics and offline regressions alone do not establish real-provider speedup or handoff quality.
+Session totals, the footer/Grok stats bar, the Tools/summaries cost breakdown and JSONL statistics scans also count known usage from retained version-1 diagnostics with outcome `failed` or `aborted` (including rejected checkpoints, recorded as `failed`). Only complete `Usage` objects with finite, nonnegative counters and costs are consumed; absent/malformed usage and unknown diagnostic versions/outcomes are ignored. Activated diagnostics do not contribute again: the successful checkpoint's `usage` is the sole accounting source for that compaction. Each lifecycle writes its diagnostics at most once.
+
+An injected `config.complete` bypasses the production adapter, so its per-provider attempts are unavailable; host phases and total duration are still recorded. Diagnostic persistence is best-effort and never fails compaction or masks its original error. Missing reports are not reconstructed, and older activated checkpoints lacking `usage` are not backfilled from diagnostics; missing usage is not evidence of zero work. Inspect the session JSONL to compare a slow request's first-text latency, generation interval, cache usage, output/reasoning tokens, and retries before changing models or retry policy. These diagnostics and offline regressions alone do not establish real-provider speedup or handoff quality.
 
 ## Checkpoint contents
 
@@ -45,7 +47,7 @@ The handoff ends with `Current continuation point`, which reconciles the timelin
 
 ## Persistence and recovery
 
-`SessionManager.appendCompaction()` appends one `CompactionEntry` to the main session JSONL. Its `replacementHistory` field is the exact active message checkpoint. Older entries are never rewritten or deleted.
+`SessionManager.appendCompactionCheckpoint()` appends one `CompactionEntry` to the main session JSONL. Its `replacementHistory` field is the exact active message checkpoint; modern entries do not require the legacy `summary` or `firstKeptEntryId` fields. Optional `usage` holds the full reported summary-generation usage, not just input/output tokens. For an activated checkpoint it aggregates reported attempts, including retries and overflow fallback, once into session totals. Injected completion functions must supply the full `Usage` shape when reporting usage; omission means unavailable, not proof of zero work. Older entries are never rewritten or deleted.
 
 `buildSessionContext()` finds the newest branch-visible compaction entry with `replacementHistory`, installs it as the base, and replays entries appended after that checkpoint. Older summary-only entries remain readable through the legacy `summary + firstKeptEntryId` path.
 
@@ -80,4 +82,4 @@ If local handoff generation or cancellation fails, no compaction entry is append
 - `PI_HF_COMPACTION=off|full_pipeline`: disable or enable checkpoint compaction. Unknown and retired mode names are rejected.
 - `compaction.enabled=false`: disable automatic compaction; manual `/compact` still requires the compaction host to be enabled.
 
-`session_before_compact`, `session_compact`, and `session_compact_failed` remain the extension observation/cancellation boundary. `session_compact` receives the actual persisted `CompactionEntry`, not a synthetic snapshot notification.
+`session_before_compact`, `session_compact`, and `session_compact_failed` remain the extension observation/cancellation boundary. A registered `session_before_compact` handler runs even when short or checkpoint-only history has no legacy cut: `preparation` may be `undefined`, while `branchEntries` remains available. Missing legacy preparation does not disable observation or cancellation. Extension-supplied free-text summaries are deprecated and ignored. `session_compact` receives the actual persisted `CompactionEntry`, not a synthetic snapshot notification. `AgentSession.abort()` also signals active automatic compaction before waiting for the run to settle.

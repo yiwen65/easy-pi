@@ -415,6 +415,18 @@ function composeOAuthAuth(
 	};
 }
 
+/** Apply request configuration without deriving auth from stored OAuth credentials. */
+export function resolveConfiguredProviderAuth(
+	providerId: string,
+	auth: ModelAuth,
+	config: ModelsJsonProvider | undefined,
+	extension: ProviderConfigInput | undefined,
+	env?: Record<string, string>,
+): ModelAuth {
+	const headers = resolveHeadersOrThrow(configuredHeaders(config, extension), `provider "${providerId}"`, env);
+	return withConfiguredAuth(auth, headers, extension?.authHeader ?? config?.authHeader ?? false);
+}
+
 function rawModelHeaders(
 	model: AnyModel,
 	config: ModelsJsonProvider | undefined,
@@ -425,11 +437,19 @@ function rawModelHeaders(
 	const extensionModel = extension?.models?.find(
 		(entry) => (entry.type ?? "chat") === getModelType(model) && entry.id === model.id,
 	);
-	const headers = {
-		...(chat ? config?.modelOverrides?.[model.id]?.headers : undefined),
-		...definition?.headers,
-		...extensionModel?.headers,
-	};
+	const headers: Record<string, string> = {};
+	for (const layer of [
+		definition?.headers,
+		extensionModel?.headers,
+		chat ? config?.modelOverrides?.[model.id]?.headers : undefined,
+	]) {
+		for (const [name, value] of Object.entries(layer ?? {})) {
+			for (const existing of Object.keys(headers)) {
+				if (existing.toLowerCase() === name.toLowerCase()) delete headers[existing];
+			}
+			headers[name] = value;
+		}
+	}
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 

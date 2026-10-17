@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
+import {
+	AuthStorage,
+	FileAuthStorageBackend,
+	ReadOnlyAuthStorage,
+	StoredApiKeyUnavailableError,
+} from "../src/core/auth-storage.ts";
+import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
 
 describe("AuthStorage", () => {
 	const tempDir = join(tmpdir(), `pi-test-auth-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -17,6 +23,8 @@ describe("AuthStorage", () => {
 
 	afterEach(() => {
 		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true });
+		clearConfigValueCache();
+		vi.unstubAllEnvs();
 		vi.restoreAllMocks();
 	});
 
@@ -41,6 +49,33 @@ describe("AuthStorage", () => {
 		writeAuthJson({ anthropic: { type: "api_key", key: "!printf 'command-key'" } });
 		const storage = AuthStorage.create(authJsonPath);
 		expect(await storage.read("anthropic")).toEqual({ type: "api_key", key: "command-key" });
+	});
+
+	for (const readOnly of [false, true]) {
+		const keys = ["$T162_MISSING_STORAGE_KEY", "$T162_EMPTY_STORAGE_KEY", ""];
+		if (!readOnly) keys.push("!exit 7", "!printf ''");
+		test.each(keys)(`throws a typed unavailable-key error for %s (readOnly=${readOnly})`, async (key) => {
+			vi.stubEnv("T162_MISSING_STORAGE_KEY", undefined);
+			vi.stubEnv("T162_EMPTY_STORAGE_KEY", "");
+			writeAuthJson({ anthropic: { type: "api_key", key } });
+			const storage = readOnly ? new ReadOnlyAuthStorage(authJsonPath) : AuthStorage.create(authJsonPath);
+			const read = storage.read("anthropic");
+			await expect(read).rejects.toBeInstanceOf(StoredApiKeyUnavailableError);
+			await expect(read).rejects.toMatchObject({
+				name: "StoredApiKeyUnavailableError",
+				providerId: "anthropic",
+				message: 'Failed to resolve stored API key for provider "anthropic"',
+			});
+		});
+	}
+
+	test("keeps read-only command keys opaque without running them", async () => {
+		const marker = join(tempDir, "command-ran");
+		const key = `!printf synthetic-key > "${marker}"`;
+		writeAuthJson({ anthropic: { type: "api_key", key } });
+		const storage = new ReadOnlyAuthStorage(authJsonPath);
+		expect(await storage.read("anthropic")).toEqual({ type: "api_key", key });
+		expect(existsSync(marker)).toBe(false);
 	});
 
 	test("returns OAuth credentials unchanged", async () => {

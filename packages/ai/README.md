@@ -341,6 +341,8 @@ await models.complete(model, context);
 await models.complete(model, context, { apiKey: 'sk-explicit' });
 ```
 
+An explicit request token also works for OAuth-only providers such as OpenAI Codex: it bypasses stored credentials and refresh for that request. It does not add an API-key login method or convert the token into a persisted credential.
+
 You can inspect resolution without making a request. Pass a provider ID for provider-scoped auth, or a model to include its static `model.headers`:
 
 ```typescript
@@ -395,7 +397,7 @@ const models = createModels({ credentials: myFileBackedStore });
 // const models = builtinModels({ credentials: myFileBackedStore });
 ```
 
-The contract is small: `read(providerId)`, `list()` for non-secret `{ providerId, type }` metadata, `modify(providerId, fn)` (the only write path — a serialized read-modify-write), and `delete(providerId)`. Each operation accepts optional cancellation options. Enumeration must not resolve secrets or execute configured key commands. OAuth token refresh runs inside `modify`, so concurrent requests and processes cannot double-refresh a rotated token. A stored credential *owns* its provider: environment variables are only consulted when nothing is stored, and a failed refresh never silently falls back to an env key.
+The contract is small: `read(providerId)`, `list()` for non-secret `{ providerId, type }` metadata, `modify(providerId, fn)` (the only write path — a serialized read-modify-write), and `delete(providerId)`. Each operation accepts optional cancellation options. Enumeration must not resolve secrets or execute configured key commands. OAuth token refresh runs inside `modify`, so concurrent requests and processes cannot double-refresh a rotated token. A stored credential *owns* its provider: the matching auth handler receives it, and a failed refresh never silently falls back to an env key. An API-key handler may intentionally use ambient auth when a stored credential omits `key`; that is distinct from a configured key failing to resolve. Persistent stores that support key expressions must preserve that distinction rather than replacing a failed expression with an absent key.
 
 API-key credentials use the same discriminator as pi's `auth.json` and can carry provider-scoped env/config values:
 
@@ -926,11 +928,13 @@ if (message.stopReason === 'error' || message.stopReason === 'aborted') {
 }
 ```
 
-Auth failures (no key configured, OAuth refresh failed, unknown provider) surface the same way: as a stream error with `stopReason: "error"`.
+Auth failures (no key configured, OAuth refresh failed, unknown provider) surface the same way: as a stream error with `stopReason: "error"`. Built-in setup failures also use this terminal-event contract rather than throwing synchronously from `streamSimple()`.
+
+Codex and Mistral HTTP error diagnostics retain at most a 4000-byte body prefix and cancel the unread remainder. These reads honor caller cancellation; they do not impose a new body deadline or cap successful response streams.
 
 ### Aborting Requests
 
-The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`:
+The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`. Cancellation also ends waits during auth, header transforms and lazy module setup; built-in dispatch gates prevent a late setup completion from starting the abandoned request. This cannot forcibly stop noncooperative custom JavaScript. An OAuth refresh already started under the credential-store lock may still finish and persist rotated credentials, so cancellation does not discard the only valid refresh token.
 
 ```typescript
 const controller = new AbortController();
@@ -1567,9 +1571,11 @@ Credentials are saved to `auth.json` in the current directory.
 
 Built-in login and refresh flows are private provider implementations. Use provider-owned `OAuthAuth`, which composes with `CredentialStore` and gets locked auto-refresh through `Models`. The `@earendil-works/pi-ai/oauth` entry point retains only type declarations required by coding-agent extension OAuth compatibility.
 
+Anthropic and Codex token exchange/refresh errors report HTTP status or fixed JSON/expected-field diagnostics, not raw token response bodies. Codex device-code startup/poll errors follow the same rule, avoiding device codes, authorization codes and verifiers in diagnostics. This is not blanket redaction of arbitrary custom-provider or network errors.
+
 Provider notes:
 
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles prompt caching when `promptCacheKey` or its backward-compatible `sessionId` fallback is provided unless `cacheRetention` is `"none"`. `promptCacheKey` changes only the prompt-cache identity; transport affinity remains scoped to `sessionId`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, connections are reused per session and expire after 5 minutes of inactivity.
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles prompt caching when `promptCacheKey` or its backward-compatible `sessionId` fallback is provided unless `cacheRetention` is `"none"`. `promptCacheKey` changes only the prompt-cache identity; transport affinity remains scoped to `sessionId`. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId` and cache retention enabled, reuse requires the same session/account, endpoint, normalized handshake headers (including authentication) and effective proxy. A changed identity replaces an idle connection and discards its connection-local continuation state; a busy connection is not shared with another request. Idle connections expire after 5 minutes.
 
 **Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
 

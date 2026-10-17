@@ -1,6 +1,7 @@
 import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
+import { getUnactivatedCompactionUsages } from "../usage-totals.ts";
 import type {
 	ScannedSession,
 	ScanResult,
@@ -265,6 +266,22 @@ function extractUsage(entry: Record<string, unknown>): ExtractedUsage | null {
 			};
 		}
 		return null;
+	}
+	if (type === "custom") {
+		const attempts = getUnactivatedCompactionUsages(entry);
+		if (attempts.length === 0) return null;
+		const usage: UsageValues = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 };
+		for (const attempt of attempts) {
+			const values = asUsageValues(attempt);
+			if (values) addUsageValues(usage, values);
+		}
+		return {
+			kind: "compaction",
+			provider: UNKNOWN_PROVIDER,
+			model: UNKNOWN_MODEL,
+			timestampMs: parseTimestampMs(entry.timestamp),
+			usage,
+		};
 	}
 	if (type === "compaction" || type === "branch_summary") {
 		const usage = asUsageValues(entry.usage);

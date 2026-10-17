@@ -218,6 +218,8 @@ export default async function (pi: ExtensionAPI) {
 
 This pattern makes the fetched models available during normal startup and to `pi --list-models`.
 
+Provider registration/removal requests and flag defaults are staged until the factory succeeds. If the factory throws or rejects, its extension registrations are discarded, its shared event-bus subscriptions are removed, and its owned MCP registrations are restored to their pre-factory state. Later calls through that failed factory's retained API also reject, including callbacks that were already awaiting work when it failed. This does not stop arbitrary JavaScript or roll back arbitrary effects: file writes, processes, network requests and already-emitted events remain the extension's responsibility. Successful factories and existing CLI flag values are not rolled back by another factory's failure.
+
 ### Long-lived resources and shutdown
 
 Extension factories may run in invocations that never start a session. Do not start background resources such as processes, sockets, file watchers, or timers from the factory.
@@ -457,12 +459,19 @@ Fired on compaction. See [compaction.md](compaction.md) for details.
 The compaction subsystem generates the handoff itself. Returning summary text through
 `compaction` is deprecated and ignored: free-text summaries cannot satisfy the checkpoint
 invariants. Extensions control compaction by cancelling it and by observing the persisted
-checkpoint.
+checkpoint. The hook also runs when no legacy cut can be prepared, including short or
+checkpoint-only history. `preparation` now has type `CompactionPreparation | undefined`:
+TypeScript handlers must guard it before reading legacy cut fields. It is not an eligibility
+signal for modern compaction; `branchEntries` remains required and contains the current raw
+branch entry list. Do not invent cut IDs or token metadata when preparation is unavailable.
+Use the session's effective context when you need the replacement-history projection.
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
   const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
 
+  // preparation - CompactionPreparation | undefined; guard before accessing legacy cut fields
+  // branchEntries - current branch entries, including persisted checkpoints
   // reason - "manual" (/compact), "threshold", or "overflow"
   // willRetry - whether the aborted turn is retried after compaction (overflow recovery)
 
@@ -1954,7 +1963,7 @@ If your custom tool mutates files, use `withFileMutationQueue()` so it participa
 
 Example failure case: your custom tool edits `foo.ts` while built-in `edit` also changes `foo.ts` in the same assistant turn. If your tool does not participate in the queue, both can read the original `foo.ts`, apply separate changes, and one of those changes is lost.
 
-Pass the real target file path to `withFileMutationQueue()`, not the raw user argument. Resolve it to an absolute path first, relative to `ctx.cwd` or your tool's working directory. For existing files, the helper canonicalizes through `realpath()`, so symlink aliases for the same file share one queue. For new files, it falls back to the resolved absolute path because there is nothing to `realpath()` yet.
+Pass the real target file path to `withFileMutationQueue()`, not the raw user argument. Resolve it to an absolute path first, relative to `ctx.cwd` or your tool's working directory. For existing files, the helper canonicalizes through `realpath()`, so symlink aliases for the same file share one queue. For new files, it canonicalizes the nearest existing ancestor and appends the missing path suffix, so aliases through an existing symlinked parent also share a queue.
 
 Queue the entire mutation window on that target path. That includes read-modify-write logic, not just the final write.
 

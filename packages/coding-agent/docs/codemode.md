@@ -94,7 +94,7 @@ Nested calls use the normal execution pipeline: parameter preparation and schema
 What a call resolves to depends on its declaration:
 
 - A tool declaring `outputSchema` returns its `structuredContent` value when provided.
-- MCP tools return a `CallToolResult`, including `content`, optional `structuredContent`, and an optional `isError` flag. A server-reported `isError` is a confirmed response, not a lost connection.
+- Confirmed MCP responses return a `CallToolResult`, including `content`, optional `structuredContent`, and an optional `isError` flag. A server-reported `isError` is normally confirmed, but `_meta["io.easy-pi/execution-outcome"] = "unknown"` makes the call fail with an unknown outcome even when `isError` is false. Protocol `_meta` is not exposed to scripts; it can reduce certainty, never prove `confirmed` or `not_started`. See [MCP results and recovery](mcp.md#results-and-recovery).
 - Other tools return their text content as one string. Do not assume an upstream Bash or Read structured-result shape unless the tool's declaration supplies one.
 
 Unknown tools, invalid arguments, blocked calls, and ordinary tool failures reject with the tool's error text. Use `Promise.allSettled()` when independent successful results should survive a known failure.
@@ -133,11 +133,12 @@ store("cursor", cursor + 1);
 return { cursor };
 ```
 
-The store is for IDs, cursors, or small summaries. One value is limited to 262144 characters of JSON; all stored values together are limited to 1048576 characters. Do not store image data; show images with `image()` instead.
+The store is for IDs, cursors, or small summaries. One value is limited to 262144 characters of JSON; live keys plus serialized values share a 1048576-character limit. The serialized writes for one execution have a separate 1048576-character limit, including escaped keys, values, deletions and JSON framing. Limits count JavaScript string lengths, not UTF-8 bytes. Oversized writes throw before changing state, and the host validates the serialized payload too. Discarding writes never rolls back tool effects. Do not store image data; show images with `image()` instead.
 
 ## Limits and scope
 
 - Each script has a fresh VM with a 256 MB memory limit. Exhaustion raises `InternalError: out of memory`.
+- Each execution admits at most 1024 host calls in total, including tools and injected discovery globals. The next call fails the script before dispatch, even without a deadline; pending calls are signalled to cancel. Earlier effects remain real and require the same outcome checks.
 - Helper output and serialized return/error payloads share a 16777216-character hard budget. Helpers and a returned value share 100000 output items. Oversized terminal errors become a bounded limit diagnostic before reaching the host. Use a tool to write larger data to a file.
 - A promise that cannot settle and has no pending host call fails immediately; the VM has no timers to make progress.
 - Scripts cannot start other codemode scripts.

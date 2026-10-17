@@ -152,7 +152,12 @@ export class PiServer {
 	async close(): Promise<void> {
 		if (this.closePromise) return this.closePromise;
 		this.closing = true;
-		this.closePromise = this.closeInternal();
+		this.closePromise = Promise.resolve()
+			.then(() => this.closeInternal())
+			.catch((error: unknown) => {
+				this.closePromise = undefined;
+				throw error;
+			});
 		return this.closePromise;
 	}
 
@@ -160,7 +165,10 @@ export class PiServer {
 		const starting = this.startPromise;
 		if (starting) await starting.catch(() => {});
 		try {
-			await Promise.all(this.listeners.map((listener) => listener.close()));
+			// Drain every admitted close before a failure makes the server retryable.
+			const results = await Promise.allSettled(this.listeners.map(async (listener) => listener.close()));
+			const failed = results.find((result) => result.status === "rejected");
+			if (failed) throw failed.reason;
 		} finally {
 			await this.closeServerState();
 			this.started = false;

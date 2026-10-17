@@ -176,6 +176,10 @@ export function createGrepToolDefinition(
 				(async () => {
 					try {
 						const rgPath = await ensureTool("rg");
+						if (signal?.aborted) {
+							settle(() => reject(new Error("Operation aborted")));
+							return;
+						}
 						if (!rgPath) {
 							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
 							return;
@@ -224,6 +228,10 @@ export function createGrepToolDefinition(
 						if (glob) args.push("--glob", glob);
 						args.push("--", pattern, searchPath);
 
+						if (signal?.aborted) {
+							settle(() => reject(new Error("Operation aborted")));
+							return;
+						}
 						const child = spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";

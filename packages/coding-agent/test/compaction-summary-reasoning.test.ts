@@ -18,6 +18,17 @@ vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => {
 	return {
 		...actual,
 		completeSimple: completeSimpleMock,
+		streamSimple: (model: Model<string>, requestContext: Context, options: unknown) => {
+			const stream = actual.createAssistantMessageEventStream();
+			void completeSimpleMock(model, requestContext, options).then((message: AssistantMessage) => {
+				if (message.stopReason === "error" || message.stopReason === "aborted") {
+					stream.push({ type: "error", reason: message.stopReason, error: message });
+				} else {
+					stream.push({ type: "done", reason: message.stopReason as "stop" | "length", message });
+				}
+			});
+			return stream;
+		},
 	};
 });
 
@@ -120,7 +131,7 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 			messages: [{ role: "user", content: "data", timestamp: 1 }],
 			promptVersion: "1.0.0",
 		});
-		expect(res).toEqual({ text: "extracted text", stopReason: "stop", usage: { input: 10, output: 5 } });
+		expect(res).toEqual({ text: "extracted text", stopReason: "stop", usage: assistantOk("").usage });
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
 			cacheRetention: "short",
 			cacheAffinityId: "parent-cache-affinity",
@@ -194,6 +205,6 @@ describe("createPiAiCompleteFn (subsystem production adapter)", () => {
 		expect(res.stopReason).toBe("length");
 		expect(res.text).toBe("partial handoff");
 		expect(res.errorMessage).toContain("output limit");
-		expect(res.usage).toEqual({ input: 10, output: 0 });
+		expect(res.usage).toEqual({ ...truncated.usage, output: 0 });
 	});
 });

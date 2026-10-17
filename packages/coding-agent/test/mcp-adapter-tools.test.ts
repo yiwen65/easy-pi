@@ -4,6 +4,7 @@ import { AgentToolError } from "@earendil-works/pi-agent-core";
 import type { CallToolResult } from "@earendil-works/pi-mcp";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { getToolErrorOutcome } from "../../agent/src/tool-outcome.ts";
 import type { ToolExposure, ToolInfo } from "../src/core/extensions/types.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 import { truncateMiddle, writeMcpOutputFile } from "../src/extensions/mcp/output.ts";
@@ -21,7 +22,7 @@ import {
 	tokenize,
 } from "../src/extensions/tool-search/tool.ts";
 
-function definition(call: () => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) {
+function definition(call: () => Promise<CallToolResult>) {
 	return createMcpToolDefinition({
 		server: "docs",
 		tool: { name: "search", inputSchema: {}, annotations: { readOnlyHint: true, idempotentHint: true } },
@@ -148,6 +149,9 @@ describe("MCP result adapter", () => {
 		} catch (error) {
 			if (!(error instanceof AgentToolError)) throw error;
 			expect(error.executionOutcome).toBe("confirmed");
+			expect(getToolErrorOutcome(error, "mcp__docs__search", {}, { contract: { sideEffects: "external" } })).toBe(
+				"confirmed",
+			);
 			expect(error.structuredContent).toEqual({
 				content: [{ type: "text", text: "no".repeat(15000) }],
 				isError: true,
@@ -159,6 +163,46 @@ describe("MCP result adapter", () => {
 			"MCP tool docs/search returned an error",
 		);
 	});
+
+	it.each([false, true])("preserves explicit unknown-effect metadata even when isError=%s", async (isError) => {
+		const raw: CallToolResult = {
+			content: [{ type: "text", text: "Interrupted; inspect state before retrying" }],
+			structuredContent: { partial: true },
+			isError,
+			_meta: { "io.easy-pi/execution-outcome": "unknown", private: "not public" },
+		};
+		const tool = wrapToolDefinition(definition(async () => raw));
+		expect(tool.contract).toEqual({ sideEffects: "external" });
+		const work = tool.execute("id", {});
+		await expect(work).rejects.toMatchObject({
+			executionOutcome: "unknown",
+			structuredContent: {
+				content: raw.content,
+				structuredContent: raw.structuredContent,
+				isError,
+			},
+		});
+		try {
+			await work;
+		} catch (error) {
+			if (!(error instanceof AgentToolError)) throw error;
+			expect(getToolErrorOutcome(error, tool.name, {}, tool)).toBe("unknown");
+			expect(error.structuredContent).not.toHaveProperty("_meta");
+		}
+	});
+
+	it.each(["not_started", "confirmed", false, { outcome: "unknown" }])(
+		"never treats remote outcome metadata %j as proof of no dispatch",
+		async (marker) => {
+			await expect(
+				convertMcpResult("desktop", "click", {
+					content: [{ type: "text", text: "STALE_REF" }],
+					isError: true,
+					_meta: { "io.easy-pi/execution-outcome": marker },
+				}),
+			).rejects.toMatchObject({ executionOutcome: "confirmed" });
+		},
+	);
 
 	it("never promotes remote annotations into retry or certainty guarantees", async () => {
 		const timeout = new Error("sent then timed out");

@@ -12,6 +12,12 @@ npm install @earendil-works/pi-agent-core
 
 The SQLite session backend and the `node:sqlite` adapter live in a separate package, `@earendil-works/pi-session-backend-sqlite-node`, so the core package does not pull in runtime builtins or native SQLite dependencies by default. The backend accepts a runtime-specific SQLite factory, allowing other session backends to ship as their own packages in the future.
 
+### Durable session inputs and JSONL recovery
+
+Durable `Session` entry/record appends validate and clone their inputs before asynchronous storage work; the JSONL and SQLite queues also snapshot before admission. Mutating a caller-owned object after the call cannot change the admitted payload.
+
+V4 JSONL recovery can discard a syntactically corrupt final record only when it is unterminated (no final LF). Newline-terminated corruption, interior corruption and schema-invalid records fail without repairing the file. A valid final record missing only its LF is preserved and terminated before further writes. This is local-log recovery, not a transaction with external tool effects.
+
 ## Quick Start
 
 ```typescript
@@ -531,6 +537,8 @@ for await (const event of agentLoopContinue(context, config, undefined, streamFn
 ```
 
 These low-level streams are observational. They preserve event order, but they do not wait for your async event handling to settle before later producer phases continue. If you need message processing to act as a barrier before tool preflight, use the `Agent` class instead of raw `agentLoop()` or `agentLoopContinue()`.
+
+If the raw loop producer rejects (for example a preparation or persistence callback fails), already-queued events remain readable, then iteration throws and `stream.result()` rejects with that failure. It does not synthesize a successful `agent_end`. Handle both iteration and result failures. This is distinct from ordinary provider error/abort messages and the `Agent` class's existing error-event behavior, which are unchanged.
 
 ## License
 

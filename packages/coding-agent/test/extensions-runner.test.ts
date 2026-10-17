@@ -6,12 +6,20 @@ import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createProvider } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionUIContext,
 	ProviderConfig,
@@ -977,6 +985,291 @@ describe("ExtensionRunner", () => {
 				details: { source: "ext1" },
 				isError: true,
 			});
+		});
+	});
+
+	describe("failed factory rollback", () => {
+		it.each([false, true])("revokes failed APIs before an in-flight listener resumes (bound=%s)", async (bound) => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const registerProvider = vi.fn();
+			const keptListener = vi.fn();
+			const lateListener = vi.fn();
+			let keptApi!: ExtensionAPI;
+			const kept = await loadExtensionFromFactory(
+				(pi) => {
+					keptApi = pi;
+					pi.registerProvider("kept", providerModelConfig);
+					pi.registerFlag("kept", { type: "boolean", default: true });
+					pi.events.on("ping", keptListener);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<kept>",
+			);
+			if (bound) {
+				const runner = new ExtensionRunner([kept], runtime, tempDir, sessionManager, modelRegistry);
+				runner.bindCore(extensionActions, extensionContextActions, { registerProvider });
+			}
+			// Repeat the exact schedule: emit while loading, fail and clean up, then resume the handler.
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const gate = Promise.withResolvers<void>();
+				const finished = Promise.withResolvers<void>();
+				const errors: unknown[] = [];
+				const started = vi.fn();
+				await expect(
+					loadExtensionFromFactory(
+						(pi) => {
+							pi.events.on("start", async () => {
+								started();
+								await gate.promise;
+								for (const action of [
+									() => pi.registerProvider("resumed", providerModelConfig),
+									() => pi.registerFlag("resumed", { type: "boolean", default: true }),
+									() => pi.events.on("ping", lateListener),
+									() => pi.unregisterProvider("kept"),
+									() => pi.events.emit("ping", {}),
+									() => pi.getFlag("resumed"),
+								]) {
+									try {
+										action();
+									} catch (error) {
+										errors.push(error);
+									}
+								}
+								finished.resolve();
+							});
+							pi.events.emit("start", {});
+							throw new Error("factory failed");
+						},
+						tempDir,
+						eventBus,
+						runtime,
+						`<failed-${attempt}>`,
+					),
+				).rejects.toThrow("factory failed");
+				expect(started).toHaveBeenCalledOnce();
+				gate.resolve();
+				await finished.promise;
+				expect.soft(runtime.flagValues.size).toBe(1);
+				expect.soft(lateListener).not.toHaveBeenCalled();
+				expect(errors).toHaveLength(6);
+				for (const error of errors)
+					expect(error).toEqual(expect.objectContaining({ message: expect.stringContaining("failed to load") }));
+				expect(runtime.flagValues.size).toBe(1);
+				expect(runtime.pendingProviderRegistrations.map(({ name }) => name)).toEqual(bound ? [] : ["kept"]);
+				expect(registerProvider.mock.calls.map(([name]) => name)).toEqual(bound ? ["kept"] : []);
+				eventBus.emit("start", {});
+				expect(started).toHaveBeenCalledOnce();
+			}
+			// The shared runtime and the successful extension API remain live.
+			keptApi.events.emit("ping", {});
+			expect(keptListener).toHaveBeenCalledOnce();
+			expect(lateListener).not.toHaveBeenCalled();
+			keptApi.registerProvider("still-live", providerModelConfig);
+			keptApi.registerFlag("still-live", { type: "string", default: "valid" });
+			expect(runtime.flagValues.get("still-live")).toBe("valid");
+			expect(() => runtime.assertActive()).not.toThrow();
+			if (bound) expect(registerProvider).toHaveBeenLastCalledWith("still-live", providerModelConfig);
+			else expect(runtime.pendingProviderRegistrations.map(({ name }) => name)).toEqual(["kept", "still-live"]);
+			runtime.releaseEventBusSubscriptions();
+		});
+
+		it("discards failed provider additions and removals before bindCore while preserving successful factories", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const native = createProvider({
+				id: "native-kept",
+				models: [],
+				auth: { apiKey: { name: "Native test API key", resolve: async () => undefined } },
+				api: {
+					stream: () => {
+						throw new Error("unused");
+					},
+					streamSimple: () => {
+						throw new Error("unused");
+					},
+				},
+			});
+			const previous = await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerProvider("kept", providerModelConfig);
+					pi.registerProvider(native);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<previous>",
+			);
+			const previousQueued = [...runtime.pendingProviderRegistrations];
+			const previousNativeQueued = [...runtime.pendingNativeProviderRegistrations];
+			await expect(
+				loadExtensionFromFactory(
+					async (pi) => {
+						pi.unregisterProvider("kept");
+						pi.unregisterProvider("native-kept");
+						pi.registerProvider("failed", providerModelConfig);
+						pi.registerProvider({ ...native, id: "native-failed" });
+						await Promise.resolve();
+						throw new Error("factory failed");
+					},
+					tempDir,
+					eventBus,
+					runtime,
+					"<failed>",
+				),
+			).rejects.toThrow("factory failed");
+			expect(runtime.pendingProviderRegistrations).toEqual(previousQueued);
+			expect(runtime.pendingNativeProviderRegistrations).toEqual(previousNativeQueued);
+			let laterApi!: ExtensionAPI;
+			const later = await loadExtensionFromFactory(
+				(pi) => {
+					laterApi = pi;
+					pi.registerProvider("later", providerModelConfig);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<later>",
+			);
+			const registerProvider = vi.fn();
+			const registerNativeProvider = vi.fn();
+			const runner = new ExtensionRunner([previous, later], runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions, { registerProvider, registerNativeProvider });
+			expect(registerProvider.mock.calls.map(([name]) => name)).toEqual(["kept", "later"]);
+			expect(registerNativeProvider.mock.calls.map(([provider]) => provider.id)).toEqual(["native-kept"]);
+			laterApi.registerProvider("live", providerModelConfig);
+			expect(registerProvider).toHaveBeenLastCalledWith("live", providerModelConfig);
+			laterApi.registerFlag("live-flag", { type: "boolean", default: true });
+			expect(runtime.flagValues.get("live-flag")).toBe(true);
+		});
+
+		it("rolls back failed flag defaults without changing earlier values or blocking later defaults", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			runtime.flagValues.set("configured", "cli");
+			await loadExtensionFromFactory(
+				(pi) => pi.registerFlag("kept", { type: "boolean", default: true }),
+				tempDir,
+				eventBus,
+				runtime,
+				"<previous>",
+			);
+			await expect(
+				loadExtensionFromFactory(
+					(pi) => {
+						pi.registerFlag("kept", { type: "boolean", default: false });
+						pi.registerFlag("configured", { type: "string", default: "failed" });
+						pi.registerFlag("next", { type: "string", default: "failed" });
+						throw new Error("factory failed");
+					},
+					tempDir,
+					eventBus,
+					runtime,
+					"<failed>",
+				),
+			).rejects.toThrow("factory failed");
+			expect([...runtime.flagValues]).toEqual([
+				["configured", "cli"],
+				["kept", true],
+			]);
+			await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerFlag("next", { type: "string", default: "valid" });
+					expect(pi.getFlag("next")).toBe("valid");
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<later>",
+			);
+			expect(runtime.flagValues.get("next")).toBe("valid");
+		});
+
+		it("does not erase successful registrations made while an async factory is pending", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const pending = Promise.withResolvers<void>();
+			const failed = loadExtensionFromFactory(
+				async (pi) => {
+					pi.registerFlag("shared", { type: "string", default: "failed" });
+					expect(pi.getFlag("shared")).toBe("failed");
+					pi.registerProvider("failed", providerModelConfig);
+					await pending.promise;
+					throw new Error("factory failed");
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<failed>",
+			);
+			await loadExtensionFromFactory(
+				(pi) => {
+					pi.registerFlag("shared", { type: "string", default: "valid" });
+					pi.registerProvider("valid", providerModelConfig);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<valid>",
+			);
+			pending.resolve();
+			await expect(failed).rejects.toThrow("factory failed");
+			expect(runtime.flagValues.get("shared")).toBe("valid");
+			expect(runtime.pendingProviderRegistrations.map(({ name }) => name)).toEqual(["valid"]);
+		});
+
+		it("removes only the failed factory's event subscriptions and keeps normal unsubscribe and shutdown cleanup", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const previous = vi.fn();
+			const failed = vi.fn();
+			const removed = vi.fn();
+			const later = vi.fn();
+			await loadExtensionFromFactory(
+				(pi) => {
+					pi.events.on("ping", previous);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<previous>",
+			);
+			await expect(
+				loadExtensionFromFactory(
+					async (pi) => {
+						pi.events.on("ping", failed);
+						const unsubscribe = pi.events.on("ping", removed);
+						unsubscribe();
+						unsubscribe();
+						await Promise.resolve();
+						throw new Error("factory failed");
+					},
+					tempDir,
+					eventBus,
+					runtime,
+					"<failed>",
+				),
+			).rejects.toThrow("factory failed");
+			await loadExtensionFromFactory(
+				(pi) => {
+					pi.events.on("ping", later);
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<later>",
+			);
+			eventBus.emit("ping", {});
+			expect(previous).toHaveBeenCalledOnce();
+			expect(later).toHaveBeenCalledOnce();
+			expect(failed).not.toHaveBeenCalled();
+			expect(removed).not.toHaveBeenCalled();
+			runtime.releaseEventBusSubscriptions();
+			eventBus.emit("ping", {});
+			expect(previous).toHaveBeenCalledOnce();
+			expect(later).toHaveBeenCalledOnce();
 		});
 	});
 

@@ -1,9 +1,45 @@
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { applyMigrations, createNodeSqliteFactory } from "../src/index.ts";
+import { applyMigrations, createNodeSqliteFactory, type SqliteDatabase } from "../src/index.ts";
 import { createTempDir } from "./test-utils.ts";
 
 describe("SQLite migrations", () => {
+	it.each([0, 1, 2])(
+		"rechecks migrations when an independent initializer wins transaction admission (%i)",
+		async () => {
+			const databasePath = join(createTempDir(), "sessions.sqlite");
+			const db = await createNodeSqliteFactory().open(databasePath);
+			let raced = false;
+			const wrapper: SqliteDatabase = {
+				exec: (sql) => db.exec(sql),
+				prepare: (sql) => db.prepare(sql),
+				close: () => db.close(),
+				transaction(fn) {
+					if (!raced) {
+						raced = true;
+						const winner = spawnSync(
+							process.execPath,
+							[fileURLToPath(new URL("./support/migrate-worker.ts", import.meta.url)), databasePath],
+							{ encoding: "utf8", timeout: 20_000 },
+						);
+						expect(winner.error).toBeUndefined();
+						expect(winner.status, winner.stderr).toBe(0);
+					}
+					return db.transaction(fn);
+				},
+			};
+			try {
+				await applyMigrations(wrapper);
+				expect(raced).toBe(true);
+				expect(db.prepare("SELECT id FROM migrations").all()).toEqual([{ id: "001_initial.sql" }]);
+			} finally {
+				db.close();
+			}
+		},
+	);
+
 	it("applies the current schema once and records its migration", async () => {
 		const databasePath = join(createTempDir(), "sessions.sqlite");
 		const db = await createNodeSqliteFactory().open(databasePath);

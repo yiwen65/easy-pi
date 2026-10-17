@@ -173,18 +173,23 @@ export async function toModelContent(
 	return (await Promise.all(blocks.map((block) => blockToContent(server, block, options)))).flat();
 }
 
-/** Explicit MCP error responses prove the execution result; transport exceptions do not. */
+/** MCP errors are confirmed unless the server explicitly reports an unknown effect. */
 export async function convertMcpResult(
 	server: string,
 	tool: string,
 	result: CallToolResult,
 	options: ConvertMcpResultOptions = {},
 ): Promise<AgentToolResult<McpToolDetails>> {
+	// Remote metadata can reduce certainty, never prove an operation did not start.
+	const unknownOutcome = result._meta?.["io.easy-pi/execution-outcome"] === "unknown";
 	// Without content blocks, toLlmContent falls back to the structured content as JSON.
 	const converted: (TextContent | ImageContent)[] =
 		result.content.length > 0 ? await toModelContent(server, result.content, options) : toLlmContent(result);
-	if (result.isError && textOf(converted) === "") {
-		converted.push({ type: "text", text: `MCP tool ${server}/${tool} returned an error` });
+	if ((result.isError || unknownOutcome) && textOf(converted) === "") {
+		converted.push({
+			type: "text",
+			text: `MCP tool ${server}/${tool} returned ${unknownOutcome ? "an unknown execution outcome" : "an error"}`,
+		});
 	}
 	const { content, fullOutputPath } = await limitMcpContent(converted, options.saveOutput);
 	const details = { server, tool, ...(fullOutputPath ? { fullOutputPath } : {}) };
@@ -200,8 +205,11 @@ export async function convertMcpResult(
 			return { ...publicBlock, resource };
 		}),
 	};
-	if (result.isError) {
-		throw new AgentToolError(textOf(content), details, { executionOutcome: "confirmed", structuredContent });
+	if (result.isError || unknownOutcome) {
+		throw new AgentToolError(textOf(content), details, {
+			executionOutcome: unknownOutcome ? undefined : "confirmed",
+			structuredContent,
+		});
 	}
 	return { content, details, structuredContent };
 }

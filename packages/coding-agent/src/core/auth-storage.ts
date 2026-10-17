@@ -3,7 +3,13 @@
  * Provider auth orchestration belongs to ModelRuntime and pi-ai Models.
  */
 
-import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
+import type {
+	ApiKeyCredential,
+	AuthOperationOptions,
+	Credential,
+	CredentialInfo,
+	CredentialStore,
+} from "@earendil-works/pi-ai";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -15,6 +21,25 @@ import { stripBom } from "../utils/text.ts";
 import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
+
+/** A configured key expression is unavailable, not an absent credential eligible for ambient auth. */
+export class StoredApiKeyUnavailableError extends Error {
+	readonly providerId: string;
+
+	constructor(providerId: string) {
+		super(`Failed to resolve stored API key for provider "${providerId}"`);
+		this.name = "StoredApiKeyUnavailableError";
+		this.providerId = providerId;
+	}
+}
+
+function resolveStoredApiKey(provider: string, credential: ApiKeyCredential): ApiKeyCredential {
+	if (credential.key === undefined) return credential;
+	const key = resolveConfigValue(credential.key, credential.env);
+	// An explicit but broken expression must not become an absent key and select ambient auth.
+	if (!key) throw new StoredApiKeyUnavailableError(provider);
+	return { ...credential, key };
+}
 
 type LockResult<T> = {
 	result: T;
@@ -262,10 +287,10 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 		const credential = this.load()[providerId];
 		options?.signal?.throwIfAborted();
 		if (!credential) return undefined;
-		if (credential.type !== "api_key" || !credential.key || isCommandConfigValue(credential.key)) {
+		if (credential.type !== "api_key" || credential.key === undefined || isCommandConfigValue(credential.key)) {
 			return structuredClone(credential);
 		}
-		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+		return resolveStoredApiKey(providerId, credential);
 	}
 
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
@@ -444,8 +469,7 @@ export class AuthStorage implements CredentialStore {
 		const credential = (await this.readLatestData(options))[provider];
 		options?.signal?.throwIfAborted();
 		if (credential?.type !== "api_key") return credential;
-		if (credential.key === undefined) return credential;
-		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+		return resolveStoredApiKey(provider, credential);
 	}
 
 	async modify(

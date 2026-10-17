@@ -10,9 +10,22 @@ const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
 const STDIN_CLOSE_GRACE_MS = 500;
 const USE_PROCESS_GROUPS = process.platform !== "win32";
 
-/** Process groups of running servers, killed if the host exits without closing them. */
+/** Owned groups stay registered until the group is gone, not merely until its leader exits. */
 const liveProcessGroups = new Set<number>();
 let exitHookInstalled = false;
+
+function processGroupExists(pid: number | undefined): boolean {
+	if (pid === undefined || !liveProcessGroups.has(pid)) return false;
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		// Forget an absent group permanently: a later close must not signal a reused identity.
+		liveProcessGroups.delete(pid);
+		return false;
+	}
+}
 
 function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
 	const pid = child.pid;
@@ -26,18 +39,17 @@ function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
 		);
 		return;
 	}
-	if (USE_PROCESS_GROUPS && pid !== undefined) {
+	if (USE_PROCESS_GROUPS && pid !== undefined && liveProcessGroups.has(pid)) {
 		try {
-			// Negative pid: the whole group, so wrappers like `npx` or `uvx` do not leave the server behind.
+			// Negative pid: the whole group, including descendants of an exited leader.
 			process.kill(-pid, signal);
 			return;
-		} catch {
-			// The group is gone or was never created; fall back to the direct child.
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+			liveProcessGroups.delete(pid);
 		}
 	}
-	try {
-		child.kill(signal);
-	} catch {}
+	if (child.exitCode === null && child.signalCode === null) child.kill(signal);
 }
 
 function installExitHook(): void {
@@ -46,7 +58,8 @@ function installExitHook(): void {
 	process.once("exit", () => {
 		for (const pid of liveProcessGroups) {
 			try {
-				process.kill(-pid, "SIGTERM");
+				// No asynchronous grace period is possible once the host is exiting.
+				process.kill(-pid, "SIGKILL");
 			} catch {}
 		}
 	});
@@ -73,6 +86,7 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 	private stderrBuffer = Buffer.alloc(0);
 	private started = false;
 	private closed = false;
+	private closePromise: Promise<void> | undefined;
 
 	constructor(options: StdioTransportOptions) {
 		super();
@@ -105,7 +119,11 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		if (USE_PROCESS_GROUPS && pid !== undefined) {
 			installExitHook();
 			liveProcessGroups.add(pid);
-			child.once("exit", () => liveProcessGroups.delete(pid));
+			// A leader can leave live descendants with or without open stdio. Start cleanup
+			// on exit, but keep ownership until the entire group has disappeared.
+			child.once("exit", () => {
+				void this.close().catch((error) => this.emitError(error));
+			});
 		}
 		child.stdout?.on("data", (chunk: Buffer | string) => this.handleStdout(chunk));
 		child.stdout?.on("error", (error) => this.emitError(error));
@@ -149,33 +167,63 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		});
 	}
 
-	async close(): Promise<void> {
-		if (this.closed) return;
+	close(): Promise<void> {
+		if (this.closePromise) return this.closePromise;
 		this.closed = true;
+		this.closePromise = this.closeChild();
+		return this.closePromise;
+	}
+
+	private async closeChild(): Promise<void> {
 		const child = this.child;
 		if (!child) {
 			this.emitClose();
 			return;
 		}
-		if (child.exitCode !== null || child.signalCode !== null) {
-			child.stdin?.end();
-			return;
-		}
-		// Shutdown per the spec: close stdin and let the server exit, then SIGTERM, then SIGKILL.
+		// Shutdown per the spec: close stdin, then TERM, then KILL. Leader/stdio exit does
+		// not cancel escalation: a descendant may ignore TERM and hold no inherited pipes.
 		const closeTimeoutMs = this.options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
-		await new Promise<void>((resolve) => {
-			const timers: ReturnType<typeof setTimeout>[] = [];
-			child.once("close", () => {
-				for (const timer of timers) clearTimeout(timer);
-				// Children of the server that ignored stdin closing would otherwise outlive it.
-				killProcessTree(child, "SIGTERM");
-				resolve();
-			});
-			const grace = Math.min(STDIN_CLOSE_GRACE_MS, closeTimeoutMs);
-			timers.push(setTimeout(() => killProcessTree(child, "SIGTERM"), grace));
-			timers.push(setTimeout(() => killProcessTree(child, "SIGKILL"), grace + closeTimeoutMs));
+		const leaderExited = child.exitCode !== null || child.signalCode !== null;
+		const grace = leaderExited ? 0 : Math.min(STDIN_CLOSE_GRACE_MS, closeTimeoutMs);
+		const terminateAt = Date.now() + grace;
+		const killAt = terminateAt + closeTimeoutMs;
+		const deadline = killAt + Math.max(closeTimeoutMs, 1_000);
+		let terminated = false;
+		let killed = false;
+		let stdioClosed = false;
+		const onClose = () => {
+			stdioClosed = true;
+		};
+		child.once("close", onClose);
+		try {
 			child.stdin?.end();
-		});
+			while (true) {
+				const groupAlive = processGroupExists(child.pid);
+				const now = Date.now();
+				if ((child.exitCode !== null || child.signalCode !== null) && !groupAlive) {
+					// Process exit can precede the final stdout data. Only `close` proves it drained.
+					if (stdioClosed) return;
+					if (now >= deadline) throw new Error("MCP stdio streams did not close after process exit");
+				} else {
+					if (!terminated && now >= terminateAt) {
+						killProcessTree(child, "SIGTERM");
+						terminated = true;
+					}
+					if (!killed && now >= killAt) {
+						killProcessTree(child, "SIGKILL");
+						killed = true;
+					}
+					if (now >= deadline) throw new Error("MCP stdio process group did not exit after SIGKILL");
+				}
+				await new Promise<void>((resolve) => setTimeout(resolve, 10));
+			}
+		} finally {
+			child.off("close", onClose);
+			// A failed cleanup is reported to callers, not retried at a much later host exit
+			// when this numeric identity may have been reused.
+			if (child.pid !== undefined) liveProcessGroups.delete(child.pid);
+			this.emitClose();
+		}
 	}
 
 	private handleStdout(chunk: Buffer | string): void {

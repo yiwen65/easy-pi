@@ -398,8 +398,8 @@ export class AgentHarness implements AgentLane {
 	private driverPromise: Promise<void> | undefined;
 	/** Resolves once the active operation's durable intent record is committed. */
 	private operationReady: Promise<void> | undefined;
-	/** Serializes queue consumption and cancellation so they never interleave into corruption. */
-	private queueLock: Promise<void> = Promise.resolve();
+	/** Serializes control admission, queue placement/cancellation, and terminal records. */
+	private controlLock: Promise<void> = Promise.resolve();
 	private readonly unsettledTools = new Set<string>();
 	private reconciling = false;
 	private closePromise: Promise<void> | undefined;
@@ -473,22 +473,17 @@ export class AgentHarness implements AgentLane {
 				new InvalidMessage({ lane: "main", reason: "empty", message: "Prompt requires at least one message" }),
 			);
 		}
-		if (this.activeOperation) {
-			return Result.err(
-				new LaneBusy({
-					lane: "main",
-					operationId: this.activeOperation.id,
-					operationKind: this.activeOperation.kind,
-					message: `Lane main is busy with ${this.activeOperation.kind} ${this.activeOperation.id}`,
-				}),
-			);
-		}
+		const busy = this.busyError();
+		if (busy) return Result.err(busy);
+		const settleDriver = this.reserveDriver();
 		const runId = this.nextId();
 		// Mark the lane busy before the first await so a concurrent prompt()
 		// observes LaneBusy instead of racing the durable append.
 		this.activeOperation = { id: runId, kind: "run" };
 		this.activeAbort = new AbortController();
-		const ready = (async () => {
+		let accepted = false;
+		const ready = this.withControlLock(async () => {
+			// Capture and place nextRun input on the same line as cancellation.
 			// Commands queued via nextRun are captured as this run's first messages.
 			const pendingNextRun = (await this.reduceCurrent()).laneState.pendingNextRun;
 			const initialMessages = [
@@ -506,26 +501,21 @@ export class AgentHarness implements AgentLane {
 				sourceLeafId: this.laneLeaf,
 				intent: { kind: "run", originalPrompt: messages, initialMessages },
 			});
-		})();
+			accepted = true;
+			for (const target of initialMessages) await this.appendOwnedEntry(target);
+		});
 		this.operationReady = ready;
 		try {
 			await ready;
-		} catch (error) {
-			this.activeOperation = undefined;
-			this.activeAbort = undefined;
-			throw error;
-		}
-		this.eventBus.emit({ type: "run_start", lane: "main", runId });
-		const driving = this.drive();
-		this.driverPromise = driving.then(
-			() => undefined,
-			() => undefined,
-		);
-		try {
-			const outcome = await driving;
+			this.eventBus.emit({ type: "run_start", lane: "main", runId });
+			const outcome = await this.drive();
 			return Result.ok({ runId, ...outcome });
 		} finally {
-			this.driverPromise = undefined;
+			if (!accepted) {
+				this.activeOperation = undefined;
+				this.activeAbort = undefined;
+			}
+			settleDriver();
 		}
 	}
 	async skill(name: string, additionalInstructions?: string): Promise<RunResult> {
@@ -549,10 +539,12 @@ export class AgentHarness implements AgentLane {
 		if (this.driveMode === "manual") throw new HarnessNotImplemented("compact.manual");
 		const busy = this.busyError();
 		if (busy) return Result.err(busy);
+		const settleDriver = this.reserveDriver();
 		const runId = this.nextId();
 		const resultEntryId = this.nextId();
 		this.activeOperation = { id: runId, kind: "compaction" };
 		this.activeAbort = new AbortController();
+		let accepted = false;
 		const ready = (async () => {
 			await this.durableSession.appendRecord({
 				type: "operation_started",
@@ -569,21 +561,15 @@ export class AgentHarness implements AgentLane {
 		this.operationReady = ready;
 		try {
 			await ready;
-		} catch (error) {
-			this.activeOperation = undefined;
-			this.activeAbort = undefined;
-			throw error;
-		}
-		const driving = this.driveCompaction();
-		this.driverPromise = driving.then(
-			() => undefined,
-			() => undefined,
-		);
-		try {
-			const outcome = await driving;
+			accepted = true;
+			const outcome = await this.driveCompaction();
 			return Result.ok({ runId, ...outcome });
 		} finally {
-			this.driverPromise = undefined;
+			if (!accepted) {
+				this.activeOperation = undefined;
+				this.activeAbort = undefined;
+			}
+			settleDriver();
 		}
 	}
 	async navigateTree(targetId: string | null, options?: NavigateOptions): Promise<NavigationResult> {
@@ -591,14 +577,20 @@ export class AgentHarness implements AgentLane {
 		if (this.driveMode === "manual") throw new HarnessNotImplemented("navigateTree.manual");
 		const busy = this.busyError();
 		if (busy) return Result.err(busy);
-		if (targetId !== null && !(await this.durableSession.getEntry(targetId))) {
-			return Result.err(new UnknownTarget({ targetId, message: `Entry not found: ${targetId}` }));
-		}
+		const settleDriver = this.reserveDriver();
 		const runId = this.nextId();
 		const summaryEntryId = options?.summarize ? this.nextId() : undefined;
 		this.activeOperation = { id: runId, kind: "navigation" };
 		this.activeAbort = new AbortController();
+		let targetExists = true;
+		let accepted = false;
 		const ready = (async () => {
+			if (targetId !== null && !(await this.durableSession.getEntry(targetId))) {
+				targetExists = false;
+				this.activeOperation = undefined;
+				this.activeAbort = undefined;
+				return;
+			}
 			await this.durableSession.appendRecord({
 				type: "operation_started",
 				id: runId,
@@ -617,31 +609,41 @@ export class AgentHarness implements AgentLane {
 		this.operationReady = ready;
 		try {
 			await ready;
-		} catch (error) {
-			this.activeOperation = undefined;
-			this.activeAbort = undefined;
-			throw error;
-		}
-		const driving = this.driveNavigation();
-		this.driverPromise = driving.then(
-			() => undefined,
-			() => undefined,
-		);
-		try {
-			const outcome = await driving;
+			if (!targetExists) {
+				return Result.err(new UnknownTarget({ targetId: targetId!, message: `Entry not found: ${targetId}` }));
+			}
+			accepted = true;
+			const outcome = await this.driveNavigation();
 			return Result.ok({ runId, ...outcome });
 		} finally {
-			this.driverPromise = undefined;
+			if (!accepted) {
+				this.activeOperation = undefined;
+				this.activeAbort = undefined;
+			}
+			settleDriver();
 		}
 	}
 
+	/** Reserve synchronously, including preparation, so admission and idle waiting agree. */
+	private reserveDriver(): () => void {
+		let settle!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			settle = resolve;
+		});
+		this.driverPromise = pending;
+		return () => {
+			if (this.driverPromise === pending) this.driverPromise = undefined;
+			settle();
+		};
+	}
+
 	private busyError(): LaneBusy | undefined {
-		if (!this.activeOperation) return undefined;
+		if (!this.activeOperation && !this.driverPromise && !this.reconciling) return undefined;
 		return new LaneBusy({
 			lane: "main",
-			operationId: this.activeOperation.id,
-			operationKind: this.activeOperation.kind,
-			message: `Lane main is busy with ${this.activeOperation.kind} ${this.activeOperation.id}`,
+			operationId: this.activeOperation?.id ?? "unknown",
+			operationKind: this.activeOperation?.kind ?? "run",
+			message: "Lane main already owns an operation or driver reservation",
 		});
 	}
 	async resume(): Promise<ResumeResult> {
@@ -657,48 +659,55 @@ export class AgentHarness implements AgentLane {
 				}),
 			);
 		}
-		const reduction = await this.reduceCurrent();
-		if (this.closed) throw new HarnessClosed();
-		const op = reduction.laneState.operation;
-		if (!op) {
-			return Result.err(new NothingToResume({ lane: "main", message: "No suspended operation on lane main" }));
-		}
-		if (op.kind === "run") {
-			const missing = this.findMissingIdentities(reduction);
-			if (missing.tools.length > 0 || missing.models.length > 0) {
-				return Result.err(
-					new MissingIdentities({
-						lane: "main",
-						tools: missing.tools,
-						models: missing.models,
-						message: "Suspended run references tools or models that are not available",
-					}),
-				);
-			}
-		}
-		this.activeOperation = { id: op.id, kind: op.kind };
-		this.activeAbort = new AbortController();
-		if (op.pausing) {
-			// Resume clears the interrupt intent; queue state is untouched.
-			await this.durableSession.appendRecord({
-				type: "pause_cleared",
-				id: this.nextId(),
-				lane: "main",
-				runId: op.id,
-			});
-		}
-		if (this.closed) throw new HarnessClosed();
-		const driving =
-			op.kind === "run" ? this.drive() : op.kind === "compaction" ? this.driveCompaction() : this.driveNavigation();
-		this.driverPromise = driving.then(
-			() => undefined,
-			() => undefined,
-		);
+		const settleDriver = this.reserveDriver();
 		try {
-			const outcome = await driving;
+			const preparing = this.withControlLock(() => this.reduceCurrent());
+			this.operationReady = preparing.then(
+				() => undefined,
+				() => undefined,
+			);
+			const reduction = await preparing;
+			if (this.closed) throw new HarnessClosed();
+			const op = reduction.laneState.operation;
+			if (!op) {
+				return Result.err(new NothingToResume({ lane: "main", message: "No suspended operation on lane main" }));
+			}
+			if (op.kind === "run") {
+				const missing = this.findMissingIdentities(reduction);
+				if (missing.tools.length > 0 || missing.models.length > 0) {
+					return Result.err(
+						new MissingIdentities({
+							lane: "main",
+							tools: missing.tools,
+							models: missing.models,
+							message: "Suspended run references tools or models that are not available",
+						}),
+					);
+				}
+			}
+			this.activeOperation = { id: op.id, kind: op.kind };
+			this.activeAbort = new AbortController();
+			if (op.aborting) this.activeAbort.abort();
+			if (op.pausing) {
+				// Resume clears the interrupt intent; queue state is untouched.
+				await this.withControlLock(async () => {
+					await this.durableSession.appendRecord({
+						type: "pause_cleared",
+						id: this.nextId(),
+						lane: "main",
+						runId: op.id,
+					});
+				});
+			}
+			if (this.closed) throw new HarnessClosed();
+			const outcome = await (op.kind === "run"
+				? this.drive()
+				: op.kind === "compaction"
+					? this.driveCompaction()
+					: this.driveNavigation());
 			return Result.ok({ operation: op.kind, runId: op.id, ...outcome } as ResumeOutcome);
 		} finally {
-			this.driverPromise = undefined;
+			settleDriver();
 		}
 	}
 	async pause(): Promise<PauseResult> {
@@ -708,10 +717,16 @@ export class AgentHarness implements AgentLane {
 		}
 		const runId = this.activeOperation.id;
 		await this.operationReady;
-		// Durable interrupt intent; the driver suspends at the next safe point.
-		// Unlike abort, queues and in-flight work are preserved for resume().
-		await this.durableSession.appendRecord({ type: "pause_requested", id: this.nextId(), lane: "main", runId });
-		return Result.ok({ runId });
+		return this.withControlLock(async () => {
+			const op = (await this.reduceCurrent()).laneState.operation;
+			if (op?.id !== runId || op.aborting) {
+				return Result.err(new NoActiveRun({ lane: "main", message: "No active run on lane main to pause" }));
+			}
+			// Unlike abort, pause preserves queues and operation ownership.
+			if (!op.pausing)
+				await this.durableSession.appendRecord({ type: "pause_requested", id: this.nextId(), lane: "main", runId });
+			return Result.ok({ runId });
+		});
 	}
 
 	/** Explicit operator verification; never infer that an unknown side effect failed. */
@@ -763,25 +778,40 @@ export class AgentHarness implements AgentLane {
 			return Result.err(new NoActiveOperation({ lane: "main", message: "No active operation on lane main" }));
 		}
 		const runId = this.activeOperation.id;
-		// The intent record must be durable before the abort record references it.
-		await this.operationReady;
-		// Cancel has priority over steer/follow-up: the abort intent is durable
-		// first, then undelivered queue items are cancelled (by the driver when one
-		// is active, otherwise here) and their messages returned to the caller.
-		await this.durableSession.appendRecord({ type: "abort_requested", id: this.nextId(), lane: "main", runId });
-		this.activeAbort?.abort();
-		const undelivered = await this.undeliveredQueueItems(runId);
-		if (!this.driverPromise) {
-			await this.cancelUndelivered(runId, [...undelivered.steer, ...undelivered.followUp]);
-			const batch = (await this.reduceCurrent()).laneState.operation?.toolBatch;
-			if (!batch?.calls.some((call) => call.started && !call.resultExists))
-				await this.finishRun(runId, "aborted", {});
+		// A suspended abort owns reconciliation until it finishes; resume cannot race it.
+		const settleDriver = this.driverPromise ? undefined : this.reserveDriver();
+		try {
+			await this.operationReady;
+			const undelivered = await this.withControlLock(async () => {
+				const op = (await this.reduceCurrent()).laneState.operation;
+				if (op?.id !== runId) return undefined;
+				if (!op.aborting)
+					await this.durableSession.appendRecord({
+						type: "abort_requested",
+						id: this.nextId(),
+						lane: "main",
+						runId,
+					});
+				this.activeAbort?.abort();
+				return this.undeliveredQueueItems(runId);
+			});
+			if (!undelivered) {
+				return Result.err(new NoActiveOperation({ lane: "main", message: "No active operation on lane main" }));
+			}
+			if (settleDriver) {
+				await this.cancelUndelivered(runId, [...undelivered.steer, ...undelivered.followUp]);
+				const batch = (await this.reduceCurrent()).laneState.operation?.toolBatch;
+				if (!batch?.calls.some((call) => call.started && !call.resultExists))
+					await this.finishRun(runId, "aborted", {});
+			}
+			return Result.ok({
+				runId,
+				steer: undelivered.steer.map(queuedMessage),
+				followUp: undelivered.followUp.map(queuedMessage),
+			});
+		} finally {
+			settleDriver?.();
 		}
-		return Result.ok({
-			runId,
-			steer: undelivered.steer.map(queuedMessage),
-			followUp: undelivered.followUp.map(queuedMessage),
-		});
 	}
 	async steer(text: string, images?: ImageContent[]): Promise<QueueResult>;
 	async steer(message: AgentMessage): Promise<QueueResult>;
@@ -828,16 +858,27 @@ export class AgentHarness implements AgentLane {
 			// The intent record must be durable before any record that references it.
 			await this.operationReady;
 		}
-		const target = {
-			type: "message",
-			id: this.nextId(),
-			message: messages[0]!,
-		} as ProvisionedEntry<MessageEntry>;
-		const base = { type: "queue_enqueued" as const, id: this.nextId(), lane: "main", target };
-		await this.durableSession.appendRecord(
-			queue === "nextRun" ? { ...base, queue } : { ...base, queue, runId: runId! },
-		);
-		return Result.ok({ entryId: target.id });
+		return this.withControlLock(async () => {
+			if (this.closed) throw new HarnessClosed();
+			if (queue !== "nextRun") {
+				const op = (await this.reduceCurrent()).laneState.operation;
+				if (op?.id !== runId || op?.kind !== "run" || op.aborting) {
+					return Result.err(
+						new NoActiveRun({ lane: "main", message: `${queue} requires an active run on lane main` }),
+					);
+				}
+			}
+			const target = {
+				type: "message",
+				id: this.nextId(),
+				message: messages[0]!,
+			} as ProvisionedEntry<MessageEntry>;
+			const base = { type: "queue_enqueued" as const, id: this.nextId(), lane: "main", target };
+			await this.durableSession.appendRecord(
+				queue === "nextRun" ? { ...base, queue } : { ...base, queue, runId: runId! },
+			);
+			return Result.ok({ entryId: target.id });
+		});
 	}
 
 	async cancelQueued(entryId: string): Promise<CancelQueuedResult> {
@@ -849,7 +890,7 @@ export class AgentHarness implements AgentLane {
 				new UnknownQueueItem({ lane: "main", entryId, message: `No queued item with entry id ${entryId}` }),
 			);
 		}
-		return this.withQueueLock(async () => {
+		return this.withControlLock(async () => {
 			if (await this.durableSession.getEntry(entryId)) {
 				return Result.ok({ outcome: "already_consumed" as const });
 			}
@@ -868,9 +909,9 @@ export class AgentHarness implements AgentLane {
 		});
 	}
 
-	private withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
-		const run = this.queueLock.then(fn, fn);
-		this.queueLock = run.then(
+	private withControlLock<T>(fn: () => Promise<T>): Promise<T> {
+		const run = this.controlLock.then(fn, fn);
+		this.controlLock = run.then(
 			() => undefined,
 			() => undefined,
 		);
@@ -897,8 +938,10 @@ export class AgentHarness implements AgentLane {
 	/** Cancel each still-undelivered queue item; entry existence is re-checked inside the lock. */
 	private async cancelUndelivered(runId: string, items: ProvisionedEntry[]): Promise<void> {
 		for (const target of items) {
-			await this.withQueueLock(async () => {
+			await this.withControlLock(async () => {
 				if (await this.durableSession.getEntry(target.id)) return;
+				const cancelled = await this.durableSession.findRecords({ lane: "main", type: "queue_cancelled" });
+				if (cancelled.some((record) => record.entryId === target.id)) return;
 				await this.durableSession.appendRecord({
 					type: "queue_cancelled",
 					id: this.nextId(),
@@ -924,7 +967,7 @@ export class AgentHarness implements AgentLane {
 	}
 	async waitForIdle(): Promise<void> {
 		if (this.closed) throw new HarnessClosed();
-		await this.driverPromise;
+		while (this.driverPromise) await this.driverPromise;
 	}
 	async runWhenIdle(callback: () => void | Promise<void>): Promise<void> {
 		if (this.closed) throw new HarnessClosed();
@@ -1083,15 +1126,17 @@ export class AgentHarness implements AgentLane {
 		const closing = (async () => {
 			if (this.reconciling) throw new Error("Reconciliation is still writing; session ownership was retained");
 			await this.operationReady;
-			const op = (await this.reduceCurrent()).laneState.operation;
-			if (op?.kind === "run" && !op.pausing)
-				await this.durableSession.appendRecord({
-					type: "pause_requested",
-					id: this.nextId(),
-					lane: "main",
-					runId: op.id,
-				});
-			this.activeAbort?.abort();
+			await this.withControlLock(async () => {
+				const op = (await this.reduceCurrent()).laneState.operation;
+				if (op?.kind === "run" && !op.pausing)
+					await this.durableSession.appendRecord({
+						type: "pause_requested",
+						id: this.nextId(),
+						lane: "main",
+						runId: op.id,
+					});
+				this.activeAbort?.abort();
+			});
 			await this.driverPromise;
 			if (this.unsettledTools.size > 0)
 				throw new Error(
@@ -1281,11 +1326,23 @@ export class AgentHarness implements AgentLane {
 		const branch = await this.durableSession.findEntriesOnBranch({ start: this.laneLeaf ?? undefined });
 		const turn: Entry[] = [];
 		for (const entry of branch) {
+			if (entry.type !== "message" || (entry.message.role !== "assistant" && entry.message.role !== "toolResult")) {
+				this.lastFingerprint = undefined;
+				this.fingerprintRepeats = 0;
+				return false;
+			}
 			turn.push(entry);
-			if (entry.type === "message" && entry.message.role === "assistant") break;
+			if (entry.message.role === "assistant") break;
 		}
 		const assistant = turn.at(-1);
-		if (!assistant || assistant.type !== "message" || assistant.message.role !== "assistant") {
+		if (
+			!assistant ||
+			assistant.type !== "message" ||
+			assistant.message.role !== "assistant" ||
+			!assistant.message.content.some((item) => item.type === "toolCall")
+		) {
+			this.lastFingerprint = undefined;
+			this.fingerprintRepeats = 0;
 			return false;
 		}
 		const signature = turn.map((entry) => fingerprintEntry(entry)).join("\n");
@@ -1299,6 +1356,8 @@ export class AgentHarness implements AgentLane {
 	}
 
 	private async drive(): Promise<RunOutcome> {
+		this.lastFingerprint = undefined;
+		this.fingerprintRepeats = 0;
 		while (true) {
 			const reduction = await this.reduceCurrent();
 			const op = reduction.laneState.operation;
@@ -1308,11 +1367,15 @@ export class AgentHarness implements AgentLane {
 			// Control safe point: an accepted abort takes effect before any further
 			// model request or tool dispatch. The driver owns queue cancellation so
 			// cancellation and consumption never interleave into a corrupt log.
+			// Reconciliation persistence can fail after timeout. A still-live physical
+			// invocation must block replay even when only its start record is durable.
 			const uncertain = op.toolBatch?.calls.find(
 				(call) =>
 					!call.resultExists &&
 					call.started &&
-					(call.reconciliation || (call.started.replay === "never" && !call.retryAuthorized)),
+					(this.unsettledTools.has(call.toolCall.id) ||
+						call.reconciliation ||
+						(call.started.replay === "never" && !call.retryAuthorized)),
 			);
 			if (uncertain) {
 				return {
@@ -1335,7 +1398,6 @@ export class AgentHarness implements AgentLane {
 			// Interrupt: stop driving at this safe point; the operation stays open
 			// and resumable. Abort has priority over pause.
 			if (op.pausing) {
-				this.activeOperation = undefined;
 				this.activeAbort = undefined;
 				this.laneLeaf = await this.durableSession.getLeafId();
 				return { kind: "paused", leafId: this.laneLeaf ?? "" };
@@ -1355,8 +1417,8 @@ export class AgentHarness implements AgentLane {
 				});
 			}
 			if (op.missingInitialMessages.length > 0) {
-				for (const target of op.missingInitialMessages) await this.appendOwnedEntry(target);
-				continue;
+				const applied = await this.drainQueued(op.missingInitialMessages, "all");
+				if (applied) continue;
 			}
 			const batch = op.toolBatch;
 			if (batch?.unresolved) {
@@ -1368,15 +1430,29 @@ export class AgentHarness implements AgentLane {
 					error: { code: "step_failed", message: op.checkpointFailure.errorMessage ?? "Assistant step failed" },
 					finalMessage: op.checkpointFailure,
 				});
-			if (batch && batch.calls.length > 0 && batch.calls.every((call) => call.terminate === true)) {
+			if (
+				batch &&
+				batch.calls.length > 0 &&
+				batch.calls.every((call) => call.terminate === true) &&
+				op.newestOwn?.role === "toolResult"
+			) {
+				if (op.pendingSteer.length > 0 || op.pendingFollowUp.length > 0) {
+					await this.drainQueued(
+						op.pendingSteer.length > 0 ? op.pendingSteer : op.pendingFollowUp,
+						op.pendingSteer.length > 0 ? this.steeringMode : this.followUpMode,
+					);
+					continue;
+				}
 				const assistant = await this.durableSession.getEntry(batch.assistantEntryId);
 				if (assistant?.type !== "message" || assistant.message.role !== "assistant") {
 					throw new HarnessFault("Tool batch anchor entry is missing", undefined);
 				}
-				return await this.finishRun(op.id, "completed", {
+				const finished = await this.finishRun(op.id, "completed", {
 					finalEntryId: this.laneLeaf ?? batch.assistantEntryId,
 					finalMessage: assistant.message,
 				});
+				if (finished) return finished;
+				continue;
 			}
 			const newest = op.newestOwn;
 			if (newest?.type === "message" && newest.role === "assistant") {
@@ -1419,10 +1495,12 @@ export class AgentHarness implements AgentLane {
 					}
 					const entry = await this.durableSession.getEntry(newest.entryId);
 					if (entry?.type === "message" && entry.message.role === "assistant") {
-						return await this.finishRun(op.id, "completed", {
+						const finished = await this.finishRun(op.id, "completed", {
 							finalEntryId: newest.entryId,
 							finalMessage: entry.message,
 						});
+						if (finished) return finished;
+						continue;
 					}
 				}
 			}
@@ -1452,17 +1530,19 @@ export class AgentHarness implements AgentLane {
 		outcome: "completed" | "declined" | "aborted" | "failed",
 		error?: OperationError,
 	): Promise<void> {
-		await this.durableSession.appendRecord({
-			type: "operation_finished",
-			id: this.nextId(),
-			lane: "main",
-			runId,
-			outcome,
-			...(error ? { error } : {}),
+		await this.withControlLock(async () => {
+			await this.durableSession.appendRecord({
+				type: "operation_finished",
+				id: this.nextId(),
+				lane: "main",
+				runId,
+				outcome,
+				...(error ? { error } : {}),
+			});
+			this.activeOperation = undefined;
+			this.activeAbort = undefined;
+			this.laneLeaf = await this.durableSession.getLeafId();
 		});
-		this.activeOperation = undefined;
-		this.activeAbort = undefined;
-		this.laneLeaf = await this.durableSession.getLeafId();
 	}
 
 	private async driveCompaction(): Promise<CompactionOutcome> {
@@ -1643,37 +1723,68 @@ export class AgentHarness implements AgentLane {
 		}
 	}
 
+	private finishRun(
+		runId: string,
+		outcome: "completed",
+		info: { error?: OperationError; finalEntryId?: string; finalMessage?: AssistantMessage },
+	): Promise<RunOutcome | undefined>;
+	private finishRun(
+		runId: string,
+		outcome: "aborted" | "failed",
+		info: { error?: OperationError; finalEntryId?: string; finalMessage?: AssistantMessage },
+	): Promise<RunOutcome>;
 	private async finishRun(
 		runId: string,
 		outcome: "completed" | "aborted" | "failed",
 		info: { error?: OperationError; finalEntryId?: string; finalMessage?: AssistantMessage },
-	): Promise<RunOutcome> {
-		await this.durableSession.appendRecord({
-			type: "operation_finished",
-			id: this.nextId(),
-			lane: "main",
-			runId,
-			outcome,
-			...(info.error ? { error: info.error } : {}),
+	): Promise<RunOutcome | undefined> {
+		return this.withControlLock(async () => {
+			const op = (await this.reduceCurrent()).laneState.operation;
+			if (op?.id !== runId) throw new HarnessFault("Operation finished before its driver", undefined);
+			if (op.aborting) outcome = "aborted";
+			else if (op.pausing) {
+				this.activeAbort = undefined;
+				this.laneLeaf = await this.durableSession.getLeafId();
+				return { kind: "paused", leafId: this.laneLeaf ?? "" };
+			}
+			const pending = await this.undeliveredQueueItems(runId);
+			if (outcome === "completed" && (pending.steer.length > 0 || pending.followUp.length > 0)) return undefined;
+			for (const target of [...pending.steer, ...pending.followUp]) {
+				await this.durableSession.appendRecord({
+					type: "queue_cancelled",
+					id: this.nextId(),
+					lane: "main",
+					runId,
+					entryId: target.id,
+				});
+			}
+			await this.durableSession.appendRecord({
+				type: "operation_finished",
+				id: this.nextId(),
+				lane: "main",
+				runId,
+				outcome,
+				...(info.error ? { error: info.error } : {}),
+			});
+			this.activeOperation = undefined;
+			this.activeAbort = undefined;
+			this.laneLeaf = await this.durableSession.getLeafId();
+			const leafId = this.laneLeaf ?? "";
+			this.eventBus.emit({ type: "run_end", lane: "main", runId, outcome, leafId });
+			if (outcome === "failed") {
+				return {
+					kind: "failed",
+					leafId,
+					error: info.error ?? { code: "unknown", message: "Operation failed" },
+					...(info.finalEntryId ? { finalEntryId: info.finalEntryId } : {}),
+					...(info.finalMessage ? { finalMessage: info.finalMessage } : {}),
+				};
+			}
+			const newest = info.finalMessage ? undefined : await this.newestAssistantMessage();
+			const finalMessage = info.finalMessage ?? newest?.message ?? syntheticAbortedMessage(this.model);
+			const finalEntryId = info.finalEntryId ?? newest?.entryId ?? leafId;
+			return { kind: outcome, leafId, finalEntryId, finalMessage };
 		});
-		this.activeOperation = undefined;
-		this.activeAbort = undefined;
-		this.laneLeaf = await this.durableSession.getLeafId();
-		const leafId = this.laneLeaf ?? "";
-		this.eventBus.emit({ type: "run_end", lane: "main", runId, outcome, leafId });
-		if (outcome === "failed") {
-			return {
-				kind: "failed",
-				leafId,
-				error: info.error ?? { code: "unknown", message: "Operation failed" },
-				...(info.finalEntryId ? { finalEntryId: info.finalEntryId } : {}),
-				...(info.finalMessage ? { finalMessage: info.finalMessage } : {}),
-			};
-		}
-		const newest = info.finalMessage ? undefined : await this.newestAssistantMessage();
-		const finalMessage = info.finalMessage ?? newest?.message ?? syntheticAbortedMessage(this.model);
-		const finalEntryId = info.finalEntryId ?? newest?.entryId ?? leafId;
-		return { kind: outcome, leafId, finalEntryId, finalMessage };
 	}
 
 	private async newestAssistantMessage(): Promise<{ entryId: string; message: AssistantMessage } | undefined> {
@@ -1692,6 +1803,7 @@ export class AgentHarness implements AgentLane {
 	}
 
 	private async runAssistantStep(op: NonNullable<LaneState["operation"]>): Promise<void> {
+		const controller = this.activeAbort;
 		const previousCheckpoints = await this.durableSession.findRecords({
 			lane: "main",
 			runId: op.id,
@@ -1724,15 +1836,26 @@ export class AgentHarness implements AgentLane {
 		let attempt = op.step ? op.step.attempts + 1 : 1;
 		const resultEntryId = op.step?.resultEntryId ?? this.nextId();
 		while (true) {
-			await this.durableSession.appendRecord({
-				type: "step_attempt",
-				id: this.nextId(),
-				lane: "main",
-				runId: op.id,
-				step: "assistant",
-				attempt,
-				resultEntryId,
+			const admitted = await this.withControlLock(async () => {
+				if (
+					this.closed ||
+					controller?.signal.aborted ||
+					this.activeOperation?.id !== op.id ||
+					(await this.isAborting(op.id))
+				)
+					return false;
+				await this.durableSession.appendRecord({
+					type: "step_attempt",
+					id: this.nextId(),
+					lane: "main",
+					runId: op.id,
+					step: "assistant",
+					attempt,
+					resultEntryId,
+				});
+				return true;
 			});
+			if (!admitted) return;
 			if (retryOffset > 0 && (!this.retryPolicy.enabled || retryOffset > this.retryPolicy.maxRetries)) {
 				await this.appendOwnedEntry({
 					type: "message",
@@ -1759,16 +1882,31 @@ export class AgentHarness implements AgentLane {
 					? await this.systemPromptOption()
 					: (this.systemPromptOption ?? "");
 			const tools = this.tools.filter((tool) => this.activeToolNames.includes(tool.name));
-			const streamFn = this.streamFn ?? getDefaultStreamFn();
-			const stream = await streamFn(
-				this.model,
-				{ systemPrompt, messages, tools },
-				{
-					...this.streamOptions,
-					reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
-					signal: this.activeAbort?.signal,
-				},
-			);
+			let pendingStream: ReturnType<StreamFn> | undefined;
+			await this.withControlLock(async () => {
+				const aborting = await this.isAborting(op.id);
+				if (
+					this.closed ||
+					controller !== this.activeAbort ||
+					controller?.signal.aborted ||
+					this.activeOperation?.id !== op.id ||
+					aborting
+				)
+					return;
+				const streamFn = this.streamFn ?? getDefaultStreamFn();
+				// Register dispatch on the control line, but never await provider work there.
+				pendingStream = streamFn(
+					this.model,
+					{ systemPrompt, messages, tools },
+					{
+						...this.streamOptions,
+						reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
+						signal: controller?.signal,
+					},
+				);
+			});
+			if (!pendingStream) return;
+			const stream = await pendingStream;
 			const completeItems = new Map<number, AssistantMessage["content"][number]>();
 			let checkpoint: AssistantMessage | undefined;
 			for await (const event of stream) {
@@ -1803,7 +1941,20 @@ export class AgentHarness implements AgentLane {
 				}
 			}
 			const message = await stream.result();
-			if (this.closed && this.activeAbort?.signal.aborted) return;
+			if (this.closed && controller?.signal.aborted) return;
+			// Each settled physical attempt is billable, even when its response is
+			// replaced by a checkpoint or retried under the same logical result id.
+			await this.durableSession.appendRecord({
+				type: "usage",
+				id: this.nextId(),
+				lane: "main",
+				runId: op.id,
+				cause: "assistant",
+				entryId: resultEntryId,
+				attempt,
+				stopReason: message.stopReason as SessionStopReason,
+				usage: stripUndefined(message.usage) as Usage,
+			});
 			if (
 				checkpoint &&
 				isRetryableAssistantError(message) &&
@@ -1844,6 +1995,7 @@ export class AgentHarness implements AgentLane {
 			) {
 				// Bounded retry: same logical step, new physical attempt; the
 				// transient error message is never persisted.
+				if (await this.checkBudgets(op.id)) return;
 				const delayMs = this.retryPolicy.baseDelayMs * 2 ** (attempt - 1);
 				const slept = await sleepAbortable(delayMs, this.activeAbort?.signal);
 				if (slept) {
@@ -1855,30 +2007,29 @@ export class AgentHarness implements AgentLane {
 			// while the durable session contract accepts strict JSON only.
 			const durableMessage = stripUndefined(message) as AssistantMessage;
 			await this.appendOwnedEntry({ type: "message", id: resultEntryId, message: durableMessage });
-			await this.durableSession.appendRecord({
-				type: "usage",
-				id: this.nextId(),
-				lane: "main",
-				runId: op.id,
-				cause: "assistant",
-				entryId: resultEntryId,
-				attempt,
-				stopReason: durableMessage.stopReason as SessionStopReason,
-				usage: durableMessage.usage,
-			});
 			return;
 		}
 	}
 
 	/** Commit queued commands as entries; the entry's existence marks consumption. */
-	private async drainQueued(items: ProvisionedEntry[], mode: QueueMode): Promise<void> {
-		const selected = mode === "all" ? items : items.slice(0, 1);
-		for (const target of selected) {
-			await this.withQueueLock(async () => {
-				if (await this.durableSession.getEntry(target.id)) return;
+	private async drainQueued(items: ProvisionedEntry[], mode: QueueMode): Promise<boolean> {
+		return this.withControlLock(async () => {
+			if (!this.activeOperation || (await this.isAborting(this.activeOperation.id))) return false;
+			const cancelled = await this.durableSession.findRecords({ lane: "main", type: "queue_cancelled" });
+			const cancelledIds = new Set(cancelled.map((record) => record.entryId));
+			let applied = false;
+			for (const target of items) {
+				if (cancelledIds.has(target.id) || (await this.durableSession.getEntry(target.id))) continue;
 				await this.appendOwnedEntry(target as ProvisionedEntry<MessageEntry>);
-			});
-		}
+				applied = true;
+				if (mode === "one-at-a-time") break;
+			}
+			if (applied) {
+				this.lastFingerprint = undefined;
+				this.fingerprintRepeats = 0;
+			}
+			return applied;
+		});
 	}
 
 	/**
@@ -1965,6 +2116,7 @@ export class AgentHarness implements AgentLane {
 					reason: "Authorized retry was dispatched; its result is unknown until committed",
 				});
 			await this.executeToolCall(
+				tool!,
 				runId,
 				call.toolCall,
 				started.effectiveArgs,
@@ -2027,18 +2179,17 @@ export class AgentHarness implements AgentLane {
 			operationId,
 			replay: tool.replay ?? defaultReplay(tool),
 		});
-		await this.executeToolCall(runId, call.toolCall, args, resultEntryId, operationId);
+		await this.executeToolCall(tool, runId, call.toolCall, args, resultEntryId, operationId);
 	}
 
 	private async executeToolCall(
+		tool: HarnessTool,
 		runId: string,
 		toolCall: AgentToolCall,
 		args: Record<string, unknown>,
 		resultEntryId: string,
 		operationId: string,
 	): Promise<void> {
-		const tool = this.tools.find((candidate) => candidate.name === toolCall.name);
-		if (!tool) throw new HarnessFault(`Tool ${toolCall.name} disappeared during execution`, undefined);
 		const contract = tool.contract;
 		const replaySafe = (tool.replay ?? defaultReplay(tool)) === "safe";
 		// Retry budgets apply only to calls that are safe to repeat.
@@ -2065,7 +2216,11 @@ export class AgentHarness implements AgentLane {
 					...errorToolResult(toolCall, error instanceof Error ? error.message : String(error)),
 					details: error instanceof AgentToolError ? error.details : {},
 				}) as ToolResultMessage;
-				const outcomeKnown = getToolErrorOutcome(error, toolCall.name, args, tool) !== "unknown";
+				// Idempotence permits replay after settlement, not concurrent different
+				// mutations while the timed-out physical invocation still owns resources.
+				const liveMutation =
+					this.unsettledTools.has(toolCall.id) && contract?.readOnly !== true && contract?.sideEffects !== "none";
+				const outcomeKnown = !liveMutation && getToolErrorOutcome(error, toolCall.name, args, tool) !== "unknown";
 				if (
 					!outcomeKnown &&
 					contract?.readOnly !== true &&
@@ -2161,6 +2316,19 @@ export class AgentHarness implements AgentLane {
 		this.unsettledTools.add(toolCallId);
 		const running = Promise.resolve().then(() => {
 			if (controller.signal.aborted || this.closed) throw new ToolTimeoutError();
+			// The binding whose arguments were validated is the only executable
+			// target. Revocation, replacement or new approval requirements fail closed.
+			if (
+				!this.tools.includes(tool) ||
+				!this.activeToolNames.includes(tool.name) ||
+				tool.contract?.approval === "required"
+			) {
+				throw new AgentToolError(
+					`Tool "${tool.name}" changed or requires approval; the call was not executed`,
+					{},
+					{ executionOutcome: "not_started" },
+				);
+			}
 			return invoke();
 		});
 		void running.then(

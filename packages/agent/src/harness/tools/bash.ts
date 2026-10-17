@@ -168,6 +168,10 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 				inheritEnv: true,
 			};
 			await options?.prepare?.(execution, context, signal);
+			if (signal?.aborted)
+				throw new ExecutionToolError("ABORTED", "Command aborted before launch", undefined, undefined, {
+					executionOutcome: "not_started",
+				});
 			const startedAt = Date.now();
 			const initialDetails: BashToolDetails = {
 				command,
@@ -194,15 +198,18 @@ export function createBashTool<TContext extends ExecutionToolContext = Execution
 					env: execution.env,
 					inheritEnv: execution.inheritEnv,
 					timeoutMs: timeout !== undefined ? timeout * 1000 : undefined,
+					signal,
 				});
 				if (!started.ok) {
 					// Only backend pre-launch evidence proves a failed start had no command effects.
 					throw new ExecutionToolError(
-						started.error.code === "not_found"
-							? "NOT_FOUND"
-							: started.error.code === "limit_reached"
-								? "LIMIT_REACHED"
-								: "SPAWN_ERROR",
+						started.error.code === "aborted" && signal?.aborted
+							? "ABORTED"
+							: started.error.code === "not_found"
+								? "NOT_FOUND"
+								: started.error.code === "limit_reached"
+									? "LIMIT_REACHED"
+									: "SPAWN_ERROR",
 						started.error.message,
 						undefined,
 						started.error,

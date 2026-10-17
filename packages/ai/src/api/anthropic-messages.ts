@@ -41,6 +41,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { lazyStream } from "./lazy.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -419,6 +420,11 @@ async function* iterateSseMessages(
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
 	let buffer = "";
+	let trailingCarriageReturn = false;
+	const onAbort = () => {
+		void reader.cancel().catch(() => {});
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
 
 	try {
 		while (true) {
@@ -427,11 +433,19 @@ async function* iterateSseMessages(
 			}
 
 			const { value, done } = await reader.read();
+			if (signal?.aborted) {
+				throw new Error("Request was aborted");
+			}
 			if (done) {
 				break;
 			}
 
-			buffer += decoder.decode(value, { stream: true });
+			let text = decoder.decode(value, { stream: true });
+			if (text.length > 0) {
+				if (trailingCarriageReturn && text.startsWith("\n")) text = text.slice(1);
+				trailingCarriageReturn = text.endsWith("\r");
+				buffer += text.replace(/\r\n|\r/g, "\n");
+			}
 			let consumed = consumeLine(buffer);
 			while (consumed) {
 				buffer = consumed.rest;
@@ -466,6 +480,10 @@ async function* iterateSseMessages(
 			yield trailingEvent;
 		}
 	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		try {
+			await reader.cancel();
+		} catch {}
 		reader.releaseLock();
 	}
 }
@@ -592,7 +610,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					signal: options?.signal,
 				},
 			);
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			try {
+				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+			} catch (error) {
+				await response.body?.cancel().catch(() => {});
+				throw error;
+			}
 			stream.push({ type: "start", partial: output });
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
@@ -839,50 +862,56 @@ export const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOpti
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	assertRequestAuth(model.provider, options?.apiKey, options?.headers);
+	return lazyStream(
+		model,
+		async () => {
+			assertRequestAuth(model.provider, options?.apiKey, options?.headers);
 
-	const base = {
-		...buildBaseOptions(model, context, options, options?.apiKey),
-		toolChoice: options?.toolChoice,
-	} satisfies AnthropicOptions;
-	if (!options?.reasoning) {
-		return stream(model, context, {
-			...base,
-			refusalFallbacks: options?.refusalFallbacks,
-			thinkingEnabled: false,
-		} satisfies AnthropicOptions);
-	}
+			const base = {
+				...buildBaseOptions(model, context, options, options?.apiKey),
+				toolChoice: options?.toolChoice,
+			} satisfies AnthropicOptions;
+			if (!options?.reasoning) {
+				return stream(model, context, {
+					...base,
+					refusalFallbacks: options?.refusalFallbacks,
+					thinkingEnabled: false,
+				} satisfies AnthropicOptions);
+			}
 
-	// For models with adaptive thinking: use an effort level.
-	// For older models: use budget-based thinking.
-	if (model.compat?.forceAdaptiveThinking === true) {
-		const effort = mapThinkingLevelToEffort(model, options.reasoning);
-		return stream(model, context, {
-			...base,
-			refusalFallbacks: options?.refusalFallbacks,
-			thinkingEnabled: true,
-			effort,
-		} satisfies AnthropicOptions);
-	}
+			// For models with adaptive thinking: use an effort level.
+			// For older models: use budget-based thinking.
+			if (model.compat?.forceAdaptiveThinking === true) {
+				const effort = mapThinkingLevelToEffort(model, options.reasoning);
+				return stream(model, context, {
+					...base,
+					refusalFallbacks: options?.refusalFallbacks,
+					thinkingEnabled: true,
+					effort,
+				} satisfies AnthropicOptions);
+			}
 
-	// Undefined means the caller did not request an output cap; let the helper use the model cap.
-	// Do not coerce to 0 here, or the thinking budget would become the entire max_tokens value.
-	const adjusted = adjustMaxTokensForThinking(
-		base.maxTokens,
-		model.maxTokens,
-		options.reasoning,
-		options.thinkingBudgets,
+			// Undefined means the caller did not request an output cap; let the helper use the model cap.
+			// Do not coerce to 0 here, or the thinking budget would become the entire max_tokens value.
+			const adjusted = adjustMaxTokensForThinking(
+				base.maxTokens,
+				model.maxTokens,
+				options.reasoning,
+				options.thinkingBudgets,
+			);
+
+			const maxTokens = clampMaxTokensToContext(model, context, adjusted.maxTokens);
+
+			return stream(model, context, {
+				...base,
+				refusalFallbacks: options?.refusalFallbacks,
+				maxTokens,
+				thinkingEnabled: true,
+				thinkingBudgetTokens: Math.min(adjusted.thinkingBudget, Math.max(0, maxTokens - 1024)),
+			} satisfies AnthropicOptions);
+		},
+		options?.signal,
 	);
-
-	const maxTokens = clampMaxTokensToContext(model, context, adjusted.maxTokens);
-
-	return stream(model, context, {
-		...base,
-		refusalFallbacks: options?.refusalFallbacks,
-		maxTokens,
-		thinkingEnabled: true,
-		thinkingBudgetTokens: Math.min(adjusted.thinkingBudget, Math.max(0, maxTokens - 1024)),
-	} satisfies AnthropicOptions);
 };
 
 function isOAuthToken(apiKey: string): boolean {

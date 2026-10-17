@@ -66,11 +66,101 @@ test("preserves CLI errors and never retries an uncertain timeout", async () => 
 	try {
 		const stale = await client.callTool({ name: "desktop_click", arguments: { ref_id: "@sabc:e1" } });
 		assert.equal(stale.structuredContent.error.code, "STALE_REF");
+		assert.equal(stale._meta?.["io.easy-pi/execution-outcome"], undefined);
 		const timeout = await client.callTool({ name: "desktop_click", arguments: { ref_id: "@sabc:e1" } });
 		assert.equal(timeout.isError, true);
+		assert.equal(timeout._meta?.["io.easy-pi/execution-outcome"], "unknown");
 		assert.match(timeout.content[0].text, /unknown; observe before retrying/);
 		assert.equal(calls, 2);
 	} finally { await close(); }
+});
+
+test("malformed or interrupted CLI responses explicitly retain unknown effects", async () => {
+	const failures = [
+		async () => ({ stdout: "not json" }),
+		async () => ({ stdout: JSON.stringify({ message: "missing envelope" }) }),
+		async () => { throw Object.assign(new Error("killed"), { killed: true, code: 1, stdout: success.stdout }); },
+		async () => { throw Object.assign(new Error("interrupted"), { signal: "SIGTERM", code: 1, stdout: success.stdout }); },
+		async () => { throw Object.assign(new Error("exit"), { code: 1, stdout: "malformed" }); },
+	];
+	for (const execute of failures) {
+		const { client, close } = await connect(execute);
+		try {
+			const result = await client.callTool({ name: "desktop_click", arguments: { ref_id: "@sabc:e1" } });
+			assert.equal(result.isError, true);
+			assert.equal(result._meta?.["io.easy-pi/execution-outcome"], "unknown");
+		} finally { await close(); }
+	}
+});
+
+for (const [name, args] of [
+	["desktop_click", { ref_id: "@sabc:e1" }],
+	["desktop_type", { ref_id: "@sabc:e1", text: "cancelled" }],
+	["desktop_batch", { actions: [{ command: "click", args: { ref_id: "@sabc:e1" } }] }],
+]) {
+	test(`cancellation prevents queued ${name} from starting`, async () => {
+		const started = Promise.withResolvers();
+		const release = Promise.withResolvers();
+		const invocations = [];
+		const { client, close } = await connect(async (_binary, argv) => {
+			invocations.push(argv);
+			if (invocations.length === 1) {
+				started.resolve();
+				await release.promise;
+			}
+			return success;
+		});
+		try {
+			const first = client.callTool({ name: "desktop_status", arguments: {} });
+			await started.promise;
+			const controller = new AbortController();
+			const queued = client.callTool({ name, arguments: args }, undefined, { signal: controller.signal });
+			const cancelled = assert.rejects(queued, /cancelled/);
+			await new Promise((done) => setImmediate(done));
+			controller.abort(new Error("cancelled"));
+			await cancelled;
+			release.resolve();
+			await first;
+			// A later request acts as a barrier behind the cancelled queue slot.
+			await client.callTool({ name: "desktop_status", arguments: {} });
+			assert.equal(invocations.length, 2);
+			assert.ok(invocations.every((argv) => argv.at(-1) === "status"));
+		} finally { release.resolve(); await close(); }
+	});
+}
+
+test("active request cancellation reaches execFile and leaves the queue usable", async () => {
+	const started = Promise.withResolvers();
+	const release = Promise.withResolvers();
+	let activeSignal;
+	let calls = 0;
+	const { client, close } = await connect(async (_binary, _argv, options) => {
+		if (++calls === 1) {
+			activeSignal = options.signal;
+			started.resolve();
+			await release.promise;
+			throw Object.assign(new Error("aborted"), { code: "ABORT_ERR" });
+		}
+		return success;
+	});
+	const controller = new AbortController();
+	const active = client.callTool({ name: "desktop_click", arguments: { ref_id: "@sabc:e1" } }, undefined, { signal: controller.signal });
+	const cancelled = assert.rejects(active, /cancelled/);
+	try {
+		await started.promise;
+		assert.ok(activeSignal instanceof AbortSignal);
+		controller.abort(new Error("cancelled"));
+		await cancelled;
+		assert.equal(activeSignal.aborted, true);
+		release.resolve();
+		assert.equal((await client.callTool({ name: "desktop_status", arguments: {} })).isError, false);
+		assert.equal(calls, 2);
+	} finally {
+		controller.abort(new Error("cancelled"));
+		release.resolve();
+		await cancelled;
+		await close();
+	}
 });
 
 test("concurrent requests are serialized", async () => {

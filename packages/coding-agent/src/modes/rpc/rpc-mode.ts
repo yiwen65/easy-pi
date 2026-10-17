@@ -56,6 +56,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
+	let bindingSession: Promise<void> | undefined;
+	let activeCommands = 0;
+	let pendingPrompts = 0;
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeRawStdout(serializeJsonLine(obj));
@@ -315,52 +318,70 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	});
 
 	const rebindSession = async (): Promise<void> => {
-		session = runtimeHost.session;
-		await session.bindExtensions({
-			uiContext: createExtensionUIContext(),
-			mode: "rpc",
-			commandContextActions: {
-				waitForIdle: () => session.waitForIdle(),
-				newSession: async (options) => runtimeHost.newSession(options),
-				fork: async (entryId, forkOptions) => {
-					const result = await runtimeHost.fork(entryId, forkOptions);
-					return { cancelled: result.cancelled };
-				},
-				navigateTree: async (targetId, options) => {
-					const result = await session.navigateTree(targetId, {
-						summarize: options?.summarize,
-						customInstructions: options?.customInstructions,
-						replaceInstructions: options?.replaceInstructions,
-						label: options?.label,
-					});
-					return { cancelled: result.cancelled };
-				},
-				switchSession: async (sessionPath, options) => {
-					return runtimeHost.switchSession(sessionPath, options);
-				},
-				reload: async () => {
-					await session.reload();
-				},
-			},
-			shutdownHandler: () => {
-				shutdownRequested = true;
-			},
-			onError: (err) => {
-				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
-			},
-		});
+		// Publish the readiness gate before hooks can emit requests or start recovery.
+		const binding = Promise.resolve().then(async () => {
+			session = runtimeHost.session;
+			unsubscribe?.();
+			unsubscribeBackpressure?.();
+			unsubscribe = session.subscribe((event) => {
+				output(toJsonEvent(event));
+				// Standalone ctx.compact() does not emit agent_settled. The idle gate
+				// still waits for compaction controllers and accepted responses to drain.
+				if (event.type === "agent_settled" || event.type === "compaction_end") {
+					void checkShutdownRequested();
+				}
+			});
+			unsubscribeBackpressure = session.agent.subscribe(async () => {
+				await waitForRawStdoutBackpressure();
+			});
 
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			output(toJsonEvent(event));
-			if (event.type === "agent_settled") {
-				void checkShutdownRequested();
-			}
+			await session.bindExtensions({
+				uiContext: createExtensionUIContext(),
+				mode: "rpc",
+				commandContextActions: {
+					waitForIdle: () => session.waitForIdle(),
+					newSession: async (options) => runtimeHost.newSession(options),
+					fork: async (entryId, forkOptions) => {
+						const result = await runtimeHost.fork(entryId, forkOptions);
+						return { cancelled: result.cancelled };
+					},
+					navigateTree: async (targetId, options) => {
+						const result = await session.navigateTree(targetId, {
+							summarize: options?.summarize,
+							customInstructions: options?.customInstructions,
+							replaceInstructions: options?.replaceInstructions,
+							label: options?.label,
+						});
+						return { cancelled: result.cancelled };
+					},
+					switchSession: async (sessionPath, options) => {
+						return runtimeHost.switchSession(sessionPath, options);
+					},
+					reload: async () => {
+						await session.reload();
+					},
+				},
+				shutdownHandler: () => {
+					shutdownRequested = true;
+					void checkShutdownRequested();
+				},
+				onError: (err) => {
+					output({
+						type: "extension_error",
+						extensionPath: err.extensionPath,
+						event: err.event,
+						error: err.error,
+					});
+				},
+			});
 		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await waitForRawStdoutBackpressure();
-		});
+		bindingSession = binding;
+		try {
+			await binding;
+		} finally {
+			if (bindingSession === binding) bindingSession = undefined;
+		}
+		await checkShutdownRequested();
 	};
 
 	const registerSignalHandlers = (): void => {
@@ -379,9 +400,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 	};
 
-	await rebindSession();
-	registerSignalHandlers();
-
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
 		const id = command.id;
@@ -395,6 +413,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
+				pendingPrompts++;
 				void session
 					.prompt(command.message, {
 						images: command.images,
@@ -407,10 +426,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 							}
 						},
 					})
-					.catch((e) => {
+					.catch((e: unknown) => {
 						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
+							output(error(id, "prompt", e instanceof Error ? e.message : String(e)));
 						}
+					})
+					.finally(async () => {
+						await waitForRawStdoutBackpressure();
+						pendingPrompts--;
+						await checkShutdownRequested();
 					});
 				return undefined;
 			}
@@ -433,9 +457,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "new_session": {
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "new_session", result);
 			}
 
@@ -600,17 +621,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "switch_session": {
 				const result = await runtimeHost.switchSession(command.sessionPath);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "switch_session", result);
 			}
 
 			case "fork": {
 				const result = await runtimeHost.fork(command.entryId);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
 			}
 
@@ -620,9 +635,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}
 				const result = await runtimeHost.fork(leafId, { position: "at" });
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "clone", { cancelled: result.cancelled });
 			}
 
@@ -715,10 +727,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 	};
 
-	/**
-	 * Check if shutdown was requested and perform shutdown if so.
-	 * Called after handling each command when waiting for the next command.
-	 */
 	let detachInput = () => {};
 
 	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
@@ -739,7 +747,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	}
 
 	async function checkShutdownRequested(): Promise<void> {
-		if (!shutdownRequested) return;
+		// ctx.shutdown is deferred; transport signals and EOF still call shutdown directly.
+		if (
+			!shutdownRequested ||
+			bindingSession ||
+			activeCommands > 0 ||
+			pendingPrompts > 0 ||
+			!session.isIdle ||
+			session.isCompacting
+		)
+			return;
 		await shutdown();
 	}
 
@@ -759,13 +776,47 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			return;
 		}
 
-		// Handle extension UI responses
+		const envelope =
+			typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: undefined;
+		const id = typeof envelope?.id === "string" ? envelope.id : undefined;
 		if (
-			typeof parsed === "object" &&
-			parsed !== null &&
-			"type" in parsed &&
-			parsed.type === "extension_ui_response"
+			!envelope ||
+			typeof envelope.type !== "string" ||
+			envelope.type.length === 0 ||
+			("id" in envelope && typeof envelope.id !== "string")
 		) {
+			output(
+				error(
+					id,
+					"parse",
+					"Invalid command envelope: expected an object with a non-empty string type and optional string id",
+				),
+			);
+			await waitForRawStdoutBackpressure();
+			return;
+		}
+
+		// Dialog responses must remain readable while startup/replacement hooks are waiting.
+		if (envelope.type === "extension_ui_response") {
+			if (
+				id === undefined ||
+				("value" in envelope && typeof envelope.value !== "string") ||
+				("confirmed" in envelope && typeof envelope.confirmed !== "boolean") ||
+				("cancelled" in envelope && envelope.cancelled !== true) ||
+				!("value" in envelope || "confirmed" in envelope || "cancelled" in envelope)
+			) {
+				output(
+					error(
+						id,
+						"parse",
+						"Invalid extension UI response: expected a string id and value, confirmed, or cancelled result",
+					),
+				);
+				await waitForRawStdoutBackpressure();
+				return;
+			}
 			const response = parsed as RpcExtensionUIResponse;
 			const pending = pendingExtensionRequests.get(response.id);
 			if (pending) {
@@ -776,22 +827,25 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		const command = parsed as RpcCommand;
+		activeCommands++;
 		try {
+			// Recovery can run during binding. Allow cancellation, but not ordinary commands
+			// against a partially initialized session. Recheck in case another bind replaced it.
+			if (command.type !== "abort" && command.type !== "abort_retry" && command.type !== "abort_bash") {
+				while (bindingSession) await bindingSession;
+			}
+			if (shuttingDown) return;
 			const response = await handleCommand(command);
 			if (response) {
 				output(response);
 				await waitForRawStdoutBackpressure();
 			}
-			await checkShutdownRequested();
 		} catch (commandError: unknown) {
-			output(
-				error(
-					command.id,
-					command.type,
-					commandError instanceof Error ? commandError.message : String(commandError),
-				),
-			);
+			output(error(id, envelope.type, commandError instanceof Error ? commandError.message : String(commandError)));
 			await waitForRawStdoutBackpressure();
+		} finally {
+			activeCommands--;
+			await checkShutdownRequested();
 		}
 	};
 
@@ -809,6 +863,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
+
+	registerSignalHandlers();
+	try {
+		await rebindSession();
+	} catch (startupError) {
+		detachInput();
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		for (const cleanup of signalCleanupHandlers) cleanup();
+		throw startupError;
+	}
 
 	// Keep process alive forever
 	return new Promise(() => {});

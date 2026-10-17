@@ -122,6 +122,7 @@ The input is raw JavaScript (not JSON, no code fence), run as an async function 
 - Await calls that matter; do not fire-and-forget writes. Calls still running when the script ends are signalled to cancel, but their effects are not undone.
 - Catching an error or cancelling a call does not prove an external effect failed or stopped. For unknown outcomes, inspect external state before retrying; do not repeat unresolved effects.
 - Scripts can call only currently authorized tools. Nested calls retain normal validation, hooks and host permissions; the VM does not isolate effects of Bash or MCP tools.
+- Each script admits at most 1024 host calls, including discovery globals. Serialized store writes, including keys and deletions, are capped at 1048576 JavaScript string characters; neither limit rolls back tool effects.
 - Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\`. Text output defaults to 10000 estimated tokens; oversized output is saved to a private temporary file.`;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */

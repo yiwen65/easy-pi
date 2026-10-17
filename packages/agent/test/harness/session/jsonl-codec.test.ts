@@ -171,7 +171,24 @@ describe("JSONL v4 codec", () => {
 					runId: "run",
 					resultEntryId: "assistant",
 					attempt: 1,
-					message: { role: "assistant", isResponseCheckpoint: true, content: [] },
+					message: {
+						role: "assistant",
+						isResponseCheckpoint: true,
+						content: [],
+						api: "openai-responses",
+						provider: "openai",
+						model: "test",
+						timestamp: 3,
+						stopReason: "error",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					},
 				},
 			]) {
 				const mutation = { kind: "record", ...record };

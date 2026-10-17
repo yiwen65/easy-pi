@@ -104,6 +104,8 @@ interface ManagedTask {
 	/** When the next stall notice is due; 0 while stall notices are disabled. */
 	nextStallNoticeAt: number;
 	waiters: Array<() => void>;
+	/** Both the process and output writer have released their ownership. */
+	settled: boolean;
 	settledPromise: Promise<void>;
 	resolveSettled: () => void;
 }
@@ -165,8 +167,12 @@ export class BackgroundTaskManager {
 	/** Start a command directly in the background. stdin is closed (immediate EOF). */
 	async start(
 		command: string,
-		options: { cwd: string; env?: NodeJS.ProcessEnv; inheritEnv?: boolean; timeoutMs?: number },
+		options: { cwd: string; env?: NodeJS.ProcessEnv; inheritEnv?: boolean; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<Result<BackgroundTaskRecord, ExecutionError>> {
+		if (options.signal?.aborted)
+			return err(
+				new ExecutionError("aborted", "Background launch aborted", undefined, { executionOutcome: "not_started" }),
+			);
 		if (!this.accepting) {
 			return err(
 				new ExecutionError("aborted", "Background task manager is shutting down", undefined, {
@@ -190,7 +196,15 @@ export class BackgroundTaskManager {
 				}),
 			);
 		}
+		if (options.signal?.aborted)
+			return err(
+				new ExecutionError("aborted", "Background launch aborted", undefined, { executionOutcome: "not_started" }),
+			);
 		const shell = await this.shell();
+		if (options.signal?.aborted)
+			return err(
+				new ExecutionError("aborted", "Background launch aborted", undefined, { executionOutcome: "not_started" }),
+			);
 		if (!shell.ok)
 			return err(
 				new ExecutionError(shell.error.code, shell.error.message, shell.error, { executionOutcome: "not_started" }),
@@ -376,7 +390,7 @@ export class BackgroundTaskManager {
 		this.accepting = false;
 		this.stopStallSweep();
 		const timeoutMs = options?.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
-		this.shutdownPromise = (async () => {
+		const shutdown = (async () => {
 			const tasks = [...this.tasks.values()];
 			for (const managed of tasks) {
 				if (managed.timeoutId) clearTimeout(managed.timeoutId);
@@ -400,7 +414,7 @@ export class BackgroundTaskManager {
 			const timedOutIds: string[] = [];
 			const remaining: string[] = [];
 			for (const managed of tasks) {
-				if (!isTerminalTaskStatus(managed.record.status)) {
+				if (!managed.settled) {
 					remaining.push(managed.record.id);
 					if (timedOut) timedOutIds.push(managed.record.id);
 				} else if (managed.record.status === "failed") {
@@ -413,7 +427,13 @@ export class BackgroundTaskManager {
 			}
 			return { complete: remaining.length === 0, completed, failed, timedOut: timedOutIds, remaining };
 		})();
-		return this.shutdownPromise;
+		this.shutdownPromise = shutdown;
+		try {
+			return await shutdown;
+		} finally {
+			// Only share an in-flight join. A later call must observe eventual settlement.
+			if (this.shutdownPromise === shutdown) this.shutdownPromise = undefined;
+		}
 	}
 
 	/** Backward-compatible cleanup that now waits for owned output and processes. */
@@ -459,6 +479,7 @@ export class BackgroundTaskManager {
 			timedOut: false,
 			nextStallNoticeAt: this.stallTimeoutMs > 0 ? startedAtMs + this.stallTimeoutMs : 0,
 			waiters: [],
+			settled: false,
 			settledPromise,
 			resolveSettled,
 		};
@@ -512,24 +533,34 @@ export class BackgroundTaskManager {
 	private attach(managed: ManagedTask, child: ChildProcess): void {
 		managed.child = child;
 		if (child.pid) managed.record.pid = child.pid;
-		const drain = (chunk: Buffer): void => {
+		const stdoutDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+		const stderrDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+		const drain = (chunk: Buffer, decoder: typeof stdoutDecoder): void => {
 			managed.totalBytes += chunk.byteLength;
-			managed.tail = appendTail(managed.tail, chunk.toString("utf8"));
+			managed.tail = appendTail(managed.tail, decoder.decode(chunk, { stream: true }));
 			this.writeLog(managed, chunk);
 			// Output is progress: it resets the stall window without touching any timer.
 			const at = this.now();
 			managed.record.lastOutputAt = at;
 			if (this.stallTimeoutMs > 0) managed.nextStallNoticeAt = at + this.stallTimeoutMs;
 		};
-		child.stdout?.on("data", drain);
-		child.stderr?.on("data", drain);
+		child.stdout?.on("data", (chunk: Buffer) => drain(chunk, stdoutDecoder));
+		child.stderr?.on("data", (chunk: Buffer) => drain(chunk, stderrDecoder));
 		const observer = observeChildProcess(child);
-		observer.promise
-			.then(({ exitCode, signal }) => this.finalize(managed, exitCode, signal, undefined))
-			.catch((error: unknown) => {
+		const flush = (): void => {
+			managed.tail = appendTail(managed.tail, stdoutDecoder.decode() + stderrDecoder.decode());
+		};
+		observer.promise.then(
+			({ exitCode, signal }) => {
+				flush();
+				this.finalize(managed, exitCode, signal, undefined);
+			},
+			(error: unknown) => {
+				flush();
 				const cause = toError(error);
 				this.finalize(managed, null, null, cause.message);
-			});
+			},
+		);
 	}
 
 	/**
@@ -666,12 +697,16 @@ export class BackgroundTaskManager {
 		this.stopStallSweepIfIdle();
 		// Only the largest preview any consumer reads is worth keeping once the task settles.
 		managed.tail = trimToLastUtf8Bytes(managed.tail, TERMINAL_TAIL_BYTES, textEncoder);
+		const settle = (): void => {
+			managed.settled = true;
+			managed.resolveSettled();
+		};
 		if (managed.logStream) {
-			if (managed.logStream.closed) managed.resolveSettled();
-			else managed.logStream.once("close", managed.resolveSettled);
+			if (managed.logStream.closed) settle();
+			else managed.logStream.once("close", settle);
 			managed.logStream.end();
 		} else {
-			managed.resolveSettled();
+			settle();
 		}
 		const snapshot = { ...managed.record };
 		for (const waiter of managed.waiters.splice(0)) waiter();

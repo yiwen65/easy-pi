@@ -22,6 +22,7 @@ import {
 	renderMarkdown,
 } from "../src/content-format.ts";
 import { mockBrowser } from "./browser-mock.mjs";
+import { snapshotHost } from "./session-host.mjs";
 
 assert.equal(process.env.PI_WEB_SEARCH_OFFLINE, "1", "Use node test/run.mjs; do not run this file in your normal environment.");
 assert.match(homedir(), /^\/tmp\/pi-web-search-offline-[^/]+\/home$/);
@@ -59,7 +60,7 @@ try {
 }
 assert.deepEqual(loaded.errors, []);
 const tool = loaded.extensions[0].tools.get("web_fetch").definition;
-const owner = { sessionManager: {} };
+const owner = snapshotHost();
 const call = (params, ctx = owner) => tool.execute("wf08-contract", params, undefined, undefined, ctx);
 const dataOf = (result) => result.structuredContent;
 const cleaned = (value) => stripVTControlCharacters(value).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Tool } from "@earendil-works/pi-ai/compat";
+import type { Tool, Usage } from "@earendil-works/pi-ai/compat";
 import { convertToLlm } from "../../messages.ts";
 import { estimateTokens } from "../compaction.ts";
 import type { CompleteFn } from "./types.ts";
@@ -10,7 +10,7 @@ export interface CompactionItemResult {
 	text: string;
 	rejected: boolean;
 	reason?: string;
-	modelUsage?: { input: number; output: number };
+	modelUsage?: Usage;
 	/** The compactor request overflowed or its output was cut short, so its handoff may be partial. */
 	truncatedInput?: boolean;
 }
@@ -193,14 +193,18 @@ export async function generateCompactionItem(options: {
 	const replacedTokens = options.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 	try {
 		const preparedMessages = trimToolResultsForLocalCompaction(options.messages, options.messageTokenBudget);
-		const request = async (messages: readonly AgentMessage[]) =>
-			await options.complete({
+		const request = async (messages: readonly AgentMessage[]) => {
+			options.signal?.throwIfAborted();
+			const response = await options.complete({
 				systemPrompt: options.systemPrompt,
 				messages: [...convertToLlm([...messages]), { role: "user", content: instructions, timestamp: Date.now() }],
 				tools: options.tools,
 				promptVersion: LOCAL_COMPACTION_PROMPT_VERSION,
 				signal: options.signal,
 			});
+			options.signal?.throwIfAborted();
+			return response;
+		};
 		let response = await request(preparedMessages);
 		let sawContextOverflow = response.contextOverflow === true;
 		if (response.contextOverflow) {

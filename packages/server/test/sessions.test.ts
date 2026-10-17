@@ -1,9 +1,16 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ModelMetadata, SessionSnapshot, TranscriptProgress } from "@earendil-works/pi-protocol";
-import { afterEach, describe, expect, test } from "vitest";
+import {
+	ClientMessageDecoder,
+	type ModelMetadata,
+	type SessionSnapshot,
+	type TranscriptProgress,
+} from "@earendil-works/pi-protocol";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { ConnectionState } from "../src/connection.ts";
 import type { CreateSessionOptions, PiServer, PiSessionRuntime } from "../src/index.ts";
+import { LiveSessionManager } from "../src/sessions.ts";
 import {
 	connectUnixTestClient,
 	Deferred,
@@ -15,6 +22,22 @@ import { createUnixServer, type UnixServerOptions } from "../src/transports/unix
 
 const MODEL = TEST_MODEL;
 type Client = ProtocolTestClient;
+
+function readyConnection(id: string): ConnectionState {
+	const handshakeTimeout = setTimeout(() => {}, 0);
+	clearTimeout(handshakeTimeout);
+	return {
+		id,
+		connection: { closed: false, send: async () => {}, close: () => {} },
+		decoder: new ClientMessageDecoder(),
+		sessionIds: new Set(),
+		stage: "ready",
+		disconnected: false,
+		handshakeComplete: true,
+		handshakeTimeout,
+	};
+}
+
 class MemoryService extends TestServerService {}
 
 class OrderedSnapshotService extends MemoryService {
@@ -74,6 +97,81 @@ afterEach(async () => {
 	servers.clear();
 	await Promise.all([...tempDirectories].map((directory) => rm(directory, { recursive: true, force: true })));
 	tempDirectories.clear();
+});
+
+describe("LiveSessionManager failed closure", () => {
+	test("retains failed shutdowns for a later close retry", async () => {
+		const service = new MemoryService();
+		service.seed("shutdown-retry");
+		let closing = false;
+		const manager = new LiveSessionManager({
+			service,
+			isClosing: () => closing,
+			sendMessage: async () => true,
+			closeConnection: async () => {},
+			disconnect: async () => {},
+			broadcastServerSnapshot: () => {},
+			reportError: () => {},
+		});
+		await manager.executeCommand(readyConnection("owner"), { command: "attach", sessionId: "shutdown-retry" });
+		const runtime = service.latestRuntime("shutdown-retry");
+		const originalDispose = runtime.dispose.bind(runtime);
+		const dispose = vi
+			.spyOn(runtime, "dispose")
+			.mockRejectedValueOnce(new Error("physical effect is still running"))
+			.mockImplementation(originalDispose);
+		closing = true;
+		await expect(manager.close()).rejects.toThrow("physical effect is still running");
+		expect(service.locked.has("shutdown-retry")).toBe(true);
+		await manager.close();
+		expect(dispose).toHaveBeenCalledTimes(2);
+		expect(service.locked.has("shutdown-retry")).toBe(false);
+	});
+
+	test("shares an in-flight cleanup retry before concurrent reacquisition", async () => {
+		const service = new MemoryService();
+		service.seed("concurrent-retry");
+		const manager = new LiveSessionManager({
+			service,
+			isClosing: () => false,
+			sendMessage: async () => true,
+			closeConnection: async () => {},
+			disconnect: async () => {},
+			broadcastServerSnapshot: () => {},
+			reportError: () => {},
+		});
+		const first = readyConnection("first");
+		const second = readyConnection("second");
+		await manager.executeCommand(first, { command: "attach", sessionId: "concurrent-retry" });
+		const runtime = service.latestRuntime("concurrent-retry");
+		const originalDispose = runtime.dispose.bind(runtime);
+		const entered = new Deferred<void>();
+		const release = new Deferred<void>();
+		const dispose = vi
+			.spyOn(runtime, "dispose")
+			.mockRejectedValueOnce(new Error("physical effect is still running"))
+			.mockImplementation(async () => {
+				entered.resolve(undefined);
+				await release.promise;
+				await originalDispose();
+			});
+		await expect(
+			manager.executeCommand(first, { command: "detach", sessionId: "concurrent-retry" }),
+		).rejects.toThrow();
+		const firstAttach = manager.executeCommand(first, { command: "attach", sessionId: "concurrent-retry" });
+		const secondAttach = manager.executeCommand(second, { command: "attach", sessionId: "concurrent-retry" });
+		const attachments = Promise.all([firstAttach, secondAttach]);
+		try {
+			await Promise.race([entered.promise, attachments]);
+			expect(dispose).toHaveBeenCalledTimes(2);
+			release.resolve(undefined);
+			await attachments;
+			expect(service.runtimes.get("concurrent-retry")).toHaveLength(2);
+		} finally {
+			release.resolve(undefined);
+			await manager.close();
+		}
+	});
 });
 
 describe("PiServer Unix integration", () => {
@@ -150,6 +248,46 @@ describe("PiServer Unix integration", () => {
 		expect(attached.id).toBe(service.lastCreatedId);
 		expect(service.runtimes.get(createdId)?.length).toBe(2);
 	});
+
+	test.each(["attach", "detach"] as const)(
+		"retains a failed-disposal runtime and retries cleanup on %s",
+		async (retry) => {
+			const service = new MemoryService();
+			service.seed("retained");
+			const { server } = await startServer(service);
+			const client = await connect(server);
+			await client.hello();
+			await attach(client, "retained");
+			const runtime = service.latestRuntime("retained");
+			const originalDispose = runtime.dispose.bind(runtime);
+			const originalSnapshot = runtime.snapshot.bind(runtime);
+			let blocked = true;
+			const dispose = vi.spyOn(runtime, "dispose").mockImplementation(async () => {
+				if (blocked) throw new Error("physical effect is still running");
+				await originalDispose();
+			});
+			vi.spyOn(runtime, "snapshot").mockImplementation(() => {
+				if (dispose.mock.calls.length > 0) throw new Error("closing runtime cannot be snapshotted");
+				return originalSnapshot();
+			});
+			try {
+				expect(await client.request({ command: "detach", sessionId: "retained" })).toMatchObject({ ok: false });
+				expect(dispose).toHaveBeenCalledTimes(1);
+				expect(await client.request({ command: "list" })).toMatchObject({ ok: true });
+				expect(await client.request({ command: "attach", sessionId: "retained" })).toMatchObject({ ok: false });
+				expect(dispose).toHaveBeenCalledTimes(2);
+				expect(service.runtimes.get("retained")).toHaveLength(1);
+				blocked = false;
+				expect(await client.request({ command: retry, sessionId: "retained" })).toMatchObject({ ok: true });
+				expect(dispose).toHaveBeenCalledTimes(3);
+				if (retry === "detach") await attach(client, "retained");
+				expect(service.runtimes.get("retained")).toHaveLength(2);
+			} finally {
+				blocked = false;
+				await runtime.dispose();
+			}
+		},
+	);
 
 	test("preserves backend metadata while refreshing live session metadata", async () => {
 		class ExtendedMetadataService extends MemoryService {

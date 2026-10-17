@@ -107,11 +107,17 @@ const { client, connected } = connect();
 await connected;
 ```
 
-Inject `McpOAuthStateStore` into `McpOAuthProvider` for durable credentials. The package does not open a browser or choose where credentials are stored.
+Inject `McpOAuthStateStore` into `McpOAuthProvider` for durable credentials. The package does not open a browser or choose where credentials are stored. Token endpoints must answer directly: token POSTs reject redirects instead of forwarding authorization codes, verifiers, refresh tokens or client secrets to a redirect destination.
 
 The OAuth implementation is adapted from the MIT-licensed Model Context Protocol TypeScript SDK v1.29.0. Its license is included under `LICENSES/`.
 
 An MCP transport owns framing and I/O. It delivers individual JSON-RPC messages to `McpClient`; the client owns request correlation, initialization, timeouts, cancellation, server requests, and protocol-level helpers.
+
+## Cancellation, bounds and cleanup
+
+- Request abort/timeout stops that request's owned HTTP dispatch, body consumption, backoff and response-stream resumption. Cancellation during shared authentication prevents a later POST but does not cancel authentication needed by other requests. Unrelated requests remain usable. Cancellation after dispatch cannot undo or establish the remote effect.
+- The `maxMessageBytes` option on `StreamableHttpTransport` bounds JSON response bodies as well as SSE event data. Overflow or interrupted consumption cancels unread data and releases the reader. HTTP error bodies retain at most an 8-KiB source-byte prefix; displayed messages can be shorter. A diagnostic-body read failure does not erase a known HTTP status, while caller cancellation still takes precedence. These are consumption bounds, not a total-memory quota or a limit on an upstream chunk's allocation.
+- Concurrent `McpClient.close()` calls join the same cleanup. Stdio cleanup retains ownership of the process group on platforms that support it even if its leader exits first, escalates TERM to KILL when needed, and waits for stdio to drain. Cleanup failure is reported, not treated as proof that descendants stopped. Processes that escape the owned group are outside this guarantee.
 
 ## Supported protocol surface
 

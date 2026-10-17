@@ -125,7 +125,9 @@ OAuth supports PKCE, dynamic registration, loopback callbacks, scope upgrades an
 
 Text and images reach the model. Text over 20 KB is shortened, with the full output saved to a temporary file; binary resources are also saved to files. Server log notifications are written to `<agentDir>/mcp.log` with bounded rotation.
 
-A returned MCP `isError` is a known tool error. In codemode, an MCP call resolves to its structured `CallToolResult`, including this flag and any `structuredContent`; inspect `isError` before using the payload. A connection drop, timeout or cancellation after dispatch can leave the remote effect **unknown**: Easy Pi pauses for verification instead of automatically replaying the call. A script catching that failure does not confirm the remote outcome or make its store writes safe to commit. Remote `readOnlyHint` and `idempotentHint` are metadata, not retry guarantees.
+A returned MCP `isError` normally represents a confirmed tool error. In codemode, a confirmed MCP response resolves to its structured `CallToolResult`, including this flag and any `structuredContent`; inspect `isError` before using the payload.
+
+An explicit `_meta["io.easy-pi/execution-outcome"] = "unknown"` instead marks the effect **unknown**, even if `isError` is false. The adapter honors only this literal uncertainty marker, never remote claims of `confirmed` or `not_started`, and strips protocol `_meta` before exposing results to scripts. A connection drop, timeout or cancellation after dispatch can also leave the remote effect unknown: Easy Pi pauses for verification instead of automatically replaying the call. A script catching that failure does not confirm the remote outcome or make its store writes safe to commit. Remote `readOnlyHint` and `idempotentHint` are metadata, not retry guarantees.
 
 ## Resources and native children
 

@@ -1,5 +1,6 @@
 import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "../../../core/extensions/types.ts";
+import { sanitizeDisplayText } from "../../../core/tools/render-utils.ts";
 import { ToolExecutionComponent, type ToolExecutionOptions } from "../../interactive/components/tool-execution.ts";
 import { theme } from "../../interactive/theme/theme.ts";
 
@@ -9,7 +10,7 @@ type GrokToolState = "pending" | "running" | "success" | "error";
 const SUMMARY_KEYS = ["command", "path", "file_path", "filePath", "pattern", "query", "url"];
 
 function firstLine(text: string): string {
-	return text.split("\n", 1)[0]?.trim() ?? "";
+	return sanitizeDisplayText(text).split("\n", 1)[0]?.trim() ?? "";
 }
 
 /**
@@ -29,7 +30,7 @@ function summarizeArgs(args: unknown): string {
 		if (typeof value === "string" && value.trim()) return firstLine(value);
 	}
 	try {
-		return JSON.stringify(args) ?? "";
+		return firstLine(JSON.stringify(args) ?? "");
 	} catch {
 		return "";
 	}
@@ -123,9 +124,9 @@ export class GrokToolExecutionComponent extends ToolExecutionComponent {
 		return this.grokState;
 	}
 
-	/** Tool name as shown in the compact overview. */
+	/** Display-only name; keep the raw identity for tool lookup and grouping decisions. */
 	getGrokToolName(): string {
-		return this.grokToolName;
+		return sanitizeDisplayText(this.grokToolName);
 	}
 
 	/** Single-line summary of the current args, for turn-level aggregation. */
@@ -181,7 +182,7 @@ export class GrokToolExecutionComponent extends ToolExecutionComponent {
 		const summary = summarizeArgs(this.grokArgs);
 		const parts = [
 			theme.fg(this.stateColor(), `${this.stateSymbol()} `),
-			theme.fg("toolTitle", theme.bold(this.grokToolName)),
+			theme.fg("toolTitle", theme.bold(this.getGrokToolName())),
 		];
 		if (summary) {
 			parts.push(theme.fg("muted", `  ${summary}`));

@@ -67,22 +67,28 @@ export function createServer({
 } = {}) {
 	const server = new McpServer({ name: "agent-desktop", version: "0.1.0" });
 	let queue = Promise.resolve();
-	function run(argv) {
+	function run(argv, signal) {
+		signal?.throwIfAborted();
 		const pending = queue.then(async () => {
+			// Cancellation while waiting must not launch a stale desktop action.
+			signal?.throwIfAborted();
 			try {
 				const { stdout } = await execute(binary, ["--session", session, ...argv], {
 					timeout: 45000,
 					maxBuffer: 8 * 1024 * 1024,
 					shell: false,
+					signal,
 				});
 				return resultFromOutput(stdout);
 			} catch (error) {
 				// A killed process may have already changed the desktop: never retry automatically.
-				if (!error.killed && typeof error.code === "number" && error.stdout) {
+				if (!error.killed && !error.signal && typeof error.code === "number" && error.stdout) {
 					try { return resultFromOutput(error.stdout, true); } catch { /* Report malformed output below. */ }
 				}
 				return {
 					isError: true,
+					// This marker only reduces certainty; never use it to claim an effect did not start.
+					_meta: { "io.easy-pi/execution-outcome": "unknown" },
 					content: [{ type: "text", text: `agent-desktop execution failed: ${error.message}. Desktop effects may be unknown; observe before retrying.` }],
 				};
 			}
@@ -105,15 +111,15 @@ export function createServer({
 			description: descriptions[command],
 			inputSchema,
 			annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: readOnly, openWorldHint: true },
-		}, async ({ headed, ...args }) => run([...(headed ? ["--headed"] : []), ...commandArgs(command, args)]));
+		}, async ({ headed, ...args }, { signal }) => run([...(headed ? ["--headed"] : []), ...commandArgs(command, args)], signal));
 	}
 	server.registerTool("desktop_batch", {
 		description: "Execute up to 64 allowed commands sequentially in one CLI process. Non-atomic; stops on the first error. Inspect partial results; never replay a whole batch blindly. All refs must come from this server. No session overrides or arbitrary commands.",
 		inputSchema: batchSchema,
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-	}, async ({ actions, headed }) => run([
+	}, async ({ actions, headed }, { signal }) => run([
 		...(headed ? ["--headed"] : []), "batch", "--stop-on-error", "--timeout-ms", "40000", JSON.stringify(actions),
-	]));
+	], signal));
 	return server;
 }
 

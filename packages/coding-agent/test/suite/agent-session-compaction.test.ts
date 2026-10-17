@@ -163,14 +163,17 @@ describe("AgentSession compaction characterization", () => {
 			hfCompaction: { mode: "full_pipeline" },
 			extensionFactories: [
 				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "summary from extension",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: { source: "extension" },
-						},
-					}));
+					pi.on("session_before_compact", async (event) => {
+						if (!event.preparation) return;
+						return {
+							compaction: {
+								summary: "summary from extension",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension" },
+							},
+						};
+					});
 				},
 			],
 		});

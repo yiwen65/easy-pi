@@ -3,19 +3,24 @@ import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queue: T[] = [];
-	private waiting: ((value: IteratorResult<T>) => void)[] = [];
+	private waiting: { resolve: (value: IteratorResult<T>) => void; reject: (error: unknown) => void }[] = [];
 	private done = false;
+	private failure?: { error: unknown };
 	private finalResultPromise: Promise<R>;
 	private resolveFinalResult!: (result: R) => void;
+	private rejectFinalResult!: (error: unknown) => void;
 	private isComplete: (event: T) => boolean;
 	private extractResult: (event: T) => R;
 
 	constructor(isComplete: (event: T) => boolean, extractResult: (event: T) => R) {
 		this.isComplete = isComplete;
 		this.extractResult = extractResult;
-		this.finalResultPromise = new Promise((resolve) => {
+		this.finalResultPromise = new Promise((resolve, reject) => {
 			this.resolveFinalResult = resolve;
+			this.rejectFinalResult = reject;
 		});
+		// Iterator-only consumers still observe failure without an unhandled result rejection.
+		this.finalResultPromise.catch(() => {});
 	}
 
 	push(event: T): void {
@@ -29,7 +34,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		// Deliver to waiting consumer or queue it
 		const waiter = this.waiting.shift();
 		if (waiter) {
-			waiter({ value: event, done: false });
+			waiter.resolve({ value: event, done: false });
 		} else {
 			this.queue.push(event);
 		}
@@ -43,8 +48,17 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		// Notify all waiting consumers that we're done
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
-			waiter({ value: undefined as any, done: true });
+			waiter.resolve({ value: undefined, done: true });
 		}
+	}
+
+	/** Terminate a producer failure, preserving queued events before rejecting iteration and result(). */
+	fail(error: unknown): void {
+		if (this.done) return;
+		this.done = true;
+		this.failure = { error };
+		this.rejectFinalResult(error);
+		while (this.waiting.length > 0) this.waiting.shift()!.reject(error);
 	}
 
 	async *[Symbol.asyncIterator](): AsyncIterator<T> {
@@ -52,9 +66,12 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			if (this.queue.length > 0) {
 				yield this.queue.shift()!;
 			} else if (this.done) {
+				if (this.failure) throw this.failure.error;
 				return;
 			} else {
-				const result = await new Promise<IteratorResult<T>>((resolve) => this.waiting.push(resolve));
+				const result = await new Promise<IteratorResult<T>>((resolve, reject) =>
+					this.waiting.push({ resolve, reject }),
+				);
 				if (result.done) return;
 				yield result.value;
 			}

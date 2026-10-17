@@ -57,11 +57,14 @@ describe("large task recovery session retention", () => {
 		const file = manager.getSessionFile()!;
 		const journal = new TaskRecoveryJournal(manager);
 		journal.start([{ role: "user", content: "你好 🧭".repeat(3000), timestamp: 1 }]);
+		const sourceSessionId = manager.getSessionId();
 		const first = manager.getLeafId()!;
+		const firstState = journal.state;
 		journal.update((state) => {
 			state.status = "interrupted";
 		});
 		const second = manager.getLeafId()!;
+		const secondState = journal.state;
 		appendFileSync(file, '{"torn":');
 		const reopened = SessionManager.open(file);
 		const entries = loadEntriesFromFile(file);
@@ -70,14 +73,29 @@ describe("large task recovery session retention", () => {
 		reopened.branch(first);
 		expect(new TaskRecoveryJournal(reopened).state?.status).toBe("running");
 		const clone = reopened.createBranchedSession(second)!;
+		expect(new TaskRecoveryJournal(reopened).state).toBeUndefined();
+		expect(reopened.getHeader()?.parentSession).toBe(file);
 		const fork = SessionManager.forkFrom(clone, dir, dir);
+		expect(fork.getHeader()?.parentSession).toBe(clone);
 		reopened.newSession();
 		renameSync(file, `${file}.old`);
 		rmSync(`${file}.old`);
 		rmSync(clone);
-		expect(new TaskRecoveryJournal(fork).state?.status).toBe("interrupted");
+		for (const retained of [fork, SessionManager.open(fork.getSessionFile()!)]) {
+			expect(retained.getBranch().map((entry) => entry.id)).toEqual([first, second]);
+			// Copied journals retain their payload and original provenance, not an executable task.
+			expect(new TaskRecoveryJournal(retained).state).toBeUndefined();
+			for (const [id, data] of [
+				[first, firstState],
+				[second, secondState],
+			] as const) {
+				const entry = retained.getEntry(id);
+				expect(entry).toMatchObject({ type: "custom", customType: recoveryType, sourceSessionId });
+				expect(entry?.type === "custom" && entry.data).toEqual(data);
+			}
+		}
 		const historical = entries.find((entry) => entry.type === "custom" && entry.id === first);
-		expect(historical?.type === "custom" && historical.data).toMatchObject({ status: "running" });
+		expect(historical?.type === "custom" && historical.data).toEqual(firstState);
 		expect(readFileSync(fork.getSessionFile()!, "utf8")).toContain("你好");
 	});
 

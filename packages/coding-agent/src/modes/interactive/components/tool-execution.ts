@@ -1,12 +1,18 @@
 import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
-import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { getTextOutput as getRenderedTextOutput, sanitizeDisplayText } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
+
+type ImageConversionState = {
+	sourceData: string;
+	sourceMimeType: string;
+	converted?: { data: string; mimeType: string };
+};
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -40,7 +46,7 @@ export class ToolExecutionComponent extends Container {
 		isError: boolean;
 		details?: any;
 	};
-	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
+	private convertedImages = new Map<number, ImageConversionState>();
 	private hideComponent = false;
 
 	constructor(
@@ -136,7 +142,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+		return new Text(theme.fg("toolTitle", theme.bold(sanitizeDisplayText(this.toolName))), 0, 0);
 	}
 
 	private createResultFallback(): Component | undefined {
@@ -182,6 +188,13 @@ export class ToolExecutionComponent extends Container {
 	): void {
 		this.result = result;
 		this.isPartial = isPartial;
+		const images = result.content.filter((content) => content.type === "image");
+		for (const [index, cached] of this.convertedImages) {
+			const image = images[index];
+			if (image?.data !== cached.sourceData || image.mimeType !== cached.sourceMimeType) {
+				this.convertedImages.delete(index);
+			}
+		}
 		this.updateDisplay();
 		this.maybeConvertImagesForKitty();
 	}
@@ -199,13 +212,26 @@ export class ToolExecutionComponent extends Container {
 			if (this.convertedImages.has(i)) continue;
 
 			const index = i;
-			convertToPng(img.data, img.mimeType).then((converted) => {
-				if (converted) {
-					this.convertedImages.set(index, converted);
-					this.updateDisplay();
-					this.ui.requestRender();
-				}
-			});
+			const cached: ImageConversionState = {
+				sourceData: img.data,
+				sourceMimeType: img.mimeType,
+			};
+			// Reserve the identity before conversion so repeated partial updates share it.
+			this.convertedImages.set(index, cached);
+			convertToPng(img.data, img.mimeType)
+				.then((converted) => {
+					if (this.convertedImages.get(index) !== cached) return;
+					if (converted) {
+						cached.converted = converted;
+						this.updateDisplay();
+						this.ui.requestRender();
+					} else {
+						this.convertedImages.delete(index);
+					}
+				})
+				.catch(() => {
+					if (this.convertedImages.get(index) === cached) this.convertedImages.delete(index);
+				});
 		}
 	}
 
@@ -344,7 +370,11 @@ export class ToolExecutionComponent extends Container {
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
 				if (caps.images && this.showImages && img.data && img.mimeType) {
-					const converted = this.convertedImages.get(i);
+					const cached = this.convertedImages.get(i);
+					const converted =
+						cached?.sourceData === img.data && cached.sourceMimeType === img.mimeType
+							? cached.converted
+							: undefined;
 					const imageData = converted?.data ?? img.data;
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 					if (caps.images === "kitty" && imageMimeType !== "image/png") continue;
@@ -374,7 +404,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private formatToolExecution(): string {
-		let text = theme.fg("toolTitle", theme.bold(this.toolName));
+		let text = theme.fg("toolTitle", theme.bold(sanitizeDisplayText(this.toolName)));
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;

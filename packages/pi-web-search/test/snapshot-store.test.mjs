@@ -44,6 +44,20 @@ test("S01 snapshots are readable only by the owning host object", () => {
 	assert.equal(second.get(stranger, "missing"), undefined, "unknown ids look exactly like unauthorized ones");
 });
 
+test("logical scope keeps only the capture anchor and rejects other sessions and sibling paths", () => {
+	const store = isolated();
+	const owner = {};
+	const scope = { sessionId: "one", branch: ["root", "capture"] };
+	const id = store.put(owner, content(), scope);
+	assert.equal(typeof id, "string");
+	scope.branch[1] = "mutated-after-put";
+	assert.equal(store.get(owner, id), undefined, "omitting scope cannot bypass a bound snapshot");
+	assert.equal(store.get(owner, id, scope), undefined, "the supplied branch array was not retained");
+	assert.equal(store.get(owner, id, { sessionId: "two", branch: ["root", "capture"] }), undefined);
+	assert.equal(store.get(owner, id, { sessionId: "one", branch: ["root", "sibling"] }), undefined);
+	assert.equal(store.get(owner, id, { sessionId: "one", branch: ["root", "capture", "append"] })?.text, "captured text");
+});
+
 test("S02 TTL is absolute and reads never extend it", () => {
 	let clock = 1_000;
 	let sequence = 0;
@@ -62,6 +76,26 @@ test("S02 TTL is absolute and reads never extend it", () => {
 	assert.equal(pool.bytes, 0);
 	const replacement = store.put(owner, content({ text: "replacement" }));
 	assert.equal(store.get(owner, replacement)?.text, "replacement", "the owner can still store a new snapshot");
+});
+
+test("idle TTL expiry releases entries and bytes without any read or write", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+	const pool = new SnapshotPool();
+	const store = new SnapshotStore({ pool, ttlMs: 100 });
+	const owner = {};
+	assert.equal(typeof store.put(owner, content()), "string");
+	const retainedBytes = pool.bytes;
+	assert.equal(pool.count, 1);
+	assert.ok(retainedBytes > 0);
+	t.mock.timers.tick(100);
+	console.log(`idle expiry: beforeCount=1, beforeBytes=${retainedBytes}, afterCount=${pool.count}, afterBytes=${pool.bytes}`);
+	assert.equal(pool.count, 0, "TTL must release the pool even while no caller is active");
+	assert.equal(pool.bytes, 0);
+	assert.equal(typeof store.put(owner, content()), "string", "expiry leaves the store usable");
+	assert.equal(pool.count, 1);
+	t.mock.timers.tick(100);
+	assert.equal(pool.count, 0);
+	assert.equal(pool.bytes, 0);
 });
 
 test("S03 per-owner count and byte caps evict the least recently used entry", () => {

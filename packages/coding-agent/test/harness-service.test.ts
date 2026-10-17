@@ -1,11 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { HarnessFault, InMemorySessionRepo, JsonlSessionRepo } from "@earendil-works/pi-agent-core";
+import { AgentHarness, HarnessFault, InMemorySessionRepo, JsonlSessionRepo } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, createModels, fauxProvider } from "@earendil-works/pi-ai";
+import type { PiSessionRuntime } from "@earendil-works/pi-server";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HarnessPiServerService, type HarnessPiServerServiceOptions } from "../src/server/harness-service.ts";
@@ -66,6 +67,138 @@ afterEach(() => {
 });
 
 describe("HarnessPiServerService (T-007)", () => {
+	it.each([false, true])(
+		"releases snapshot watches on create and reopen (invalid queue: %s)",
+		async (invalidQueue) => {
+			const liveWatches = new Set<Awaited<ReturnType<AgentHarness["watch"]>>>();
+			const originalWatch = AgentHarness.prototype.watch;
+			const watchSpy = vi.spyOn(AgentHarness.prototype, "watch").mockImplementation(async function (
+				this: AgentHarness,
+			) {
+				const watch = await originalWatch.call(this);
+				liveWatches.add(watch);
+				if (invalidQueue) {
+					watch.snapshot.queues.steer.push({
+						entryId: "invalid-steer",
+						message: { role: "user", content: "adjust", timestamp: Number.NaN },
+					});
+				}
+				return {
+					...watch,
+					unsubscribe: () => {
+						watch.unsubscribe();
+						liveWatches.delete(watch);
+					},
+				};
+			});
+			const service = createService(scripted(() => assistantMessage("unused")));
+			try {
+				for (const reopen of [false, true]) {
+					const runtime = reopen
+						? await service.openSession("snapshot-watches")
+						: await service.createSession({ id: "snapshot-watches" });
+					try {
+						const baseline = liveWatches.size;
+						expect(baseline).toBe(0);
+						const counts: number[] = [];
+						watchSpy.mockClear();
+						for (let i = 0; i < 100; i++) {
+							if (invalidQueue) {
+								await expect(runtime.snapshot()).rejects.toThrow("Protocol timestamps");
+							} else {
+								expect(await runtime.snapshot()).toMatchObject({ queuedSteer: [], queuedSteerCount: 0 });
+							}
+							counts.push(liveWatches.size);
+						}
+						expect(watchSpy).toHaveBeenCalledTimes(100);
+						expect(Math.max(...counts)).toBe(baseline);
+					} finally {
+						await runtime.dispose();
+					}
+				}
+			} finally {
+				for (const watch of liveWatches) watch.unsubscribe();
+				watchSpy.mockRestore();
+			}
+		},
+	);
+
+	it("restores each JSONL session's cwd for its environment, snapshot, and relative tools", async () => {
+		const root = mkdtempSync(join(tmpdir(), "svc-jsonl-cwd-"));
+		dirs.push(root);
+		const defaultCwd = join(root, "server-default");
+		mkdirSync(defaultCwd);
+		writeFileSync(join(defaultCwd, "marker.txt"), "wrong-server-default", "utf8");
+		const repoOptions = { fs: new NodeExecutionEnv({ cwd: root }), sessionsRoot: join(root, "sessions") };
+		const service = createService(
+			scripted(() => assistantMessage("unused")),
+			{ repo: new JsonlSessionRepo(repoOptions), defaultCwd },
+		);
+		for (const id of ["project-a", "project-b"]) {
+			const cwd = join(root, id);
+			mkdirSync(cwd);
+			writeFileSync(join(cwd, "marker.txt"), id, "utf8");
+			const first = await service.createSession({ id, cwd });
+			try {
+				expect((await first.snapshot()).cwd).toBe(cwd);
+			} finally {
+				await first.dispose();
+			}
+		}
+
+		for (const id of ["project-a", "project-b"]) {
+			const cwd = join(root, id);
+			const createEnv = vi.fn((path: string) => new NodeExecutionEnv({ cwd: path }));
+			// A new service and repository discard any process-local session state.
+			const restarted = createService(
+				scripted(
+					() => ({
+						...assistantMessage(""),
+						content: [{ type: "toolCall", id: "read-marker", name: "read", arguments: { path: "marker.txt" } }],
+						stopReason: "toolUse",
+					}),
+					() => assistantMessage("done"),
+				),
+				{ repo: new JsonlSessionRepo(repoOptions), defaultCwd, createEnv },
+			);
+			const reopened = await restarted.openSession(id);
+			try {
+				expect.soft(createEnv).toHaveBeenCalledExactlyOnceWith(cwd);
+				expect.soft((await reopened.snapshot()).cwd).toBe(cwd);
+				await reopened.prompt({ text: "read marker.txt" });
+				const snapshot = await reopened.snapshot();
+				expect.soft(snapshot.transcript.find((item) => item.role === "tool")).toMatchObject({
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: expect.stringContaining(id) }],
+				});
+			} finally {
+				await reopened.dispose();
+			}
+		}
+	});
+
+	it.each([undefined, "/server-default"])(
+		"falls back when session metadata has no cwd (default: %s)",
+		async (defaultCwd) => {
+			const repo = new InMemorySessionRepo();
+			await repo.create({ id: "legacy-no-cwd" });
+			const createEnv = vi.fn((cwd: string) => new NodeExecutionEnv({ cwd }));
+			const service = createService(
+				scripted(() => assistantMessage("unused")),
+				{ repo, defaultCwd, createEnv },
+			);
+			const runtime = await service.openSession("legacy-no-cwd");
+			try {
+				const expectedCwd = defaultCwd ?? process.cwd();
+				expect(createEnv).toHaveBeenCalledExactlyOnceWith(expectedCwd);
+				expect((await runtime.snapshot()).cwd).toBe(expectedCwd);
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
+
 	it("lists a live JSONL session without acquiring another writer", async () => {
 		const root = mkdtempSync(join(tmpdir(), "svc-jsonl-"));
 		dirs.push(root);
@@ -274,6 +407,86 @@ describe("HarnessPiServerService (T-007)", () => {
 			expect(effects).toBe(1);
 		} finally {
 			release();
+			await runtime.dispose();
+		}
+	});
+
+	it("retains the JSONL writer and live owner until a timed-out physical tool settles and close is retried", async () => {
+		const root = mkdtempSync(join(tmpdir(), "svc-close-owner-"));
+		dirs.push(root);
+		const repoOptions = { fs: new NodeExecutionEnv({ cwd: root }), sessionsRoot: root };
+		let enter: () => void = () => {};
+		const entered = new Promise<void>((resolve) => {
+			enter = resolve;
+		});
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const completed = gate.then(() => ({ content: [], details: {} }));
+		const execute = vi.fn(() => {
+			enter();
+			return completed;
+		});
+		const owner = createService(
+			scripted(() => ({
+				...assistantMessage(""),
+				content: [{ type: "toolCall", id: "blocked-call", name: "effect", arguments: {} }],
+				stopReason: "toolUse",
+			})),
+			{
+				repo: new JsonlSessionRepo(repoOptions),
+				defaultCwd: root,
+				harness: {
+					tools: [
+						{
+							name: "effect",
+							label: "effect",
+							description: "controlled physical effect",
+							parameters: Type.Object({}),
+							replay: "never",
+							contract: { timeoutMs: 100, sideEffects: "external" },
+							execute,
+						},
+					],
+				},
+			},
+		);
+		const contender = createService(
+			scripted(() => assistantMessage("unused")),
+			{
+				repo: new JsonlSessionRepo(repoOptions),
+				defaultCwd: root,
+			},
+		);
+		const runtime = await owner.createSession({ id: "blocked-owner" });
+		let replacement: PiSessionRuntime | undefined;
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const running = runtime.prompt({ text: "go" });
+			await entered;
+			await vi.advanceTimersByTimeAsync(100);
+			await running;
+			await expect(runtime.dispose()).rejects.toThrow("Tool execution has not stopped");
+			await expect(
+				contender.openSession("blocked-owner").then((opened) => {
+					replacement = opened;
+					return "acquired";
+				}),
+			).rejects.toMatchObject({ code: "storage" });
+			expect(await owner.openSession("blocked-owner")).toBe(runtime);
+			expect(execute).toHaveBeenCalledTimes(1);
+			release();
+			await completed;
+			await runtime.dispose();
+			replacement = await contender.openSession("blocked-owner");
+			expect(replacement).not.toBe(runtime);
+			expect(execute).toHaveBeenCalledTimes(1);
+		} finally {
+			release();
+			await completed;
+			vi.useRealTimers();
+			await replacement?.dispose();
 			await runtime.dispose();
 		}
 	});

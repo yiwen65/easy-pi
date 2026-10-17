@@ -3,7 +3,7 @@ import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from 
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
-import { addUsageToTotals, createUsageTotals } from "../../../core/usage-totals.ts";
+import { addUsageToTotals, createUsageTotals, getUnactivatedCompactionUsages } from "../../../core/usage-totals.ts";
 import { formatCodexServiceTierLabel } from "../codex-service-tier-ui.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -61,6 +61,7 @@ export function computeSessionUsageStats(session: AgentSession): SessionUsageSta
 	let latestCacheReadRatio: number | undefined;
 
 	for (const entry of session.sessionManager.getEntries()) {
+		for (const usage of getUnactivatedCompactionUsages(entry)) addUsageToTotals(totals, usage);
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			addUsageToTotals(totals, entry.message.usage);
 

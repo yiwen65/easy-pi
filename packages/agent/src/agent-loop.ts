@@ -73,9 +73,10 @@ export function agentLoop(
 		},
 		signal,
 		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	).then(
+		(messages) => stream.end(messages),
+		(error: unknown) => stream.fail(error),
+	);
 
 	return stream;
 }
@@ -112,9 +113,10 @@ export function agentLoopContinue(
 		},
 		signal,
 		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	).then(
+		(messages) => stream.end(messages),
+		(error: unknown) => stream.fail(error),
+	);
 
 	return stream;
 }
@@ -299,6 +301,8 @@ async function runLoop(
 
 			// Process pending messages (inject before next assistant response)
 			if (pendingMessages.length > 0) {
+				lastTurnFingerprint = undefined;
+				turnFingerprintRepeats = 0;
 				for (const message of pendingMessages) {
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
@@ -436,6 +440,9 @@ async function runLoop(
 					await emit({ type: "agent_end", messages: newMessages });
 					return;
 				}
+			} else {
+				lastTurnFingerprint = undefined;
+				turnFingerprintRepeats = 0;
 			}
 
 			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {

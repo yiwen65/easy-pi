@@ -30,6 +30,7 @@
  * `Array.prototype.toJSON`) could otherwise corrupt what the prelude reports to the host.
  */
 export const MAX_STORE_VALUE_CHARS = 256 * 1024;
+/** Bounds both live key/value characters and the serialized mutation payload, including deletions. */
 export const MAX_STORE_TOTAL_CHARS = 1024 * 1024;
 /**
  * Output one script may produce with helpers and its serialized terminal payload:
@@ -277,7 +278,9 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 
 	// key -> JSON text. Sizes count key and JSON characters.
 	const stored = new Map(Object.entries(parse(storeJson)));
+	// Keep serialized entries so escaped keys, tombstones and set/delete churn share one budget.
 	const writes = new Map();
+	let writesChars = 2; // The enclosing JSON array brackets.
 	let storedChars = 0;
 	for (const [key, json] of stored) storedChars += key.length + json.length;
 
@@ -286,15 +289,27 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 
 	function checkKey(name, key) {
 		if (typeof key !== "string") throw new TypeError(name + "() key must be a string");
+		if (key.length > ${MAX_STORE_TOTAL_CHARS}) throw new RangeError(name + "() key exceeds ${MAX_STORE_TOTAL_CHARS} characters. " + STORE_HINT);
+	}
+
+	function recordWrite(key, json) {
+		const entry = stringify(json === undefined ? [key] : [key, json]);
+		const previous = writes.get(key);
+		const next = writesChars + entry.length - (previous === undefined ? 0 : previous.length) + (previous === undefined && writes.size > 0 ? 1 : 0);
+		if (next > ${MAX_STORE_TOTAL_CHARS}) {
+			throw new RangeError("store mutations exceed ${MAX_STORE_TOTAL_CHARS} serialized characters, including keys and deletions. " + STORE_HINT);
+		}
+		writes.set(key, entry);
+		writesChars = next;
 	}
 
 	function store(key, value) {
 		checkKey("store", key);
 		const previous = stored.has(key) ? key.length + stored.get(key).length : 0;
 		if (value === undefined) {
+			recordWrite(key, undefined);
 			stored.delete(key);
 			storedChars -= previous;
-			writes.set(key, undefined);
 			return;
 		}
 		let json;
@@ -319,9 +334,9 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 					STORE_HINT,
 			);
 		}
+		recordWrite(key, json);
 		stored.set(key, json);
 		storedChars = next;
-		writes.set(key, json);
 	}
 
 	function load(key) {
@@ -331,9 +346,7 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 	}
 
 	function serializeWrites() {
-		const entries = [];
-		for (const [key, json] of writes) entries.push(json === undefined ? [key] : [key, json]);
-		return stringify(entries);
+		return "[" + [...writes.values()].join(",") + "]";
 	}
 
 	Object.defineProperty(globalThis, "store", { value: store, enumerable: true });

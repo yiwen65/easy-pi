@@ -1,5 +1,8 @@
 import type { FileError, Result } from "@earendil-works/pi-agent-core";
 import {
+	assertDurableEntry,
+	assertDurableRecord,
+	assertJsonSerializable,
 	type BranchBounds,
 	type Entry,
 	type EntryQuery,
@@ -50,6 +53,7 @@ import {
 	appendRecordRow,
 	deleteRecordRows,
 	idExistsInRecords,
+	type RecordRow,
 	readOpenOperationRows,
 	readRecordRows,
 } from "./storage/records.ts";
@@ -190,72 +194,16 @@ function readObjectPayload(row: EntryRow): Record<string, unknown> {
 function decodeEntry(row: EntryRow): Entry {
 	try {
 		const payload = readObjectPayload(row);
-		const base = { id: row.id, seq: row.seq, parentId: row.parent_id, timestamp: row.timestamp };
-		switch (row.type) {
-			case "message":
-				if (typeof payload.message !== "object" || payload.message === null) throw new Error("Missing message");
-				return {
-					...base,
-					type: "message",
-					message: payload.message as Extract<Entry, { type: "message" }>["message"],
-					...(payload.terminate === true ? { terminate: true as const } : {}),
-				};
-			case "model_change":
-				if (typeof payload.provider !== "string" || typeof payload.modelId !== "string") {
-					throw new Error("Invalid model_change payload");
-				}
-				return { ...base, type: "model_change", provider: payload.provider, modelId: payload.modelId };
-			case "thinking_level_change":
-				if (typeof payload.thinkingLevel !== "string") throw new Error("Invalid thinking_level_change payload");
-				return { ...base, type: "thinking_level_change", thinkingLevel: payload.thinkingLevel };
-			case "active_tools_change":
-				if (!Array.isArray(payload.activeToolNames)) throw new Error("Invalid active_tools_change payload");
-				if (payload.activeToolNames.some((value) => typeof value !== "string")) {
-					throw new Error("Invalid active_tools_change payload");
-				}
-				return { ...base, type: "active_tools_change", activeToolNames: payload.activeToolNames };
-			case "compaction":
-				if (
-					typeof payload.summary !== "string" ||
-					!Array.isArray(payload.retainedTail) ||
-					typeof payload.tokensBefore !== "number"
-				) {
-					throw new Error("Invalid compaction payload");
-				}
-				return {
-					...base,
-					type: "compaction",
-					summary: payload.summary,
-					retainedTail: payload.retainedTail as Extract<Entry, { type: "compaction" }>["retainedTail"],
-					tokensBefore: payload.tokensBefore,
-					...(Object.hasOwn(payload, "details") ? { details: payload.details } : {}),
-					...(Object.hasOwn(payload, "usage")
-						? { usage: payload.usage as Extract<Entry, { type: "compaction" }>["usage"] }
-						: {}),
-				};
-			case "branch_summary":
-				if (typeof payload.fromId !== "string" || typeof payload.summary !== "string") {
-					throw new Error("Invalid branch_summary payload");
-				}
-				return {
-					...base,
-					type: "branch_summary",
-					fromId: payload.fromId,
-					summary: payload.summary,
-					...(Object.hasOwn(payload, "details") ? { details: payload.details } : {}),
-					...(Object.hasOwn(payload, "usage")
-						? { usage: payload.usage as Extract<Entry, { type: "branch_summary" }>["usage"] }
-						: {}),
-				};
-			case "custom":
-				if (typeof payload.customType !== "string") throw new Error("Invalid custom payload");
-				return {
-					...base,
-					type: "custom",
-					customType: payload.customType,
-					...(Object.hasOwn(payload, "data") ? { data: payload.data } : {}),
-				};
-		}
+		const entry = {
+			...payload,
+			type: row.type,
+			id: row.id,
+			seq: row.seq,
+			parentId: row.parent_id,
+			timestamp: row.timestamp,
+		};
+		assertDurableEntry(entry);
+		return entry as Entry;
 	} catch (error) {
 		throw new SessionError(
 			"invalid_entry",
@@ -273,13 +221,19 @@ function recordOpKind(record: NewRecord): string | undefined {
 	return record.type === "operation_started" ? record.intent.kind : undefined;
 }
 
-function decodeRecord(row: { seq: number; timestamp: number; payload: string }): LaneRecord {
+function decodeRecord(row: RecordRow): LaneRecord {
 	try {
-		return {
-			...(JSON.parse(row.payload) as object),
-			seq: row.seq,
-			timestamp: row.timestamp,
-		} as LaneRecord;
+		const payload: unknown = JSON.parse(row.payload);
+		assertDurableRecord(payload);
+		if (
+			payload.id !== row.id ||
+			payload.type !== row.type ||
+			payload.lane !== row.lane ||
+			(recordRunId(payload) ?? null) !== row.run_id ||
+			(recordOpKind(payload) ?? null) !== row.op_kind
+		)
+			throw new Error("Record payload does not match indexed identity");
+		return { ...payload, seq: row.seq, timestamp: row.timestamp };
 	} catch (error) {
 		throw new SessionError(
 			"storage",
@@ -358,20 +312,22 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 	}
 
 	async release(): Promise<void> {
-		this.releasePromise ??= this.finishRelease();
+		this.releasePromise ??= this.finishRelease().catch((error: unknown) => {
+			this.releasePromise = undefined;
+			throw error;
+		});
 		await this.releasePromise;
 	}
 
 	private async finishRelease(): Promise<void> {
 		this.closing = true;
 		if (this.heartbeatTimer !== undefined) clearTimeout(this.heartbeatTimer);
-		try {
-			await this.operations.enqueue(() =>
-				this.db.transaction(() => releaseWriterLease(this.db, this.metadata.id, this.lease)),
-			);
-		} finally {
-			this.onRelease();
-		}
+		this.heartbeatTimer = undefined;
+		await this.operations.enqueue(() =>
+			this.db.transaction(() => releaseWriterLease(this.db, this.metadata.id, this.lease)),
+		);
+		// Keep failed lease cleanup registered so a later release/close can retry.
+		this.onRelease();
 	}
 
 	private enqueueWrite<T>(operation: () => T): Promise<T> {
@@ -453,7 +409,9 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 		});
 	}
 
-	async appendEntry<TEntry extends Entry>(entry: ProvisionedEntry<TEntry>, lane: string): Promise<TEntry> {
+	async appendEntry<TEntry extends Entry>(input: ProvisionedEntry<TEntry>, lane: string): Promise<TEntry> {
+		assertJsonSerializable(input);
+		const entry = structuredClone(input);
 		return this.enqueueWrite(() => {
 			const parentId = readLaneHead(this.db, this.metadata.id, lane).leafId;
 			assertUnusedId(this.db, this.metadata.id, entry.id);
@@ -484,7 +442,9 @@ class SqliteSessionStorage implements SessionStorage<SqliteSessionMetadata> {
 	}
 
 	async appendRecord<TRecord extends LaneRecord>(record: NewRecord<TRecord>): Promise<TRecord>;
-	async appendRecord(record: NewRecord): Promise<LaneRecord> {
+	async appendRecord(input: NewRecord): Promise<LaneRecord> {
+		assertJsonSerializable(input);
+		const record = structuredClone(input);
 		return this.enqueueWrite(() => {
 			if (!readLane(this.db, this.metadata.id, record.lane)) {
 				throw new SessionError("invalid_lane", `Lane not found: ${record.lane}`);
@@ -655,15 +615,9 @@ function claimStorage(
 		const lease = claimWriterLease(db, metadata.id, leaseOptions);
 		const row = requireSessionRow(db, metadata.id);
 		readLanes(db, metadata.id);
-		return { lease, row };
+		return { lease, metadata: decodeSessionMetadata(row, metadata.path) };
 	});
-	return new SqliteSessionStorage(
-		db,
-		decodeSessionMetadata(claimed.row, metadata.path),
-		claimed.lease,
-		leaseOptions,
-		onRelease,
-	);
+	return new SqliteSessionStorage(db, claimed.metadata, claimed.lease, leaseOptions, onRelease);
 }
 
 export class SqliteSessionRepository
@@ -674,6 +628,8 @@ export class SqliteSessionRepository
 	private databasePath: string | undefined;
 	private database: SqliteDatabase | undefined;
 	private databasePromise: Promise<SqliteDatabase> | undefined;
+	private closing = false;
+	private closePromise: Promise<void> | undefined;
 	private readonly operations = new SerialOperationQueue();
 	private readonly activeStorages = new Set<SqliteSessionStorage>();
 	private readonly options: SqliteSessionRepositoryOptions;
@@ -718,7 +674,7 @@ export class SqliteSessionRepository
 	}
 
 	async create(options: SqliteSessionCreateOptions): Promise<Session<SqliteSessionMetadata>> {
-		return this.operations.enqueue(async () => {
+		return this.enqueue(async () => {
 			const db = await this.getDatabase();
 			const path = await this.getDatabasePath();
 			const id = options.id ?? uuidv7();
@@ -743,12 +699,12 @@ export class SqliteSessionRepository
 	}
 
 	async open(metadata: SqliteSessionMetadata): Promise<Session<SqliteSessionMetadata>> {
-		return this.operations.enqueue(async () => this.claimSession(await this.getDatabase(), metadata));
+		return this.enqueue(async () => this.claimSession(await this.getDatabase(), metadata));
 	}
 
 	/** Rebuilds this session's private branch-read cache from canonical entry parent links. */
 	async repairBranchCache(metadata: SqliteSessionMetadata): Promise<void> {
-		return this.operations.enqueue(async () => {
+		return this.enqueue(async () => {
 			await this.releaseStoragesForSession(metadata.id);
 			const db = await this.getDatabase();
 			db.transaction(() => {
@@ -762,7 +718,7 @@ export class SqliteSessionRepository
 
 	/** Reads the session catalog without acquiring or renewing per-session writer leases. */
 	async list(options: SqliteSessionListOptions = {}): Promise<SqliteSessionMetadata[]> {
-		return this.operations.enqueue(async () => {
+		return this.enqueue(async () => {
 			const path = await this.getDatabasePath();
 			if (!resultOrThrow(await this.options.env.exists(path), `Failed to check database ${path}`)) return [];
 			const db = await this.getDatabase();
@@ -772,7 +728,7 @@ export class SqliteSessionRepository
 	}
 
 	async delete(metadata: SqliteSessionMetadata): Promise<void> {
-		return this.operations.enqueue(async () => {
+		return this.enqueue(async () => {
 			await this.releaseStoragesForSession(metadata.id);
 			const db = await this.getDatabase();
 			db.transaction(() => {
@@ -798,64 +754,63 @@ export class SqliteSessionRepository
 		source: SqliteSessionMetadata,
 		options: ForkOptions & SqliteSessionCreateOptions,
 	): Promise<Session<SqliteSessionMetadata>> {
-		return this.operations.enqueue(async () => {
+		return this.enqueue(async () => {
 			const db = await this.getDatabase();
 			const path = await this.getDatabasePath();
-			const sourceMetadata = decodeSessionMetadata(requireSessionRow(db, source.id), path);
 			const id = options.id ?? uuidv7();
-			if (sessionExists(db, id)) throw new SessionError("already_exists", `Session already exists: ${id}`);
-
-			const entries: EntryRow[] = [];
-			const lanes: { lane: string; leafId: string | null }[] = [];
-			const branchTips: string[] = [];
-			let branchForkTargetId: string | null = null;
-
-			if (options.scope === "tree") {
-				entries.push(...readEntryRows(db, source.id, { order: "oldestFirst" }));
-				lanes.push(...readLanes(db, source.id).map((row) => ({ lane: row.lane, leafId: row.leaf_id })));
-				branchTips.push(...readBranchTipIds(db, source.id));
-			} else {
-				const main = readLane(db, source.id, "main");
-				if (!main) throw new SessionError("invalid_lane", "Lane not found: main");
-				const selectedEntryId = options.entryId ?? main.leaf_id;
-				if (selectedEntryId !== null) {
-					const target = readEntryRow(db, source.id, selectedEntryId);
-					if (!target || target.type !== "message") {
-						throw new SessionError(
-							"invalid_fork_target",
-							`Fork target is not a message entry: ${selectedEntryId}`,
-						);
-					}
-					const position = options.position ?? (options.entryId === undefined ? "at" : "before");
-					branchForkTargetId = position === "at" ? target.id : target.parent_id;
-				}
-				lanes.push({ lane: "main", leafId: branchForkTargetId });
-				if (branchForkTargetId !== null) {
-					const cached = readCachedBranch(db, source.id, branchForkTargetId);
-					if (!cached) {
-						throw new SessionError(
-							"invalid_fork_target",
-							`Fork target is not on a cached branch: ${branchForkTargetId}`,
-						);
-					}
-					const rows = queryCachedBranchRows(db, source.id, cached, { order: "oldestFirst" });
-					entries.push(...rows.map(entryRowFromCached));
-					branchTips.push(branchForkTargetId);
-				}
-			}
-
-			const copiedIds = new Set(entries.map((entry) => entry.id));
-			const latestName = readLatestFact(db, source.id, "name", null);
-			const latestLabels = readLatestLabelFacts(db, source.id);
-			const labelsToCopy = latestLabels.filter(
-				(row) => options.scope === "tree" || (row.key !== null && copiedIds.has(row.key)),
-			);
-			const createdAt = Date.now();
-			const metadata = options.metadata ?? sourceMetadata.metadata;
-			let lease: WriterLease;
-
+			let fork: { metadata: SqliteSessionMetadata; lease: WriterLease };
 			try {
-				lease = db.transaction(() => {
+				fork = db.transaction(() => {
+					const sourceMetadata = decodeSessionMetadata(requireSessionRow(db, source.id), path);
+					if (sessionExists(db, id)) throw new SessionError("already_exists", `Session already exists: ${id}`);
+
+					const entries: EntryRow[] = [];
+					const lanes: { lane: string; leafId: string | null }[] = [];
+					const branchTips: string[] = [];
+					let branchForkTargetId: string | null = null;
+
+					if (options.scope === "tree") {
+						entries.push(...readEntryRows(db, source.id, { order: "oldestFirst" }));
+						lanes.push(...readLanes(db, source.id).map((row) => ({ lane: row.lane, leafId: row.leaf_id })));
+						branchTips.push(...readBranchTipIds(db, source.id));
+					} else {
+						const main = readLane(db, source.id, "main");
+						if (!main) throw new SessionError("invalid_lane", "Lane not found: main");
+						const selectedEntryId = options.entryId ?? main.leaf_id;
+						if (selectedEntryId !== null) {
+							const target = readEntryRow(db, source.id, selectedEntryId);
+							if (!target || target.type !== "message") {
+								throw new SessionError(
+									"invalid_fork_target",
+									`Fork target is not a message entry: ${selectedEntryId}`,
+								);
+							}
+							const position = options.position ?? (options.entryId === undefined ? "at" : "before");
+							branchForkTargetId = position === "at" ? target.id : target.parent_id;
+						}
+						lanes.push({ lane: "main", leafId: branchForkTargetId });
+						if (branchForkTargetId !== null) {
+							const cached = readCachedBranch(db, source.id, branchForkTargetId);
+							if (!cached) {
+								throw new SessionError(
+									"invalid_fork_target",
+									`Fork target is not on a cached branch: ${branchForkTargetId}`,
+								);
+							}
+							const rows = queryCachedBranchRows(db, source.id, cached, { order: "oldestFirst" });
+							entries.push(...rows.map(entryRowFromCached));
+							branchTips.push(branchForkTargetId);
+						}
+					}
+
+					const copiedIds = new Set(entries.map((entry) => entry.id));
+					const latestName = readLatestFact(db, source.id, "name", null);
+					const latestLabels = readLatestLabelFacts(db, source.id);
+					const labelsToCopy = latestLabels.filter(
+						(row) => options.scope === "tree" || (row.key !== null && copiedIds.has(row.key)),
+					);
+					const createdAt = Date.now();
+					const metadata = options.metadata ?? sourceMetadata.metadata;
 					insertSessionRow(db, {
 						id,
 						createdAt,
@@ -892,7 +847,8 @@ export class SqliteSessionRepository
 
 					setNextSequence(db, id, nextSeq);
 					for (const tip of branchTips) buildCachedBranch(db, id, tip);
-					return claimWriterLease(db, id, this.leaseOptions);
+					const lease = claimWriterLease(db, id, this.leaseOptions);
+					return { lease, metadata: decodeSessionMetadata(requireSessionRow(db, id), path) };
 				});
 			} catch (error) {
 				if (error instanceof SessionError) throw error;
@@ -903,14 +859,31 @@ export class SqliteSessionRepository
 				);
 			}
 
-			const row = requireSessionRow(db, id);
-			return this.sessionFromLease(db, decodeSessionMetadata(row, path), lease);
+			return this.sessionFromLease(db, fork.metadata, fork.lease);
 		});
 	}
 
-	async close(): Promise<void> {
+	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+		if (this.closing) return Promise.reject(new SessionError("storage", "SQLite session repository is closed"));
+		return this.operations.enqueue(operation);
+	}
+
+	close(): Promise<void> {
+		this.closing = true;
+		this.closePromise ??= this.finishClose().catch((error: unknown) => {
+			this.closePromise = undefined;
+			throw error;
+		});
+		return this.closePromise;
+	}
+
+	private async finishClose(): Promise<void> {
 		await this.operations.drain();
-		for (const storage of [...this.activeStorages]) await storage.release();
+		const releases = await Promise.allSettled([...this.activeStorages].map((storage) => storage.release()));
+		const failed = releases.find((result) => result.status === "rejected");
+		// All storages are sealed and their timers stopped, but failed lease
+		// cleanup still needs this connection on the next explicit close attempt.
+		if (failed) throw failed.reason;
 		if (this.database) this.database.close();
 		this.database = undefined;
 		this.databasePromise = undefined;

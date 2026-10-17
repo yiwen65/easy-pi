@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type Component, type MarkdownTheme, truncateToWidth } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import { sanitizeDisplayText } from "../../../core/tools/render-utils.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { AssistantMessageComponent } from "../../interactive/components/assistant-message.ts";
 import { getMarkdownTheme, theme } from "../../interactive/theme/theme.ts";
@@ -29,7 +30,7 @@ class ThinkingLineComponent implements Component {
 	}
 
 	setThinking(text: string): void {
-		this.flat = flattenInline(text);
+		this.flat = flattenInline(sanitizeDisplayText(text));
 	}
 
 	invalidate(): void {

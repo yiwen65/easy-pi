@@ -36,6 +36,13 @@ export function normalizeDisplayText(text: string): string {
 	return text.replace(/\r/g, "");
 }
 
+/** Plain, untrusted display text only; call before adding host styles, links or images. */
+export function sanitizeDisplayText(text: string): string {
+	// Strip complete ANSI sequences for readability, then remove remaining controls
+	// (including incomplete streaming escapes and C1 introducers). Keep tabs/newlines.
+	return sanitizeBinaryOutput(stripAnsi(text)).replace(/[\r\x7f-\x9f]/g, "");
+}
+
 export function getTextOutput(
 	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> } | undefined,
 	showImages: boolean,
@@ -45,7 +52,7 @@ export function getTextOutput(
 	const textBlocks = result.content.filter((c) => c.type === "text");
 	const imageBlocks = result.content.filter((c) => c.type === "image");
 
-	let output = textBlocks.map((c) => sanitizeBinaryOutput(stripAnsi(c.text || "")).replace(/\r/g, "")).join("\n");
+	let output = textBlocks.map((c) => sanitizeDisplayText(c.text || "")).join("\n");
 
 	const caps = getCapabilities();
 	if (imageBlocks.length > 0 && (!caps.images || !showImages)) {

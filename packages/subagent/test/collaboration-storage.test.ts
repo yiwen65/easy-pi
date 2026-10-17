@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type * as Fs from "node:fs";
 import {
 	existsSync,
+	linkSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
@@ -627,6 +628,112 @@ test("historical interrupted work remains GC-protected after a later completed t
 		gcEligible: false,
 	});
 	expect(sweepCollaborationStorage({ agentDir: f.cwd, maxAgeMs: 1, now: Date.now() + 10_000 }).candidates).toEqual([]);
+});
+
+test.each([process.pid, 2147483647])(
+	"native task writer %s is measured without granting deletion of live work",
+	(pid) => {
+		const f = fixture();
+		const agent = child(f);
+		f.store.close();
+		const before = inspectCollaborationStorage(f.options);
+		const bytes = JSON.stringify({ pid, token: randomUUID() });
+		writeFileSync(join(f.directory, agent.id, `${agent.sessionFile}.task.lock`), bytes);
+		const after = inspectCollaborationStorage(f.options);
+		expect(after).toMatchObject({
+			state: "present",
+			incomplete: false,
+			files: before.files + 1,
+			bytes: before.bytes + Buffer.byteLength(bytes),
+			deletable: pid !== process.pid,
+		});
+		expect(() =>
+			checkCollaborationStorageAdmission({
+				...f.options,
+				maxTeamBytes: Number.MAX_SAFE_INTEGER,
+				maxTotalBytes: Number.MAX_SAFE_INTEGER,
+			}),
+		).not.toThrow();
+		expect(deleteCollaborationStorage({ ...f.options, dryRun: false }).status).toBe(
+			pid === process.pid ? "protected" : "deleted",
+		);
+	},
+);
+
+test.each([
+	{ pid: 0, token: randomUUID() },
+	{ pid: -1, token: randomUUID() },
+	{ pid: process.pid, token: "invalid" },
+	{ pid: process.pid, token: randomUUID(), unknown: true },
+])("invalid task ownership remains fail-closed (%j)", (owner) => {
+	const f = fixture();
+	const agent = child(f);
+	f.store.close();
+	writeFileSync(join(f.directory, agent.id, `${agent.sessionFile}.task.lock`), JSON.stringify(owner));
+	expect(inspectCollaborationStorage(f.options)).toMatchObject({ incomplete: true, deletable: false });
+	expect(() => checkCollaborationStorageAdmission({ ...f.options, maxTeamBytes: Number.MAX_SAFE_INTEGER })).toThrow(
+		expect.objectContaining({ code: "storage_error" }),
+	);
+	expect(deleteCollaborationStorage({ ...f.options, dryRun: false }).status).toBe("protected");
+});
+
+test("an uncertain task ownership claim remains protected and rejects budgeted admission", () => {
+	const f = fixture();
+	const agent = child(f);
+	f.store.close();
+	mkdirSync(join(f.directory, agent.id, `${agent.sessionFile}.task.lock.claim`));
+	expect(inspectCollaborationStorage(f.options)).toMatchObject({ incomplete: true, deletable: false });
+	expect(() => checkCollaborationStorageAdmission({ ...f.options, maxTeamBytes: Number.MAX_SAFE_INTEGER })).toThrow(
+		expect.objectContaining({ code: "storage_error" }),
+	);
+	expect(deleteCollaborationStorage({ ...f.options, dryRun: false }).status).toBe("protected");
+});
+
+test.each(["symlink", "hardlink", "claim-content"])("known task-lock paths reject unsafe %s", (kind) => {
+	const f = fixture();
+	const agent = child(f);
+	f.store.close();
+	const external = join(f.cwd, "external-owner");
+	const bytes = JSON.stringify({ pid: 2147483647, token: randomUUID() });
+	writeFileSync(external, bytes);
+	const lock = join(f.directory, agent.id, `${agent.sessionFile}.task.lock`);
+	if (kind === "symlink") symlinkSync(external, lock);
+	else if (kind === "hardlink") linkSync(external, lock);
+	else {
+		mkdirSync(`${lock}.claim`);
+		writeFileSync(join(`${lock}.claim`, "unowned"), "keep");
+	}
+	expect(inspectCollaborationStorage(f.options)).toMatchObject({ incomplete: true, deletable: false });
+	expect(deleteCollaborationStorage({ ...f.options, dryRun: false }).status).toBe("protected");
+	expect(readFileSync(external, "utf8")).toBe(bytes);
+});
+
+test("task-lock names cannot authorize unknown child files", () => {
+	const f = fixture();
+	const agent = child(f);
+	f.store.close();
+	const path = join(f.directory, agent.id, "other.jsonl.task.lock");
+	writeFileSync(path, JSON.stringify({ pid: 2147483647, token: randomUUID() }));
+	expect(inspectCollaborationStorage(f.options)).toMatchObject({ incomplete: true, deletable: false });
+	expect(deleteCollaborationStorage({ ...f.options, dryRun: false }).status).toBe("protected");
+	expect(existsSync(path)).toBe(true);
+});
+
+test("deletion retry rechecks a retained task lock's owner even if its inode is unchanged", () => {
+	const f = fixture();
+	const agent = child(f);
+	f.store.close();
+	const lock = `${agent.sessionFile}.task.lock`;
+	const owner = (pid: number) => JSON.stringify({ pid, token: randomUUID() });
+	writeFileSync(join(f.directory, agent.id, lock), owner(2147483647));
+	interruptDeletion(f);
+	expect(() => deleteCollaborationStorage({ ...f.options, dryRun: false })).toThrow(/synthetic/);
+	const retained = join(f.quarantine, agent.id, lock);
+	writeFileSync(retained, owner(process.pid));
+	expect(() => deleteCollaborationStorage({ ...f.options, dryRun: false })).toThrow(/task writer/);
+	expect(existsSync(retained)).toBe(true);
+	writeFileSync(retained, owner(2147483647));
+	expect(deleteCollaborationStorage({ ...f.options, dryRun: false }).status).toBe("deleted");
 });
 
 test.each(["..", "/absolute", "a/b", ".hidden", ""])(

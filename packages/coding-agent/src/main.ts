@@ -402,6 +402,14 @@ export async function createSessionManager(
 				return openSessionOrExit(resolved.path, sessionDir);
 
 			case "global": {
+				if (resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY) !== "interactive") {
+					console.error(
+						chalk.red(
+							"Error: Session belongs to another project. Use --fork <id> to copy it here, or --session <path> to open it in its original directory.",
+						),
+					);
+					process.exit(1);
+				}
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {

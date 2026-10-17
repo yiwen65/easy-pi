@@ -280,7 +280,12 @@ export function createFindToolDefinition(
 						// has to say so: the tool description promises .gitignore handling.
 						let appliesGitignoreOutsideRepo = true;
 						for (let current = searchPath; ; ) {
-							if (await pathExists(path.join(current, ".git"))) {
+							const hasGitDirectory = await pathExists(path.join(current, ".git"));
+							if (settled || signal?.aborted) {
+								onAbort();
+								return;
+							}
+							if (hasGitDirectory) {
 								insideGitRepo = true;
 								break;
 							}
@@ -309,6 +314,10 @@ export function createFindToolDefinition(
 						}
 						args.push("--", effectivePattern, searchPath);
 
+						if (settled || signal?.aborted) {
+							onAbort();
+							return;
+						}
 						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
