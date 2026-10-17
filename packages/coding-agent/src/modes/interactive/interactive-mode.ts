@@ -6009,6 +6009,7 @@ export class InteractiveMode {
 					},
 					showRenameHint: true,
 					keybindings: this.keybindings,
+					agentDir: this.runtimeHost.services.agentDir,
 				},
 
 				this.sessionManager.getSessionFile(),

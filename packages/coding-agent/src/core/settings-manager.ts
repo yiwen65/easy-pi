@@ -11,6 +11,11 @@ import { stripBom } from "../utils/text.ts";
 import { type CodexServiceTier, parseCodexServiceTier } from "./codex-service-tier.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
+import {
+	parseSubagentStoragePolicy,
+	type SubagentStoragePolicy,
+	type SubagentStorageSettings,
+} from "./subagent-storage-policy.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -113,6 +118,8 @@ export interface Settings {
 	subagentThinkingLevel?: ThinkingLevel;
 	/** Team collaboration tools (spawn_agent and peers); default: true. */
 	subagentEnabled?: boolean;
+	/** Global-only operator policy; automatic cleanup is disabled unless explicitly enabled. */
+	subagentStorage?: SubagentStorageSettings;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -830,6 +837,11 @@ export class SettingsManager {
 
 	getSubagentEnabled(): boolean {
 		return this.globalSettings.subagentEnabled ?? true;
+	}
+
+	/** Project settings and host overrides cannot authorize automatic data deletion. */
+	getSubagentStoragePolicy(): SubagentStoragePolicy {
+		return parseSubagentStoragePolicy(this.globalSettings.subagentStorage);
 	}
 
 	setSubagentEnabled(enabled: boolean | undefined): void {

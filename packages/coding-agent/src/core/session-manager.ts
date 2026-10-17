@@ -3,12 +3,14 @@ import { type ImageContent, type Message, type TextContent, type Usage, uuidv7 }
 import { randomUUID } from "crypto";
 import {
 	closeSync,
+	constants,
 	createReadStream,
 	existsSync,
 	fstatSync,
 	fsyncSync,
 	ftruncateSync,
 	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -16,6 +18,7 @@ import {
 	readSync,
 	realpathSync,
 	renameSync,
+	rmdirSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -35,6 +38,7 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 import type { TaskRecoveryState } from "./task-recovery.ts";
+import { assertNativeSessionTeamAvailable, nativeSessionTeamPaths } from "./tool-output-storage-session.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -758,28 +762,115 @@ function readSessionFile(filePath: string): {
 	return { entries, repair, size, recoverySource };
 }
 
+function ensureSessionDirectory(directory: string): void {
+	const target = join(directory, "session.jsonl");
+	assertNativeSessionTeamAvailable(target);
+	if (existsSync(directory)) return;
+	const native = nativeSessionTeamPaths(target);
+	if (!native) {
+		mkdirSync(directory, { recursive: true });
+		assertNativeSessionTeamAvailable(target);
+		return;
+	}
+	// Pin the native parent inode before mkdir, so isolation cannot turn cleanup into a path guess.
+	const parentPath = dirname(directory);
+	const parentInfo = lstatSync(parentPath);
+	if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) throw new Error("Unsafe native session parent");
+	const parentFd = openSync(parentPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+	try {
+		const parent = fstatSync(parentFd);
+		if (!parent.isDirectory() || parent.dev !== parentInfo.dev || parent.ino !== parentInfo.ino) {
+			throw new Error("Native session parent identity changed");
+		}
+		const locate = (expected?: { dev: number; ino: number }) => {
+			for (const path of [directory, dirname(native.relocatedFile)]) {
+				try {
+					const currentParent = lstatSync(dirname(path));
+					if (
+						!currentParent.isDirectory() ||
+						currentParent.isSymbolicLink() ||
+						currentParent.dev !== parent.dev ||
+						currentParent.ino !== parent.ino
+					)
+						continue;
+					const child = lstatSync(path);
+					if (
+						!child.isDirectory() ||
+						child.isSymbolicLink() ||
+						(expected && (child.dev !== expected.dev || child.ino !== expected.ino))
+					)
+						continue;
+					return { path, dev: child.dev, ino: child.ino };
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				}
+			}
+			return undefined;
+		};
+		// A native team must already exist: never recursively recreate an isolated/deleted parent.
+		mkdirSync(directory, { recursive: false });
+		const created = locate();
+		if (!created) throw new Error("New native session directory identity cannot be verified");
+		try {
+			assertNativeSessionTeamAvailable(target);
+		} catch (error) {
+			try {
+				const current = locate(created);
+				// rmdir is the emptiness check: unknown files and replacement directories are retained.
+				if (current) rmdirSync(current.path);
+			} catch {
+				/* Preserve the admission failure; retain anything not safely removable. */
+			}
+			throw error;
+		}
+	} finally {
+		closeSync(parentFd);
+	}
+}
+
+/** Remove only our exclusively opened temporary/lock inode, including a concurrent team rename. */
+function removeSessionWriteFile(path: string, identity: { dev: number; ino: number }): void {
+	for (const candidate of [path, nativeSessionTeamPaths(path)?.relocatedFile]) {
+		if (!candidate) continue;
+		try {
+			const info = lstatSync(candidate);
+			if (!info.isFile() || info.isSymbolicLink() || info.dev !== identity.dev || info.ino !== identity.ino) {
+				throw new Error("Session write file identity changed during cleanup");
+			}
+			unlinkSync(candidate);
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+}
+
 /** Publish a fully synced replacement; readers see either the old file or the complete new file. */
 function writeSessionFile(filePath: string, entries: FileEntry[], exclusive = false): void {
+	assertNativeSessionTeamAvailable(filePath);
 	if (existsSync(filePath) && statSync(filePath).nlink > 1) {
 		throw new Error(`Session files with multiple hard links are unsupported: ${filePath}`);
 	}
 	const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
 	const fd = openSync(temporaryPath, "wx", 0o600);
+	const identity = fstatSync(fd);
 	try {
 		try {
+			assertNativeSessionTeamAvailable(filePath);
 			for (const entry of entries) writeFileSync(fd, `${JSON.stringify(entry)}\n`);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
 		}
 	} catch (error) {
-		unlinkSync(temporaryPath);
+		removeSessionWriteFile(temporaryPath, identity);
 		throw error;
 	}
 	try {
+		assertNativeSessionTeamAvailable(filePath);
 		if (exclusive) {
 			linkSync(temporaryPath, filePath);
-			unlinkSync(temporaryPath);
+			removeSessionWriteFile(temporaryPath, identity);
 		} else renameSync(temporaryPath, filePath);
 		const directoryFd = openSync(dirname(filePath), "r");
 		try {
@@ -788,7 +879,7 @@ function writeSessionFile(filePath: string, entries: FileEntry[], exclusive = fa
 			closeSync(directoryFd);
 		}
 	} finally {
-		if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+		removeSessionWriteFile(temporaryPath, identity);
 	}
 }
 
@@ -1135,8 +1226,9 @@ export class SessionManager {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
-			mkdirSync(this.sessionDir, { recursive: true });
+		if (persist) {
+			if (sessionFile) assertNativeSessionTeamAvailable(resolvePath(sessionFile));
+			if (this.sessionDir) ensureSessionDirectory(this.sessionDir);
 		}
 
 		if (sessionFile) {
@@ -1153,15 +1245,23 @@ export class SessionManager {
 
 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
 		const requestedPath = resolvePath(sessionFile);
+		assertNativeSessionTeamAvailable(requestedPath);
 		const path = existsSync(requestedPath) ? realpathSync(requestedPath) : requestedPath;
+		assertNativeSessionTeamAvailable(path);
+		const native = nativeSessionTeamPaths(path);
 		if (this.persist && existsSync(path) && statSync(path).nlink > 1) {
 			throw new Error(`Session files with multiple hard links are unsupported: ${path}`);
 		}
 		const loaded = readSessionFile(path);
+		assertNativeSessionTeamAvailable(path);
+		if (native && loaded.entries.length === 0) {
+			throw new Error(`Native team session file is missing or invalid; refusing to initialize history: ${path}`);
+		}
 		const entries = preloadedFileEntries ?? loaded.entries;
 		const hadEntries = entries.length > 0;
 		let repairPending = false;
 		if (entries.length === 0) {
+			assertNativeSessionTeamAvailable(path);
 			if (existsSync(path) && statSync(path).size > 0) {
 				throw new Error(`Session file is not a valid ${APP_NAME} session: ${path}`);
 			}
@@ -1263,11 +1363,14 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): { offset: number; length: number } | undefined {
 		if (!this.persist || !this.sessionFile) return;
+		assertNativeSessionTeamAvailable(this.sessionFile);
 		const serialized = Buffer.from(`${JSON.stringify(entry)}\n`);
 		const lockPath = `${this.sessionFile}.append.lock`;
 		const lockFd = openSync(lockPath, "wx", 0o600);
+		const lockIdentity = fstatSync(lockFd);
 		let committedSize = this.committedSize;
 		try {
+			assertNativeSessionTeamAvailable(this.sessionFile);
 			writeFileSync(lockFd, JSON.stringify(process.pid));
 			fsyncSync(lockFd);
 			const fileStats = statSync(this.sessionFile);
@@ -1284,6 +1387,7 @@ export class SessionManager {
 			} else {
 				const fd = openSync(this.sessionFile, "r+");
 				try {
+					assertNativeSessionTeamAvailable(this.sessionFile);
 					const stats = fstatSync(fd);
 					if (stats.nlink > 1) {
 						throw new Error(`Session files with multiple hard links are unsupported: ${this.sessionFile}`);
@@ -1318,7 +1422,7 @@ export class SessionManager {
 			}
 		} finally {
 			closeSync(lockFd);
-			unlinkSync(lockPath);
+			removeSessionWriteFile(lockPath, lockIdentity);
 		}
 		this.committedSize = committedSize;
 		this.repairPending = false;
@@ -1841,6 +1945,11 @@ export class SessionManager {
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
+		assertNativeSessionTeamAvailable(resolvedPath);
+		if (existsSync(resolvedPath)) assertNativeSessionTeamAvailable(realpathSync(resolvedPath));
+		else if (nativeSessionTeamPaths(resolvedPath)) {
+			throw new Error(`Native team session file is missing; refusing to initialize history: ${resolvedPath}`);
+		}
 		let header: SessionHeader | null = null;
 		let preloadedFileEntries: FileEntry[] | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
@@ -1907,9 +2016,7 @@ export class SessionManager {
 		}
 
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
+		ensureSessionDirectory(dir);
 
 		// Create new session file with new ID but forked content
 		if (options?.id !== undefined) {

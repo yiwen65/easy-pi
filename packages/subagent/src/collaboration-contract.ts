@@ -43,9 +43,17 @@ const ERROR_HINTS: Record<CollaborationErrorCode, string> = {
 	context_unavailable: "Refresh the evidence or choose an explicit compatible context policy.",
 };
 const ERROR_REASONS = {
+	team_deleted: {
+		code: "forbidden",
+		hint: "This team's history was deleted or deletion is pending. Inspect /agents storage and start a new root session; never recreate an empty team under the old identity.",
+	},
 	team_agents_full: {
 		code: "limit_reached",
 		hint: "Close settled children to free team slots (the root counts toward the team limit).",
+	},
+	storage_budget_full: {
+		code: "limit_reached",
+		hint: "Retained storage budget reached. Inspect /agents storage and explicitly clean cold teams before admitting new work.",
 	},
 	turn_history_full: {
 		code: "limit_reached",
@@ -61,7 +69,7 @@ const ERROR_REASONS = {
 	},
 	team_history_full: {
 		code: "limit_reached",
-		hint: "This root team has reached its retained-agent history limit. Start a new root session; closed names and records cannot be deleted automatically.",
+		hint: "This root team has reached its retained-agent history limit. Start a new root session; closed records are not pruned to admit more work.",
 	},
 	execution_slots_full: {
 		code: "limit_reached",

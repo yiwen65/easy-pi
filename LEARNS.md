@@ -611,3 +611,12 @@
 - Correct approach: 摘要边界固定完整解析结果，包括省略状态；内部 snapshot 标记在 SDK 消费后移除，不向 provider 泄漏，也不拿 Standard/null 代替省略。普通请求的 undefined 仍继承当前默认值。
 - Prevention: 涉及动态默认配置的重试，必须穿过真实 SDK seam 验证 unset、显式值、重试间切换和下一条普通请求；不要只测替换掉 SDK 的 custom stream。
 - Verified by: 2026-10-15 `suite/codex-service-tier-sdk-summaries.test.ts` 修复前仅三个 unset 场景失败，修复后九个场景通过；协调者独立复跑六文件 67/67 通过。
+
+## Native team 数据清理——保护实际会话生命周期，不能只看团队 owner 或 Bash writer
+
+- Wrong approach: 只用 team registry owner 与懒创建的 Bash 日志租约判断历史是否活跃。
+- Why it failed: `--session` 可直接续开旧团队内的 child JSONL；新 root 锁的是另一 team，尚未执行 Bash 时原文件没有租约，清理原团队会删掉正在使用的历史。
+- Recognition signal: 真实 SDK 打开 child、零 Bash/零 provider 后，原团队 delete 返回 `deleted` 而不是 `protected`；仅测正常 spawn/close 无法覆盖此入口。
+- Correct approach: 持久会话在推理前建立生命周期租约；源 team 删除标记在租约建立前后复核，provider 前再次验证文件身份。SessionManager 必须在 mkdir/缺失 header 初始化及 append 前就拒绝已删除 native 路径，不能等 AgentSession 再拦截重建。失败启动释放租约，隔离删除重试复核活跃租约。按实际源路径识别 foreign agentDir，不能只比较当前 root ID。
+- Prevention: 清理功能同时覆盖普通 spawn、直接/foreign child reopen、独立进程删除、marker/rename 竞态、SDK 最终化失败与 shutdown；`close` 释放运行资源不等于删除历史。
+- Verified by: 2026-10-18 `suite/tool-output-storage-lifecycle.test.ts` 原始活跃文件误删 red→green；`session-manager-team-deletion.test.ts` 在旧代码复现删除后 open 重建等9项失败，前置保护后回归通过；协调者定向矩阵通过，全部合成目录与 faux provider，无真实数据清理。

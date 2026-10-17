@@ -14,8 +14,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
 	Agent,
@@ -153,6 +153,12 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type SuspendedTaskRecovery, TaskRecoveryJournal, type TaskRecoveryState } from "./task-recovery.ts";
+import { ToolOutputStorage } from "./tool-output-storage.ts";
+import {
+	assertNativeSessionTeamAvailable,
+	assertPersistentSessionAvailable,
+	nativeSessionTeamPaths,
+} from "./tool-output-storage-session.ts";
 import { BACKGROUND_TASK_TOOL_NAMES, createBackgroundTaskToolDefinitions } from "./tools/background-tasks.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions, createBashToolDefinition } from "./tools/index.ts";
@@ -234,6 +240,8 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
+	/** Actual host storage root; used only to recognize native team history and managed temporary logs. */
+	agentDir?: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for extensions, skills, prompts, themes, context files, and system prompt */
@@ -450,6 +458,9 @@ export class AgentSession {
 
 	/** Shared background bash task manager. Survives reloads; created lazily on first tool build. */
 	private _backgroundTaskManager?: BackgroundTaskManager;
+	private _toolOutputStorage?: ToolOutputStorage;
+	private _toolOutputStorageIdentity?: string;
+	private readonly _agentDir: string | undefined;
 	private readonly _backgroundBashPromotion: boolean;
 	private readonly _backgroundTaskNotifications = new BackgroundTaskNotifications();
 	private _backgroundTaskUnsubscribes: Array<() => void> = [];
@@ -498,6 +509,7 @@ export class AgentSession {
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
+		this._agentDir = config.agentDir;
 		this._modelRuntime = config.modelRuntime;
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
@@ -544,6 +556,17 @@ export class AgentSession {
 		const restoredProjection = this._hfHost?.buildActiveMessages(branchEntries);
 		this.agent.state.messages = restoredProjection ?? buildSessionContext(branchEntries).messages;
 		this._restoreTaskQueues();
+		// Protect persistent JSONL even when this runtime never executes Bash. Do this last:
+		// failed construction must not leave a live lease behind.
+		try {
+			this._assertPersistentSessionAvailable();
+		} catch (error) {
+			this._extensionRunner.invalidate();
+			this._disconnectFromAgent();
+			for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
+			this._backgroundTaskNotifications.dispose();
+			throw error;
+		}
 	}
 
 	private _restoreSessionMessages(): void {
@@ -605,6 +628,7 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		env?: Record<string, string>;
 	}> {
+		this._assertPersistentSessionAvailable();
 		if (this.agent.streamFunction === streamSimple) {
 			return this._getRequiredRequestAuth(model);
 		}
@@ -1126,6 +1150,7 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
+			this._assertPersistentSessionAvailable();
 			const preparedMessages = await this._compactProviderContextIfNeeded(turn.context.messages);
 			let preparedContext =
 				preparedMessages === turn.context.messages ? turn.context : { ...turn.context, messages: preparedMessages };
@@ -1187,6 +1212,7 @@ export class AgentSession {
 				this._agentLoopProjectionRevision !== this._providerContextProjectionRevision;
 			this._agentLoopProjectionRevision = this._providerContextProjectionRevision;
 			if (projectionChangedDuringCallback) preparedContextBoundary = undefined;
+			this._assertPersistentSessionAvailable();
 			return {
 				...previousUpdate,
 				context: {
@@ -1653,6 +1679,7 @@ export class AgentSession {
 						this._eventListeners = [];
 						for (const unsubscribe of this._backgroundTaskUnsubscribes.splice(0)) unsubscribe();
 						this._backgroundTaskNotifications.dispose();
+						this._toolOutputStorage?.close();
 					}
 				}
 			});
@@ -4457,6 +4484,47 @@ export class AgentSession {
 		return this._backgroundTaskNotifications.isConsumed(taskId);
 	}
 
+	private _assertPersistentSessionAvailable(): void {
+		if (!this.sessionFile) return;
+		try {
+			assertNativeSessionTeamAvailable(this.sessionFile, this._agentDir);
+			this._getToolOutputStorage();
+			assertPersistentSessionAvailable(this.sessionFile, this.sessionId, this._agentDir);
+		} catch (error) {
+			try {
+				this._toolOutputStorage?.close({ discardEmpty: true });
+			} finally {
+				this._toolOutputStorage = undefined;
+				this._toolOutputStorageIdentity = undefined;
+			}
+			throw error;
+		}
+	}
+
+	private _getToolOutputStorage(): ToolOutputStorage {
+		const identity = `${this.sessionId}:${this.sessionFile ?? "memory"}`;
+		if (!this._toolOutputStorage || this._toolOutputStorageIdentity !== identity) {
+			this._toolOutputStorage?.close();
+			if (this.sessionFile) assertNativeSessionTeamAvailable(this.sessionFile, this._agentDir);
+			let tempRoot: string | undefined;
+			if (!this.sessionFile && this._agentDir) {
+				mkdirSync(this._agentDir, { recursive: true, mode: 0o700 });
+				tempRoot = join(realpathSync(this._agentDir), "tool-output");
+				mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
+			}
+			this._toolOutputStorage = new ToolOutputStorage({
+				tempRoot,
+				sessionId: this.sessionId,
+				sessionFile: this.sessionFile,
+				relocatedDirectory: this.sessionFile
+					? nativeSessionTeamPaths(this.sessionFile, this._agentDir)?.relocatedLogs(this.sessionId)
+					: undefined,
+			});
+			this._toolOutputStorageIdentity = identity;
+		}
+		return this._toolOutputStorage;
+	}
+
 	private _getOrCreateBackgroundTaskManager(): BackgroundTaskManager {
 		if (!this._backgroundTaskManager) {
 			const manager = new BackgroundTaskManager({
@@ -4466,6 +4534,7 @@ export class AgentSession {
 				stallTimeoutMs: this.settingsManager.getBackgroundBashStallTimeoutSeconds() * 1000,
 				maxTasks: this.settingsManager.getBackgroundBashMaxTasks(),
 				maxLogBytes: this.settingsManager.getBackgroundBashMaxLogBytes(),
+				createLogFile: () => this._getToolOutputStorage().createLogFile(),
 			});
 			this._backgroundTaskManager = manager;
 			// Queue notifications before registering the session's own listeners: the "wake" hook runs on
@@ -4534,6 +4603,7 @@ export class AgentSession {
 				commandPrefix: shellCommandPrefix,
 				shellPath,
 				backgroundTasks,
+				createLogFile: () => this._getToolOutputStorage().createLogFile(),
 				promotion: this._backgroundBashPromotion ? {} : undefined,
 			});
 			for (const definition of createBackgroundTaskToolDefinitions(this._cwd, backgroundTasks, {
@@ -4785,6 +4855,7 @@ export class AgentSession {
 				this.sessionManager.getCwd(),
 				options?.operations ?? createLocalBashOperations({ shellPath }),
 				{
+					createLogFile: () => this._getToolOutputStorage().createLogFile(),
 					onChunk: (delta) => {
 						onChunk?.(delta);
 						this._emit({ type: "bash_execution_update", id: options?.id, delta });

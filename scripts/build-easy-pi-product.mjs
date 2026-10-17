@@ -18,7 +18,7 @@ try {
 	// the compiler's transitive graph. Package exports alone cannot stop bundling.
 	const nativeModules = new Set([
 		"index", "collaboration-contract", "collaboration-controller",
-		"collaboration-mailbox", "collaboration-store", "context-fork", "session-host",
+		"collaboration-mailbox", "collaboration-store", "collaboration-storage", "collaboration-storage-guard", "context-fork", "session-host",
 	]);
 	for (const file of readdirSync(join(output, "subagent/src"))) {
 		if (!nativeModules.has(file.replace(/\.(?:js|d\.ts)(?:\.map)?$/, ""))) {

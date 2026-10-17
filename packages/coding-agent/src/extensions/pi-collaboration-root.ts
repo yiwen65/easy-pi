@@ -10,6 +10,11 @@ import { getSessionMcpConfig } from "./mcp/index.ts";
 import { getNativeSession } from "./native-session-binding.ts";
 import { createPiChildSessionHost } from "./pi-child-session-host.ts";
 import { PiCollaborationMonitor } from "./pi-collaboration-monitor.ts";
+import {
+	checkNativeTeamStorageAdmission,
+	handleNativeStorageCommand,
+	runAutomaticNativeStorageGc,
+} from "./pi-collaboration-storage.ts";
 import { registerPiCollaborationTools } from "./pi-collaboration-tools.ts";
 
 /** Product root only. Factory discovery opens no resources; session_start owns the team. */
@@ -27,6 +32,9 @@ export function registerPiCollaborationRoot(
 		if (controller || stopped) return;
 		const session = getNativeSession(ctx.sessionManager);
 		const identity = { rootSessionId: session.sessionId, agentPath: "/root" };
+		const settings = session.settingsManager;
+		settings.getSubagentStoragePolicy(); // Validate before acquiring resources or binding tools.
+		const storage = { agentDir, rootSessionId: session.sessionId, sessionFile: session.sessionFile, settings };
 		const store = new CollaborationStore({
 			path: session.sessionFile ? join(agentDir, "teams", session.sessionId, "registry.sqlite") : ":memory:",
 			rootSessionId: session.sessionId,
@@ -36,7 +44,6 @@ export function registerPiCollaborationRoot(
 			recoverInterruptedOwner: true,
 		});
 		try {
-			const settings = session.settingsManager;
 			// Share a live root getter, not the child SettingsManager's creation-time snapshot.
 			const getDefaults = () => ({
 				subagentModel: settings.getSubagentModel(),
@@ -99,9 +106,17 @@ export function registerPiCollaborationRoot(
 					});
 				},
 			});
-			controller = new CollaborationController({ store, host, agentDir, getPermissions });
+			controller = new CollaborationController({
+				store,
+				host,
+				agentDir,
+				getPermissions,
+				checkStorageAdmission: session.sessionFile ? () => checkNativeTeamStorageAdmission(storage) : undefined,
+			});
 			monitor = new PiCollaborationMonitor(controller, session);
 			registerPiCollaborationTools({ pi, controller, identity, getSession: () => session, getDefaults }).start(ctx);
+			// The current team's live owner now protects it from its own startup sweep.
+			if (session.sessionFile) runAutomaticNativeStorageGc(storage, ctx);
 			startupError = undefined;
 		} catch (error) {
 			monitor?.dispose();
@@ -115,14 +130,19 @@ export function registerPiCollaborationRoot(
 		try {
 			start(ctx);
 		} catch (error) {
-			startupError = error instanceof CollaborationError ? error.code : "storage_error";
+			startupError =
+				error instanceof CollaborationError
+					? error.reason === "team_deleted"
+						? "team_deleted"
+						: error.code
+					: "storage_error";
 		}
 	};
 	pi.on("session_start", (_event, ctx) => {
 		tryStart(ctx);
 		if (startupError) {
 			ctx.ui.notify(
-				`Native agents unavailable: ${startupError}. ${startupError === "busy" ? "Another live process owns this team; it will be retried before your next turn or /agents." : "Inspect retained team; /agents retries initialization without replay."}`,
+				`Native agents unavailable: ${startupError}. ${startupError === "busy" ? "Another live process owns this team; it will be retried before your next turn or /agents." : startupError === "team_deleted" ? "Team history was deleted or deletion is pending. Inspect /agents storage; start a new root session instead of recreating this team." : "Inspect retained team; /agents retries initialization without replay."}`,
 				"warning",
 			);
 		}
@@ -141,8 +161,21 @@ export function registerPiCollaborationRoot(
 			"Inspect native sessions, progress and retained turns before interrupting; explicitly message or follow up; retry team initialization without replay",
 		handler: async (args, ctx) => {
 			if (stopped) return;
+			const session = getNativeSession(ctx.sessionManager);
+			if (
+				await handleNativeStorageCommand(args, ctx, {
+					agentDir,
+					rootSessionId: session.sessionId,
+					sessionFile: session.sessionFile,
+					settings: session.settingsManager,
+				})
+			)
+				return;
 			if (args.trim() && args.trim() !== "recover") {
-				ctx.ui.notify("Usage: /agents or /agents recover. Recovery never resumes tasks.", "info");
+				ctx.ui.notify(
+					"Usage: /agents [recover|storage [root-id]|delete <root-id> [--confirm]|gc [--confirm]]. Recovery never resumes tasks.",
+					"info",
+				);
 				return;
 			}
 			if (!controller) tryStart(ctx);

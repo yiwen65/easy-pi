@@ -1,25 +1,27 @@
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { WriteStream } from "node:fs";
+import { type ManagedToolOutputFile, openToolOutputStream, ToolOutputStorage } from "../tool-output-storage.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
-	tempFilePrefix?: string;
+	/** Raw output bytes retained on disk; 0 disables the cap. The one-time marker is additional. */
+	maxPersistedBytes?: number;
+	createLogFile?: () => ManagedToolOutputFile;
 }
 
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
 	fullOutputPath?: string;
+	/** The persisted log is incomplete, independently of the rolling preview truncation. */
+	logTruncated?: boolean;
 }
 
-function defaultTempFilePath(prefix: string): string {
-	const id = randomBytes(8).toString("hex");
-	return join(tmpdir(), `${prefix}-${id}.log`);
-}
+export const DEFAULT_MAX_PERSISTED_BYTES = 64 * 1024 * 1024;
+export const OUTPUT_LOG_TRUNCATION_MARKER =
+	"\n[pi] Full output log truncated at its byte budget; later output is kept only in the preview.\n";
 
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf-8");
@@ -36,7 +38,12 @@ export class OutputAccumulator {
 	private readonly maxLines: number;
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
-	private readonly tempFilePrefix: string;
+	private readonly maxPersistedBytes: number;
+	private readonly createLogFile: (() => ManagedToolOutputFile) | undefined;
+	private ownedStorage: ToolOutputStorage | undefined;
+	private persistedBytes = 0;
+	private logTruncated = false;
+	private streamError: Error | undefined;
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
@@ -58,7 +65,11 @@ export class OutputAccumulator {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
-		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
+		this.maxPersistedBytes = options.maxPersistedBytes ?? DEFAULT_MAX_PERSISTED_BYTES;
+		if (!Number.isSafeInteger(this.maxPersistedBytes) || this.maxPersistedBytes < 0) {
+			throw new Error("maxPersistedBytes must be a non-negative safe integer");
+		}
+		this.createLogFile = options.createLogFile;
 	}
 
 	append(data: Buffer): void {
@@ -71,7 +82,7 @@ export class OutputAccumulator {
 
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
-			this.tempFileStream?.write(data);
+			this.writePersisted(data);
 		} else if (data.length > 0) {
 			this.rawChunks.push(data);
 		}
@@ -115,30 +126,30 @@ export class OutputAccumulator {
 			content: truncation.content,
 			truncation,
 			fullOutputPath: this.tempFilePath,
+			...(this.logTruncated ? { logTruncated: true } : {}),
 		};
 	}
 
 	async closeTempFile(): Promise<void> {
 		if (!this.tempFileStream) {
+			this.ownedStorage?.close();
 			return;
 		}
 
 		const stream = this.tempFileStream;
 		this.tempFileStream = undefined;
 
-		await new Promise<void>((resolve, reject) => {
-			const onError = (error: Error) => {
-				stream.off("finish", onFinish);
-				reject(error);
-			};
-			const onFinish = () => {
-				stream.off("error", onError);
-				resolve();
-			};
-			stream.once("error", onError);
-			stream.once("finish", onFinish);
-			stream.end();
-		});
+		try {
+			if (!stream.closed) {
+				await new Promise<void>((resolve) => {
+					stream.once("close", resolve);
+					stream.end();
+				});
+			}
+			if (this.streamError) throw this.streamError;
+		} finally {
+			this.ownedStorage?.close();
+		}
 	}
 
 	getLastLineBytes(): number {
@@ -212,11 +223,35 @@ export class OutputAccumulator {
 		if (this.tempFilePath) {
 			return;
 		}
-		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
-		this.tempFileStream = createWriteStream(this.tempFilePath);
-		for (const chunk of this.rawChunks) {
-			this.tempFileStream.write(chunk);
-		}
+		if (!this.createLogFile) this.ownedStorage = new ToolOutputStorage({ sessionId: randomUUID() });
+		const file = this.createLogFile ? this.createLogFile() : this.ownedStorage!.createLogFile();
+		this.tempFilePath = file.path;
+		this.tempFileStream = openToolOutputStream(file);
+		this.tempFileStream.on("error", (error: Error) => {
+			this.streamError = error;
+		});
+		this.tempFileStream.once("close", () => {
+			try {
+				file.release();
+			} catch (error) {
+				this.streamError ??= error instanceof Error ? error : new Error(String(error));
+			}
+		});
+		for (const chunk of this.rawChunks) this.writePersisted(chunk);
 		this.rawChunks = [];
+	}
+
+	private writePersisted(data: Buffer): void {
+		if (!this.tempFileStream || this.logTruncated || this.streamError) return;
+		const remaining = this.maxPersistedBytes === 0 ? data.length : this.maxPersistedBytes - this.persistedBytes;
+		const bytes = Math.min(data.length, remaining);
+		if (bytes > 0) {
+			this.tempFileStream.write(data.subarray(0, bytes));
+			this.persistedBytes += bytes;
+		}
+		if (bytes < data.length) {
+			this.logTruncated = true;
+			this.tempFileStream.write(OUTPUT_LOG_TRUNCATION_MARKER);
+		}
 	}
 }

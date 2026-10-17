@@ -49,7 +49,7 @@ export async function selectSession(
 		);
 
 		ui.addChild(selector);
-		ui.setFocus(selector.getSessionList());
+		ui.setFocus(selector);
 		startStartupTui(ui, settingsManager);
 	});
 }

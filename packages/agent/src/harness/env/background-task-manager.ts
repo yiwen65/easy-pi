@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { closeSync, createWriteStream, type WriteStream } from "node:fs";
 import { rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,8 +71,10 @@ export interface BackgroundTaskManagerOptions {
 	maxLogBytes?: number;
 	/** Grace period between SIGTERM and SIGKILL when stopping. Defaults to 5s. */
 	stopGraceMs?: number;
-	/** Directory for task output logs. Defaults to the OS temp directory. */
+	/** Directory for task output logs. Defaults to the OS temp directory when no host factory is supplied. */
 	logDir?: string;
+	/** Host-managed file admission. Release its writer lease only after the stream closes. */
+	createLogFile?: () => { path: string; fd: number; release: () => void };
 	now?: () => number;
 	generateId?: () => string;
 }
@@ -131,6 +133,7 @@ export class BackgroundTaskManager {
 	private readonly defaultTimeoutMs: number;
 	private readonly stopGraceMs: number;
 	private readonly logDir: string;
+	private readonly createLogFile: BackgroundTaskManagerOptions["createLogFile"];
 	private readonly now: () => number;
 	private readonly generateId: () => string;
 	private readonly stallSweepIntervalMs: number;
@@ -154,6 +157,7 @@ export class BackgroundTaskManager {
 		this.maxLogBytes = options.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES;
 		this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
 		this.logDir = options.logDir ?? tmpdir();
+		this.createLogFile = options.createLogFile;
 		this.now = options.now ?? (() => Date.now());
 		this.generateId = options.generateId ?? (() => `task-${++this.counter}`);
 	}
@@ -212,7 +216,17 @@ export class BackgroundTaskManager {
 				),
 			);
 		}
-		const managed = this.createTask(command, options.cwd, false, options.timeoutMs);
+		let managed: ManagedTask;
+		try {
+			managed = this.createTask(command, options.cwd, false, options.timeoutMs);
+		} catch (error) {
+			const cause = toError(error);
+			return err(
+				new ExecutionError("spawn_error", `Cannot create output log: ${cause.message}`, cause, {
+					executionOutcome: "not_started",
+				}),
+			);
+		}
 		let child: ChildProcess;
 		try {
 			const env = Object.fromEntries(
@@ -247,6 +261,8 @@ export class BackgroundTaskManager {
 		// The adopted process already ran in the foreground: keep its real start so the task
 		// duration covers the whole command, not just the promoted phase.
 		const startedAt = Number.isFinite(handle.startedAt) ? Math.min(handle.startedAt, this.now()) : this.now();
+		// Admission must finish before detach: a failed log factory leaves ownership with
+		// NodeProcessExecutor, whose promotion contract terminates and observes the process.
 		const managed = this.createTask(meta.command, meta.cwd, true, meta.timeoutMs, startedAt);
 		handle.detach();
 		this.attach(managed, handle.child);
@@ -418,7 +434,8 @@ export class BackgroundTaskManager {
 		startedAt?: number,
 	): ManagedTask {
 		const id = this.generateId();
-		const outputPath = join(this.logDir, `pi-bash-${id}-${randomUUID().slice(0, 8)}.log`);
+		const logFile = this.createLogFile?.();
+		const outputPath = logFile?.path ?? join(this.logDir, `pi-bash-${id}-${randomUUID().slice(0, 8)}.log`);
 		let resolveSettled = () => {};
 		const settledPromise = new Promise<void>((resolve) => {
 			resolveSettled = resolve;
@@ -445,7 +462,34 @@ export class BackgroundTaskManager {
 			settledPromise,
 			resolveSettled,
 		};
-		managed.logStream = createWriteStream(outputPath, { flags: "w" });
+		try {
+			managed.logStream = createWriteStream(
+				outputPath,
+				logFile ? { fd: logFile.fd, autoClose: true } : { flags: "wx", mode: 0o600 },
+			);
+		} catch (error) {
+			if (logFile) {
+				try {
+					closeSync(logFile.fd);
+				} catch {
+					// Preserve the admission error even if construction already closed the fd.
+				}
+				try {
+					logFile.release();
+				} catch {
+					// An unreleased lease remains conservative protection, never a reason to spawn.
+				}
+			}
+			throw error;
+		}
+		if (logFile)
+			managed.logStream.once("close", () => {
+				try {
+					logFile.release();
+				} catch (error) {
+					managed.record.logError ??= toError(error).message;
+				}
+			});
 		// A log that cannot be written must not fail the task: the in-memory tail stays available and
 		// the record carries the reason so tools and notifications stop promising the full log file.
 		managed.logStream.on("error", (error: Error) => {
@@ -623,8 +667,8 @@ export class BackgroundTaskManager {
 		// Only the largest preview any consumer reads is worth keeping once the task settles.
 		managed.tail = trimToLastUtf8Bytes(managed.tail, TERMINAL_TAIL_BYTES, textEncoder);
 		if (managed.logStream) {
-			managed.logStream.once("finish", managed.resolveSettled);
-			managed.logStream.once("error", managed.resolveSettled);
+			if (managed.logStream.closed) managed.resolveSettled();
+			else managed.logStream.once("close", managed.resolveSettled);
 			managed.logStream.end();
 		} else {
 			managed.resolveSettled();

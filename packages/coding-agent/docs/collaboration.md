@@ -36,7 +36,7 @@ The local product contains native collaboration only. The admission/control/diag
 
 Breaking internal API change: `createEasyPiHarness()` now defaults to native collaboration; use `{ agentDir }` for root storage or `{ nativeSession }` for explicit child authority. The old `subagent` options, process launcher, `/subagents`, `/subagent-models`, DAG tool and legacy private-package exports are retired. `@easy-pi/subagent` exports/bundles only the collaboration contract/controller/mailbox/store, context fork and session host. Recovery source remains in the repository, not in the product; removed harness/launcher/tests have byte snapshots under root `docs/archive/native-subagent-cutover/`.
 
-After an authorized product build, `node scripts/check-native-subagent-product.mjs` (repository root) checks compiled faux spawning, the delegation tool catalog, retired exports, CLI metadata and npm pack inventories offline. This is not an isolated installation, real-provider or physical-terminal acceptance. History disposition/budgets and final recovery-aware source retirement/distribution acceptance remain T-006/T-007.
+After an authorized product build, `node scripts/check-native-subagent-product.mjs` (repository root) checks compiled faux spawning, the delegation tool catalog, retired exports, CLI metadata and npm pack inventories offline. This is not an isolated installation, real-provider or physical-terminal acceptance. Native storage disposition and admission budgets are described under [Storage lifecycle](#storage-lifecycle). Final recovery-aware source retirement/distribution acceptance remains separate; source tests do not prove installed-build acceptance.
 
 ## Explicit delegation contract
 
@@ -347,7 +347,34 @@ Ingestion uses awaited `sendCustomMessage(..., { triggerTurn: false })` at that 
 
 Only after native persistence/sync is the message acknowledged in the team store. Pi can defer creation of a new root file until its first assistant response; until then the pending envelope is retained, with acknowledgement retried at assistant completion or the next request. There is no cross-database/session-file transaction and no claim of exactly-once model execution. Acknowledgement failure stops admission/request execution; explicit recovery recognizes already-ingested IDs without reinjecting them.
 
-Dead-owner recovery marks interrupted work and emits retained completion notifications; it never replays tasks, tools or provider requests. Shared edits and old DAG data are not cleaned by this adapter. History disposition and actual disk budgets remain T-006 work.
+Dead-owner recovery marks interrupted work and emits retained completion notifications; it never replays tasks, tools or provider requests. Shared edits and old DAG data are not cleaned by this adapter. Storage maintenance is a separate operator policy, not part of recovery.
+
+## Storage lifecycle
+
+Native teams live under `<agentDir>/teams/<root-session-id>/registry.sqlite`; child JSONL files and their managed logs live inside each child UUID directory. Easy Pi defaults to `~/.epi/agent`. Closing a child, acknowledging results, unloading an idle session and recovery still retain history. Compaction appends checkpoints; it does not shrink the JSONL file.
+
+Operator commands (not model-callable deletion tools):
+
+| Command | Effect |
+| --- | --- |
+| `/agents storage` | Bounded team inventory and managed-log totals/protection counts. Incomplete scans report lower bounds, not free capacity. |
+| `/agents storage <root-id>` | Inspect one team, its owner, pending mail, unfinished/interrupted work and deletion protection. |
+| `/agents delete <root-id>` | Preview manual deletion; a UI must confirm. Without a UI, no deletion occurs. |
+| `/agents delete <root-id> --confirm` | Explicitly delete that inactive team's database, child histories and managed child logs. May discard unread/interrupted results. The selected root session file and workspace remain. |
+| `/agents gc` | Dry-run the configured cold-team/log retention policy. |
+| `/agents gc --confirm` | Explicitly apply that policy, even when automatic startup GC is disabled. |
+
+The active root team cannot be manually deleted from itself. Close its owning process and use another root. Live owners and live log writers block deletion. Unknown identities/schema, symlinks/hardlinks, unknown files and incomplete scans fail closed. Manual deletion first records durable deletion intent, then isolates the recognized directory and removes only its validated contents. A small permanent sibling tombstone prevents the old root identity from recreating an empty team. If deletion is interrupted, inspect and repeat the same explicit delete command; do not recursively remove an active team's directory by hand. An interrupted quarantine is not treated as zero/free disk capacity. A retained root whose team was deleted can still be inspected as an ordinary session, but requires a new root session to create another team.
+
+`/resume` deletion now asks whether to delete the selected root session **and its team**, keep the team and delete only the session file, or cancel. Cancel is the default. Team deletion is permanent even when the root file can be moved to the OS trash; a failed final root-file deletion can be retried. Root-session tool logs outside the team follow the independent log policy. No choice deletes shared workspace edits, referenced artifacts or legacy DAG/worktree data.
+
+Automatic GC is **off by default** and reads only the global `subagentStorage` setting; project settings and temporary overrides cannot authorize deletion. On persistent root startup, an opted-in bounded sweep runs only after the current team has acquired its live owner. Memory-only roots do not automatically maintain other teams; explicit operator commands remain available. GC requires a verified inactive team with complete, consumed history, no pending mail and no unfinished or interrupted turns. Historical interrupted turns also protect a team. Age and total-capacity rules select whole teams, never prune individual turns to admit more work. Capacity-only team GC requires at least 24 hours of coldness. Protected data can keep usage above the requested target.
+
+`maxTeamBytes` / `maxTotalBytes` reject **new** spawn/followup admission at the observed threshold, while existing work, result reads, acknowledgements and close remain usable. They do not cap already-admitted inference, JSONL growth or arbitrary filesystem writes. Totals include team SQLite/child histories/child logs; they exclude root session JSONL, root logs and unrelated files. Unknown or incomplete measurements reject budgeted admission rather than assuming zero. The existing 2048 retained-agent and 4096 retained-turn limits remain unchanged. See [settings.md](settings.md#native-subagent-storage).
+
+Built-in foreground, background and user-shell Bash outputs now use marker-owned per-session `<session-id>.logs` directories next to persistent session JSONL. SDK memory-only sessions create isolated managed directories under `<agentDir>/tool-output/`; they still write logs to disk. Persistent sessions acquire their lifecycle lease before inference, even without a Bash call, so directly reopening a child JSONL also protects its original team. Startup and provider preparation reject deleted/quarantined source history; foreign `--session` paths are recognized from verified native storage layout. A session/writer lease protects active output; disposal closes writers and releases leases but does not delete logs immediately. Foreground persisted output defaults to a 64 MiB payload budget plus one truncation marker; previews continue after the log fills and explicitly report that the saved log is truncated. Background logs retain their existing budget. This is not a disk quota or output rollback.
+
+Log retention only deletes recognized log files after rechecking leases under the same maintenance exclusion used for writer admission. Marker and dead-lease metadata remain small and retained. Historical log paths may subsequently return `ENOENT`; session history itself is not rewritten. Standard global discovery includes default session directories, child directories, SDK memory-log directories under `<agentDir>/tool-output/` and the current custom session directory, but not offline custom roots, direct embeddings' OS temporary roots when no agent directory is supplied, or old unowned OS `pi-bash-*.log` files. Incomplete discovery disables total-capacity log cleanup. Stale/unknown maintenance locks and reused live PIDs conservatively protect data for operator inspection. The protections coordinate cooperative Pi processes, not hostile same-user filesystem mutation; custom extension-managed files are outside this lifecycle.
 
 ## End-to-end contract validation
 

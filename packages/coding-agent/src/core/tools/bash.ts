@@ -2,8 +2,9 @@ import { stat as fsStat } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
 	type AgentTool,
+	AgentToolError,
 	type BashExecution,
-	type BashToolDetails,
+	type BashToolDetails as CoreBashToolDetails,
 	createBashTool as createCoreBashTool,
 	type ExecutionEnv,
 	ExecutionError,
@@ -25,6 +26,7 @@ import { theme } from "../../modes/interactive/theme/theme.ts";
 import { getShellConfig, getShellEnv, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import type { ManagedToolOutputFile } from "../tool-output-storage.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -60,7 +62,10 @@ export const bashToolSystemPromptContribution = {
 	],
 } as const;
 
-export type { BashToolDetails, BashToolInput } from "@earendil-works/pi-agent-core";
+export type { BashToolInput } from "@earendil-works/pi-agent-core";
+export interface BashToolDetails extends CoreBashToolDetails {
+	logTruncated?: boolean;
+}
 
 /**
  * Pluggable operations for the bash tool.
@@ -232,6 +237,10 @@ export interface BashToolOptions {
 	spawnHook?: BashSpawnHook;
 	/** Shared background task manager; enables run_in_background and is required for promotion. */
 	backgroundTasks?: BackgroundTaskManager;
+	/** Managed session log factory. Standalone tools use an isolated managed temporary directory. */
+	createLogFile?: () => ManagedToolOutputFile;
+	/** Foreground persisted output budget; defaults to 64MiB. 0 disables the cap. */
+	maxPersistedBytes?: number;
 	/** Kimi-style foreground promotion (60s default / 300s max, promote on timeout). Requires backgroundTasks. */
 	promotion?: {
 		foregroundTimeoutSeconds?: number;
@@ -338,7 +347,10 @@ function rebuildBashResultRenderComponent(
 	if (truncation?.truncated || fullOutputPath) {
 		const warnings: string[] = [];
 		if (fullOutputPath) {
-			warnings.push(`Full output: ${fullOutputPath}`);
+			warnings.push(`${result.details?.logTruncated ? "Truncated output log" : "Output log"}: ${fullOutputPath}`);
+		}
+		if (result.details?.logTruncated) {
+			warnings.push("Full output log truncated at its byte budget; preview continues with newest output");
 		}
 		if (truncation?.truncated) {
 			if (truncation.truncatedBy === "lines") {
@@ -364,8 +376,10 @@ async function captureBashOperations(
 	ops: BashOperations,
 	execution: BashExecution,
 	options: ShellCaptureOptions,
+	storageOptions?: Pick<BashToolOptions, "createLogFile" | "maxPersistedBytes">,
+	onLogTruncated?: () => void,
 ): Promise<Result<ShellCaptureResult, ExecutionError>> {
-	const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
+	const output = new OutputAccumulator(storageOptions);
 	let acceptingOutput = true;
 	let exitCode: number | undefined;
 	let exitSignal: string | undefined;
@@ -374,8 +388,13 @@ async function captureBashOperations(
 	let cancelled = false;
 	const progress = (): ShellCaptureProgress => {
 		const snapshot = output.snapshot({ persistIfTruncated: true });
+		if (snapshot.logTruncated) onLogTruncated?.();
 		return {
-			output: snapshot.content,
+			output:
+				snapshot.content +
+				(snapshot.logTruncated
+					? "\n\n[Full output log truncated at its byte budget; preview continues with newest output.]"
+					: ""),
 			truncation: snapshot.truncation,
 			fullOutputPath: snapshot.fullOutputPath,
 			lastLineBytes: output.getLastLineBytes(),
@@ -457,39 +476,86 @@ export function createBashToolDefinition(
 			? undefined
 			: createLocalBashOperations({ shellPath: options?.shellPath, backgroundTasks: options?.backgroundTasks }));
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
-	const tool = createCoreBashTool<ExecutionToolContext & { extensionContext?: ExtensionContext }>({
-		commandPrefix: options?.commandPrefix,
-		promotion: options?.backgroundTasks ? options?.promotion : undefined,
-		prepare: async (execution, context, signal) => {
-			if (ops && !options?.operations) {
-				execution.cwd = getOrThrow(await env.absolutePath(execution.cwd, signal));
-			}
-			const spawnContext = resolveSpawnContext(
-				execution.command,
-				execution.cwd,
-				options?.spawnHook,
-				exposeSessionEnvironment,
-				context.extensionContext,
-			);
-			Object.assign(execution, spawnContext, { inheritEnv: false });
-		},
-		capture: ops ? (execution, captureOptions) => captureBashOperations(ops, execution, captureOptions) : undefined,
-	});
+	const createTool = (onLogTruncated?: () => void) =>
+		createCoreBashTool<ExecutionToolContext & { extensionContext?: ExtensionContext }>({
+			commandPrefix: options?.commandPrefix,
+			promotion: options?.backgroundTasks ? options?.promotion : undefined,
+			prepare: async (execution, context, signal) => {
+				if (ops && !options?.operations) {
+					execution.cwd = getOrThrow(await env.absolutePath(execution.cwd, signal));
+				}
+				const spawnContext = resolveSpawnContext(
+					execution.command,
+					execution.cwd,
+					options?.spawnHook,
+					exposeSessionEnvironment,
+					context.extensionContext,
+				);
+				Object.assign(execution, spawnContext, { inheritEnv: false });
+			},
+			capture: ops
+				? (execution, captureOptions) =>
+						captureBashOperations(ops, execution, captureOptions, options, onLogTruncated)
+				: undefined,
+		});
+	const tool = createTool();
 	return {
 		name: tool.name,
 		label: tool.label,
-		description: tool.description,
+		description: tool.description.replace(
+			"full output is saved to a temp file",
+			"output logs are retained in managed session storage (64MiB default budget; overflow is explicitly marked)",
+		),
 		promptSnippet: bashToolSystemPromptContribution.snippet,
 		promptGuidelines: exposeSessionEnvironment ? [...bashToolSystemPromptContribution.guidelines] : undefined,
 		parameters: tool.parameters,
 		constrainedSampling: getExperimentalToolSampling(),
 		executionMode: tool.executionMode,
-		execute: (toolCallId, params, signal, onUpdate, ctx) =>
-			tool.execute(toolCallId, params, signal, onUpdate, {
-				env,
-				workspacePolicy: options?.workspacePolicy,
-				extensionContext: ctx,
-			}),
+		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+			let logTruncated = false;
+			const executionTool = ops
+				? createTool(() => {
+						logTruncated = true;
+					})
+				: tool;
+			try {
+				const result = await executionTool.execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate
+						? (update) =>
+								onUpdate({
+									...update,
+									details: { ...update.details, ...(logTruncated ? { logTruncated: true } : {}) },
+								})
+						: undefined,
+					{
+						env,
+						workspacePolicy: options?.workspacePolicy,
+						extensionContext: ctx,
+					},
+				);
+				return {
+					...result,
+					details: { ...result.details, ...(logTruncated ? { logTruncated: true } : {}) },
+					content: logTruncated
+						? result.content.map((part) =>
+								part.type === "text"
+									? { ...part, text: part.text.replaceAll("Full output:", "Truncated output log:") }
+									: part,
+							)
+						: result.content,
+				};
+			} catch (error) {
+				if (logTruncated && error instanceof AgentToolError) {
+					error.message = error.message.replaceAll("Full output:", "Truncated output log:");
+					if (error.details && typeof error.details === "object")
+						Object.assign(error.details, { logTruncated: true });
+				}
+				throw error;
+			}
+		},
 		renderCall(args, _theme, context) {
 			const state = context.state;
 			if (context.executionStarted && state.startedAt === undefined) {

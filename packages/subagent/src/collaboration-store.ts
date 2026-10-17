@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
@@ -23,6 +22,8 @@ import {
 	validateCollaborationProgress,
 	validateDelegation,
 } from "./collaboration-contract.ts";
+
+import { assertCollaborationNotDeleted, collaborationOwnerAlive } from "./collaboration-storage-guard.ts";
 
 const ModelSchema = Type.Object(
 	{
@@ -132,7 +133,7 @@ export type CollaborationAuthority = Readonly<Pick<StoredCollaborationAgent, "pa
 	readonly tools?: readonly string[];
 };
 
-function validateSnapshot(value: unknown): CollaborationSnapshot {
+export function validateCollaborationSnapshot(value: unknown): CollaborationSnapshot {
 	if (!Value.Check(SnapshotSchema, value)) throw new CollaborationError("storage_error", "Invalid team snapshot");
 	if (!isAbsolute(value.cwd)) throw new CollaborationError("storage_error", "Invalid team cwd");
 	if (value.agents.filter((agent) => agent.status !== "closed").length > COLLABORATION_LIMITS.maxAgents - 1)
@@ -301,6 +302,16 @@ const TurnSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** Shape-only validation shared with bounded, read-only storage maintenance. */
+export function validateCollaborationStoredTurn(value: unknown): CollaborationTurnRecord {
+	if (!Value.Check(TurnSchema, value)) throw new CollaborationError("storage_error", "Invalid turn record");
+	validateAgentPath(value.target);
+	if (value.target === "/root") throw new CollaborationError("storage_error", "Invalid turn target");
+	if (value.delegation) validateDelegation(value.delegation);
+	validateStoredHandoff(value);
+	return value;
+}
+
 interface TurnRow {
 	sequence: number;
 	target: string;
@@ -322,29 +333,6 @@ interface Row {
 	owner: string | null;
 	pid: number | null;
 	owner_started_at?: number | null;
-}
-
-/**
- * Process start time of `pid` in epoch milliseconds, via elapsed-time probing. Undefined when the
- * platform cannot answer (win32, ps failure): callers then fall back to the kill(pid, 0) probe.
- * Guards against PID reuse: a recycled pid necessarily starts later than the recorded owner.
- */
-function probeProcessStartMs(pid: number): number | undefined {
-	if (process.platform === "win32") return undefined;
-	try {
-		// ps etime renders [[dd-]hh:]mm:ss; etimes is not portable (absent on macOS).
-		const out = execFileSync("ps", ["-o", "etime=", "-p", String(pid)], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		}).trim();
-		const match = out.match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
-		if (!match) return undefined;
-		const seconds =
-			Number(match[1] ?? 0) * 86_400 + Number(match[2] ?? 0) * 3_600 + Number(match[3]) * 60 + Number(match[4]);
-		return Date.now() - seconds * 1000;
-	} catch {
-		return undefined;
-	}
 }
 
 /** This process's own start time in epoch milliseconds (second-resolution tolerance is fine). */
@@ -378,6 +366,7 @@ export class CollaborationStore {
 		if (!fresh) {
 			if (!isAbsolute(path))
 				throw new CollaborationError("invalid_arguments", "Team database path must be absolute");
+			assertCollaborationNotDeleted(dirname(path));
 			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 			if (lstatSync(dirname(path)).isSymbolicLink())
 				throw new CollaborationError("forbidden", "Unsafe team directory");
@@ -392,6 +381,7 @@ export class CollaborationStore {
 					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 				}
 			}
+			assertCollaborationNotDeleted(this.directory);
 			if (!existsSync(path)) {
 				closeSync(openSync(path, "wx", 0o600));
 				fresh = true;
@@ -399,6 +389,7 @@ export class CollaborationStore {
 		}
 		this.database = new DatabaseSync(path);
 		try {
+			if (this.directory) assertCollaborationNotDeleted(this.directory);
 			if (fresh) {
 				this.database.exec(
 					"CREATE TABLE team (id INTEGER PRIMARY KEY CHECK(id=1), snapshot TEXT NOT NULL, owner TEXT, pid INTEGER, owner_started_at INTEGER)",
@@ -414,11 +405,17 @@ export class CollaborationStore {
 			}
 			this.database.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
 			try {
+				if (this.directory) assertCollaborationNotDeleted(this.directory);
 				// Schema upgrade and seed proof share the acquisition transaction.
 				const columns = this.database
 					.prepare("PRAGMA table_info(team)")
 					.all()
 					.map((column) => String(column.name));
+				if (
+					columns.includes("deletion_pending") &&
+					this.database.prepare("SELECT deletion_pending FROM team WHERE id=1").get()?.deletion_pending !== null
+				)
+					throw new CollaborationError("forbidden", "Team deletion is pending");
 				if (!columns.includes("owner_started_at"))
 					this.database.exec("ALTER TABLE team ADD COLUMN owner_started_at INTEGER");
 				const legacy = !this.database
@@ -432,21 +429,11 @@ export class CollaborationStore {
 				const version = this.dataVersion();
 				const row = this.readRow();
 				const snapshot = this.decode(row);
+				const ownerAlive = collaborationOwnerAlive(row);
 				if (row.owner !== null) {
 					if (!Number.isSafeInteger(row.pid) || (row.pid ?? 0) <= 0)
 						throw new CollaborationError("storage_error", "Invalid team owner");
-					let alive = true;
-					try {
-						process.kill(row.pid!, 0);
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
-					}
-					if (alive && row.owner_started_at !== null && row.owner_started_at !== undefined) {
-						// PID-reuse guard: a recycled pid starts later than the recorded owner process.
-						const startedAt = probeProcessStartMs(row.pid!);
-						if (startedAt !== undefined && Math.abs(startedAt - row.owner_started_at) > 10_000) alive = false;
-					}
-					if (alive) throw new CollaborationError("busy", "Team is owned by a live controller");
+					if (ownerAlive) throw new CollaborationError("busy", "Team is owned by a live controller");
 					if (!options.recoverInterruptedOwner)
 						throw new CollaborationError("interrupted", "Explicit recovery of the interrupted team is required");
 				}
@@ -515,7 +502,7 @@ export class CollaborationStore {
 	}
 
 	private decode(row: Row): CollaborationSnapshot {
-		const snapshot = validateSnapshot(JSON.parse(row.snapshot));
+		const snapshot = validateCollaborationSnapshot(JSON.parse(row.snapshot));
 		if (snapshot.rootSessionId !== this.rootSessionId || snapshot.cwd !== this.cwd) {
 			throw new CollaborationError("forbidden", "Team belongs to another root session or workspace");
 		}
@@ -560,7 +547,7 @@ export class CollaborationStore {
 
 	/** CAS prevents stale callers from overwriting a newer turn or terminal result. */
 	commit(snapshot: CollaborationSnapshot, patches: readonly TurnPatch[] = []): CollaborationSnapshot {
-		const next = validateSnapshot(snapshot);
+		const next = validateCollaborationSnapshot(snapshot);
 		if (next.rootSessionId !== this.rootSessionId || next.cwd !== this.cwd)
 			throw new CollaborationError("forbidden", "Invalid team owner");
 		this.database.exec("BEGIN IMMEDIATE");

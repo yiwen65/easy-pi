@@ -15,7 +15,8 @@ import * as native from "../packages/coding-agent/node_modules/@easy-pi/subagent
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const product = join(root, "packages/coding-agent");
-const modules = ["index", "collaboration-contract", "collaboration-controller", "collaboration-mailbox", "collaboration-store", "context-fork", "session-host"].sort();
+const publicModules = ["index", "collaboration-contract", "collaboration-controller", "collaboration-mailbox", "collaboration-store", "collaboration-storage", "context-fork", "session-host"].sort();
+const modules = [...publicModules, "collaboration-storage-guard"].sort();
 const expected = modules.flatMap((name) => [".js", ".js.map", ".d.ts", ".d.ts.map"].map((extension) => name + extension)).sort();
 for (const directory of [join(root, "packages/subagent/dist"), join(product, "node_modules/@easy-pi/subagent/dist")]) {
 	assert.deepEqual(readdirSync(directory).sort(), expected);
@@ -27,11 +28,11 @@ assert.throws(() => native.parseCollaborationArguments("spawn_agent", { task_nam
 assert.deepEqual(native.validateDelegationResult("unstructured retained output", "completed"), { contract: "invalid", acceptance: "not_reviewed" });
 assert.equal(existsSync(join(product, "dist/extensions/product-launcher.js")), false);
 const require = createRequire(join(product, "dist/cli.js"));
-for (const name of ["extension", "ledger", "process-runner", "dag-orchestrator", "worktree", "child-protocol-extension"]) {
+for (const name of ["extension", "ledger", "process-runner", "dag-orchestrator", "worktree", "child-protocol-extension", "collaboration-storage-guard"]) {
 	assert.throws(() => require.resolve(`@easy-pi/subagent/${name}`), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });
 }
 const metadata = JSON.parse(readFileSync(join(product, "node_modules/@easy-pi/subagent/package.json"), "utf8"));
-assert.deepEqual(Object.keys(metadata.exports).sort(), [".", ...modules.filter((name) => name !== "index").map((name) => `./${name}`)].sort());
+assert.deepEqual(Object.keys(metadata.exports).sort(), [".", ...publicModules.filter((name) => name !== "index").map((name) => `./${name}`)].sort());
 
 const cwd = realpathSync(mkdtempSync(join(tmpdir(), "epi-compiled-native-")));
 let session;

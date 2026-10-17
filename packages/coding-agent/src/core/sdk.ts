@@ -447,6 +447,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager,
 		settingsManager,
 		cwd,
+		agentDir,
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
@@ -459,15 +460,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		backgroundBash: options.backgroundBash,
 	});
-	if (options.codexServiceTier !== undefined) {
-		session.setCodexServiceTier(options.codexServiceTier);
-	}
-	bindNativeSession(session);
-	const extensionsResult = resourceLoader.getExtensions();
+	try {
+		if (options.codexServiceTier !== undefined) {
+			session.setCodexServiceTier(options.codexServiceTier);
+		}
+		bindNativeSession(session);
+		const extensionsResult = resourceLoader.getExtensions();
 
-	return {
-		session,
-		extensionsResult,
-		modelFallbackMessage,
-	};
+		return {
+			session,
+			extensionsResult,
+			modelFallbackMessage,
+		};
+	} catch (error) {
+		// A runtime that cannot be returned to its owner must not retain a live session lease.
+		try {
+			await session.shutdown();
+		} catch {
+			/* Preserve the creation error after best-effort shutdown. */
+		}
+		throw error;
+	}
 }

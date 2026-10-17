@@ -26,6 +26,11 @@
 			"development": "./src/collaboration-mailbox.ts",
 			"import": "./dist/collaboration-mailbox.js"
 		},
+		"./collaboration-storage": {
+			"types": "./dist/collaboration-storage.d.ts",
+			"development": "./src/collaboration-storage.ts",
+			"import": "./dist/collaboration-storage.js"
+		},
 		"./collaboration-store": {
 			"types": "./dist/collaboration-store.d.ts",
 			"development": "./src/collaboration-store.ts",
@@ -48,6 +53,8 @@
 		"dist/collaboration-controller.*",
 		"dist/collaboration-mailbox.*",
 		"dist/collaboration-store.*",
+		"dist/collaboration-storage.*",
+		"dist/collaboration-storage-guard.*",
 		"dist/context-fork.*",
 		"dist/session-host.*"
 	],

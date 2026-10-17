@@ -55,6 +55,7 @@ export class CollaborationController {
 	private readonly host: ChildSessionHost;
 	private readonly agentDir: string;
 	private readonly getPermissions: () => ChildSessionPermissions;
+	private readonly checkStorageAdmission: (() => void) | undefined;
 	private readonly sessions = new Map<string, ChildSession>();
 	private readonly active = new Map<string, Promise<void>>();
 	private queue: Promise<unknown> = Promise.resolve();
@@ -75,11 +76,14 @@ export class CollaborationController {
 		host: ChildSessionHost;
 		agentDir: string;
 		getPermissions: () => ChildSessionPermissions;
+		/** Reject new work before it is persisted; never gates queries, completion, ack or close. */
+		checkStorageAdmission?: () => void;
 	}) {
 		this.store = options.store;
 		this.host = options.host;
 		this.agentDir = options.agentDir;
 		this.getPermissions = options.getPermissions;
+		this.checkStorageAdmission = options.checkStorageAdmission;
 	}
 
 	get persistent(): boolean {
@@ -454,6 +458,7 @@ export class CollaborationController {
 				completionPending: true,
 				turnId: randomUUID(),
 			};
+			this.checkStorageAdmission?.();
 			this.reserve(record, message, caller, "initial");
 			snapshot.agents.push(record);
 			this.persist(snapshot);
@@ -536,6 +541,7 @@ export class CollaborationController {
 			} else if (record.delegation) {
 				throw new CollaborationError("invalid_arguments", "Follow-up requires an explicit task contract");
 			}
+			this.checkStorageAdmission?.();
 			assertAgentTransition(record.status, "pending");
 			record.turnId = randomUUID();
 			this.reserve(record, message, caller, "existing");

@@ -12,7 +12,7 @@ const entries = {
 	"@easy-pi/permissions": "permissions/src/index.ts",
 	"@easy-pi/permissions/journal": "permissions/src/external-mutation-journal.ts",
 	"@easy-pi/subagent": "subagent/src/index.ts",
-	...Object.fromEntries(["collaboration-contract", "collaboration-controller", "collaboration-mailbox", "collaboration-store", "context-fork", "session-host"].map((name) => [`@easy-pi/subagent/${name}`, `subagent/src/${name}.ts`])),
+	...Object.fromEntries(["collaboration-contract", "collaboration-controller", "collaboration-mailbox", "collaboration-store", "collaboration-storage", "context-fork", "session-host"].map((name) => [`@easy-pi/subagent/${name}`, `subagent/src/${name}.ts`])),
 	"@easy-pi/web-search": "pi-web-search/src/index.ts",
 	"@easy-pi/grok-tui": "grok-tui/src/index.ts",
 	"@earendil-works/pi-grok-tui": "grok-tui-compat/src/index.ts",
@@ -70,7 +70,7 @@ test("package entry and direct source imports share the same module singleton", 
 });
 
 test("does not manufacture old, private, missing, or traversal aliases", () => {
-	const names = ["@earendil-works/pi-agent-old", "@earendil-works/pi-coding-agent/hooks", "@easy-pi/subagent/tool", "@earendil-works/pi-ai/nonexistent", "@earendil-works/pi-ai/providers/../index"];
+	const names = ["@earendil-works/pi-agent-old", "@earendil-works/pi-coding-agent/hooks", "@easy-pi/subagent/tool", "@earendil-works/pi-ai/nonexistent", "@earendil-works/pi-ai/providers/../index", "@easy-pi/subagent/collaboration-storage-guard"];
 	const actual = JSON.parse(run(`console.log(JSON.stringify(${JSON.stringify(names)}.map(s => { try { return import.meta.resolve(s); } catch (e) { return e.code; } })));`));
 	assert.deepEqual(actual, names.map(() => "ERR_PACKAGE_PATH_NOT_EXPORTED").map((code, i) => i === 0 ? "ERR_MODULE_NOT_FOUND" : i === 4 ? "ERR_INVALID_MODULE_SPECIFIER" : code));
 });

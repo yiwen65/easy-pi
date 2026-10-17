@@ -1,52 +1,32 @@
-/**
- * Bash command execution with streaming support and cancellation.
- *
- * This module provides a unified bash execution implementation used by:
- * - AgentSession.executeBash() for interactive and RPC modes
- * - Direct calls from modes that need bash execution
- */
-
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+/** Bash execution with streaming sanitization for interactive and RPC user_bash. */
+import { randomUUID } from "node:crypto";
+import type { WriteStream } from "node:fs";
 import { splitIncompleteAnsiSuffix, stripAnsi } from "../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
+import { type ManagedToolOutputFile, openToolOutputStream, ToolOutputStorage } from "./tool-output-storage.ts";
 import type { BashOperations } from "./tools/bash.ts";
+import { DEFAULT_MAX_PERSISTED_BYTES, OUTPUT_LOG_TRUNCATION_MARKER } from "./tools/output-accumulator.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
-// ============================================================================
-// Types
-// ============================================================================
-
 export interface BashExecutorOptions {
-	/** Callback for streaming output chunks (already sanitized) */
+	/** Callback for streaming output chunks (already sanitized). */
 	onChunk?: (chunk: string) => void;
-	/** AbortSignal for cancellation */
 	signal?: AbortSignal;
+	createLogFile?: () => ManagedToolOutputFile;
+	/** 64MiB default; 0 disables the persisted output cap. */
+	maxPersistedBytes?: number;
 }
 
 export interface BashResult {
-	/** Combined stdout + stderr output (sanitized, possibly truncated) */
 	output: string;
-	/** Process exit code (undefined if killed/cancelled) */
 	exitCode: number | undefined;
-	/** Whether the command was cancelled via signal */
 	cancelled: boolean;
-	/** Whether the output was truncated */
 	truncated: boolean;
-	/** Path to temp file containing full output (if output exceeded truncation threshold) */
 	fullOutputPath?: string;
+	logTruncated?: boolean;
 }
 
-// ============================================================================
-// Implementation
-// ============================================================================
-
-/**
- * Execute a bash command using custom BashOperations.
- * Used for remote execution (SSH, containers, etc.).
- */
+/** Execute local or custom remote operations without changing user_bash sanitization. */
 export async function executeBashWithOperations(
 	command: string,
 	cwd: string,
@@ -56,55 +36,66 @@ export async function executeBashWithOperations(
 	const outputChunks: string[] = [];
 	let outputBytes = 0;
 	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
-
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
 	let totalBytes = 0;
+	let persistedBytes = 0;
+	let logTruncated = false;
+	let ownedStorage: ToolOutputStorage | undefined;
+	let streamError: Error | undefined;
+	const maxPersistedBytes = options?.maxPersistedBytes ?? DEFAULT_MAX_PERSISTED_BYTES;
+	if (!Number.isSafeInteger(maxPersistedBytes) || maxPersistedBytes < 0) {
+		throw new Error("Invalid persisted output byte budget");
+	}
 
-	const ensureTempFile = () => {
-		if (tempFilePath) {
-			return;
+	const writeTempFile = (text: string) => {
+		if (!tempFileStream || logTruncated || streamError) return;
+		const data = Buffer.from(text);
+		const bytes = Math.min(data.length, maxPersistedBytes === 0 ? data.length : maxPersistedBytes - persistedBytes);
+		if (bytes > 0) {
+			tempFileStream.write(data.subarray(0, bytes));
+			persistedBytes += bytes;
 		}
-		const id = randomBytes(8).toString("hex");
-		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
-		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
+		if (bytes < data.length) {
+			logTruncated = true;
+			tempFileStream.write(OUTPUT_LOG_TRUNCATION_MARKER);
 		}
 	};
 
+	const ensureTempFile = () => {
+		if (tempFilePath) return;
+		if (!options?.createLogFile) ownedStorage = new ToolOutputStorage({ sessionId: randomUUID() });
+		const file = options?.createLogFile ? options.createLogFile() : ownedStorage!.createLogFile();
+		tempFilePath = file.path;
+		tempFileStream = openToolOutputStream(file);
+		tempFileStream.on("error", (error: Error) => {
+			streamError = error;
+		});
+		tempFileStream.once("close", () => {
+			try {
+				file.release();
+			} catch (error) {
+				streamError ??= error instanceof Error ? error : new Error(String(error));
+			}
+		});
+		for (const chunk of outputChunks) writeTempFile(chunk);
+	};
+
 	const decoder = new TextDecoder();
-	// Unfinished escape sequence at the end of the previous chunk, completed by the next chunk.
 	let pendingAnsi = "";
-
 	const appendText = (rawText: string) => {
-		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
 		const text = sanitizeBinaryOutput(stripAnsi(rawText)).replace(/\r/g, "");
-
 		// Preserve the raw-byte tempfile threshold, even when the chunk contains only ANSI.
-		if (totalBytes > DEFAULT_MAX_BYTES) {
-			ensureTempFile();
-		}
-		if (!text) {
-			return;
-		}
-
-		if (tempFileStream) {
-			tempFileStream.write(text);
-		}
-
-		// Keep rolling buffer
+		if (totalBytes > DEFAULT_MAX_BYTES) ensureTempFile();
+		if (!text) return;
+		writeTempFile(text);
 		outputChunks.push(text);
 		outputBytes += text.length;
 		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
 			const removed = outputChunks.shift()!;
 			outputBytes -= removed.length;
 		}
-
-		// Stream to callback
-		if (options?.onChunk) {
-			options.onChunk(text);
-		}
+		options?.onChunk?.(text);
 	};
 
 	const onData = (data: Buffer) => {
@@ -113,62 +104,52 @@ export async function executeBashWithOperations(
 		pendingAnsi = pending;
 		appendText(complete);
 	};
-
 	const flushOutput = () => {
 		const rest = pendingAnsi + decoder.decode();
 		pendingAnsi = "";
 		appendText(rest);
 	};
-
-	try {
-		const result = await operations.exec(command, cwd, {
-			onData,
-			signal: options?.signal,
-		});
-
+	const result = (exitCode: number | undefined, cancelled: boolean): BashResult => {
 		flushOutput();
 		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateTail(fullOutput);
-		if (truncationResult.truncated) {
-			ensureTempFile();
-		}
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
-		const cancelled = options?.signal?.aborted ?? false;
-
+		const truncation = truncateTail(fullOutput);
+		if (truncation.truncated) ensureTempFile();
 		return {
-			output: truncationResult.truncated ? truncationResult.content : fullOutput,
-			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
+			output:
+				(truncation.truncated ? truncation.content : fullOutput) +
+				(logTruncated
+					? "\n\n[Full output log truncated at its byte budget; preview continues with newest output.]"
+					: ""),
+			exitCode,
 			cancelled,
-			truncated: truncationResult.truncated,
+			truncated: truncation.truncated,
 			fullOutputPath: tempFilePath,
+			...(logTruncated ? { logTruncated: true } : {}),
 		};
-	} catch (err) {
-		// Check if it was an abort
-		if (options?.signal?.aborted) {
-			flushOutput();
-			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateTail(fullOutput);
-			if (truncationResult.truncated) {
-				ensureTempFile();
-			}
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
-			return {
-				output: truncationResult.truncated ? truncationResult.content : fullOutput,
-				exitCode: undefined,
-				cancelled: true,
-				truncated: truncationResult.truncated,
-				fullOutputPath: tempFilePath,
-			};
-		}
+	};
 
-		if (tempFileStream) {
-			tempFileStream.end();
+	const closeOutput = async () => {
+		try {
+			if (tempFileStream && !tempFileStream.closed) {
+				await new Promise<void>((resolve) => {
+					tempFileStream!.once("close", resolve);
+					tempFileStream!.end();
+				});
+			}
+			if (streamError) throw streamError;
+		} finally {
+			ownedStorage?.close();
 		}
+	};
 
-		throw err;
+	try {
+		const execution = await operations.exec(command, cwd, { onData, signal: options?.signal });
+		const cancelled = options?.signal?.aborted ?? false;
+		return result(cancelled ? undefined : (execution.exitCode ?? undefined), cancelled);
+	} catch (error) {
+		if (options?.signal?.aborted) return result(undefined, true);
+		throw error;
+	} finally {
+		await closeOutput();
 	}
 }

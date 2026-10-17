@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { deleteCollaborationStorage } from "@easy-pi/subagent/collaboration-storage";
 import { CollaborationStore } from "@easy-pi/subagent/collaboration-store";
 import { afterEach, expect, test } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
@@ -11,7 +12,7 @@ import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { registerPiCollaborationRoot } from "../src/extensions/pi-collaboration-root.ts";
 import { spawnArgs } from "./collaboration-fixture.ts";
 
@@ -20,7 +21,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-async function fixture() {
+async function fixture(settings: Partial<Settings> = {}) {
 	const cwd = await realpath(await mkdtemp(join(tmpdir(), "epi-root-recovery-")));
 	cleanups.push(() => rm(cwd, { recursive: true, force: true }));
 	const agentDir = join(cwd, "agent");
@@ -37,7 +38,11 @@ async function fixture() {
 	const path = join(agentDir, "teams", manager.getSessionId(), "registry.sqlite");
 	const owner = new CollaborationStore({ path, cwd, rootSessionId: manager.getSessionId() });
 	cleanups.push(() => owner.close());
-	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false },
+		retry: { enabled: false },
+		...settings,
+	});
 	const loader = new DefaultResourceLoader({
 		cwd,
 		agentDir,
@@ -183,6 +188,32 @@ test("the next root prompt reacquires a formerly busy team before constructing p
 	expect(f.session.getActiveToolNames()).toContain("spawn_agent");
 	expect(f.faux.state.callCount).toBe(1);
 	expect(f.session.isIdle).toBe(true);
+});
+
+test("deleted team stays deleted when its retained root session is reopened", async () => {
+	const f = await fixture();
+	f.owner.close();
+	deleteCollaborationStorage({
+		agentDir: join(f.cwd, "agent"),
+		rootSessionId: f.manager.getSessionId(),
+		dryRun: false,
+	});
+	await f.bind();
+	expect(f.notices.join("\n")).toContain("team_deleted");
+	expect(f.session.getActiveToolNames()).not.toContain("spawn_agent");
+	expect(f.faux.state.callCount).toBe(0);
+});
+
+test("root storage budget rejects new child work without disabling inspection", async () => {
+	const f = await fixture({ subagentStorage: { maxTeamBytes: 1 } });
+	f.owner.close();
+	await f.bind();
+	await expect(tool(f.session, "spawn_agent").execute("full", spawnArgs("blocked", "must not run"))).rejects.toThrow(
+		/storage|budget/i,
+	);
+	const listed = await tool(f.session, "list_agents").execute("inspect", {});
+	expect(listed.details).toMatchObject({ agents: [] });
+	expect(f.faux.state.callCount).toBe(0);
 });
 
 test("unknown snapshots remain unchanged and ordinary root inference remains usable", async () => {

@@ -8,15 +8,23 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
+	SelectList,
 	Spacer,
 	Text,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { getAgentDir } from "../../../config.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
+import {
+	assertSessionTeamDeletionUnchanged,
+	deleteAssociatedSessionTeam,
+	inspectSessionTeamDeletion,
+	type SessionTeamDeletion,
+} from "../../../core/session-team-deletion.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
-import { theme } from "../theme/theme.ts";
+import { getSelectListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
@@ -694,6 +702,11 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			return;
 		}
 
+		if (this.mode === "delete") {
+			this.deleteChoice?.handleInput(data);
+			return;
+		}
+		if (this.mode === "deleting") return;
 		this.sessionList.handleInput(data);
 	}
 
@@ -714,7 +727,9 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private allLoading = false;
 	private allLoadSeq = 0;
 
-	private mode: "list" | "rename" = "list";
+	private mode: "list" | "rename" | "delete" | "deleting" = "list";
+	private deleteChoice?: SelectList;
+	private agentDir: string;
 	private renameInput = new Input();
 	private renameTargetPath: string | null = null;
 
@@ -754,6 +769,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		onExit: () => void,
 		requestRender: () => void,
 		options?: {
+			/** Team storage is separate from the session directory. */
+			agentDir?: string;
 			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
 			showRenameHint?: boolean;
 			keybindings?: KeybindingsManager;
@@ -762,6 +779,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	) {
 		super();
 		this.keybindings = options?.keybindings ?? KeybindingsManager.create();
+		this.agentDir = options?.agentDir ?? getAgentDir();
 		this.currentSessionsLoader = currentSessionsLoader;
 		this.allSessionsLoader = allSessionsLoader;
 		this.requestRender = requestRender;
@@ -830,33 +848,106 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 		// Handle session deletion
 		this.sessionList.onDeleteSession = async (sessionPath: string) => {
-			const result = await deleteSessionFile(sessionPath);
-
-			if (result.ok) {
-				if (this.currentSessions) {
-					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
+			try {
+				const selected = inspectSessionTeamDeletion(sessionPath, this.agentDir);
+				if (selected.team.owner === "live") throw new Error("Another live process owns this session's team");
+				if (selected.team.state === "missing" || selected.team.state === "deleted") {
+					await this.performDeletion(selected, false);
+				} else {
+					this.chooseDeletionScope(selected);
 				}
-				if (this.allSessions) {
-					this.allSessions = this.allSessions.filter((s) => s.path !== sessionPath);
-				}
-
-				const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
-				const showCwd = this.scope === "all";
-				this.sessionList.setSessions(sessions, showCwd);
-
-				const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-				this.header.setStatusMessage({ type: "info", message: msg }, 2000);
-				await this.refreshSessionsAfterMutation();
-			} else {
-				const errorMessage = result.error ?? "Unknown error";
-				this.header.setStatusMessage({ type: "error", message: `Failed to delete: ${errorMessage}` }, 3000);
+			} catch (error) {
+				this.header.setStatusMessage({
+					type: "error",
+					message: `Deletion refused: ${error instanceof Error ? error.message : String(error)}`,
+				});
+				this.requestRender();
 			}
-
-			this.requestRender();
 		};
 
 		// Start loading current sessions immediately
 		this.loadCurrentSessions();
+	}
+
+	private chooseDeletionScope(selected: SessionTeamDeletion): void {
+		this.mode = "delete";
+		const team = selected.team;
+		const panel = new Container();
+		panel.addChild(new Text(theme.bold("Delete session: choose history scope"), 1, 0));
+		panel.addChild(
+			new Text(
+				`${team.agentCount ?? "Unknown"} children · ${team.bytes} known team bytes${team.incomplete ? " (incomplete scan)" : ""}\n${team.pendingMessages ?? "Unknown"} pending messages · ${team.unfinishedTurns ?? "Unknown"} unfinished · ${team.interruptedTurns ?? "Unknown"} interrupted turns.\nTeam deletion is permanent; workspace files and referenced artifacts are never deleted.`,
+				1,
+				0,
+			),
+		);
+		panel.addChild(new Spacer(1));
+		const choices = new SelectList(
+			[
+				{ value: "cancel", label: "Cancel", description: "Keep the session and team history" },
+				{
+					value: "team",
+					label: "Delete session and team",
+					description: "Permanently delete all child history and results; retryable if interrupted",
+				},
+				{
+					value: "session",
+					label: "Delete session only",
+					description: "Keep team data on disk; inspect it later with /agents storage",
+				},
+			],
+			3,
+			getSelectListTheme(),
+		);
+		const cancel = () => {
+			this.mode = "list";
+			this.deleteChoice = undefined;
+			this.buildBaseLayout(this.sessionList);
+			this.requestRender();
+		};
+		choices.onCancel = cancel;
+		choices.onSelect = (item) => {
+			if (item.value === "cancel") cancel();
+			else void this.performDeletion(selected, item.value === "team");
+		};
+		this.deleteChoice = choices;
+		panel.addChild(choices);
+		this.buildBaseLayout(panel, { showHeader: false });
+		this.requestRender();
+	}
+
+	private async performDeletion(selected: SessionTeamDeletion, includeTeam: boolean): Promise<void> {
+		this.mode = "deleting";
+		this.deleteChoice = undefined;
+		try {
+			assertSessionTeamDeletionUnchanged(selected);
+			if (includeTeam) deleteAssociatedSessionTeam(selected);
+			assertSessionTeamDeletionUnchanged(selected);
+			const result = await deleteSessionFile(selected.path);
+			if (!result.ok) throw new Error(result.error ?? "Session file deletion failed; team deletion can be retried");
+			if (this.currentSessions)
+				this.currentSessions = this.currentSessions.filter((entry) => entry.path !== selected.path);
+			if (this.allSessions) this.allSessions = this.allSessions.filter((entry) => entry.path !== selected.path);
+			this.header.setStatusMessage(
+				{
+					type: "info",
+					message: includeTeam
+						? "Session and team history deleted"
+						: `${result.method === "trash" ? "Session moved to trash" : "Session deleted"}; team history retained when present`,
+				},
+				3000,
+			);
+			await this.refreshSessionsAfterMutation();
+		} catch (error) {
+			this.header.setStatusMessage({
+				type: "error",
+				message: `Deletion incomplete: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		} finally {
+			this.mode = "list";
+			this.buildBaseLayout(this.sessionList);
+			this.requestRender();
+		}
 	}
 
 	private loadCurrentSessions(): void {

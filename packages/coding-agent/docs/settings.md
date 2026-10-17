@@ -75,6 +75,35 @@ For each field, precedence is **explicit `spawn_agent` override > global Subagen
 
 Unsupported model/effort combinations are rejected before child admission, not downgraded. Effort choices are independent of the root model, so select a level supported by the intended child model. A differing default also conflicts with `prefix: "preserve"`; explicitly match the caller's model/effort or choose a compatible context policy. No automatic retry or context fallback occurs. See [collaboration.md](collaboration.md).
 
+#### Native subagent storage
+
+`subagentStorage` is a **global-only** operator policy in `~/.epi/agent/settings.json` (or the configured agent directory). Project settings and temporary host overrides cannot enable GC or change these budgets. Invalid fields, types, negative/fractional/overflowing values are rejected rather than silently changing deletion policy.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `subagentStorage.autoGc` | `false` | Run one bounded cold-team/log sweep at persistent root startup after acquiring the current team owner |
+| `subagentStorage.maxAgeDays` | `0` | Cold-team age threshold; `0` disables age-based deletion |
+| `subagentStorage.maxTeamBytes` | `0` | Observed per-team byte threshold for rejecting new spawn/followup admission |
+| `subagentStorage.maxTotalBytes` | `0` | Observed team-storage total for admission and optional capacity-based GC |
+| `subagentStorage.logMaxAgeDays` | `0` | Managed output-log age threshold |
+| `subagentStorage.logMaxTotalBytes` | `0` | Managed output-log capacity target; protected logs remain |
+
+All day/byte values are non-negative safe integers. Zero disables that criterion. Enabling `autoGc` alone, with all thresholds zero, does not delete anything. To inspect a proposed policy without automatic deletion:
+
+```json
+{
+  "subagentStorage": {
+    "autoGc": false,
+    "maxAgeDays": 30,
+    "logMaxAgeDays": 7
+  }
+}
+```
+
+Run `/agents storage` and `/agents gc` (dry-run); `/agents gc --confirm` explicitly applies the policy. Only set `autoGc: true` after reviewing its candidates. A time/byte threshold is never permission to delete active, unknown or protected data. Capacity-only team GC requires at least 24 hours of coldness. Unconsumed messages, unfinished/interrupted work and unknown legacy history protect teams from automatic GC; manual `/agents delete <root-id>` requires separate confirmation.
+
+Byte budgets are admission safeguards, **not hard disk quotas**. They never truncate existing session history or stop already-admitted work. Team totals cover team databases, child JSONL and child logs, not root JSONL or unrelated files. Bounded/incomplete measurements reject budgeted admission instead of reporting free capacity. SDK memory logs under `<agentDir>/tool-output/` are discoverable. Offline custom session roots, direct embeddings' OS temporary roots without an agent directory, and old unowned OS temporary files are outside global discovery. Closing a child still retains its history; compaction does not shrink JSONL. See [storage lifecycle](collaboration.md#storage-lifecycle) for deletion, retry and `/resume` scope choices.
+
 #### thinkingBudgets
 
 ```json
