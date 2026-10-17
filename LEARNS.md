@@ -350,6 +350,7 @@
 - Prevention: 原生宿主至少验证 create→dispose→reopen 全程零 provider 请求，以及 checkpoint fork 在首轮前的冷加载。
 - Verified by: 2026-09-07 pi-child-session-host.test.ts 未启动子会话回归先 ENOENT 后通过；实际 controller LRU/冷加载与 fork 测试通过，未处理真实历史。
 - Mailbox follow-up: 新 root 同样可能未落盘；接收端不能因 sendCustomMessage 返回或 sessionFile 非空就删除 durable envelope。等 native 文件存在并 sync 后 ack，首条 assistant 或下一请求重试确认；原生消息 ID 防重复。2026-09-07 pi-collaboration-tools.test.ts 验证 idle 不启动、确认失败阻止 provider、显式重启不重复注入，以及后续 checkpoint 不复活原消息。
+- Admission follow-up（2026-10-18）: 只关闭 bind-time 自动恢复仍不足：冷 child 的旧 followUp 会在新 assignment 中多触发一次 provider，steer/nextTurn 也会混入请求。host-controlled 策略必须在新 prompt 组装前清理旧 live mirrors，再以 `inheritQueuedInputs:false` 接纳；旧收据保留历史/悬挂状态，不伪造取消或完成。回归同时断言三种队列的请求正文、调用次数、未知效果保留与普通 root 默认恢复；`pi-child-session-host.test.ts` 和 `harness-audit-host-recovery-policy.test.ts` 先红后绿，组合24文件328项通过。
 
 ## Pi 邮箱注入——持久消息必须先于 compaction preflight
 
@@ -629,3 +630,11 @@
 - Correct approach: 仅同 provider、同 ID、同 Codex API 继承已有 Fast 布尔声明；显式 provider/model/modelOverrides 仍优先，其他元数据保留替换语义，不改用户配置。
 - Prevention: 能力新增必须穿过完整 registry/composer 层，覆盖旧同 ID 定义、显式 false、未知 ID 和 API/provider 改变，不能只测生成 catalog。
 - Verified by: `codex-fast-capability.test.ts` 三个同 ID 回归先失败后通过；三文件 138 项通过。只读实际配置离线探针恢复 `fast`，mock 请求发送 `priority`，网络调用为零、配置未改变。
+
+## MCP stdio 清理——leader exit、进程组收敛与 stdout drain 是三个边界
+
+- Wrong approach: 修复 leader 先退出遗留子进程后，在 `exit` 中启动 cleanup，并在组已消失时立即通知 transport close。
+- Why it failed: 合法的 `exit → stdout 最后响应 → close` 被改成 `transport close → message`，McpClient 先拒绝 pending request，真实末尾结果随后被丢弃。
+- Correct approach: 进程组独立 TERM→KILL/收敛；transport 仍要在有界预算内等待 Child 的 stdio close，确认两者后才结束；看到 ESRCH 后不再向旧身份发信号。
+- Prevention: 除 stubborn grandchild 测试外，用受控 Child/PassThrough 制造上述事件顺序，断言 onMessage 先于 onClose、pending client 收到结果，以及不关闭 pipe 时有界失败。
+- Verified by: 2026-10-18 `packages/mcp/test/stdio-close-order.test.ts` 三种末尾响应由0/3成功变为3/3；HTTP/stdio/client 邻域70项通过，未据此宣称逃逸进程组或其他 OS 已验证。

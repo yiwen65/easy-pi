@@ -1,0 +1,31 @@
+# 实施与验证回执快照
+
+实现方回执，最终接受状态见任务计划与 root 复查。
+
+Implemented T-131..T-139 and T-141 (F02..F10 durable-harness portion, F12). Recommended status: addressed, pending coordinator review/system checks—not acceptance. Base: f7606c3df763e4dcbc75261211346e67124ee628.
+
+Changed only:
+- packages/agent/src/harness/agent-harness.ts
+- packages/agent/test/harness/agent-harness-runtime-regressions.test.ts (new, 28 tests)
+
+Per-task evidence/fix:
+- T-131: navigation/prompt and concurrent resume barriers reproduced competing admission failures. Synchronous driver reservation now covers target lookup/reduction/preparation; rejection releases reservations (source 478–718; tests 100–151,602).
+- T-132: paused prompt produced corruption; paused abort returned NoActiveOperation. Pausing now releases driver activity but retains durable operation ownership (source 1397; tests 153–176).
+- T-133: steer after abort was accepted; finish-first late controls were accepted; queue-first input was stranded. One control line serializes admission/abort/pause/finish, revalidates current operation, and retries normal finishing if queued input won (source 720–923,1732–1781; tests 178–224,497–531). Finish-first controls and enqueue-first histories checked; admissions repeated three times under barriers.
+- T-134: cancelled captured steering and interrupted-acceptance nextRun input produced invalid_queue_cancellation. Capture/placement and cancellation serialize; consumption rechecks cancellation and skips cancelled recovered initial messages (source 485–506,1402,2006–2030; tests 226–291,533–600). Both cancel-first and consume-first outcomes checked; fresh harness re-reduces logs.
+- T-135: revoked original, approval-changed original, and approval-required replacement executed. Carry validated tool identity instead of name re-resolution, then fail closed on replacement/revocation/approval immediately at invocation (source 2110,2178,2310–2324; tests 293–324).
+- T-136: non-cooperative idempotent timeout incorrectly finished and dispatched conflicting mutation. Physical unsettled mutations now require reconciliation regardless of replay safety (source 2210–2238; tests 326–370,630–655). Measured active/peak/mutations/provider requests: baseline 2/2/2/2, fixed 1/1/1/1; active becomes 0 after explicit release. Live reconciliation/close reject; close ownership-retention behavior preserved and neighboring JSONL reopen/close regressions pass.
+- T-137: abort during conversion/systemPrompt and close during systemPrompt still dispatched provider. Captured controller/current operation and control-line recheck immediately before stream dispatch prevent it (source 1796,1830–1850,1877–1902; tests 372–414): provider calls 1 before, 0 after.
+- T-138: idle callback ran during intent persistence. The reservation settlement promise includes preparation and driving, and releases after preparation rejection (source 628–640,970–978; tests 416–441,610–628).
+- T-139: repeated independent text prompts and repeated tools separated by explicit steering falsely stopped. Reset per drive/input and fingerprint only uninterrupted tool continuations (source 1325–1362,2024–2027; tests 443–474); existing genuine no-progress tests remain green.
+- T-141: retry/checkpoint failed attempts lost usage; maxTokens allowed another retry. Persist settled-attempt usage before branching and check budgets before retry dispatch (source 1936–1949,1992; tests 476–495,657–673). Two attempts now report 4 tokens/2 ledger records instead of 2 tokens/1; maxTokens=2 dispatches once.
+
+Verification:
+1. Before production edits: package cwd command `node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/harness/agent-harness-runtime-regressions.test.ts` failed all 21 initial reproductions for expected behavioral reasons. Log /tmp/fix-durable-runtime-red.log.
+2. Expanded baseline reproduction used /tmp/fix-durable-runtime-baseline.py to extract only the baseline harness from the pinned commit and rewrite relative imports into an isolated temporary test root (shared worktree source never reverted). Command, from packages/agent: `python3 /tmp/fix-durable-runtime-baseline.py && node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --config /Users/w/Projects/easy-pi/pi/packages/agent/vitest.config.ts --root /tmp/fix-durable-runtime-baseline --run runtime-regressions.test.ts`. Result 25 failed/3 passed; log /tmp/fix-durable-runtime-baseline-expanded.log (resource counts lines 290–305).
+3. Final package-cwd Vitest command used the same CLI with --run and these nine exact paths: test/harness/agent-harness-runtime-regressions.test.ts, test/harness/agent-harness-controls.test.ts, test/harness/agent-harness-tool-gateway.test.ts, test/harness/agent-harness-faults.test.ts, test/harness/agent-harness-budgets.test.ts, test/harness/agent-harness-recovery.test.ts, test/harness/agent-harness-run.test.ts, test/harness/agent-harness-operations.test.ts, test/harness/agent-harness-scaffold.test.ts. PASS 103 tests/9 files; /tmp/fix-durable-runtime-final.log.
+4. Scoped `node_modules/.bin/biome check --write` on both owned files passed; `git diff --check --` both paths passed. Reviewed complete original source and complete diff. No dependencies, lockfiles, docs, authority task/report files or commits changed.
+
+Limits: root npm check/typecheck/build intentionally deferred to coordinator; no real APIs/credentials/remote changes. New race tests use in-memory sessions and fresh log reductions; neighboring existing JSONL recovery tests also passed. No claim of exhaustive scheduler/backend coverage or throughput improvement. Temporary baseline runner needed an absolute --config after an initial config-path startup failure (not counted as red evidence); an added stats assertion was corrected to current SessionStats.totalTokens before final green.
+
+Documentation: no required public-signature or durable-format change. Optional current-runtime note: pause retains lane ownership; idle waits include preparation; idempotence alone does not settle a live timed-out mutation; usage ledger counts failed/retried/checkpoint attempts. Do not present the future transaction/register specification in harness.md as already implemented.

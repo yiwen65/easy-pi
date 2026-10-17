@@ -1,0 +1,16 @@
+# 实施与验证回执快照
+
+历史回执；最终接受状态见任务计划与 root 复查。
+
+Final T-160 factual closeout completed against HEAD f7606c3df763e4dcbc75261211346e67124ee628. Current-turn edits only: packages/coding-agent/docs/{compaction,session-format,rpc,extensions,tui}.md. Combined inventory remains the prior 20 owned docs; previous codemode tool.ts description change is preserved unchanged. No source/tests edited.
+
+Final corrections:
+- compaction.md:25–27, session-format.md:277, rpc.md:576 document known unsuccessful summary usage from retained v1 pi-compaction-diagnostics (failed/aborted; rejected checkpoints map to failed). Only valid full Usage with finite nonnegative fields counts. Activated diagnostics are excluded: checkpoint usage remains the sole success accounting source. Missing/malformed/unknown-version data is ignored; no missing-diagnostics reconstruction or old activated-checkpoint backfill. Diagnostics remain best-effort; injected config.complete has no per-provider attempt diagnostics.
+- extensions.md:463–467 explicitly states CompactionPreparation | undefined, required branchEntries, narrowing before legacy fields, and no fabricated cut/token metadata.
+- tui.md:35 states generic/fallback tool-name sanitization is display-only; raw identity remains for lookup/dispatch/special-name grouping. Specific standard/Grok boundaries are described without claiming every renderer is safe.
+
+Source grounding: core/usage-totals.ts:35–61,70–97 (actual helper name getUnactivatedCompactionUsages); AgentSession _emit:1241–1252 and getSessionStats:5239–5288; footer computeSessionUsageStats:59–79; GrokStatsBar renderLeft; stats/scan.ts extractUsage:243–298; standard and Grok tool-name display sinks plus raw constructor/lookup/grouping inputs. Reviewed current optional-preparation type and validation-compaction-accounting/journal-admission/tool-name/mcp-review/server-close receipts. Existing docs retain best-effort deletion, unknown active cancellation, owned-group limits, close deadlines, and no OS/extension sandbox claims.
+
+Checks: all 20 owned docs passed local checker (107 relative targets; 5 added links/anchors; four modern/legacy compaction JSON examples), scoped git diff --check, and changed-text review. Temporary checker removed. No code tests rerun for documentation-only edits; worker green-98 accounting evidence is referenced, not claimed as my test run. No root check/build, real-provider/network/GUI calls, commits, dependencies or authority-file edits.
+
+Remaining exact gap after ONE near-end T-080 caller check: task-recovery.ts:258–295 has inheritQueuedInputs:false support, but AgentSession still calls _taskRecovery.start(prompts, systemPrompt, ids) at :2481, still copies all _pendingNextTurnMessages at :2791, and recoveryPolicy remains a bind-only check at :4042. Therefore no stronger old-queue isolation claim was added. Once caller integration actually persists host-controlled policy, clears only old live mirrors, filters old nextTurn before prompt assembly and passes false at explicit child admission, synchronize collaboration/sdk/stream-recovery wording. No other pending T-160 factual gap found within the assigned scope; final remediation acceptance remains root-owned.
