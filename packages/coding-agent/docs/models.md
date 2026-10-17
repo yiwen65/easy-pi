@@ -337,6 +337,7 @@ Merge semantics:
 - Custom models are upserted by `id` within the provider.
 - If a custom model `id` matches a built-in model `id`, the custom model replaces that built-in model.
 - If a custom model `id` is new, it is added alongside built-in models.
+- A same-ID `openai-codex` definition that keeps `openai-codex-responses` inherits the existing `compat.supportsFastMode` declaration when unspecified. This exception preserves only Fast eligibility, not other model metadata. Explicit provider/model `compat` values and final `modelOverrides` take precedence; unknown IDs or changed APIs do not inherit it.
 
 ## Per-model Overrides
 
@@ -386,7 +387,7 @@ Behavior notes:
 - Unknown model IDs are ignored.
 - You can combine provider-level `baseUrl`/`headers` with `modelOverrides`.
 - Overriding `name` changes model matching and secondary detail text only; the footer and primary model lists continue to show the model `id`.
-- If `models` is also defined for a provider, custom models are merged after built-in overrides. A custom model with the same `id` replaces the overridden built-in model entry.
+- If `models` is also defined for a provider, custom models first replace matching built-in entries. `modelOverrides` are applied last, including to those custom models.
 
 ## Anthropic Messages Compatibility
 

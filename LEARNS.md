@@ -620,3 +620,12 @@
 - Correct approach: 持久会话在推理前建立生命周期租约；源 team 删除标记在租约建立前后复核，provider 前再次验证文件身份。SessionManager 必须在 mkdir/缺失 header 初始化及 append 前就拒绝已删除 native 路径，不能等 AgentSession 再拦截重建。失败启动释放租约，隔离删除重试复核活跃租约。按实际源路径识别 foreign agentDir，不能只比较当前 root ID。
 - Prevention: 清理功能同时覆盖普通 spawn、直接/foreign child reopen、独立进程删除、marker/rename 竞态、SDK 最终化失败与 shutdown；`close` 释放运行资源不等于删除历史。
 - Verified by: 2026-10-18 `suite/tool-output-storage-lifecycle.test.ts` 原始活跃文件误删 red→green；`session-manager-team-deletion.test.ts` 在旧代码复现删除后 open 重建等9项失败，前置保护后回归通过；协调者定向矩阵通过，全部合成目录与 faux provider，无真实数据清理。
+
+## Codex Fast 能力——catalog 合并之后还有自定义模型替换层
+
+- Wrong approach: 只在内置 catalog 和旧远端记录合并时保留 Fast 声明，未覆盖 `models.json.models` 的同 ID 替换。
+- Why it failed: `provider-composer.ts` 的 `modelFromJson` 重建元数据，仅合并 provider/model compat；旧自定义定义未写新字段，最终能力丢失，即使全局 Fast 已开启也不发送档位、不显示 `fast`。
+- Recognition signal: 内置模型 `supportsFastMode: true`，实际组合模型却缺失；仅移除自定义定义或显式补能力可恢复。
+- Correct approach: 仅同 provider、同 ID、同 Codex API 继承已有 Fast 布尔声明；显式 provider/model/modelOverrides 仍优先，其他元数据保留替换语义，不改用户配置。
+- Prevention: 能力新增必须穿过完整 registry/composer 层，覆盖旧同 ID 定义、显式 false、未知 ID 和 API/provider 改变，不能只测生成 catalog。
+- Verified by: `codex-fast-capability.test.ts` 三个同 ID 回归先失败后通过；三文件 138 项通过。只读实际配置离线探针恢复 `fast`，mock 请求发送 `priority`，网络调用为零、配置未改变。

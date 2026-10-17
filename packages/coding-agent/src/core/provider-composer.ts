@@ -153,6 +153,19 @@ function modelFromJson(
 	if (definition.maxTokens !== undefined && definition.maxTokens <= 0) {
 		throw new Error(`Provider ${providerId}, model ${definition.id}: invalid maxTokens`);
 	}
+	// A same-model Codex definition can predate Fast metadata. Retain only that
+	// declared capability; custom models still replace all other model metadata.
+	const inheritedFastCompat =
+		providerId === "openai-codex" &&
+		api === "openai-codex-responses" &&
+		defaults?.provider === providerId &&
+		defaults.id === definition.id &&
+		defaults.api === api &&
+		defaults.compat &&
+		"supportsFastMode" in defaults.compat &&
+		typeof defaults.compat.supportsFastMode === "boolean"
+			? { supportsFastMode: defaults.compat.supportsFastMode }
+			: undefined;
 	return {
 		id: definition.id,
 		name: definition.name ?? definition.id,
@@ -167,7 +180,7 @@ function modelFromJson(
 		maxTokens: definition.maxTokens ?? 16384,
 		samplingParams: definition.samplingParams,
 		headers: undefined,
-		compat: mergeCompat(providerConfig.compat, definition.compat),
+		compat: mergeCompat(inheritedFastCompat, mergeCompat(providerConfig.compat, definition.compat)),
 	};
 }
 
