@@ -97,7 +97,7 @@ describe("request-only image repair and final wire validation", () => {
 		expect(prepared.context.messages[0].content[0]).toEqual(valid);
 	});
 
-	it("adds request-local resize geometry without changing canonical hints or later image IDs", async () => {
+	it("keeps resize geometry in reports without appending processing prose or changing user text and image IDs", async () => {
 		const wide = { ...valid, data: createImagePng(800, 4).toString("base64") };
 		const context: Context = {
 			messages: [
@@ -115,13 +115,10 @@ describe("request-only image repair and final wire validation", () => {
 		expect(resized.decisions.map((decision) => decision.imageId)).toEqual(
 			initial.decisions.map((decision) => decision.imageId),
 		);
-		expect(resized.context.messages[0].content[1]).toMatchObject({
-			type: "text",
-			text: expect.stringContaining("Request-only image preparation"),
-		});
-		expect(resized.context.messages[0].content[1]).toMatchObject({
-			text: expect.stringContaining("displayed at 400x2"),
-		});
+		expect(resized.context.messages[0].content).toHaveLength(3);
+		expect(resized.context.messages[0].content[1]).toBe(context.messages[0].content[1]);
+		expect(JSON.stringify(resized.context)).not.toContain("Request-only image preparation");
+		expect(JSON.stringify(resized.context)).not.toContain("Multiply coordinates");
 		expect(resized.decisions[0]).toMatchObject({ width: 400, height: 2 });
 	});
 

@@ -42,7 +42,6 @@ async function prepareBlock(image: ImageContent, policy: ImagePolicy, signal?: A
 				result.data === image.data && result.mimeType === image.mimeType
 					? image
 					: { ...image, data: result.data, mimeType: result.mimeType },
-			hints: result.hints,
 			dimensions: result.dimensions,
 		};
 	} catch (error) {
@@ -115,7 +114,6 @@ export async function prepareImageContext(
 	if (policy.blocked || !policy.vision) return selected;
 	const accepted = selected.decisions.filter((decision) => decision.stage !== "omitted");
 	const updates = new Map<string, ImageDecision>();
-	const requestHints = new Map<ImageContent, string>();
 	let imageIndex = 0;
 	let changed = false;
 	const deadline = AbortSignal.timeout(policy.batchTimeoutMs);
@@ -140,12 +138,6 @@ export async function prepareImageContext(
 				operationSignal.throwIfAborted();
 				content.push(prepared);
 				contentChanged ||= prepared !== part;
-				if (prepared !== part && result.hints.length) {
-					requestHints.set(
-						prepared,
-						`[Request-only image preparation: the following dimensions refer to this request's transmitted image relative to canonical history; earlier size notes are not its transmitted dimensions.]\n${result.hints.join("\n")}`,
-					);
-				}
 				updates.set(decision.imageId, {
 					...decision,
 					stage: "prepared",
@@ -196,20 +188,7 @@ export async function prepareImageContext(
 		);
 	}
 	const decisions = selected.decisions.map((decision) => updates.get(decision.imageId) ?? decision);
-	// Add request-local geometry only after budgeting so canonical content-index IDs stay stable.
-	if (!requestHints.size) return { context: budgeted.context, decisions };
-	const annotated = budgeted.context.messages.map((message) => {
-		if (message.role === "assistant" || typeof message.content === "string") return message;
-		if (!message.content.some((part) => part.type === "image" && requestHints.has(part))) return message;
-		return {
-			...message,
-			content: message.content.flatMap((part) => {
-				const hint = part.type === "image" ? requestHints.get(part) : undefined;
-				return hint ? [part, { type: "text" as const, text: hint }] : [part];
-			}),
-		};
-	});
-	return { context: { ...budgeted.context, messages: annotated }, decisions };
+	return { context: budgeted.context, decisions };
 }
 
 /** Final hook-after-serialization defence. Does not silently rewrite opaque native payloads. */

@@ -85,15 +85,15 @@ describe("unified image input preparation", () => {
 		await expect(prepareInputImages([attachment], policy)).rejects.toMatchObject({ name: "ImageInputError", code });
 	});
 
-	it("preserves order, source snapshots and adjacent hints; prepared re-entry does not repeat work/hints", async () => {
+	it("preserves image order and source snapshots without processing prose or repeated codec work", async () => {
 		const a = image(2400, 3);
 		const b = image(5, 6);
 		const process = vi.spyOn(codec, "processImage");
 		const result = await prepareInputImages([a, b], policy);
 		expect(result.sources).toEqual([a, b]);
 		expect(result.sources[0]).not.toBe(a);
-		expect(result.content.map((part) => part.type)).toEqual(["image", "text", "image"]);
-		expect(result.content[1]).toMatchObject({ text: expect.stringContaining("original 2400x3") });
+		expect(result.content.map((part) => part.type)).toEqual(["image", "image"]);
+		expect(result.content).toEqual(result.images);
 		expect(result.decisions.find((decision) => decision.stage === "accepted")).toMatchObject({
 			width: 2400,
 			height: 3,
@@ -169,6 +169,23 @@ describe("unified image input preparation", () => {
 });
 
 describe("AgentSession image admission", () => {
+	it("keeps submitted text unchanged after resizing an uploaded image and retains structured size reports", async () => {
+		const h = await harness();
+		h.setResponses([fauxAssistantMessage("ok")]);
+		await h.session.prompt("只发送这段正文", { images: [image(2400, 3)] });
+		const user = h.session.messages[0];
+		if (user.role !== "user" || typeof user.content === "string") throw new Error("Expected user content blocks");
+		expect(user.content).toHaveLength(2);
+		expect(user.content[0]).toEqual({ type: "text", text: "只发送这段正文" });
+		expect(user.content[1]).toMatchObject({ type: "image", mimeType: "image/png" });
+		expect(h.session.getImageDecisions()).toContainEqual(
+			expect.objectContaining({ stage: "accepted", width: 2400, height: 3 }),
+		);
+		expect(h.session.getImageDecisions()).toContainEqual(
+			expect.objectContaining({ stage: "prepared", width: 2000, height: 3 }),
+		);
+	});
+
 	it("rejects before task admission and preflight success, then accepts a normal turn", async () => {
 		const h = await harness();
 		const preflight = vi.fn();
@@ -331,7 +348,7 @@ describe("AgentSession image admission", () => {
 		expect(h.session.taskRecovery).toBeUndefined();
 	});
 
-	it("shares @file preparation with prompt admission without duplicate hints or codec work", async () => {
+	it("shares @file preparation with prompt admission without processing prose or repeated codec work", async () => {
 		const h = await harness();
 		const path = join(h.tempDir, "wide.png");
 		writeFileSync(path, createImagePng(2400, 3));
@@ -344,7 +361,9 @@ describe("AgentSession image admission", () => {
 		expect(user.role).toBe("user");
 		if (user.role !== "user") throw new Error("Expected admitted user message");
 		const content = user.content;
-		expect(JSON.stringify(content).match(/original 2400x3/g)).toHaveLength(1);
+		expect(input.text).toBe(`<file name="${path}"></file>\n`);
+		expect(content).toHaveLength(2);
+		expect(JSON.stringify(content)).not.toContain("[Image:");
 	});
 
 	it("defers builtin read image preparation until after the tool_result hook, exactly once", async () => {
@@ -371,7 +390,11 @@ describe("AgentSession image admission", () => {
 		expect(observedImage?.data).toBe(source.toString("base64"));
 		expect(process).toHaveBeenCalledOnce();
 		const tool = h.session.messages.find((message) => message.role === "toolResult");
-		expect(JSON.stringify(tool)).toContain("original 2400x3");
+		expect(tool).toMatchObject({
+			content: [{ type: "text", text: "Read image file [image/png]" }, { type: "image" }],
+		});
+		expect(tool?.content).toHaveLength(2);
+		expect(JSON.stringify(tool)).not.toContain("[Image:");
 	});
 
 	it("prepares only the post-hook tool result and retains a bad tool fact without rerunning", async () => {

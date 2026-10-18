@@ -100,7 +100,7 @@ describe("original image snapshot handoff", () => {
 			height: 3,
 		});
 		expect(process).toHaveBeenCalledOnce();
-		expect(JSON.stringify(h.session.messages[0]).match(/original 2400x3/g)).toHaveLength(1);
+		expect(JSON.stringify(h.session.messages[0])).not.toContain("[Image:");
 	});
 
 	it("publishes immutable original snapshots, sanitizes callback fields and skips committed memo re-entry", async () => {
@@ -120,7 +120,7 @@ describe("original image snapshot handoff", () => {
 		];
 		const committed = await prepareInputContent(content, policy, { onPrepared: sink });
 		expect(sink).toHaveBeenCalledOnce();
-		expect(committed.content.map((part) => part.type)).toEqual(["text", "image", "text", "text"]);
+		expect(committed.content.map((part) => part.type)).toEqual(["text", "image", "text"]);
 		const output = committed.content[1] as ImageContent;
 		expect(Object.keys(output).sort()).toEqual(["data", "imageSource", "mimeType", "type"]);
 		expect(sourceBytes(manager, output)).toEqual(Buffer.from(original.data, "base64"));
@@ -174,6 +174,7 @@ describe("original image snapshot handoff", () => {
 		const original: ImageContent = { type: "image", data: bytes.toString("base64"), mimeType: "image/bmp" };
 		const early = await prepareInputImages([original], policy);
 		expect(early.images![0].mimeType).toBe("image/png");
+		expect(early.content).toEqual(early.images);
 		const result = await prepareInputImages(early.images, policy, {
 			onPrepared: (output, source, dimensions) => manager.attachImageSource(output, source, dimensions),
 		});
@@ -352,6 +353,8 @@ describe("session source publication boundaries", () => {
 			const queued = h.session.taskRecovery!.queued[0].messages[0];
 			if (!("content" in queued) || typeof queued.content === "string") throw new Error("Expected queued blocks");
 			const output = queued.content.find((part): part is ImageContent => part.type === "image")!;
+			expect(queued.content).toHaveLength(2);
+			expect(queued.content[0]).toEqual({ type: "text", text: "replacement" });
 			expect(sourceBytes(h.sessionManager, output)).toEqual(Buffer.from(replacement.data, "base64"));
 		},
 	);
@@ -377,6 +380,7 @@ describe("session source publication boundaries", () => {
 		expect(messages).toHaveLength(2);
 		for (const message of messages) {
 			if (typeof message.content === "string") throw new Error("Expected custom blocks");
+			expect(message.content).toHaveLength(1);
 			expect(sourceBytes(h.sessionManager, message.content[0] as ImageContent)).toEqual(
 				Buffer.from(original.data, "base64"),
 			);

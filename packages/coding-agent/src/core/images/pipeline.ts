@@ -14,7 +14,7 @@ export interface PreparedInputImages {
 	decisions: ImageDecision[];
 	/** Pending original snapshots, in image order. Empty after a source sink commits. */
 	sources: ImageContent[];
-	/** Images with their preparation hints immediately adjacent. */
+	/** Prepared image blocks only; processing facts stay in decisions and provenance. */
 	content: (ImageContent | TextContent)[];
 }
 
@@ -277,7 +277,6 @@ export async function prepareInputImages(
 			}
 			let output: ImageContent;
 			let facts: PreparedFacts;
-			let hints: string[] = [];
 			if (known?.key === key) {
 				output = sanitizeInputImage(signature(owner) === known.signature ? owner : image, metadata ?? null);
 				facts = { ...known, committed, metadata, claim, sourceOwner: committed ? known.sourceOwner : undefined };
@@ -356,12 +355,10 @@ export async function prepareInputImages(
 					},
 					decision,
 				);
-				hints = processed.hints;
 			}
 			prepared.set(output, facts);
 			const contentIndex = result.content.length;
 			result.content.push(output);
-			if (hints.length) result.content.push({ type: "text", text: hints.join("\n") });
 			result.images!.push(output);
 			if (source) {
 				if (options.onPrepared) publications.push({ index, contentIndex, source, facts });
@@ -449,10 +446,7 @@ export async function prepareInputContent(
 	let index = 0;
 	for (const part of content) {
 		if (part.type !== "image") output.push(part);
-		else {
-			output.push(result.content[index++]);
-			if (result.content[index]?.type === "text") output.push(result.content[index++]);
-		}
+		else output.push(result.images![index++]);
 	}
 	return {
 		content: output.every((part, i) => part === content[i]) && output.length === content.length ? content : output,

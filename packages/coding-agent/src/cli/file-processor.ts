@@ -22,7 +22,7 @@ export interface ProcessFileOptions {
 /** Invalid user attachments reject the submission, rather than silently submitting text only. */
 export async function processFileArguments(fileArgs: string[], options?: ProcessFileOptions): Promise<ProcessedFiles> {
 	const policy = resolveImagePolicy(undefined, { autoResizeImages: options?.autoResizeImages });
-	const parts: Array<{ text: string } | { path: string; imageIndex: number }> = [];
+	const parts: Array<{ text: string } | { path: string }> = [];
 	const images: ImageContent[] = [];
 	let batchBytes = 0;
 	for (const fileArg of fileArgs) {
@@ -49,7 +49,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			batchBytes += content.byteLength;
 			if (batchBytes > policy.maxBatchInputBytes)
 				throw new ImageInputError("input_limit", "File image attachments exceed the combined source byte limit.");
-			parts.push({ path: absolutePath, imageIndex: images.length });
+			parts.push({ path: absolutePath });
 			images.push({ type: "image", mimeType, data: content.toString("base64") });
 		} else {
 			try {
@@ -63,13 +63,6 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		}
 	}
 	const prepared = await prepareInputImages(images, policy);
-	const hints: string[] = [];
-	for (const part of prepared.content) {
-		if (part.type === "image") hints.push("");
-		else hints[hints.length - 1] = part.text;
-	}
-	const text = parts
-		.map((part) => ("text" in part ? part.text : `<file name="${part.path}">${hints[part.imageIndex]}</file>\n`))
-		.join("");
+	const text = parts.map((part) => ("text" in part ? part.text : `<file name="${part.path}"></file>\n`)).join("");
 	return { text, images: prepared.images ?? [] };
 }

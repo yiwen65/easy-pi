@@ -195,8 +195,9 @@ describe("Coding Agent Tools", () => {
 
 			const result = await readTool.execute("test-call-img-1", { path: testFile });
 
+			expect(result.content).toHaveLength(2);
 			expect(result.content[0]?.type).toBe("text");
-			expect(getTextOutput(result)).toContain("Read image file [image/png]");
+			expect(getTextOutput(result)).toBe("Read image file [image/png]");
 
 			const imageBlock = result.content.find(
 				(c): c is { type: "image"; mimeType: string; data: string } => c.type === "image",
@@ -207,15 +208,15 @@ describe("Coding Agent Tools", () => {
 			expect((imageBlock?.data ?? "").length).toBeGreaterThan(0);
 		});
 
-		it("should read BMP files from disk as PNG image attachments", async () => {
+		it("should read BMP files from disk as PNG image attachments without conversion prose", async () => {
 			const testFile = join(testDir, "image.bmp");
 			writeFileSync(testFile, createTinyBmp1x1Red24bpp());
 
 			const result = await readTool.execute("test-call-img-bmp", { path: testFile });
 
+			expect(result.content).toHaveLength(2);
 			expect(result.content[0]?.type).toBe("text");
-			expect(getTextOutput(result)).toContain("Read image file [image/png]");
-			expect(getTextOutput(result)).toContain("[Image converted from image/bmp to image/png.]");
+			expect(getTextOutput(result)).toBe("Read image file [image/png]");
 
 			const imageBlock = result.content.find(
 				(c): c is { type: "image"; mimeType: string; data: string } => c.type === "image",
