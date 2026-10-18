@@ -3,7 +3,7 @@
 - Created: 2026-10-18
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户授权“继续优化/resume 摘要索引和无 message session 处理”。
 
 <!-- task-doc-section:background-goal -->
@@ -123,9 +123,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 文档、完整检查与提交
+### [x] T-004 — 文档、完整检查与提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 说明索引重建/空壳规则与快捷键，完成门禁和任务专属提交。
 - Inputs and prerequisites: T-003完成。
@@ -140,7 +140,7 @@
   - 所有必需验证通过，未完成/冷建成本如实说明，worktree无任务遗留。
 - Verification method:
   - npm run check、任务validator、git diff/status。
-- Validation evidence: 最终npm run check exit0（1614文件，No fixes applied，含tsc与依赖/导入/锁文件/browser-smoke检查）；git diff --check通过。README/session-format/keybindings说明已核对，LEARNS新增并回读旧测试持久cache隔离教训。只包含本任务13个文件；待任务专属Git提交。
+- Validation evidence: 最终npm run check exit0（1614文件，No fixes applied，含tsc与依赖/导入/锁文件/browser-smoke检查）；git diff --check通过。README/session-format/keybindings说明已核对，LEARNS新增并回读旧测试持久cache隔离教训。只包含本任务13个文件；已提交 `b743cd890 fix(coding-agent): index resume summaries and filter empty sessions`，提交后worktree clean。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -172,11 +172,12 @@
 - 2026-10-18: 受控离线tmux启动实际TUI，用4个固定fixture验证3行默认可见（named空、custom state、user消息），CtrlShiftE后5行含当前新会话及fixture空壳；/quit干净退出，无模型/API请求。
 - 2026-10-18: 真实listAll可发现1747份主会话预热完成：首次3.661s/首可见58.44ms，fresh进程120.11ms/首可见55.65ms、JSONL stream0；93初始化空壳/1654可见，1747个cache共2.85MB，原始session指纹全部不变。T-003验收，T-004开始完整check、文档与提交收尾。
 - 2026-10-18: root最终复核补充fresh writer不打开picker就追加的跨进程回归：旧实现fresh reader仍尝试读JSONL1次，修正为source全读重建投影时保留既有磁盘索引兴趣，之后fresh reader零正文读取；从未列出的writer仍只维护memory。新回归先红后绿，最终28文件427项通过。
-- 2026-10-18: 最终完整check通过（1614文件，无改写），临时benchmark/fixture已清理，受控tmux已退出。保留用户真实派生索引2.85MB以供重启后直接使用；原始会话未改。下一步仅任务专属13文件提交。
+- 2026-10-18: 最终完整check通过（1614文件，无改写），临时benchmark/fixture已清理，受控tmux已退出。保留用户真实派生索引2.85MB以供重启后直接使用；原始会话未改。
+- 2026-10-18: 显式暂存13个任务文件，提交b743cd890成功并确认worktree clean；T-004完成，本文档最终状态另作收尾提交。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: T-001至T-003全部通过；实现、独立审查与复核、427项回归、真实目录与实际TUI验证、完整check通过。T-004仅剩Git提交。
+- Result: passed
+- Evidence: T-001至T-004全部完成；实现、独立审查与复核、427项回归、真实目录与实际TUI验证、完整check通过。代码提交b743cd890，任务文档校验通过。
 - Limitations: 首次无缓存/未知外部变更/超大投影仍需扫描；扫描期间变化的源本次跳过，下次重建。cache删除是当前agentDir内best-effort，手工删除源不是全局cache擦除。未运行build/全量Vitest/真实模型请求；性能计时限当前机器和数据，冷建不声称零成本。重启epi加载本轮代码，真实会话正文未改。
