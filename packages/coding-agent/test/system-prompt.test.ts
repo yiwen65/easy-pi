@@ -34,6 +34,7 @@ describe("buildSystemPrompt", () => {
 					bash: "Execute bash commands",
 					edit: "Make surgical edits",
 					write: "Create or overwrite files",
+					codemode: "Run JavaScript that calls other tools",
 				},
 				contextFiles: [],
 				skills: [],
@@ -44,6 +45,19 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- bash:");
 			expect(prompt).toContain("- edit:");
 			expect(prompt).toContain("- write:");
+			expect(prompt).toContain("- codemode: Run JavaScript that calls other tools");
+			expect(prompt).toContain("(via bash/write/codemode)");
+		});
+
+		test("omits codemode when it is not selected", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash", "edit", "write"],
+				toolSnippets: { codemode: "Run JavaScript that calls other tools" },
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("codemode");
+			expect(prompt).toContain("(via bash/write)");
 		});
 
 		test("instructs models to resolve pi docs and examples under absolute base paths", () => {

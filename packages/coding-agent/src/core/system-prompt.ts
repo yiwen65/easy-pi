@@ -8,7 +8,7 @@ import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
-	/** Tools to include in prompt. Default: [read, bash, edit, write] */
+	/** Tools to include in prompt. Default: [read, bash, edit, write, codemode] */
 	selectedTools?: string[];
 	/** Optional one-line tool snippets keyed by tool name. */
 	toolSnippets?: Record<string, string>;
@@ -78,7 +78,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Build tools list based on selected tools.
 	// A tool appears in Available tools only when the caller provides a one-line snippet.
-	const tools = selectedTools || ["read", "bash", "edit", "write"];
+	const tools = selectedTools || ["read", "bash", "edit", "write", "codemode"];
 	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
 	const toolsList =
 		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
@@ -153,7 +153,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 Available tools:
 ${toolsList}
 
-Other project-specific tools may also be available in your tool list. Call only tools available in this session, with arguments that follow each tool's schema — never invent tools, parameters, or outputs. Creating and running new scripts or programs (via bash/write) is always in scope. If a needed capability cannot be achieved with the available tools, say so instead of fabricating its result.
+Other project-specific tools may also be available in your tool list. Call only tools available in this session, with arguments that follow each tool's schema — never invent tools, parameters, or outputs. Creating and running new scripts or programs (via ${tools.includes("codemode") ? "bash/write/codemode" : "bash/write"}) is always in scope. If a needed capability cannot be achieved with the available tools, say so instead of fabricating its result.
 
 Working rules:
 ${guidelines}
