@@ -229,6 +229,56 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("classifies image rejection once and exposes reversible historical image selection over JSONL", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		try {
+			lineHandler(
+				JSON.stringify({
+					id: "invalid-image",
+					type: "prompt",
+					message: "draft",
+					images: [{ type: "image", data: "bad", mimeType: "image/png" }],
+				}),
+			);
+			await vi.waitFor(() =>
+				expect(getPromptResponses(rpcIo.outputLines, "invalid-image")).toEqual([
+					expect.objectContaining({ success: false, code: "invalid_base64", imageIds: [] }),
+				]),
+			);
+			const imageId = `image_${"a".repeat(24)}`;
+			lineHandler(JSON.stringify({ id: "selection", type: "set_image_selection", omitImageIds: [imageId] }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({ id: "selection", success: true }),
+				),
+			);
+			lineHandler(JSON.stringify({ id: "images", type: "get_images" }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({
+						id: "images",
+						success: true,
+						data: { selection: { omitImageIds: [imageId] }, decisions: [] },
+					}),
+				),
+			);
+			lineHandler(JSON.stringify({ id: "bad-selection", type: "set_image_selection", omitImageIds: ["wire:0"] }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({ id: "bad-selection", success: false, code: "invalid_image" }),
+				),
+			);
+			lineHandler(JSON.stringify({ id: "reset-selection", type: "set_image_selection", omitImageIds: [] }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+					expect.objectContaining({ id: "reset-selection", success: true }),
+				),
+			);
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one success response when prompt preflight succeeds", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
 

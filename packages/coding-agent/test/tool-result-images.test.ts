@@ -1,5 +1,6 @@
 import { crc32, deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { resolveImagePolicy } from "../src/core/images/policy.ts";
 import type { ToolResultContent } from "../src/utils/tool-result-images.ts";
 import { normalizeToolResultImages } from "../src/utils/tool-result-images.ts";
 
@@ -118,7 +119,35 @@ describe("normalizeToolResultImages", () => {
 	it("keeps undecodable images instead of dropping tool output", async () => {
 		const content: ToolResultContent[] = [{ type: "image", data: "bm90LWFuLWltYWdl", mimeType: "image/png" }];
 
-		expect(await normalizeToolResultImages(content)).toBe(content);
+		const normalized = await normalizeToolResultImages(content);
+		expect(normalized[0]).toBe(content[0]);
+		expect(normalized[1]).toMatchObject({ type: "text", text: expect.stringContaining("invalid_image") });
+	});
+
+	it("bounds failed raw evidence instead of moving excessive image bytes into details", async () => {
+		const content: ToolResultContent[] = [
+			{ type: "text", text: "executed" },
+			{ type: "image", data: "A".repeat(1000), mimeType: "image/png" },
+		];
+		const normalized = await normalizeToolResultImages(content, {
+			policy: resolveImagePolicy(undefined, { limits: { maxInputBytes: 100 } }),
+		});
+		expect(normalized[0]).toBe(content[0]);
+		expect(normalized.every((block) => block.type === "text")).toBe(true);
+		expect(JSON.stringify(normalized)).toContain("Base64 SHA-256=");
+		expect(JSON.stringify(normalized)).not.toContain("A".repeat(1000));
+	});
+
+	it("retains the executed fact on cancellation rather than throwing away the whole tool result", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const content: ToolResultContent[] = [
+			{ type: "text", text: "executed" },
+			imageBlock(createPng(4, 4), "image/png"),
+		];
+		const normalized = await normalizeToolResultImages(content, { signal: controller.signal });
+		expect(normalized.slice(0, 2)).toEqual(content);
+		expect(normalized[2]).toMatchObject({ text: expect.stringContaining("aborted") });
 	});
 
 	it("preserves surrounding text blocks and their order", async () => {

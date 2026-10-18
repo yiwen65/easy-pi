@@ -47,6 +47,13 @@ describe("AgentSession tool result images", () => {
 
 		await harness.session.prompt("take a screenshot");
 
-		expect(normalizeToolResultImages).toHaveBeenCalledWith(expect.any(Array), { autoResizeImages: false });
+		expect(normalizeToolResultImages).toHaveBeenCalledWith(
+			expect.any(Array),
+			expect.objectContaining({
+				autoResizeImages: false,
+				signal: expect.any(AbortSignal),
+				policy: expect.objectContaining({ mode: "original" }),
+			}),
+		);
 	});
 });

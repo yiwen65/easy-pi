@@ -10,6 +10,8 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ImageSourceData, ImageSourceSummary } from "../../core/images/attachments.ts";
+import { type ImageDecision, ImageInputError, type ImageSelection } from "../../core/images/types.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -437,6 +439,25 @@ export class RpcClient {
 		return this.getData<{ messages: AgentMessage[] }>(response).messages;
 	}
 
+	/** Get local image reports, optionally including active-branch source summaries (never bytes/paths). */
+	async getImages(includeSources = false): Promise<{
+		selection: ImageSelection;
+		decisions: readonly ImageDecision[];
+		sources?: ImageSourceSummary[];
+	}> {
+		return this.getData(await this.send({ type: "get_images", includeSources }));
+	}
+
+	/** Explicit bounded original read; the full source ID must belong to the active branch. */
+	async getImageSource(sourceId: string): Promise<ImageSourceData> {
+		return this.getData(await this.send({ type: "get_image_source", sourceId }));
+	}
+
+	/** Replace reversible branch request-view exclusions, without deleting images or source history. */
+	async setImageSelection(omitImageIds: string[]): Promise<void> {
+		await this.send({ type: "set_image_selection", omitImageIds });
+	}
+
 	/**
 	 * Get available commands (extension commands, prompt templates, skills).
 	 */
@@ -584,7 +605,12 @@ export class RpcClient {
 				resolve: (response) => {
 					clearTimeout(timeout);
 					if (response.success) resolve(response);
-					else reject(new Error(response.error));
+					else
+						reject(
+							response.code
+								? new ImageInputError(response.code, response.error, response.imageIds)
+								: new Error(response.error),
+						);
 				},
 				reject: (error) => {
 					clearTimeout(timeout);

@@ -8,11 +8,12 @@ import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
-import { processImage } from "../../utils/image-process.ts";
-import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import { getExperimentalToolSampling } from "../experimental.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { detectImageInputMimeType, prepareInputImages, readImageInputFile } from "../images/pipeline.ts";
+import { resolveImagePolicy } from "../images/policy.ts";
+import { IMAGE_LIMITS, ImageInputError } from "../images/types.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -49,6 +50,8 @@ const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.override.md", "AGENTS.md", 
 export interface ReadOperations {
 	/** Read file contents as a Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
+	/** Optional bounded image reader; remote operations should enforce the same byte ceiling. */
+	readImageFile?: (absolutePath: string) => Promise<Buffer>;
 	/** Check if file is readable (throw if not) */
 	access: (absolutePath: string) => Promise<void>;
 	/** Detect image MIME type, return null or undefined for non-images */
@@ -57,13 +60,16 @@ export interface ReadOperations {
 
 const defaultReadOperations: ReadOperations = {
 	readFile: (path) => fsReadFile(path),
+	readImageFile: (path) => readImageInputFile(path, IMAGE_LIMITS.maxInputBytes),
 	access: (path) => fsAccess(path, constants.R_OK),
-	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+	detectImageMimeType: detectImageInputMimeType,
 };
 
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
 	autoResizeImages?: boolean;
+	/** AgentSession prepares after tool_result hooks instead of preparing twice. */
+	deferImagePreparation?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
 }
@@ -254,20 +260,37 @@ export function createReadToolDefinition(
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
 								// Read image as binary.
-								const buffer = await ops.readFile(absolutePath);
-								const processed = await processImage(buffer, mimeType, { autoResizeImages });
-								if (!processed.ok) {
-									let textNote = `Read image file [${mimeType}]\n${processed.message}`;
-									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
-									content = [{ type: "text", text: textNote }];
+								const buffer = await (ops.readImageFile ?? ops.readFile)(absolutePath);
+								if (buffer.length > IMAGE_LIMITS.maxInputBytes)
+									throw new ImageInputError("input_limit", "Image file exceeds the source byte limit.");
+								const image: ImageContent = { type: "image", data: buffer.toString("base64"), mimeType };
+								let textNote = `Read image file [${mimeType}]`;
+								if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
+								if (options?.deferImagePreparation) {
+									content = [{ type: "text", text: textNote }, image];
 								} else {
-									let textNote = `Read image file [${processed.mimeType}]`;
-									if (processed.hints.length > 0) textNote += `\n${processed.hints.join("\n")}`;
-									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
-									content = [
-										{ type: "text", text: textNote },
-										{ type: "image", data: processed.data, mimeType: processed.mimeType },
-									];
+									try {
+										const processed = await prepareInputImages(
+											[image],
+											resolveImagePolicy(ctx?.model, { autoResizeImages }),
+											{ signal },
+										);
+										content = [
+											{
+												type: "text",
+												text: `Read image file [${processed.images![0].mimeType}]${nonVisionImageNote ? `\n${nonVisionImageNote}` : ""}`,
+											},
+											...processed.content,
+										];
+									} catch (error) {
+										if (signal?.aborted) throw error;
+										content = [
+											{
+												type: "text",
+												text: `${textNote}\n[Image omitted: ${error instanceof ImageInputError ? error.code : "decoder_unavailable"}.]`,
+											},
+										];
+									}
 								}
 							} else {
 								// Read text content.

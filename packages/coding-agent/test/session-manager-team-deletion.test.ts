@@ -19,7 +19,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteCollaborationStorage } from "../../subagent/src/collaboration-storage.ts";
 import { CollaborationStore } from "../../subagent/src/collaboration-store.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import { imageAssetsDirectory } from "../src/core/images/source-store.ts";
+import { getImageSourceMetadata, SessionManager } from "../src/core/session-manager.ts";
 
 vi.mock("fs", async (original) => {
 	const fs = await original<typeof Fs>();
@@ -67,6 +68,39 @@ function fixture() {
 }
 
 describe("SessionManager native team deletion intent", () => {
+	it("includes only the registered session's image assets in confirmed team deletion", () => {
+		const f = fixture();
+		const source = { type: "image" as const, mimeType: "image/png", data: Buffer.from("source").toString("base64") };
+		const attached = f.manager.attachImageSource(
+			{ ...source, data: Buffer.from("derivative").toString("base64") },
+			source,
+		);
+		f.manager.appendMessage({ role: "user", content: [attached], timestamp: 1 });
+		expect(existsSync(imageAssetsDirectory(f.file))).toBe(true);
+		const ref = getImageSourceMetadata(attached)!.asset;
+		expect(deleteCollaborationStorage(f.options).status).toBe("deleted");
+		expect(existsSync(f.directory)).toBe(false);
+		expect(() => f.manager.readImageSource(ref)).toThrow(/owner/);
+		expect(() => f.manager.attachImageSource(source, source)).toThrow(/owner/);
+		expect(existsSync(f.directory)).toBe(false);
+	});
+
+	it("protects image assets under the native task lease and refuses unknown asset names", () => {
+		const f = fixture();
+		const image = { type: "image" as const, mimeType: "image/png", data: Buffer.from("source").toString("base64") };
+		f.manager.attachImageSource(image, image);
+		const lock = `${f.file}.task.lock`;
+		writeFileSync(lock, JSON.stringify({ pid: process.pid, token: randomUUID() }));
+		expect(deleteCollaborationStorage(f.options).status).toBe("protected");
+		unlinkSync(lock);
+		const unknown = join(imageAssetsDirectory(f.file), "unowned.txt");
+		writeFileSync(unknown, "preserve");
+		expect(deleteCollaborationStorage(f.options).status).toBe("protected");
+		expect(readFileSync(unknown, "utf8")).toBe("preserve");
+		unlinkSync(unknown);
+		expect(deleteCollaborationStorage(f.options).status).toBe("deleted");
+	});
+
 	it("does not recreate a deleted native child when directly opened, preserving the compact tombstone retry", () => {
 		const f = fixture();
 		expect(deleteCollaborationStorage(f.options).status).toBe("deleted");

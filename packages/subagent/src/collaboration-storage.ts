@@ -481,9 +481,14 @@ function scan(
 						} else if (
 							!child ||
 							(!(entry.isFile() && entry.name === child.sessionFile) &&
-								!(entry.isDirectory() && /^[A-Za-z0-9._-]+\.logs$/.test(entry.name)))
+								!(entry.isDirectory() && /^[A-Za-z0-9._-]+\.logs$/.test(entry.name)) &&
+								!(entry.isDirectory() && child.sessionFile && entry.name === `${child.sessionFile}.images`))
 						)
 							throw new Error("Unknown child entry");
+					} else if (parts.length === 2 && parts[1] === `${children.get(parts[0])?.sessionFile}.images`) {
+						// Session-scoped assets only. Unknown names, links and nested directories protect deletion.
+						if (!entry.isFile() || !/^[a-f0-9]{64}$/.test(entry.name))
+							throw new Error("Unknown image asset entry");
 					} else if (parts.length === 2 && parts[1].endsWith(".logs")) {
 						if (entry.name === ".pi-tool-logs.json") {
 							const marker = object(jsonFile(next));

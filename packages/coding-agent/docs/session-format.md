@@ -12,7 +12,7 @@ Where `<path>` is the working directory with `/` replaced by `-`.
 
 ## Deleting Sessions
 
-Sessions can be removed by deleting their `.jsonl` files under `~/.pi/agent/sessions/`.
+Sessions can be removed by deleting their `.jsonl` files under `~/.pi/agent/sessions/`. V4 image assets are separate in `<session.jsonl>.images/`: deleting only the log does not erase those image bytes. Do not delete an image directory while its owning session is live. There is no automatic global image GC.
 
 Pi also supports deleting sessions interactively from `/resume` (select a session and press `Ctrl+D`, then confirm). When available, pi uses the `trash` CLI to avoid permanent deletion.
 
@@ -34,9 +34,10 @@ Sessions have a version field in the header:
 
 - **Version 1**: Linear entry sequence (legacy, auto-migrated on load)
 - **Version 2**: Tree structure with `id`/`parentId` linking
-- **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
+- **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification); inline portable images
+- **Version 4**: New native sessions use `imageEncoding: "assets-v1"` with session-owned image assets
 
-Existing sessions are automatically migrated to the current version (v3) when loaded.
+New persistent sessions use v4. Existing v1–v3 sessions are not automatically converted to v4: legacy logical migrations to v3 still apply, but opening alone does not rewrite the file or create durable originals. Continued legacy writes remain inline. Portable JSONL export uses v3 inline prepared images, without original-source metadata.
 
 ## Source Files
 
@@ -205,13 +206,13 @@ interface SessionEntryBase {
 First line of the file. Metadata only, not part of the tree (no `id`/`parentId`).
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
+{"type":"session","version":4,"imageEncoding":"assets-v1","id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
 ```
 
 For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ parentSession })`):
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
+{"type":"session","version":4,"imageEncoding":"assets-v1","id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
 ```
 
 ### SessionMessageEntry
@@ -223,6 +224,24 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 {"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi!"}],"provider":"anthropic","model":"claude-sonnet-4-5","usage":{...},"stopReason":"stop"}}
 {"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false}}
 ```
+
+### Image storage (v4)
+
+Native v4 physical image blocks replace Base64 `data` with an `imageAsset` reference. Optional `imageSource` links the separately retained original to the prepared image. Schematic block (digest placeholders are not valid hashes):
+
+```json
+{"type":"image","mimeType":"image/png","imageAsset":{"version":1,"sha256":"<prepared SHA-256>","byteLength":1200,"mimeType":"image/png"},"imageSource":{"version":1,"asset":{"version":1,"sha256":"<original SHA-256>","byteLength":8000,"mimeType":"image/png"},"dimensions":{"originalWidth":4000,"originalHeight":2000,"width":2000,"height":1000}}}
+```
+
+Both asset digests are SHA-256 of binary bytes, not Base64. Files live under `<session.jsonl>.images/<sha256>`, without extensions. Keep the native log and its asset directory together when copying/backing up. Assets are published before their referencing log records; fork/clone copy required assets into the destination session's ownership scope. A hash does not authorize access to another session's assets.
+
+`SessionManager`, `loadEntriesFromFile(path)` and `parseSessionEntries(text, owningSessionPath)` return hydrated logical `ImageContent` with standard Base64 `data`, not `imageAsset`. If only the prepared asset is missing/corrupt, loading can recover the separately verified original with an explicit local notice and restored original raster dimensions. If only the original is unavailable, the usable prepared image remains with an original-unavailable notice and no false source link. If neither is usable, local omission text preserves surrounding tool facts. Original-source reads separately validate ownership, length and digest, and return classified `storage_missing`/`storage_invalid` errors. Supply the owning session path when parsing native asset references; raw `JSON.parse` does not hydrate them.
+
+The codec visits known image-bearing message/custom-message content, compaction replacement history and defined task recovery/interruption fields only. Tool arguments, extension details and signature/encrypted blocks remain opaque. Bounded malformed tool-image evidence can remain inline when no valid asset reference can be made.
+
+`imageSource` is app-only metadata, not a provider file ID. It is stripped before provider serialization and portable export. Portable JSONL/HTML export inlines prepared images and does **not** bundle originals. Legacy sessions do not gain a source by relabeling a prepared image. In-memory sessions have bounded local source storage (32 sources / 32 MiB), no durable path, and explicit local/RPC reads while the session lives.
+
+`/images sources` lists only sources attached to known messages/custom messages and compaction replacement-history content on the active branch, deduplicated by source digest; arbitrary opaque metadata is not an attachment. `/images source <ID>` previews explicitly and never creates a provider message. `SessionManager.auditImageAssets()` checks whole-log reachability/missing/orphan candidates without deleting anything; branch-inactive does not mean disposable. See [Images](images.md) for report levels, source access and privacy.
 
 ### ModelChangeEntry
 
@@ -302,9 +321,9 @@ This abbreviated example illustrates the encoding, not a complete executable tas
 
 `SessionManager`, `loadEntriesFromFile()` and `parseSessionEntries()` return the complete logical `data` and omit `recoveryStorage`. Raw `JSON.parse` consumers see the storage representation instead. Missing, malformed, unsupported-version or mismatched references fail loading rather than authorizing tool replay. Content sharing does not share execution authority: branch selection, receipts and `sourceSessionId` remain authoritative.
 
-New appends reuse committed fields; merely opening an old file does not rewrite it. Repair, clone, fork and JSONL export re-encode their selected logical entries into a self-contained file. No sidecar or global object store is required. JSONL export writes records incrementally; normal existing output files can be atomically replaced, existing symbolic links resolve to their target, and multiply hard-linked output files are refused.
+New appends reuse committed fields; merely opening an old file does not rewrite it. Repair, clone and fork re-encode selected logical entries into self-contained native sessions (including required image assets for v4). Portable JSONL export inlines prepared images and strips original-source links. Recovery text-field sharing itself requires no sidecar or global object store. JSONL export writes records incrementally; normal existing output files can be atomically replaced, existing symbolic links resolve to their target, and multiply hard-linked output files are refused.
 
-Restart old drivers before using reference-encoded files. Older readers do not understand this storage representation. The task-state schema version and session header version are unchanged.
+Restart old drivers before using reference-encoded files. Older readers do not understand this storage representation. Recovery-field sharing does not itself change the task-state schema or session header version; v4 image encoding is a separate feature.
 
 #### Non-destructive recovery-log compaction
 
@@ -464,6 +483,12 @@ Key methods for working with sessions programmatically.
 - `branch(entryId)` - Move leaf to earlier entry
 - `resetLeaf()` - Reset leaf to null (before any entries)
 - `branchWithSummary(entryId, summary, details?, fromHook?)` - Branch with context summary
+
+### Instance Methods - Images
+- `attachImageSource(prepared, source, dimensions?)` - Associate a retained original snapshot with a prepared logical image; legacy persistent sessions return the prepared image without durable source metadata
+- `readImageSource(ref)` - Read bounded original bytes through the owning session's store checks; callers exposing reads must additionally enforce active-branch membership
+- `getImageSourcePath(ref)` - Verified local asset path for explicit use, or `undefined` in memory; not a default diagnostic field
+- `auditImageAssets()` - Read-only whole-log reachable/missing/orphan audit; never GC
 
 ### Instance Methods - Context & Info
 - `buildContextEntries()` - Get selected branch entries, not materialized replacement messages

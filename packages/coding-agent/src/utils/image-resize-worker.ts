@@ -1,42 +1,26 @@
 import { parentPort } from "node:worker_threads";
-import { type ImageResizeOptions, type ResizedImage, resizeImageInProcess } from "./image-resize-core.ts";
+import { type ImageFailureCode, ImageInputError } from "../core/images/types.ts";
+import { type ImageCodecOptions, prepareImageInProcess, type ResizedImage } from "./image-resize-core.ts";
 
-interface ResizeImageWorkerRequest {
-	inputBytes: Uint8Array;
-	mimeType: string;
-	options?: ImageResizeOptions;
-}
-
-interface ResizeImageWorkerResponse {
-	result?: ResizedImage | null;
-	error?: string;
-}
-
-function isResizeImageWorkerRequest(value: unknown): value is ResizeImageWorkerRequest {
-	if (!value || typeof value !== "object") return false;
-	const record = value as Record<string, unknown>;
-	return record.inputBytes instanceof Uint8Array && typeof record.mimeType === "string";
+export interface ImageWorkerResponse {
+	result?: ResizedImage;
+	error?: { code: ImageFailureCode; message: string };
 }
 
 const port = parentPort;
-if (!port) {
-	throw new Error("image resize worker requires parentPort");
-}
+if (!port) throw new Error("image resize worker requires parentPort");
 
-port.once("message", (message: unknown) => {
+port.once("message", (message: { inputBytes: Uint8Array; mimeType: string; options: ImageCodecOptions }) => {
 	void (async () => {
 		try {
-			if (!isResizeImageWorkerRequest(message)) {
-				throw new Error("Invalid image resize worker request");
-			}
-			const result = await resizeImageInProcess(message.inputBytes, message.mimeType, message.options);
-			const response: ResizeImageWorkerResponse = { result };
-			port.postMessage(response);
+			const result = await prepareImageInProcess(message.inputBytes, message.mimeType, message.options);
+			port.postMessage({ result } satisfies ImageWorkerResponse);
 		} catch (error) {
-			const response: ResizeImageWorkerResponse = {
-				error: error instanceof Error ? error.message : String(error),
-			};
-			port.postMessage(response);
+			const failure =
+				error instanceof ImageInputError ? error : new ImageInputError("invalid_image", "Image processing failed.");
+			port.postMessage({ error: { code: failure.code, message: failure.message } } satisfies ImageWorkerResponse);
+		} finally {
+			port.close();
 		}
 	})();
 });

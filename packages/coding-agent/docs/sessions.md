@@ -4,7 +4,7 @@ Pi saves conversations as sessions so you can continue work, branch from earlier
 
 ## Session Storage
 
-Sessions auto-save to `~/.pi/agent/sessions/`, organized by working directory. Each session is a JSONL file with a tree structure.
+Sessions auto-save to `~/.pi/agent/sessions/`, organized by working directory. Each session is a JSONL file with a tree structure. New v4 sessions also store image assets in `<session.jsonl>.images/`; keep that directory with the JSONL for native backups. Existing v1–v3 files remain inline and are not automatically converted to v4.
 
 ```bash
 pi -c                  # Continue most recent session
@@ -17,7 +17,7 @@ pi --fork <path|id>    # Fork a session file or partial session ID into a new se
 
 Use `/session` in interactive mode to see the current session file, session ID, message count, tokens, and cost.
 
-For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
+For the JSONL file format and SessionManager API, see [Session Format](session-format.md). See [Images](images.md) for original-source availability, request-only exclusions, and image export/privacy boundaries.
 
 ## Session Commands
 
@@ -27,11 +27,12 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 | `/new` | Start a new session |
 | `/name <name>` | Set the current session display name |
 | `/session` | Show session info |
+| `/images` | Inspect image evidence; `sources` lists active-branch originals and `source <ID>` previews locally |
 | `/tree` | Navigate the current session tree |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Summarize older context; see [Compaction](compaction.md) |
-| `/export [file]` | Export session to HTML |
+| `/export [file]` | Export session to HTML or portable JSONL (prepared images inline; originals not bundled) |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 
 ## Resuming and Deleting Sessions
@@ -124,7 +125,7 @@ Selecting the root user message resets the leaf to an empty conversation and pla
 | Typical use | Explore alternatives in place | Start a new session from an earlier prompt | Duplicate current work before continuing |
 | Summary | Optional branch summary | None | None |
 
-Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session file.
+Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session file. Fork/clone copy required image assets into the new session's ownership scope. `/images sources` only lists originals attached on the selected branch; a source hash from another branch is not a read capability.
 
 ## Branch Summaries
 

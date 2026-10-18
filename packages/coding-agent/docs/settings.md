@@ -255,8 +255,11 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `terminal.showImages` | boolean | `true` | Show images in terminal (if supported) |
 | `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells |
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
-| `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max. Applies to `@file` attachments, `read`, and images returned by tools |
-| `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+| `images.autoResize` | boolean | `true` | Balanced preparation (normally at most 2000×2000 and 4.5 MiB Base64). Applies to clipboard/path/`@file`, RPC/SDK, user/extension and tool images. `false` preserves valid original bytes without proactive downsampling/lossy encoding, but still validates and enforces safety/request limits |
+| `images.blockImages` | boolean | `false` | Block outgoing images, including after payload hooks; local originals remain viewable. No extra vision call or upload |
+| `images.limits` | object | Engineering defaults | Positive-safe-integer limits that can only tighten engineering caps; binary bytes, Base64 bytes, pixels and milliseconds are separate units |
+
+`terminal.showImages` controls local display, not sending. Use `/images` for local evidence and omission reasons, `/images sources` for active-branch original summaries, and `/images source <ID>` for an explicit local preview. `accepted`, `prepared` and `serialized` are different evidence levels; remote image receipt remains unverified. See [Images](images.md) for limit keys/defaults, original-mode behavior, classified failures and reversible historical request exclusions.
 
 ### Shell
 

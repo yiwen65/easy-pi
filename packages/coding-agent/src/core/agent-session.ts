@@ -127,6 +127,9 @@ import {
 	wrapRegisteredTool,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { prepareInputContent, prepareInputImages } from "./images/pipeline.ts";
+import { resolveImagePolicy } from "./images/policy.ts";
+import { IMAGE_LIMITS, type ImageDecision, ImageInputError, type ImageSelection } from "./images/types.ts";
 import { createToolNameMatcher } from "./mcp-servers.ts";
 import {
 	type BashExecutionMessage,
@@ -147,7 +150,7 @@ import {
 	reclaimSessionAppendLock,
 	type SessionHeader,
 	sessionEntryToContextMessages,
-	writeSessionFile,
+	writePortableSessionFile,
 } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { buildSkillPromptExpansion } from "./skill-invocations.ts";
@@ -350,6 +353,12 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface ImageAdmissionState {
+	generation: number;
+	sessionId: string;
+	leafId: string | null;
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -383,6 +392,13 @@ export class AgentSession {
 	private _recoveringToolBatch = false;
 	private _taskInputIds = new WeakMap<object, string>();
 	private readonly _queuedTaskInputIds = new Set<string>();
+	private readonly _imageAdmissions = new Map<AbortController, Promise<void>>();
+	private _imageAdmissionGeneration = 0;
+	private _imageSelection: ImageSelection = {};
+	private _imageSelectionAnchor: string | null = null;
+	private _imageReportAnchor: string | null = null;
+	private _imageStateSessionId: string | undefined;
+	private _imageDecisions: ImageDecision[] = [];
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -692,6 +708,7 @@ export class AgentSession {
 		};
 
 		this.agent.afterToolCall = async ({ toolCall, args, result, isError, parentToolCallId }, signal) => {
+			const generation = this._captureImageAdmission();
 			const runner = this._extensionRunner;
 			const hookResult = runner.hasHandlers("tool_result")
 				? await runner.emitToolResult(
@@ -714,6 +731,14 @@ export class AgentSession {
 			const content = hookResult?.content ?? result.content ?? [];
 			const normalizedContent = await normalizeToolResultImages(content, {
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
+				policy: resolveImagePolicy(this.model, this.settingsManager.getImagePolicyOptions()),
+				signal,
+				sourceOwner: generation.sessionId,
+				onPrepared: (prepared, source, dimensions) => {
+					this._assertImageAdmissionCurrent(generation);
+					return this.sessionManager.attachImageSource(prepared, source, dimensions);
+				},
+				onDecisions: (decisions) => this.recordImageDecisions(decisions),
 			});
 
 			if (!hookResult && normalizedContent === content) {
@@ -1471,7 +1496,10 @@ export class AgentSession {
 			) {
 				this.agent.state.messages.push(event.message);
 			}
-			if (appendedEntryId) this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
+			if (appendedEntryId) {
+				this._hfHost?.syncFromEntries(this.sessionManager.getBranch());
+				this._refreshImageState();
+			}
 			if (appendedEntryId && event.message.role === "assistant")
 				this._taskRecovery.commitAssistant(event.message, appendedEntryId);
 			if (appendedEntryId && event.message.role === "toolResult" && resultSourceId)
@@ -2647,6 +2675,152 @@ export class AgentSession {
 		return this.agent.hasQueuedMessages();
 	}
 
+	private _refreshImageState(): void {
+		const branchIds = new Set(this.sessionManager.getBranch().map((entry) => entry.id));
+		const changedSession = this._imageStateSessionId !== this.sessionId;
+		if (changedSession || (this._imageSelectionAnchor !== null && !branchIds.has(this._imageSelectionAnchor))) {
+			this._imageSelection = {};
+			this._imageSelectionAnchor = null;
+		}
+		if (changedSession || (this._imageReportAnchor !== null && !branchIds.has(this._imageReportAnchor))) {
+			this._imageDecisions = [];
+			this._imageReportAnchor = null;
+		}
+		// Reports can precede the first durable input. Bind once it commits; ordinary appends
+		// preserve the anchor, while rewind/sibling navigation drops stale reports independently.
+		if (this._imageDecisions.length && this._imageReportAnchor === null) {
+			this._imageReportAnchor = this.sessionManager.getLeafId();
+		}
+		this._imageStateSessionId = this.sessionId;
+	}
+
+	getImageSelection(): ImageSelection {
+		this._refreshImageState();
+		return { omitImageIds: [...(this._imageSelection.omitImageIds ?? [])] };
+	}
+
+	setImageSelection(omitImageIds: readonly string[]): void {
+		if (
+			!Array.isArray(omitImageIds) ||
+			omitImageIds.length > 2048 ||
+			omitImageIds.some((id) => typeof id !== "string" || !/^image_[a-f0-9]{24}$/.test(id))
+		) {
+			throw new ImageInputError(
+				"invalid_image",
+				"Select canonical historical image IDs, not paths or wire report IDs.",
+			);
+		}
+		this._refreshImageState();
+		this._imageSelection = { omitImageIds: [...new Set(omitImageIds)] };
+		this._imageSelectionAnchor = this.sessionManager.getLeafId();
+	}
+
+	recordImageDecisions(decisions: readonly ImageDecision[]): void {
+		this._refreshImageState();
+		const reports = new Map(
+			this._imageDecisions.map((decision) => [`${decision.imageId}:${decision.stage}`, decision]),
+		);
+		for (const decision of decisions) reports.set(`${decision.imageId}:${decision.stage}`, { ...decision });
+		this._imageDecisions = [...reports.values()].slice(-IMAGE_LIMITS.maxImages * 8);
+		if (decisions.length) this._imageReportAnchor = this.sessionManager.getLeafId();
+	}
+
+	getImageDecisions(): readonly ImageDecision[] {
+		this._refreshImageState();
+		return this._imageDecisions.map((decision) => ({ ...decision }));
+	}
+
+	private _captureImageAdmission(): ImageAdmissionState {
+		return {
+			generation: this._imageAdmissionGeneration,
+			sessionId: this.sessionId,
+			leafId: this.sessionManager.getLeafId(),
+		};
+	}
+
+	private _assertImageAdmissionCurrent(state: ImageAdmissionState): void {
+		if (
+			this._disposed ||
+			state.generation !== this._imageAdmissionGeneration ||
+			state.sessionId !== this.sessionId ||
+			this._branchSummaryAbortController !== undefined ||
+			(state.leafId !== null && !this.sessionManager.getBranch().some((entry) => entry.id === state.leafId))
+		) {
+			throw new ImageInputError("aborted", "Image input admission was cancelled or its session branch changed.");
+		}
+	}
+
+	private async _prepareUserImages(images: ImageContent[] | undefined) {
+		const generation = this._captureImageAdmission();
+		this._assertImageAdmissionCurrent(generation);
+		const controller = new AbortController();
+		let finish!: () => void;
+		this._imageAdmissions.set(
+			controller,
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			}),
+		);
+		try {
+			const result = await prepareInputImages(
+				images,
+				resolveImagePolicy(this.model, this.settingsManager.getImagePolicyOptions()),
+				{
+					signal: controller.signal,
+					sourceOwner: generation.sessionId,
+					onPrepared: (prepared, source, dimensions) => {
+						this._assertImageAdmissionCurrent(generation);
+						return this.sessionManager.attachImageSource(prepared, source, dimensions);
+					},
+				},
+			);
+			this._assertImageAdmissionCurrent(generation);
+			this.recordImageDecisions(result.decisions);
+			return result;
+		} finally {
+			this._imageAdmissions.delete(controller);
+			finish();
+		}
+	}
+
+	private async _prepareUserContent(
+		content: string | (TextContent | ImageContent)[],
+	): Promise<string | (TextContent | ImageContent)[]> {
+		const generation = this._captureImageAdmission();
+		this._assertImageAdmissionCurrent(generation);
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content))
+			throw new ImageInputError("invalid_image", "Message content must be text or content blocks.");
+		const controller = new AbortController();
+		let finish!: () => void;
+		this._imageAdmissions.set(
+			controller,
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			}),
+		);
+		try {
+			const result = await prepareInputContent(
+				content,
+				resolveImagePolicy(this.model, this.settingsManager.getImagePolicyOptions()),
+				{
+					signal: controller.signal,
+					sourceOwner: generation.sessionId,
+					onPrepared: (prepared, source, dimensions) => {
+						this._assertImageAdmissionCurrent(generation);
+						return this.sessionManager.attachImageSource(prepared, source, dimensions);
+					},
+				},
+			);
+			this._assertImageAdmissionCurrent(generation);
+			this.recordImageDecisions(result.decisions);
+			return result.content;
+		} finally {
+			this._imageAdmissions.delete(controller);
+			finish();
+		}
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -2703,6 +2877,7 @@ export class AgentSession {
 		// Clear before input/preflight so old nextTurn messages cannot enter the new prompt.
 		if (this._recoveryPolicy === "host-controlled" && !this.isStreaming) this._clearLiveTaskQueues();
 		const promptGeneration = this._lifecycleGeneration;
+		const imageGeneration = this._captureImageAdmission();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -2747,6 +2922,8 @@ export class AgentSession {
 				}
 			}
 
+			this._assertImageAdmissionCurrent(imageGeneration);
+
 			// Resolve skill tokens into separate context messages, then expand the remaining prompt.
 			let expandedText = currentText;
 			let skillMessages: SkillPromptMessage[] = [];
@@ -2772,6 +2949,10 @@ export class AgentSession {
 				preflightResult?.(true);
 				return;
 			}
+
+			const preparedImages = await this._prepareUserImages(currentImages);
+			currentImages = preparedImages.images;
+			this._assertImageAdmissionCurrent(imageGeneration);
 
 			// Flush any pending bash messages before the new prompt
 			this._flushPendingBashMessages();
@@ -2805,9 +2986,7 @@ export class AgentSession {
 
 			if (expandedText || currentImages?.length || messages.length === 0) {
 				const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-				if (currentImages) {
-					userContent.push(...currentImages);
-				}
+				userContent.push(...preparedImages.content);
 				messages.push({
 					role: "user",
 					content: userContent,
@@ -2836,7 +3015,7 @@ export class AgentSession {
 						role: "custom",
 						customType: msg.customType,
 						// Untyped extensions can pass null/missing content; normalize at ingestion.
-						content: msg.content ?? [],
+						content: await this._prepareUserContent(msg.content ?? []),
 						display: msg.display,
 						details: msg.details,
 						timestamp: Date.now(),
@@ -2853,9 +3032,16 @@ export class AgentSession {
 		if (!messages) {
 			return;
 		}
-		if (this._disposed || promptGeneration !== this._lifecycleGeneration) {
+		if (
+			this._disposed ||
+			promptGeneration !== this._lifecycleGeneration ||
+			imageGeneration.generation !== this._imageAdmissionGeneration ||
+			imageGeneration.sessionId !== this.sessionId ||
+			(imageGeneration.leafId !== null &&
+				!this.sessionManager.getBranch().some((entry) => entry.id === imageGeneration.leafId))
+		) {
 			preflightResult?.(false);
-			throw new Error("AgentSession was replaced while preparing the prompt");
+			throw new ImageInputError("aborted", "AgentSession or its branch changed while preparing the prompt.");
 		}
 
 		let accepted = false;
@@ -2927,17 +3113,21 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], source: InputSource = "interactive"): Promise<void> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
 
+		const generation = this._captureImageAdmission();
+		const input = await this._transformQueuedInput(text, images, "steer", source);
+		this._assertImageAdmissionCurrent(generation);
+		if (!input) return;
 		// Resolve skill commands and expand the remaining prompt template.
-		const skillExpansion = this._buildSkillPromptExpansion(text);
+		const skillExpansion = this._buildSkillPromptExpansion(input.text);
 		const expandedText = expandPromptTemplate(skillExpansion.text, [...this.promptTemplates]);
 
-		await this._queueSteer(expandedText, images, skillExpansion.messages);
+		await this._queueSteer(expandedText, input.images, skillExpansion.messages);
 	}
 
 	/**
@@ -2947,17 +3137,37 @@ export class AgentSession {
 	 * @param images Optional image attachments to include with the message
 	 * @throws Error if text is an extension command
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+	async followUp(text: string, images?: ImageContent[], source: InputSource = "interactive"): Promise<void> {
 		// Check for extension commands (cannot be queued)
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
 
+		const generation = this._captureImageAdmission();
+		const input = await this._transformQueuedInput(text, images, "followUp", source);
+		this._assertImageAdmissionCurrent(generation);
+		if (!input) return;
 		// Resolve skill commands and expand the remaining prompt template.
-		const skillExpansion = this._buildSkillPromptExpansion(text);
+		const skillExpansion = this._buildSkillPromptExpansion(input.text);
 		const expandedText = expandPromptTemplate(skillExpansion.text, [...this.promptTemplates]);
 
-		await this._queueFollowUp(expandedText, images, skillExpansion.messages);
+		await this._queueFollowUp(expandedText, input.images, skillExpansion.messages);
+	}
+
+	private async _transformQueuedInput(
+		text: string,
+		images: ImageContent[] | undefined,
+		streamingBehavior: "steer" | "followUp",
+		source: InputSource,
+	) {
+		const generation = this._captureImageAdmission();
+		this._assertImageAdmissionCurrent(generation);
+		const result = this._extensionRunner.hasHandlers("input")
+			? await this._extensionRunner.emitInput(text, images, source, this.isStreaming ? streamingBehavior : undefined)
+			: undefined;
+		this._assertImageAdmissionCurrent(generation);
+		if (result?.action === "handled") return undefined;
+		return result?.action === "transform" ? { text: result.text, images: result.images ?? images } : { text, images };
 	}
 
 	/**
@@ -2968,13 +3178,13 @@ export class AgentSession {
 		images?: ImageContent[],
 		skillMessages: SkillPromptMessage[] = [],
 	): Promise<void> {
+		const generation = this._captureImageAdmission();
+		const preparedImages = await this._prepareUserImages(images);
+		this._assertImageAdmissionCurrent(generation);
 		const queueText = text || skillMessages.map((message) => `/skill:${message.details.name}`).join(" ");
 		const messages: AgentMessage[] = [...skillMessages];
-		if (text || images?.length || messages.length === 0) {
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-			if (images) {
-				content.push(...images);
-			}
+		if (text || preparedImages.images?.length || messages.length === 0) {
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...preparedImages.content];
 			messages.push({ role: "user", content, timestamp: Date.now() });
 		}
 		const ids = this._taskRecovery.queue("steer", messages, queueText);
@@ -2995,13 +3205,13 @@ export class AgentSession {
 		images?: ImageContent[],
 		skillMessages: SkillPromptMessage[] = [],
 	): Promise<void> {
+		const generation = this._captureImageAdmission();
+		const preparedImages = await this._prepareUserImages(images);
+		this._assertImageAdmissionCurrent(generation);
 		const queueText = text || skillMessages.map((message) => `/skill:${message.details.name}`).join(" ");
 		const messages: AgentMessage[] = [...skillMessages];
-		if (text || images?.length || messages.length === 0) {
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-			if (images) {
-				content.push(...images);
-			}
+		if (text || preparedImages.images?.length || messages.length === 0) {
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text }, ...preparedImages.content];
 			messages.push({ role: "user", content, timestamp: Date.now() });
 		}
 		const ids = this._taskRecovery.queue("followUp", messages, queueText);
@@ -3045,15 +3255,17 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		const generation = this._captureImageAdmission();
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
 			// Untyped extensions can pass null/missing content; normalize at ingestion.
-			content: message.content ?? [],
+			content: await this._prepareUserContent(message.content ?? []),
 			display: message.display,
 			details: message.details,
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
+		this._assertImageAdmissionCurrent(generation);
 		if (options?.deliverAs === "nextTurn") {
 			const ids = this._taskRecovery.queue("nextTurn", [appMessage]);
 			this._taskInputIds.set(appMessage, ids[0]);
@@ -3074,7 +3286,7 @@ export class AgentSession {
 			this.agent.state.messages.push(appMessage);
 			this.sessionManager.appendCustomMessageEntry(
 				message.customType,
-				message.content,
+				appMessage.content,
 				message.display,
 				message.details,
 			);
@@ -3172,7 +3384,15 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
+	private async _abortImageAdmissions(): Promise<void> {
+		this._imageAdmissionGeneration++;
+		const admissions = [...this._imageAdmissions.values()];
+		for (const controller of this._imageAdmissions.keys()) controller.abort();
+		await Promise.all(admissions);
+	}
+
 	async abort(): Promise<void> {
+		const imageAdmissions = this._abortImageAdmissions();
 		if (!this.isIdle)
 			this._taskRecovery.update((state) => {
 				state.status = "cancelled";
@@ -3180,6 +3400,7 @@ export class AgentSession {
 		this.abortRetry();
 		this.abortCompaction();
 		this.agent.abort();
+		await imageAdmissions;
 		await this.waitForIdle();
 	}
 
@@ -4646,7 +4867,7 @@ export class AgentSession {
 						]),
 					)
 				: createAllToolDefinitions(this._cwd, {
-						read: { autoResizeImages },
+						read: { autoResizeImages, deferImagePreparation: true },
 						bash: { commandPrefix: shellCommandPrefix, shellPath },
 					});
 		if (!this._baseToolDefinitionsOverride && !this._baseToolsOverride) {
@@ -5070,10 +5291,11 @@ export class AgentSession {
 			label,
 		};
 
-		// Set up abort controller for summarization
+		// Reserve navigation before draining so no new image admission can cross the branch change.
 		this._branchSummaryAbortController = new AbortController();
 
 		try {
+			await this._abortImageAdmissions();
 			let extensionSummary: { summary: string; details?: unknown; usage?: Usage } | undefined;
 			let fromExtension = false;
 
@@ -5430,7 +5652,7 @@ export class AgentSession {
 		const targetPath = lstatSync(filePath, { throwIfNoEntry: false })?.isSymbolicLink()
 			? realpathSync(filePath)
 			: filePath;
-		writeSessionFile(targetPath, exportEntries());
+		writePortableSessionFile(targetPath, exportEntries());
 		return filePath;
 	}
 

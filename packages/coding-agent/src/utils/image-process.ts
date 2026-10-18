@@ -1,11 +1,15 @@
-import { convertImageBytesToPng } from "./image-convert.ts";
-import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize.ts";
+import { type ImageFailureCode, ImageInputError } from "../core/images/types.ts";
+import { formatDimensionNote, type ImageResizeOptions, prepareImage } from "./image-resize.ts";
 
 export interface ProcessImageOptions {
-	/** Whether to resize images to inline provider limits. Default: true */
+	/** False preserves valid original bytes; output policy still applies. */
 	autoResizeImages?: boolean;
-	/** Optional resize overrides. Uses resizeImage defaults when omitted. */
 	resizeOptions?: ImageResizeOptions;
+	signal?: AbortSignal;
+	/** Includes time spent in the bounded queue. Default: 10 seconds. */
+	timeoutMs?: number;
+	maxInputBytes?: number;
+	maxInputPixels?: number;
 }
 
 export type ProcessImageResult =
@@ -14,106 +18,51 @@ export type ProcessImageResult =
 			data: string;
 			mimeType: string;
 			hints: string[];
+			dimensions: { originalWidth: number; originalHeight: number; width: number; height: number };
 	  }
-	| {
-			ok: false;
-			message: string;
-	  };
-
-interface NormalizedImage {
-	bytes: Uint8Array;
-	mimeType: string;
-	convertedFrom?: string;
-}
-
-function baseMimeType(mimeType: string): string {
-	return mimeType.split(";")[0]?.trim().toLowerCase() ?? mimeType.toLowerCase();
-}
-
-function normalizeSupportedImageMimeType(mimeType: string): string | null {
-	switch (baseMimeType(mimeType)) {
-		case "image/png":
-			return "image/png";
-		case "image/jpeg":
-		case "image/jpg":
-			return "image/jpeg";
-		case "image/gif":
-			return "image/gif";
-		case "image/webp":
-			return "image/webp";
-		default:
-			return null;
-	}
-}
-
-async function normalizeImage(bytes: Uint8Array, mimeType: string): Promise<NormalizedImage | null> {
-	const normalizedMimeType = normalizeSupportedImageMimeType(mimeType);
-	if (normalizedMimeType) {
-		return { bytes, mimeType: normalizedMimeType };
-	}
-
-	const pngBytes = await convertImageBytesToPng(bytes);
-	if (!pngBytes) {
-		return null;
-	}
-
-	return {
-		bytes: pngBytes,
-		mimeType: "image/png",
-		convertedFrom: baseMimeType(mimeType),
-	};
-}
-
-function conversionHint(from: string | undefined, to: string): string | undefined {
-	if (!from || from === to) return undefined;
-	return `[Image converted from ${from} to ${to}.]`;
-}
+	| { ok: false; message: string; code: ImageFailureCode };
 
 export async function processImage(
 	bytes: Uint8Array,
 	mimeType: string,
 	options?: ProcessImageOptions,
 ): Promise<ProcessImageResult> {
-	const autoResizeImages = options?.autoResizeImages ?? true;
-	const normalized = await normalizeImage(bytes, mimeType);
-	if (!normalized) {
-		return {
-			ok: false,
-			message: "[Image omitted: could not be converted to a supported inline image format.]",
-		};
-	}
-
-	if (autoResizeImages) {
-		const resized = await resizeImage(normalized.bytes, normalized.mimeType, options?.resizeOptions);
-		if (!resized) {
-			return {
-				ok: false,
-				message: "[Image omitted: could not be resized below the inline image size limit.]",
-			};
-		}
-
+	try {
+		const result = await prepareImage(bytes, mimeType, {
+			...options?.resizeOptions,
+			autoResizeImages: options?.autoResizeImages ?? true,
+			...(options?.signal ? { signal: options.signal } : {}),
+			...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+			...(options?.maxInputBytes !== undefined ? { maxInputBytes: options.maxInputBytes } : {}),
+			...(options?.maxInputPixels !== undefined ? { maxInputPixels: options.maxInputPixels } : {}),
+		});
 		const hints: string[] = [];
-		const convertedHint = conversionHint(normalized.convertedFrom, resized.mimeType);
-		if (convertedHint) hints.push(convertedHint);
-		const dimensionNote = formatDimensionNote(resized);
-		if (dimensionNote) hints.push(dimensionNote);
-
+		if (result.convertedFrom) hints.push(`[Image converted from ${result.convertedFrom} to ${result.mimeType}.]`);
+		const note = formatDimensionNote(result);
+		if (note) hints.push(note);
 		return {
 			ok: true,
-			data: resized.data,
-			mimeType: resized.mimeType,
+			data: result.data,
+			mimeType: result.mimeType,
 			hints,
+			dimensions: {
+				originalWidth: result.originalWidth,
+				originalHeight: result.originalHeight,
+				width: result.width,
+				height: result.height,
+			},
 		};
+	} catch (error) {
+		if (
+			options?.signal?.aborted ||
+			options?.resizeOptions?.signal?.aborted ||
+			(error instanceof Error && error.name === "AbortError")
+		)
+			throw error;
+		const failure =
+			error instanceof ImageInputError
+				? error
+				: new ImageInputError("decoder_unavailable", "Image processing is unavailable.");
+		return { ok: false, message: `[Image omitted: ${failure.message}]`, code: failure.code };
 	}
-
-	const hints: string[] = [];
-	const convertedHint = conversionHint(normalized.convertedFrom, normalized.mimeType);
-	if (convertedHint) hints.push(convertedHint);
-
-	return {
-		ok: true,
-		data: Buffer.from(normalized.bytes).toString("base64"),
-		mimeType: normalized.mimeType,
-		hints,
-	};
 }

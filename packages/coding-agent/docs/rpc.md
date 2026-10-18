@@ -81,7 +81,7 @@ Response:
 
 `success: true` means the prompt was accepted, queued, or handled immediately. `success: false` means the prompt was rejected before acceptance. Failures after acceptance are reported through the normal event and message stream, not as a second `response` for the same request id.
 
-The `images` field is optional. Each image uses `ImageContent` format: `{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}`.
+The `images` field is optional. Each image uses `ImageContent` format: `{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}`. The same local validation/preparation contract applies to `prompt`, `steer` and `follow_up`; invalid images are rejected with classified errors before provider dispatch. `images.autoResize: false` preserves valid original bytes but does not disable safety/request limits. See [Images](images.md).
 
 #### steer
 
@@ -217,6 +217,60 @@ Response:
 ```
 
 Messages are `AgentMessage` objects (see [Message Types](#message-types)).
+
+#### get_images
+
+Get local image evidence and reversible request-view selection. This command does not send a provider request or return image Base64/private filesystem paths.
+
+```json
+{"id":"images","type":"get_images","includeSources":true}
+```
+
+`includeSources` is an optional boolean (default `false`). When true, `sources` lists original attachments on the **active branch**, deduplicated by original SHA-256. Known image-bearing message/custom-message content and compaction replacement history are included, not arbitrary tool arguments, recovery strings or extension details. Listing a summary does not validate all asset bytes.
+
+Response (schematic):
+
+```json
+{"id":"images","type":"response","command":"get_images","success":true,"data":{"selection":{"omitImageIds":[]},"decisions":[{"imageId":"image_aaaaaaaaaaaaaaaaaaaaaaaa","stage":"prepared","protected":true,"inputBytes":8000,"encodedBytes":1600,"width":100,"height":100}],"sources":[{"sourceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mimeType":"image/png","byteLength":8000,"dimensions":{"originalWidth":200,"originalHeight":200,"width":100,"height":100}}]}}
+```
+
+Without `includeSources: true`, `sources` is absent. Summary fields are `sourceId` (64 lowercase hex characters), `mimeType`, binary `byteLength`, and optional raster `dimensions`. A repeated original with different preparations uses its first branch occurrence's dimensions. Old inline sessions/portable imports may have no originals; in-memory sources are available while their session lives.
+
+Decision stages are distinct: `accepted` = received locally; `prepared` = processed locally; `serialized` = a supported payload image was checked; `omitted` = absent from the temporary provider view with a reason. **Remote image receipt remains unverified**, including after a provider responds. `encodedBytes` counts Base64 ASCII bytes, not binary bytes, tokens or a final HTTP body. Only known raster transformations can be reported; dimensions do not imply CSS/DPR mapping.
+
+Canonical selection IDs are `image_` plus 24 lowercase hex digits. Their optional `protected` flag distinguishes current user/latest-current-turn tool images (`true`) from historical ones (`false`). Admission/source and `wire:...` facts are nonselectable. Source IDs are separate identities, not provider IDs or omission IDs. See [image evidence](images.md#reading-the-report) for guarantee boundaries.
+
+#### get_image_source
+
+Explicitly retrieve one original's bounded Base64 bytes. No provider, upload, or extra vision call occurs.
+
+```json
+{"id":"original","type":"get_image_source","sourceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+RPC requires the complete source ID (not a prefix). It must be attached on the currently active branch, and the owning session's store must validate it. Knowing an arbitrary hash or another branch/session's hash does not grant access.
+
+```json
+{"id":"original","type":"response","command":"get_image_source","success":true,"data":{"sourceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mimeType":"image/png","byteLength":8000,"data":"<original Base64>","dimensions":{"originalWidth":200,"originalHeight":200,"width":100,"height":100}}}
+```
+
+The response contains at most 20 MiB decoded bytes (Base64 length at most `4 * ceil(20971520 / 3)`), with MIME and optional dimensions. Treat it as private image content. No absolute path is returned. Missing/not-branch-attached sources return `storage_missing`; corrupt, mismatched or unsafe assets return `storage_invalid`; malformed IDs return `invalid_image`. Failure does not substitute the prepared image or poison later commands.
+
+#### set_image_selection
+
+Replace reversible exclusions for future requests on the current branch:
+
+```json
+{"type":"set_image_selection","omitImageIds":["image_aaaaaaaaaaaaaaaaaaaaaaaa"]}
+```
+
+```json
+{"type":"response","command":"set_image_selection","success":true}
+```
+
+Send `omitImageIds: []` to reset. This is request-view state only: it does not delete history or originals, is not persisted, and is cleared when rewinding outside its branch anchor or switching sessions. A successful command stores the selection; request preparation still rejects exclusions targeting protected current images. Wire IDs, source hashes and paths are invalid selection IDs. Interactive mode's equivalent `/images omit` asks for confirmation; RPC clients must obtain any needed confirmation themselves. See [budget recovery](images.md#budget-failures-and-recovery).
+
+The TypeScript `RpcClient` provides `getImages(includeSources = false)`, `getImageSource(sourceId)` and `setImageSelection(omitImageIds)` convenience methods.
 
 ### Model
 
@@ -1375,6 +1429,14 @@ Failed commands return a response with `success: false`:
   "error": "Model not found: invalid/model"
 }
 ```
+
+Local image failures additionally include a machine-readable `code` and `imageIds` (an empty array when no canonical request IDs are available):
+
+```json
+{"id":"original","type":"response","command":"get_image_source","success":false,"error":"Image source is not attached on the active branch.","code":"storage_missing","imageIds":[]}
+```
+
+Codes include `invalid_base64`, `invalid_image`, `mime_mismatch`, `input_limit`, `pixel_limit`, `image_budget`, `decoder_unavailable`, `timeout`, `aborted`, `storage_missing`, `storage_invalid`, and `unsupported_api`. A local image failure is not evidence of a remote API failure or permission to rerun a tool. `RpcClient` preserves classified errors as `ImageInputError` (`code`, `imageIds`); other failures remain ordinary errors.
 
 Parse errors:
 

@@ -10,6 +10,8 @@ import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ImageSourceData, ImageSourceSummary } from "../../core/images/attachments.ts";
+import type { ImageDecision, ImageFailureCode, ImageSelection } from "../../core/images/types.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
@@ -68,6 +70,9 @@ export type RpcCommand =
 
 	// Messages
 	| { id?: string; type: "get_messages" }
+	| { id?: string; type: "get_images"; includeSources?: boolean }
+	| { id?: string; type: "get_image_source"; sourceId: string }
+	| { id?: string; type: "set_image_selection"; omitImageIds: string[] }
 
 	// Commands (available for invocation via prompt)
 	| { id?: string; type: "get_commands" };
@@ -217,6 +222,15 @@ export type RpcResponse =
 
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_images";
+			success: true;
+			data: { selection: ImageSelection; decisions: readonly ImageDecision[]; sources?: ImageSourceSummary[] };
+	  }
+	| { id?: string; type: "response"; command: "get_image_source"; success: true; data: ImageSourceData }
+	| { id?: string; type: "response"; command: "set_image_selection"; success: true }
 
 	// Commands
 	| {
@@ -228,7 +242,15 @@ export type RpcResponse =
 	  }
 
 	// Error response (any command can fail)
-	| { id?: string; type: "response"; command: string; success: false; error: string };
+	| {
+			id?: string;
+			type: "response";
+			command: string;
+			success: false;
+			error: string;
+			code?: ImageFailureCode;
+			imageIds?: readonly string[];
+	  };
 
 // ============================================================================
 // Extension UI Events (stdout)

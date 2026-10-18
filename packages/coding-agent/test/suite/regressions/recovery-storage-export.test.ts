@@ -15,12 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	CURRENT_SESSION_VERSION,
-	type FileEntry,
-	type SessionEntry,
-	SessionManager,
-} from "../../../src/core/session-manager.ts";
+import { type FileEntry, type SessionEntry, SessionManager } from "../../../src/core/session-manager.ts";
 import { TaskRecoveryJournal, type TaskRecoveryState } from "../../../src/core/task-recovery.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -201,7 +196,8 @@ describe("recovery-aware JSONL branch export", () => {
 		assertLocalReferences(exported);
 		expect(exported[0]).toEqual({
 			type: "session",
-			version: CURRENT_SESSION_VERSION,
+			// Portable exports deliberately stay standard inline v3, independent of live storage.
+			version: 3,
 			id: manager.getSessionId(),
 			timestamp: expect.any(String),
 			cwd: manager.getCwd(),

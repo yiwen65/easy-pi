@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type ImageContent, type Message, type TextContent, type Usage, uuidv7 } from "@earendil-works/pi-ai";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
 	type BigIntStats,
 	closeSync,
@@ -30,7 +30,19 @@ import { dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+import { normalizeImageMimeType } from "../utils/image-validation.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { type ImageAssetRef, ImageSourceStore, imageAssetsDirectory } from "./images/source-store.ts";
+import {
+	collectImageAssets,
+	getImageSourceMetadata,
+	type ImageSourceDimensions,
+	type ImageSourceMetadata,
+	ImageStorageCodec,
+	imageStorageBytes,
+	portableImageEntry,
+} from "./images/storage-codec.ts";
+import { ImageInputError } from "./images/types.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -48,13 +60,20 @@ import {
 	sessionInfoFromProjection,
 } from "./session-summary-index.ts";
 import type { TaskRecoveryState } from "./task-recovery.ts";
-import { assertNativeSessionTeamAvailable, nativeSessionTeamPaths } from "./tool-output-storage-session.ts";
+import {
+	assertNativeSessionTeamAvailable,
+	assertPersistentSessionAvailable,
+	nativeSessionTeamPaths,
+} from "./tool-output-storage-session.ts";
 
-export const CURRENT_SESSION_VERSION = 3;
+export { getImageSourceMetadata };
+export type { ImageSourceMetadata, ImageSourceDimensions };
+export const CURRENT_SESSION_VERSION = 4;
 
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
+	imageEncoding?: "assets-v1";
 	id: string;
 	timestamp: string;
 	cwd: string;
@@ -320,7 +339,8 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
 
-	if (version >= CURRENT_SESSION_VERSION) return false;
+	// Legacy migration deliberately ends at v3. Existing files never opt into sidecars implicitly.
+	if (version >= 3) return false;
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
@@ -334,16 +354,34 @@ export function migrateSessionEntries(entries: FileEntry[]): void {
 }
 
 /** Exported for compaction.test.ts */
-export function parseSessionEntries(content: string): FileEntry[] {
+export function parseSessionEntries(content: string, assetSessionFile?: string): FileEntry[] {
 	const entries: FileEntry[] = [];
-	const source = new RecoveryDataSource();
+	let source = new RecoveryDataSource();
+	let imageCodec: ImageStorageCodec | undefined;
 	for (const line of content.trim().split("\n")) {
 		const entry = parseSessionEntryLine(line);
 		if (!entry) continue;
-		// Only syntax errors are skippable. Invalid storage references fail closed.
+		if (entry.type === "session" && entry.version === 4) {
+			imageCodec = new ImageStorageCodec(
+				assetSessionFile
+					? new ImageSourceStore(imageAssetsDirectory(realpathSync(assetSessionFile)), () =>
+							assertPersistentSessionAvailable(realpathSync(assetSessionFile), entry.id),
+						)
+					: {
+							put: () => {
+								throw new ImageInputError("storage_missing", "Image asset owner is required.");
+							},
+							read: () => {
+								throw new ImageInputError("storage_missing", "Image asset owner is required.");
+							},
+						},
+			);
+			source = new RecoveryDataSource(undefined, imageCodec);
+		}
+		// Only syntax errors are skippable. Invalid recovery references fail closed.
 		if (isRecoveryEntry(entry)) deferRecoveryData(entry, source, line);
 		else source.index.register(entry);
-		entries.push(entry);
+		entries.push(isRecoveryEntry(entry) ? entry : (imageCodec?.decode(entry) ?? entry));
 	}
 	return entries;
 }
@@ -693,8 +731,11 @@ class RecoveryDataSource {
 	private readonly locations = new Map<string, RecoveryLocation>();
 	private readonly suspendedReceipts = new Map<string, readonly TaskRecoveryResultReceipt[]>();
 
-	constructor(fd?: number) {
+	private readonly imageCodec?: ImageStorageCodec;
+
+	constructor(fd?: number, imageCodec?: ImageStorageCodec) {
 		this.fd = fd;
+		this.imageCodec = imageCodec;
 		if (fd !== undefined) recoverySourceFinalizer.register(this, fd, this);
 	}
 
@@ -739,7 +780,9 @@ class RecoveryDataSource {
 	}
 
 	read(id: string): unknown {
-		return this.index.decode(this.readEntry(id), (sourceId) => this.readEntry(sourceId));
+		const entry = this.readEntry(id);
+		const data = this.index.decode(entry, (sourceId) => this.readEntry(sourceId));
+		return this.imageCodec ? (this.imageCodec.decode({ ...entry, data }) as CustomEntry).data : data;
 	}
 }
 
@@ -766,7 +809,11 @@ function sameSessionFileIdentity(left: BigIntStats, right: BigIntStats): boolean
 	);
 }
 
-function readSessionFile(filePath: string): {
+function readSessionFile(
+	filePath: string,
+	assetFilePath: string = filePath,
+	onPhysicalEntry?: (entry: FileEntry) => void,
+): {
 	entries: FileEntry[];
 	repair: boolean;
 	damagedTail: boolean;
@@ -774,8 +821,10 @@ function readSessionFile(filePath: string): {
 	identity?: BigIntStats;
 	recoverySource?: RecoveryDataSource;
 } {
-	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return { entries: [], repair: false, damagedTail: false, size: 0 };
+	const requestedFilePath = normalizePath(filePath);
+	if (!existsSync(requestedFilePath)) return { entries: [], repair: false, damagedTail: false, size: 0 };
+	const resolvedFilePath = realpathSync(requestedFilePath);
+	const assetOwnerPath = assetFilePath === filePath ? resolvedFilePath : normalizePath(assetFilePath);
 
 	const entries: FileEntry[] = [];
 	const summary = new SessionSummaryBuilder();
@@ -785,6 +834,7 @@ function readSessionFile(filePath: string): {
 	const identity = fstatSync(fd, { bigint: true });
 	const size = Number(identity.size);
 	let recoverySource: RecoveryDataSource | undefined;
+	let imageCodec: ImageStorageCodec | undefined;
 	let offset = 0;
 	const acceptLine = (bytes: Buffer): void => {
 		const lineOffset = offset;
@@ -794,14 +844,22 @@ function readSessionFile(filePath: string): {
 		if (damagedTail) throw new Error(`Corrupt session record before end of file: ${resolvedFilePath}`);
 		const entry = parseSessionEntryLine(line);
 		if (entry) {
+			onPhysicalEntry?.(entry);
+			if (entry.type === "session" && entry.version === 4) {
+				imageCodec = new ImageStorageCodec(
+					new ImageSourceStore(imageAssetsDirectory(assetOwnerPath), () => {
+						assertPersistentSessionAvailable(resolvedFilePath, entry.id);
+					}),
+				);
+			}
 			summary.add(entry);
 			if (isRecoveryEntry(entry)) {
-				recoverySource ??= new RecoveryDataSource(fd);
+				recoverySource ??= new RecoveryDataSource(fd, imageCodec);
 				deferRecoveryData(entry, recoverySource, { offset: lineOffset, length: bytes.length });
 			} else if ("recoveryStorage" in entry) {
 				throw new Error("Invalid task recovery storage: metadata on a non-recovery entry");
 			}
-			entries.push(entry);
+			entries.push(isRecoveryEntry(entry) ? entry : (imageCodec?.decode(entry) ?? entry));
 		} else damagedTail = true;
 	};
 	try {
@@ -939,6 +997,7 @@ export function writeSessionFile(
 	entries: Iterable<FileEntry>,
 	exclusive = false,
 	beforePublish?: (temporaryPath: string) => void,
+	readImageSource?: (ref: ImageAssetRef) => Buffer,
 ): void {
 	assertNativeSessionTeamAvailable(filePath);
 	if (existsSync(filePath) && statSync(filePath).nlink > 1) {
@@ -954,8 +1013,18 @@ export function writeSessionFile(
 			assertNativeSessionTeamAvailable(filePath);
 			// This dictionary is private to the unpublished replacement, never the live writer.
 			const index = new RecoveryStorageIndex();
+			let imageCodec: ImageStorageCodec | undefined;
 			for (const entry of entries) {
-				const stored = index.encode(entry);
+				if (entry.type === "session" && entry.version === 4) {
+					imageCodec = new ImageStorageCodec(
+						new ImageSourceStore(imageAssetsDirectory(filePath), () => {
+							assertNativeSessionTeamAvailable(filePath);
+						}),
+						readImageSource,
+					);
+				}
+				// Asset publication precedes both recovery field hashing and the referring JSONL record.
+				const stored = index.encode(imageCodec ? imageCodec.encode(entry) : portableImageEntry(entry));
 				index.register(stored);
 				summary.add(stored);
 				writeFileSync(fd, `${JSON.stringify(stored)}\n`);
@@ -1008,9 +1077,22 @@ export function writeSessionFile(
 	}
 }
 
+/** Portable JSONL has inline derivatives and no app-only source references. */
+export function writePortableSessionFile(filePath: string, entries: Iterable<FileEntry>): void {
+	function* portable(): Generator<FileEntry> {
+		for (const entry of entries) {
+			if (entry.type === "session") {
+				const { imageEncoding: _encoding, ...header } = entry;
+				yield { ...header, version: 3 };
+			} else yield portableImageEntry(entry);
+		}
+	}
+	writeSessionFile(filePath, portable());
+}
+
 /** Non-destructive, same-identity rewrite. Unlike a fork, this does not change execution authority. */
 export function rewriteSessionRecoveryFile(sourcePath: string, destinationPath: string): void {
-	const source = resolvePath(sourcePath);
+	const source = realpathSync(resolvePath(sourcePath));
 	const destination = resolvePath(destinationPath);
 	if (source === destination || existsSync(destination))
 		throw new Error("Recovery rewrite destination must not exist");
@@ -1021,19 +1103,28 @@ export function rewriteSessionRecoveryFile(sourcePath: string, destinationPath: 
 		if (!loaded.entries.length || loaded.damagedTail)
 			throw new Error("Recovery rewrite source is invalid or has a damaged tail");
 		validateSessionGraph(loaded.entries);
-		writeSessionFile(destination, loaded.entries, true, (temporaryPath) => {
-			const verified = readSessionFile(temporaryPath);
-			try {
-				if (verified.repair || verified.entries.length !== loaded.entries.length)
-					throw new Error("Recovery rewrite validation failed");
-				validateSessionGraph(verified.entries);
-			} finally {
-				verified.recoverySource?.close();
-			}
-			const current = statSync(source, { bigint: true });
-			if (!sameSessionFileIdentity(current, identity))
-				throw new Error("Recovery rewrite source changed before publication");
-		});
+		writeSessionFile(
+			destination,
+			loaded.entries,
+			true,
+			(temporaryPath) => {
+				const verified = readSessionFile(temporaryPath, destination);
+				try {
+					if (verified.repair || verified.entries.length !== loaded.entries.length)
+						throw new Error("Recovery rewrite validation failed");
+					validateSessionGraph(verified.entries);
+				} finally {
+					verified.recoverySource?.close();
+				}
+				const current = statSync(source, { bigint: true });
+				if (!sameSessionFileIdentity(current, identity))
+					throw new Error("Recovery rewrite source changed before publication");
+			},
+			(ref) =>
+				new ImageSourceStore(imageAssetsDirectory(source), () =>
+					assertPersistentSessionAvailable(source, (loaded.entries[0] as SessionHeader).id),
+				).read(ref),
+		);
 	} finally {
 		loaded.recoverySource?.close();
 	}
@@ -1291,6 +1382,8 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private readonly memoryImageSources = new Map<string, { ref: ImageAssetRef; bytes: Buffer }>();
+	private memoryImageSourceBytes = 0;
 
 	private constructor(
 		cwd: string,
@@ -1345,6 +1438,7 @@ export class SessionManager {
 			const header: SessionHeader = {
 				type: "session",
 				version: CURRENT_SESSION_VERSION,
+				imageEncoding: "assets-v1",
 				id: createSessionId(),
 				timestamp: new Date().toISOString(),
 				cwd: this.cwd,
@@ -1383,6 +1477,7 @@ export class SessionManager {
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
+			imageEncoding: "assets-v1",
 			id: sessionId,
 			timestamp,
 			cwd: this.cwd,
@@ -1397,6 +1492,8 @@ export class SessionManager {
 		this.committedIdentity = sessionFile ? statSync(sessionFile, { bigint: true }) : undefined;
 		this.repairPending = false;
 		this.recoverySource = undefined;
+		this.memoryImageSources.clear();
+		this.memoryImageSourceBytes = 0;
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.labelsById.clear();
@@ -1450,10 +1547,117 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	private getImageStore(): ImageSourceStore {
+		const file = this.sessionFile;
+		if (!file) throw new ImageInputError("storage_missing", "Image source has no persistent owner.");
+		const id = this.sessionId;
+		return new ImageSourceStore(imageAssetsDirectory(file), () => assertPersistentSessionAvailable(file, id));
+	}
+
+	private getImageCodec(): ImageStorageCodec | undefined {
+		return this.persist && this.getHeader()?.version === 4 ? new ImageStorageCodec(this.getImageStore()) : undefined;
+	}
+
+	/** Sources are durable only for v4; legacy files continue inline without dangling provenance. */
+	attachImageSource(prepared: ImageContent, source: ImageContent, dimensions?: ImageSourceDimensions): ImageContent {
+		if (this.persist && this.getHeader()?.version !== 4) return prepared;
+		const bytes = imageStorageBytes(source);
+		const mimeType = normalizeImageMimeType(source.mimeType);
+		let asset: ImageAssetRef;
+		if (this.persist) asset = this.getImageStore().put(bytes, mimeType);
+		else {
+			// Reject rather than evict a source still referenced by a live message.
+			asset = Object.freeze({
+				version: 1,
+				sha256: createHash("sha256").update(bytes).digest("hex"),
+				byteLength: bytes.length,
+				mimeType,
+			});
+			if (!getImageSourceMetadata({ type: "image", imageSource: { version: 1, asset } })) {
+				throw new ImageInputError("storage_invalid", "Invalid image source metadata.");
+			}
+			const existing = this.memoryImageSources.get(asset.sha256);
+			if (existing && existing.ref.mimeType !== mimeType) {
+				throw new ImageInputError("storage_invalid", "Image source MIME conflicts with retained content.");
+			}
+			if (!existing) {
+				if (this.memoryImageSources.size >= 32 || this.memoryImageSourceBytes + bytes.length > 32 * 1024 * 1024) {
+					throw new ImageInputError("storage_invalid", "In-memory image source capacity exceeded.");
+				}
+				this.memoryImageSources.set(asset.sha256, { ref: asset, bytes });
+				this.memoryImageSourceBytes += bytes.length;
+			}
+		}
+		const image = {
+			...prepared,
+			imageSource: { version: 1 as const, asset, ...(dimensions ? { dimensions: { ...dimensions } } : {}) },
+		};
+		if (!getImageSourceMetadata(image))
+			throw new ImageInputError("storage_invalid", "Invalid image source dimensions.");
+		return image;
+	}
+
+	readImageSource(ref: ImageAssetRef): Buffer {
+		if (this.persist) return this.getImageStore().read(ref);
+		const metadata = getImageSourceMetadata({ type: "image", imageSource: { version: 1, asset: ref } });
+		const stored = metadata && this.memoryImageSources.get(metadata.asset.sha256);
+		if (!stored) throw new ImageInputError("storage_missing", "Image source is not retained by this session.");
+		if (stored.ref.byteLength !== ref.byteLength || stored.ref.mimeType !== ref.mimeType) {
+			throw new ImageInputError("storage_invalid", "Image source reference does not match.");
+		}
+		return Buffer.from(stored.bytes);
+	}
+
+	getImageSourcePath(ref: ImageAssetRef): string | undefined {
+		if (!this.persist) {
+			this.readImageSource(ref);
+			return undefined;
+		}
+		return this.getImageStore().getPath(ref);
+	}
+
+	/** Read-only, whole-log reachability audit. Never removes unknown or orphaned files. */
+	auditImageAssets(): { reachable: string[]; missing: string[]; orphan: string[] } {
+		if (!this.persist || !this.sessionFile || this.getHeader()?.version !== 4) {
+			return { reachable: [...this.memoryImageSources.keys()], missing: [], orphan: [] };
+		}
+		const store = this.getImageStore();
+		assertPersistentSessionAvailable(this.sessionFile, this.sessionId);
+		const refs = new Map<string, ImageAssetRef>();
+		const loaded = readSessionFile(this.sessionFile, this.sessionFile, (entry) => {
+			for (const ref of collectImageAssets(entry)) refs.set(ref.sha256, ref);
+		});
+		loaded.recoverySource?.close();
+		const missing: string[] = [];
+		for (const ref of refs.values()) {
+			try {
+				store.read(ref);
+			} catch {
+				missing.push(ref.sha256);
+			}
+		}
+		const directory = imageAssetsDirectory(this.sessionFile);
+		let names: string[] = [];
+		if (existsSync(directory)) {
+			const info = lstatSync(directory);
+			if (!info.isDirectory() || info.isSymbolicLink())
+				throw new ImageInputError("storage_invalid", "Unsafe image asset directory.");
+			names = readdirSync(directory);
+		}
+		return {
+			reachable: [...refs.keys()].sort(),
+			missing: missing.sort(),
+			orphan: names.filter((name) => /^[a-f0-9]{64}$/.test(name) && !refs.has(name)).sort(),
+		};
+	}
+
 	_persist(entry: SessionEntry): { entry: SessionEntry; reloaded?: FileEntry[] } | undefined {
 		if (!this.persist || !this.sessionFile) return;
 		assertNativeSessionTeamAvailable(this.sessionFile);
-		const stored = (this.recoverySource?.index ?? new RecoveryStorageIndex()).encode(entry) as SessionEntry;
+		const imageCodec = this.getImageCodec();
+		const stored = (this.recoverySource?.index ?? new RecoveryStorageIndex()).encode(
+			imageCodec ? imageCodec.encode(entry) : portableImageEntry(entry),
+		) as SessionEntry;
 		const serialized = Buffer.from(`${JSON.stringify(stored)}\n`);
 		const lockPath = `${this.sessionFile}.append.lock`;
 		const lockFd = openSync(lockPath, "wx", 0o600);
@@ -1535,14 +1739,16 @@ export class SessionManager {
 			return { entry: reloaded.entries[reloaded.entries.length - 1] as SessionEntry, reloaded: reloaded.entries };
 		}
 		if (isRecoveryEntry(stored)) {
-			this.recoverySource ??= new RecoveryDataSource(openSync(this.sessionFile, "r"));
+			this.recoverySource ??= new RecoveryDataSource(openSync(this.sessionFile, "r"), imageCodec);
 			// Commit dictionary changes only after the record's fsync and writer-lock cleanup succeeded.
 			deferRecoveryData(stored, this.recoverySource, {
 				offset: committedSize - serialized.length,
 				length: serialized.length,
 			});
 		}
-		return { entry: stored };
+		return {
+			entry: isRecoveryEntry(stored) ? stored : ((imageCodec?.decode(stored) as SessionEntry | undefined) ?? stored),
+		};
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1986,6 +2192,7 @@ export class SessionManager {
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
+			imageEncoding: "assets-v1",
 			id: newSessionId,
 			timestamp,
 			cwd: this.cwd,
@@ -2021,7 +2228,7 @@ export class SessionManager {
 			}
 
 			const fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-			writeSessionFile(newSessionFile, fileEntries, true);
+			writeSessionFile(newSessionFile, fileEntries, true, undefined, (ref) => this.readImageSource(ref));
 			this._setSessionFile(newSessionFile);
 
 			return this.sessionFile;
@@ -2132,7 +2339,10 @@ export class SessionManager {
 		sessionDir?: string,
 		options?: NewSessionOptions,
 	): SessionManager {
-		const resolvedSourcePath = resolvePath(sourcePath);
+		const requestedSourcePath = resolvePath(sourcePath);
+		const resolvedSourcePath = existsSync(requestedSourcePath)
+			? realpathSync(requestedSourcePath)
+			: requestedSourcePath;
 		const resolvedTargetCwd = resolvePath(targetCwd);
 		const sourceEntries = loadEntriesFromFile(resolvedSourcePath);
 		if (sourceEntries.length === 0) {
@@ -2167,12 +2377,22 @@ export class SessionManager {
 		const newHeader: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
+			imageEncoding: "assets-v1",
 			id: newSessionId,
 			timestamp,
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeSessionFile(newSessionFile, [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")], true);
+		writeSessionFile(
+			newSessionFile,
+			[newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")],
+			true,
+			undefined,
+			(ref) =>
+				new ImageSourceStore(imageAssetsDirectory(resolvedSourcePath), () =>
+					assertPersistentSessionAvailable(resolvedSourcePath, sourceHeader.id),
+				).read(ref),
+		);
 
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}

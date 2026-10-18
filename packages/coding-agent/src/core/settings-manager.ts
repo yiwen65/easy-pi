@@ -10,6 +10,8 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { type CodexServiceTier, parseCodexServiceTier } from "./codex-service-tier.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { validateImageLimits } from "./images/policy.ts";
+import type { ImageLimits } from "./images/types.ts";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 import {
 	parseSubagentStoragePolicy,
@@ -54,6 +56,8 @@ export interface TerminalSettings {
 export interface ImageSettings {
 	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
 	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+	/** Positive safe-integer bounds that tighten local engineering limits; encoded bytes mean Base64 ASCII bytes. */
+	limits?: Partial<ImageLimits>;
 }
 
 export interface ThinkingBudgetsSettings {
@@ -1314,6 +1318,14 @@ export class SettingsManager {
 		this.globalSettings.fullscreenScrollbar = mode;
 		this.markModified("fullscreenScrollbar");
 		this.save();
+	}
+
+	getImagePolicyOptions(): { autoResizeImages: boolean; blockImages: boolean; limits: Partial<ImageLimits> } {
+		return {
+			autoResizeImages: this.getImageAutoResize(),
+			blockImages: this.getBlockImages(),
+			limits: validateImageLimits(this.settings.images?.limits),
+		};
 	}
 
 	getImageAutoResize(): boolean {

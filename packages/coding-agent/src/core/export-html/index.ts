@@ -5,6 +5,7 @@ import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { portableImageEntry } from "../images/storage-codec.ts";
 import type { SessionEntry } from "../session-manager.ts";
 import { SessionManager } from "../session-manager.ts";
 
@@ -157,7 +158,12 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const infoBg = themeExport.infoBg ?? derivedExportColors.infoBg;
 
 	// Base64 encode session data to avoid escaping issues
-	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
+	// Keep recovery payloads lazy: eagerly mapping logical copies retains every historical snapshot.
+	const portableData = {
+		...sessionData,
+		entries: sessionData.entries.map((entry) => ({ toJSON: () => portableImageEntry(entry) })),
+	};
+	const sessionDataBase64 = Buffer.from(JSON.stringify(portableData)).toString("base64");
 
 	// Build the CSS with theme variables injected
 	const css = templateCss

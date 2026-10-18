@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, InputEvent } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
+import { createImagePng } from "../helpers/image-fixtures.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -136,7 +137,7 @@ describe("AgentSession prompt characterization", () => {
 				{
 					type: "image",
 					mimeType: "image/png",
-					data: "ZmFrZQ==",
+					data: createImagePng().toString("base64"),
 				},
 			],
 		});

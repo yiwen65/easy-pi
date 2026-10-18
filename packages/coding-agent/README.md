@@ -170,6 +170,8 @@ The editor can be temporarily replaced by other UI, like built-in `/settings` or
 
 Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.md](docs/keybindings.md).
 
+Image inputs are validated and prepared consistently across attachments, RPC/SDK, and tools. New persistent sessions retain originals separately from prepared images; `/images sources` lists active-branch originals and `/images source <ID>` previews one locally without contacting a provider. See [image limits, evidence levels, and portability](docs/images.md).
+
 ### Commands
 
 Type `/` in the editor to trigger commands. [Extensions](#extensions) can register custom commands, [skills](#skills) are available as `/skill:name`, and [prompt templates](#prompt-templates) expand via `/templatename`.
@@ -186,6 +188,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (file, ID, messages, tokens, cost) |
+| [`/images`](docs/images.md) | Inspect local image evidence, preview originals, or explicitly exclude historical request images |
 | `/agents` | easy-pi: [watch and control native child sessions](docs/collaboration.md) in Grok-TUI |
 | `/mcp` | [Manage MCP servers](docs/mcp.md), sign in, reconnect, or change exposure |
 | `/tree` | Jump to any point in the session and continue from there |
@@ -238,7 +241,7 @@ Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUp
 
 ## Sessions
 
-Sessions are stored as JSONL files with a tree structure. Each entry has an `id` and `parentId`, enabling in-place branching without creating new files. See [docs/session-format.md](docs/session-format.md) for file format.
+Sessions are stored as JSONL files with a tree structure. Each entry has an `id` and `parentId`, enabling in-place branching without creating new files. New v4 sessions also use a session-owned `.jsonl.images/` directory; back up both together. Existing v1–v3 files remain inline. Portable exports inline prepared images but do not bundle originals. See [docs/session-format.md](docs/session-format.md) for file format.
 
 ### Management
 

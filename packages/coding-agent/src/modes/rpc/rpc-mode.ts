@@ -19,6 +19,8 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { listBranchImageSources, readBranchImageSource } from "../../core/images/attachments.ts";
+import { ImageInputError } from "../../core/images/types.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,
@@ -75,8 +77,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		return { id, type: "response", command, success: true, data } as RpcResponse;
 	};
 
-	const error = (id: string | undefined, command: string, message: string): RpcResponse => {
-		return { id, type: "response", command, success: false, error: message };
+	const error = (id: string | undefined, command: string, failure: unknown): RpcResponse => {
+		return {
+			id,
+			type: "response",
+			command,
+			success: false,
+			error: failure instanceof Error ? failure.message : String(failure),
+			...(failure instanceof ImageInputError ? { code: failure.code, imageIds: failure.imageIds } : {}),
+		};
 	};
 
 	// Pending extension UI requests waiting for response
@@ -428,7 +437,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					})
 					.catch((e: unknown) => {
 						if (!preflightSucceeded) {
-							output(error(id, "prompt", e instanceof Error ? e.message : String(e)));
+							output(error(id, "prompt", e));
 						}
 					})
 					.finally(async () => {
@@ -439,13 +448,28 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return undefined;
 			}
 
+			case "get_images":
+				if (command.includeSources !== undefined && typeof command.includeSources !== "boolean") {
+					throw new ImageInputError("invalid_image", "includeSources must be a boolean.");
+				}
+				return success(id, "get_images", {
+					selection: session.getImageSelection(),
+					decisions: session.getImageDecisions(),
+					...(command.includeSources ? { sources: listBranchImageSources(session.sessionManager) } : {}),
+				});
+			case "get_image_source":
+				return success(id, "get_image_source", readBranchImageSource(session.sessionManager, command.sourceId));
+			case "set_image_selection":
+				session.setImageSelection(command.omitImageIds);
+				return success(id, "set_image_selection");
+
 			case "steer": {
-				await session.steer(command.message, command.images);
+				await session.steer(command.message, command.images, "rpc");
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
+				await session.followUp(command.message, command.images, "rpc");
 				return success(id, "follow_up");
 			}
 
@@ -841,7 +865,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				await waitForRawStdoutBackpressure();
 			}
 		} catch (commandError: unknown) {
-			output(error(id, envelope.type, commandError instanceof Error ? commandError.message : String(commandError)));
+			output(error(id, envelope.type, commandError));
 			await waitForRawStdoutBackpressure();
 		} finally {
 			activeCommands--;

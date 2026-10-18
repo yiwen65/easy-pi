@@ -52,7 +52,8 @@ test.each([1, 2])("forkFrom migrates v%s under its original header without rewri
 	const bytes = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 	writeFileSync(file, bytes);
 	const fork = SessionManager.forkFrom(file, dir, join(dir, "forks"));
-	expect(fork.getHeader()?.version).toBe(3);
+	// A fork is a new v4 session; the original legacy bytes remain untouched.
+	expect(fork.getHeader()?.version).toBe(4);
 	const context = fork.buildSessionContext().messages;
 	expect(context.map((message) => message.role)).toEqual(["user", "custom"]);
 	expect(fork.getBranch()).toHaveLength(2);

@@ -170,6 +170,21 @@ export {
 export type { ToolAccess, ToolAnnotations, ToolExposure, ToolNamespace } from "./core/extensions/types.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+export type { ImageSourceData, ImageSourceSummary } from "./core/images/attachments.ts";
+export type { ImagePolicyOverride } from "./core/images/policy.ts";
+export type { ImageAssetRef } from "./core/images/source-store.ts";
+export {
+	getImageSourceMetadata,
+	type ImageSourceDimensions,
+	type ImageSourceMetadata,
+} from "./core/images/storage-codec.ts";
+export {
+	type ImageDecision,
+	type ImageFailureCode,
+	ImageInputError,
+	type ImageLimits,
+	type ImageSelection,
+} from "./core/images/types.ts";
 export type {
 	McpExposure,
 	McpHttpServerConfig,

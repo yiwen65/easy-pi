@@ -16,6 +16,9 @@ import {
 } from "./codex-service-tier.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import type { ImagePolicyOverride } from "./images/policy.ts";
+import { guardImagePayload, prepareImageContext } from "./images/request-guard.ts";
+import type { ImageDecision } from "./images/types.ts";
 import { createToolNameMatcher } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -107,6 +110,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
+	/** Explicit API/actual-endpoint image constraints. Only tighten local engineering caps. */
+	imagePolicyOverrides?: readonly ImagePolicyOverride[];
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
 	/**
@@ -349,6 +354,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const imageSessionRef: { current?: AgentSession } = {};
+	const imagePolicyOverrides = options.imagePolicyOverrides?.map((override) => ({
+		...override,
+		limits: { ...override.limits },
+	}));
 
 	// Inherited cache lineage: route this session's requests to the provider cache partition the
 	// duplicated prefix was cached in. Session, request and native transport identity stay this
@@ -385,8 +395,40 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const headerRunner = extensionRunnerRef.current;
+			const imageOptions = { ...settingsManager.getImagePolicyOptions(), providerOverrides: imagePolicyOverrides };
+			const selection = imageSessionRef.current?.getImageSelection();
+			const payloadHook = requestOptions.onPayload;
+			let imageDecisions: ImageDecision[] = [];
 			return modelRuntime.streamSimple(model, context, {
 				...requestOptions,
+				prepareContext: async (requestContext, actualModel, signal) => {
+					const prepared = await prepareImageContext(
+						requestContext,
+						actualModel,
+						imageOptions,
+						selection,
+						signal,
+						(inventory) => imageSessionRef.current?.recordImageDecisions(inventory),
+					);
+					imageDecisions = prepared.decisions;
+					imageSessionRef.current?.recordImageDecisions(imageDecisions);
+					return prepared.context;
+				},
+				onPayload: async (payload, actualModel) => {
+					const rewritten = await payloadHook?.(payload, actualModel);
+					const resolvedPayload = rewritten ?? payload;
+					const checked = await guardImagePayload(
+						resolvedPayload,
+						actualModel,
+						{
+							...imageOptions,
+							blockImages: settingsManager.getBlockImages(),
+						},
+						requestOptions.signal,
+					);
+					imageSessionRef.current?.recordImageDecisions([...imageDecisions, ...checked.decisions]);
+					return resolvedPayload;
+				},
 				...(serviceTier !== undefined ? { serviceTier } : {}),
 				timeoutMs,
 				websocketConnectTimeoutMs,
@@ -468,6 +510,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		backgroundBash: options.backgroundBash,
 	});
+	imageSessionRef.current = session;
 	try {
 		if (options.codexServiceTier !== undefined) {
 			session.setCodexServiceTier(options.codexServiceTier);

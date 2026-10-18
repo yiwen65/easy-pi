@@ -33,6 +33,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "name", description: "Set session display name" },
 	{ name: "session", description: "Show session info and stats" },
 	{
+		name: "images",
+		description: "Inspect local image evidence, preview originals, or select historical request images",
+		argumentHint: "[sources | source <ID/prefix> | omit <historical IDs> | reset]",
+	},
+	{
 		name: "context",
 		description: "Inspect the active compaction checkpoint",
 		argumentHint: "[inspect [--full]]",

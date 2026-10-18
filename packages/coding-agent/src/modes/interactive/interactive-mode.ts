@@ -85,6 +85,8 @@ import type {
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import { listBranchImageSources, readBranchImageSource } from "../../core/images/attachments.ts";
+import { ImageInputError } from "../../core/images/types.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import {
 	type CompactionSummaryMessage,
@@ -597,6 +599,7 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (input: InteractiveUserInput) => void;
 	private pendingUserInputs: InteractiveUserInput[] = [];
+	private submittedDrafts = new WeakMap<InteractiveUserInput, () => void>();
 	private activeStatusIndicator: StatusIndicator | undefined = undefined;
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
@@ -627,6 +630,8 @@ export class InteractiveMode {
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private transcriptTools = new Set<ToolExecutionComponent>();
+	// Local-only, replaceable preview: never a session entry, tool call or provider message.
+	private imageSourcePreview: ToolExecutionComponent | undefined;
 	private subagentRouter!: SubagentTranscriptRouter;
 	private backgroundTaskGroup: BackgroundTaskGroupComponent | undefined;
 	private backgroundTaskOwners = new Map<string, { group: BackgroundTaskGroupComponent; owner: object }>();
@@ -1544,6 +1549,7 @@ export class InteractiveMode {
 			try {
 				await this.session.prompt(userInput.text, { images: userInput.images });
 			} catch (error: unknown) {
+				this.restoreRejectedImageDraft(userInput, error);
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			}
@@ -3159,6 +3165,160 @@ export class InteractiveMode {
 		this.showStatus("Startup is still in progress");
 	}
 
+	private restoreRejectedImageDraft(input: InteractiveUserInput, error: unknown): void {
+		if (error instanceof ImageInputError) this.submittedDrafts?.get(input)?.();
+	}
+
+	/** Restore only the submitted editor slot; never overwrite a newer draft/session. */
+	private captureSubmittedDraft(text: string, attachments: readonly unknown[]): () => void {
+		const editor = this.editor;
+		const session = this.session;
+		const generation = this.editorGeneration;
+		return () => {
+			if (
+				this.editor !== editor ||
+				this.session !== session ||
+				this.editorGeneration !== generation ||
+				editor.getText()
+			)
+				return;
+			editor.setText(text);
+			editor.setAttachmentPayloads?.("Image", attachments);
+			this.ui.requestRender();
+		};
+	}
+
+	private async submitQueuedImagePrompt(
+		text: string,
+		images: ImageContent[],
+		attachments: readonly unknown[],
+		streamingBehavior: "steer" | "followUp",
+	): Promise<void> {
+		this.editor.setText("");
+		const restore = this.captureSubmittedDraft(text, attachments);
+		try {
+			await this.session.prompt(text, { streamingBehavior, images: images.length > 0 ? images : undefined });
+		} catch (error) {
+			if (error instanceof ImageInputError) restore();
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async handleImagesCommand(text: string): Promise<void> {
+		const [action, ...ids] = text.trim().split(/\s+/).slice(1);
+		try {
+			if (!action) {
+				const selection = new Set(this.session.getImageSelection().omitImageIds);
+				const reports = this.session.getImageDecisions();
+				this.showStatus(
+					[
+						"Local image evidence: accepted = received; prepared = processed; serialized = wire checked. Remote image receipt: UNVERIFIED.",
+						...reports.map((decision) => {
+							const canonical = /^image_[a-f0-9]{24}$/.test(decision.imageId);
+							const identity = canonical
+								? decision.protected === true
+									? "canonical protected"
+									: decision.protected === false
+										? "canonical historical"
+										: "canonical; protection checked at request"
+								: "source/wire fact; not selectable";
+							return [
+								`${decision.imageId}: ${decision.stage} [${identity}${selection.has(decision.imageId) ? "; exclusion selected" : ""}]`,
+								decision.mimeType,
+								decision.inputBytes !== undefined ? `source ${decision.inputBytes} B` : undefined,
+								decision.encodedBytes !== undefined ? `inline ${decision.encodedBytes} Base64 B` : undefined,
+								decision.width !== undefined && decision.height !== undefined
+									? `${decision.width}×${decision.height} px`
+									: undefined,
+								decision.code,
+								decision.reason,
+							]
+								.filter(Boolean)
+								.join("; ");
+						}),
+						...(reports.length ? [] : ["No request image report yet."]),
+						"/images sources lists attached originals; /images omit <historical IDs> changes only the branch request view; /images reset reverses it.",
+					].join("\n"),
+				);
+			} else if (action === "sources" && ids.length === 0) {
+				const sources = listBranchImageSources(this.sessionManager);
+				this.showStatus(
+					sources.length
+						? [
+								"Original attachments on the active branch (source IDs are not omission IDs):",
+								...sources.map(
+									(source) =>
+										`${source.sourceId}: ${source.mimeType}; source ${source.byteLength} B${source.dimensions ? `; ${source.dimensions.originalWidth}×${source.dimensions.originalHeight} → ${source.dimensions.width}×${source.dimensions.height} px` : ""}`,
+								),
+								"/images source <ID or unique prefix of at least 8 hex digits> previews locally; no provider request.",
+							].join("\n")
+						: "No original attachments on this branch. Legacy sessions and portable exports may contain only prepared inline images.",
+				);
+			} else if (action === "source" && ids.length === 1) {
+				const source = readBranchImageSource(this.sessionManager, ids[0], true);
+				const preview = new ToolExecutionComponent(
+					"Local original preview (not a tool execution or provider message)",
+					source.sourceId,
+					{},
+					{
+						showImages: this.settingsManager.getShowImages(),
+						imageWidthCells: this.settingsManager.getImageWidthCells(),
+					},
+					undefined,
+					this.ui,
+					this.sessionManager.getCwd(),
+				);
+				preview.updateResult({
+					content: [
+						{
+							type: "text",
+							text: `${source.sourceId}; ${source.mimeType}; source ${source.byteLength} B. Terminal preview requires image support and terminal.showImages. RPC get_image_source retrieves original bytes. CSS/DPR coordinates are not inferred.`,
+						},
+						{ type: "image", data: source.data, mimeType: source.mimeType },
+					],
+					isError: false,
+				});
+				if (this.imageSourcePreview) this.chatContainer.removeChild(this.imageSourcePreview);
+				this.imageSourcePreview = preview;
+				this.chatContainer.addChild(preview);
+				this.ui.requestRender();
+			} else if (action === "reset" && ids.length === 0) {
+				this.session.setImageSelection([]);
+				this.showStatus("Historical image exclusions cleared");
+			} else if (action === "omit" && ids.length > 0) {
+				if (ids.some((id) => !/^image_[a-f0-9]{24}$/.test(id))) {
+					throw new ImageInputError(
+						"invalid_image",
+						"Select canonical historical image IDs, not source hashes, paths or wire report IDs.",
+					);
+				}
+				const session = this.session;
+				const leafId = session.sessionManager.getLeafId();
+				if (
+					await this.showExtensionConfirm(
+						"Exclude historical images?",
+						`Exclude these IDs from future requests on this branch (history and originals are unchanged; /images reset reverses this):\n${ids.join("\n")}`,
+					)
+				) {
+					if (this.session !== session || session.sessionManager.getLeafId() !== leafId) return;
+					session.setImageSelection(ids);
+					this.showStatus("Historical image selection updated; current user/latest tool images remain protected");
+				}
+			} else
+				throw new Error(
+					"Usage: /images | /images sources | /images source <source ID/prefix> | /images omit <historical IDs> | /images reset",
+				);
+		} catch (error) {
+			this.showError(
+				error instanceof ImageInputError
+					? `${error.code}: ${error.message}`
+					: error instanceof Error
+						? error.message
+						: String(error),
+			);
+		}
+	}
+
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string, attachments: readonly unknown[] = []) => {
 			this.editorGeneration++;
@@ -3171,6 +3331,11 @@ export class InteractiveMode {
 			const images = selectSubmittedImages(text, attachmentValues);
 
 			// Handle commands
+			if (text === "/images" || text.startsWith("/images ")) {
+				this.editor.setText("");
+				await this.handleImagesCommand(text);
+				return;
+			}
 			if (/^\/fast(?:\s|$)/.test(text)) {
 				this.handleFastCommand(text);
 				this.editor.setText("");
@@ -3334,11 +3499,7 @@ export class InteractiveMode {
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
-				this.editor.setText("");
-				await this.session.prompt(text, {
-					streamingBehavior: "steer",
-					images: images.length > 0 ? images : undefined,
-				});
+				await this.submitQueuedImagePrompt(text, images, attachmentValues, "steer");
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -3349,6 +3510,8 @@ export class InteractiveMode {
 			this.flushPendingBashComponents();
 
 			const input: InteractiveUserInput = images.length > 0 ? { text, images } : { text };
+			this.submittedDrafts ??= new WeakMap();
+			this.submittedDrafts.set(input, this.captureSubmittedDraft(text, attachmentValues));
 			if (this.onInputCallback) {
 				this.onInputCallback(input);
 			} else {
@@ -4077,6 +4240,8 @@ export class InteractiveMode {
 		items: readonly RenderSessionItem[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		if (this.imageSourcePreview) this.chatContainer.removeChild(this.imageSourcePreview);
+		this.imageSourcePreview = undefined;
 		this.pendingTools.clear();
 		this.currentTurnThinkingGroup = undefined;
 		this.currentTurnToolGroup = undefined;
@@ -4530,11 +4695,7 @@ export class InteractiveMode {
 		// This handles extension commands (execute immediately), prompt template expansion, and queueing
 		if (this.session.isStreaming) {
 			this.editor.addToHistory?.(text);
-			this.editor.setText("");
-			await this.session.prompt(text, {
-				streamingBehavior: "followUp",
-				images: images.length > 0 ? images : undefined,
-			});
+			await this.submitQueuedImagePrompt(text, images, attachments, "followUp");
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}

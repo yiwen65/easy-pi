@@ -656,3 +656,11 @@
 - Correct approach: 旧调用者同样用 `vi.stubEnv(ENV_AGENT_DIR, join(tempDir, "agent"))` 隔离；每个测试只扫描自己的 mkdtemp 目录。teardown 在恢复环境前调用 `flushSessionSummaries()` 收敛定时写，再恢复环境并删除私有目录。
 - Prevention: 给 read/list 增加持久副作用时，审计全部实际调用者及既有测试，而非只隔离新增测试；同时核对产品专用目录环境变量、扫描范围与后台写清理。清理误写只针对已验证属于本轮 fixture 的派生文件，不批量删除用户 cache 或源数据。
 - Verified by: 2026-10-18 协调者修正 `test/session-manager/file-operations.test.ts` 与 `test/session-info-modified-timestamp.test.ts`，记录两文件26项及组合28文件426项通过，真实索引目录文件数保持0；源码已核对两处环境隔离、私有扫描目录与 flush/恢复环境顺序。
+
+## 图片来源生命周期——派生图、原图与会话所有权不能共用一个成功标记
+
+- Wrong approach: 准备对象的全局 memo 用 committed 布尔值跳过后续来源提交；冷加载先读派生图，失败便把整个图片及原图关联替换成纯文字。
+- Why it failed: 同一派生对象进入另一会话时携带旧 owner 引用；仅派生图损坏时，仍健康的原图也从查看清单和 fork 复制路径消失。二者都是把一种表示的成功/失败误当作整个附件生命周期的结论。
+- Correct approach: 来源提交 memo 绑定 session owner；未提交原字节用有界、带引用计数的 handoff，失效明确要求重附原图。派生图失败时独立验证原图，保留可读取/复制的关联并显式标明恢复，不把派生图伪装成原图。
+- Prevention: 图片接线同时覆盖同对象跨两个 owner、共享 SHA 的不同 pending 输出、首图 await 期间第二个 memo owner 被修改，以及“只删派生图→冷加载→原图清单/读取→fork→删除旧会话”。任何 memo 快路径都要比较当前 owner 与 await 前快照。
+- Verified by: 2026-10-18 `image-storage.test.ts` 两个仅派生图失效回归先红后绿；来源 handoff 的 owner/mutation 回归及最终 coding-agent 命名矩阵44文件566项通过，未调用真实模型。

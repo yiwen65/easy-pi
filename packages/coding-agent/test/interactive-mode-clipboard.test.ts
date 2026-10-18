@@ -2,7 +2,9 @@ import { Container, type EditorComponent, setKeybindings, TuiMainScreen } from "
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
+import { ImageInputError } from "../src/core/images/types.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { getEditorTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -25,6 +27,8 @@ type ModeMethods = {
 	handleClipboardPaste(): Promise<void>;
 	handleRightClickPaste(): Promise<void>;
 	clearEditor(): void;
+	restoreRejectedImageDraft(input: { text: string }, error: unknown): void;
+	handleImagesCommand(text: string): Promise<void>;
 };
 
 function fixture() {
@@ -44,11 +48,20 @@ function fixture() {
 		defaultEditor: editor,
 		editorContainer,
 		editorGeneration: 0,
-		runtimeHost: { session: { isStreaming: false, isCompacting: false, isBashRunning: false } },
+		runtimeHost: {
+			session: {
+				isStreaming: false,
+				isCompacting: false,
+				isBashRunning: false,
+				sessionManager: SessionManager.inMemory(),
+			},
+		},
 		pendingUserInputs: [] as Array<{ text: string }>,
 		flushPendingBashComponents: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
 		showWarning: vi.fn(),
+		showError: vi.fn(),
+		updatePendingMessagesDisplay: vi.fn(),
 	});
 	mode.setupKeyHandlers();
 	mode.setupEditorSubmitHandler();
@@ -182,6 +195,67 @@ describe("InteractiveMode async clipboard ownership", () => {
 		expect(mode.showWarning).toHaveBeenCalledExactlyOnceWith(
 			"The active custom editor does not support image attachments",
 		);
+	});
+
+	it("restores a rejected normal image draft with its numbered attachment", () => {
+		const { mode, editor } = fixture();
+		editor.setText("keep normal ");
+		const attachment = { type: "image", data: "bad", mimeType: "image/png" };
+		editor.insertAttachmentAtCursor("Image", attachment);
+		editor.handleInput("\r");
+		expect(editor.getText()).toBe("");
+		mode.restoreRejectedImageDraft(mode.pendingUserInputs[0], new ImageInputError("invalid_image", "Invalid image"));
+		expect(editor.getText()).toBe("keep normal [Image #1]");
+		expect(editor.getAttachments()).toEqual([attachment]);
+	});
+
+	it("requires confirmation before excluding historical images and supports reset", async () => {
+		const { mode } = fixture();
+		const setImageSelection = vi.fn();
+		const confirm = vi.fn().mockResolvedValue(false);
+		Object.assign(mode, { showExtensionConfirm: confirm, showStatus: vi.fn() });
+		Object.assign(mode.runtimeHost.session, { setImageSelection });
+		const id = `image_${"a".repeat(24)}`;
+		await mode.handleImagesCommand(`/images omit ${id}`);
+		expect(confirm).toHaveBeenCalledOnce();
+		expect(setImageSelection).not.toHaveBeenCalled();
+		confirm.mockResolvedValue(true);
+		await mode.handleImagesCommand(`/images omit ${id}`);
+		expect(setImageSelection).toHaveBeenLastCalledWith([id]);
+		await mode.handleImagesCommand("/images reset");
+		expect(setImageSelection).toHaveBeenLastCalledWith([]);
+	});
+
+	it("restores a rejected streaming image draft with its numbered attachment", async () => {
+		const { mode, editor } = fixture();
+		Object.assign(mode.runtimeHost.session, {
+			isStreaming: true,
+			prompt: vi.fn().mockRejectedValue(new ImageInputError("invalid_image", "Invalid image")),
+		});
+		editor.setText("keep this ");
+		const attachment = { type: "image", data: "bad", mimeType: "image/png" };
+		editor.insertAttachmentAtCursor("Image", attachment);
+		editor.handleInput("\r");
+		await vi.waitFor(() => expect(editor.getText()).toBe("keep this [Image #1]"));
+		expect(editor.getAttachments()).toEqual([attachment]);
+		expect(mode.showError).toHaveBeenCalledWith("Invalid image");
+	});
+
+	it("does not restore rejected images over a newer draft", async () => {
+		const { mode, editor } = fixture();
+		let reject!: (error: Error) => void;
+		const prompt = new Promise<void>((_resolve, rej) => {
+			reject = rej;
+		});
+		Object.assign(mode.runtimeHost.session, { isStreaming: true, prompt: vi.fn(() => prompt) });
+		editor.setText("old ");
+		editor.insertAttachmentAtCursor("Image", { type: "image", data: "bad", mimeType: "image/png" });
+		editor.handleInput("\r");
+		editor.handleInput("new draft");
+		reject(new ImageInputError("invalid_image", "Invalid image"));
+		await vi.waitFor(() => expect(mode.showError).toHaveBeenCalled());
+		expect(editor.getText()).toBe("new draft");
+		expect(editor.getAttachments()).toEqual([]);
 	});
 
 	it("ignores clipboard read errors without modifying the draft", async () => {

@@ -96,6 +96,11 @@ export interface CreateModelRuntimeOptions {
 	refreshOnCreate?: boolean;
 }
 
+export interface ModelRuntimeContextTransforms extends ModelsRequestTransforms {
+	/** Per-request preparation against the authenticated model, never shared between sessions. */
+	prepareContext?: (context: Context, model: Model<Api>, signal?: AbortSignal) => Context | Promise<Context>;
+}
+
 export interface ModelRuntimeAuthOverrides extends AuthOperationOptions {
 	apiKey?: string;
 	env?: Record<string, string>;
@@ -705,20 +710,28 @@ export class ModelRuntime implements Models {
 	stream<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,
-		options?: ModelsApiStreamOptions<TApi>,
+		options?: ModelsApiStreamOptions<TApi> & ModelRuntimeContextTransforms,
 	): AssistantMessageEventStream {
 		return lazyStream(
 			model,
 			async () => {
 				assertChatModel(model);
+				const { prepareContext, ...requestOptions } = options ?? {};
 				const prepared = await this.prepareRequest(
 					model,
-					options as (StreamOptions & ModelsRequestTransforms) | undefined,
+					requestOptions as StreamOptions & ModelsRequestTransforms,
 				);
-				options?.signal?.throwIfAborted();
+				const signal = operationSignal(options?.signal);
+				const preparedContext = prepareContext
+					? await raceWithAbortSignal(
+							Promise.resolve(prepareContext(context, prepared.model, options?.signal)),
+							signal,
+						)
+					: context;
+				signal.throwIfAborted();
 				return prepared.provider.stream(
 					prepared.model as Model<TApi>,
-					context,
+					preparedContext,
 					prepared.options as ApiStreamOptions<TApi>,
 				);
 			},
@@ -729,25 +742,45 @@ export class ModelRuntime implements Models {
 	complete<TApi extends Api>(
 		model: Model<TApi>,
 		context: Context,
-		options?: ModelsApiStreamOptions<TApi>,
+		options?: ModelsApiStreamOptions<TApi> & ModelRuntimeContextTransforms,
 	): Promise<AssistantMessage> {
 		return this.stream(model, context, options).result();
 	}
 
-	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
+	streamSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions & ModelRuntimeContextTransforms,
+	): AssistantMessageEventStream {
 		return lazyStream(
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				options?.signal?.throwIfAborted();
-				return prepared.provider.streamSimple(prepared.model, context, prepared.options as SimpleStreamOptions);
+				const { prepareContext, ...requestOptions } = options ?? {};
+				const prepared = await this.prepareRequest(model, requestOptions);
+				const signal = operationSignal(options?.signal);
+				const preparedContext = prepareContext
+					? await raceWithAbortSignal(
+							Promise.resolve(prepareContext(context, prepared.model, options?.signal)),
+							signal,
+						)
+					: context;
+				signal.throwIfAborted();
+				return prepared.provider.streamSimple(
+					prepared.model,
+					preparedContext,
+					prepared.options as SimpleStreamOptions,
+				);
 			},
 			options?.signal,
 		);
 	}
 
-	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage> {
+	completeSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions & ModelRuntimeContextTransforms,
+	): Promise<AssistantMessage> {
 		return this.streamSimple(model, context, options).result();
 	}
 
