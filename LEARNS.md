@@ -647,3 +647,12 @@
 - Correct approach: `link → 按 inode 身份移除 staging → fsync(output 所在目录)`，同步最终单链接状态；finally 仅作失败清理兜底，不能承载成功发布必需的持久化步骤。
 - Prevention: Session JSONL 的 hard-link 独占发布同时检查文件内容同步、最终目录状态和 reader 的链接数限制；回归断言最后一次目录 fsync 晚于 staging unlink，不能只检查 exit0 或最终文件列表。
 - Verified by: 2026-10-18 独立审查指出顺序缺口；协调者记录 `scripts/compact-session-recovery.test.mjs` 的发布顺序测试先红后绿，`node --test scripts/compact-session-recovery.test.mjs` 5/5 通过。证据限于源码持久化顺序与调用顺序回归，未做物理断电测试。
+
+## SessionManager 列表持久缓存——旧读操作测试也必须隔离 agentDir
+
+- Wrong approach: 新摘要索引测试隔离了目录，却沿用旧 `SessionManager.list/listAll` fixture 的默认 agentDir；时间戳测试还扫描整个系统 tmpdir。
+- Why it failed: 列表新增持久搜索投影后，读取源文件不再意味着没有写入副作用；源在临时目录，cache 仍按 `getAgentDir()` 写入用户目录，并可能收录同 tmpdir 下的无关文件。
+- Recognition signal: 用户 `session-index/v1` 出现 source 指向测试临时文件的记录；协调者本轮确认并仅清理了18份这类派生缓存，未删除源文件。
+- Correct approach: 旧调用者同样用 `vi.stubEnv(ENV_AGENT_DIR, join(tempDir, "agent"))` 隔离；每个测试只扫描自己的 mkdtemp 目录。teardown 在恢复环境前调用 `flushSessionSummaries()` 收敛定时写，再恢复环境并删除私有目录。
+- Prevention: 给 read/list 增加持久副作用时，审计全部实际调用者及既有测试，而非只隔离新增测试；同时核对产品专用目录环境变量、扫描范围与后台写清理。清理误写只针对已验证属于本轮 fixture 的派生文件，不批量删除用户 cache 或源数据。
+- Verified by: 2026-10-18 协调者修正 `test/session-manager/file-operations.test.ts` 与 `test/session-info-modified-timestamp.test.ts`，记录两文件26项及组合28文件426项通过，真实索引目录文件数保持0；源码已核对两处环境隔离、私有扫描目录与 flush/恢复环境顺序。

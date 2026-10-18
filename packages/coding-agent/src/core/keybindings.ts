@@ -36,6 +36,7 @@ export interface AppKeybindings {
 	"app.agents.previous": true;
 	"app.agents.next": true;
 	"app.session.toggleNamedFilter": true;
+	"app.session.toggleEmptyFilter": true;
 	"app.editor.external": true;
 	"app.message.copy": true;
 	"app.message.followUp": true;
@@ -127,6 +128,10 @@ export const KEYBINDINGS = {
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",
 		description: "Toggle named session filter",
+	},
+	"app.session.toggleEmptyFilter": {
+		defaultKeys: "ctrl+shift+e",
+		description: "Toggle empty session visibility",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",

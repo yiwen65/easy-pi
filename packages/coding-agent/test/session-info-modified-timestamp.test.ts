@@ -1,10 +1,12 @@
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import type { SessionHeader } from "../src/core/session-manager.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { flushSessionSummaries } from "../src/core/session-summary-index.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 function createSessionFile(path: string): void {
@@ -17,8 +19,7 @@ function createSessionFile(path: string): void {
 	};
 	writeFileSync(path, `${JSON.stringify(header)}\n`, "utf8");
 
-	// SessionManager only persists once it has seen at least one assistant message.
-	// Add a minimal assistant entry so subsequent appends are persisted.
+	// Seed conversational activity independently of subsequent file metadata changes.
 	const mgr = SessionManager.open(path);
 	mgr.appendMessage({
 		role: "assistant",
@@ -40,14 +41,22 @@ function createSessionFile(path: string): void {
 }
 
 describe("SessionInfo.modified", () => {
+	let tempDir: string;
 	beforeAll(() => initTheme("dark"));
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-session-modified-"));
+		vi.stubEnv(ENV_AGENT_DIR, join(tempDir, "agent"));
+	});
 
 	afterEach(() => {
+		flushSessionSummaries();
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	it("uses last user/assistant message timestamp instead of file mtime", async () => {
-		const filePath = join(tmpdir(), `pi-session-${Date.now()}-${Math.random().toString(36).slice(2)}-modified.jsonl`);
+		const filePath = join(tempDir, "modified.jsonl");
 		createSessionFile(filePath);
 
 		const before = await stat(filePath);

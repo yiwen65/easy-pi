@@ -39,6 +39,14 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 import { isRecoveryEntry, RecoveryStorageIndex } from "./recovery-storage.ts";
+import {
+	advanceSessionSummary,
+	flushSessionSummaries,
+	getSessionSummary,
+	recordSessionSummary,
+	SessionSummaryBuilder,
+	sessionInfoFromProjection,
+} from "./session-summary-index.ts";
 import type { TaskRecoveryState } from "./task-recovery.ts";
 import { assertNativeSessionTeamAvailable, nativeSessionTeamPaths } from "./tool-output-storage-session.ts";
 
@@ -213,6 +221,8 @@ export interface SessionInfo {
 	messageCount: number;
 	firstMessage: string;
 	allMessagesText: string;
+	/** True only for unnamed sessions containing exclusively known initialization metadata. */
+	isMetadataOnly?: boolean;
 }
 
 export type ReadonlySessionManager = Pick<
@@ -768,6 +778,7 @@ function readSessionFile(filePath: string): {
 	if (!existsSync(resolvedFilePath)) return { entries: [], repair: false, damagedTail: false, size: 0 };
 
 	const entries: FileEntry[] = [];
+	const summary = new SessionSummaryBuilder();
 	let damagedTail = false;
 	let repair = false;
 	const fd = openSync(resolvedFilePath, "r");
@@ -783,6 +794,7 @@ function readSessionFile(filePath: string): {
 		if (damagedTail) throw new Error(`Corrupt session record before end of file: ${resolvedFilePath}`);
 		const entry = parseSessionEntryLine(line);
 		if (entry) {
+			summary.add(entry);
 			if (isRecoveryEntry(entry)) {
 				recoverySource ??= new RecoveryDataSource(fd);
 				deferRecoveryData(entry, recoverySource, { offset: lineOffset, length: bytes.length });
@@ -834,6 +846,7 @@ function readSessionFile(filePath: string): {
 		return { entries: [], repair, damagedTail, size };
 	}
 
+	if (summary.projection) recordSessionSummary(resolvedFilePath, identity, summary.projection);
 	return { entries, repair, damagedTail, size, identity, recoverySource };
 }
 
@@ -934,6 +947,8 @@ export function writeSessionFile(
 	const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
 	const fd = openSync(temporaryPath, "wx", 0o600);
 	const identity = fstatSync(fd);
+	const summary = new SessionSummaryBuilder();
+	let writtenIdentity: BigIntStats | undefined;
 	try {
 		try {
 			assertNativeSessionTeamAvailable(filePath);
@@ -942,9 +957,11 @@ export function writeSessionFile(
 			for (const entry of entries) {
 				const stored = index.encode(entry);
 				index.register(stored);
+				summary.add(stored);
 				writeFileSync(fd, `${JSON.stringify(stored)}\n`);
 			}
 			fsyncSync(fd);
+			writtenIdentity = fstatSync(fd, { bigint: true });
 		} finally {
 			closeSync(fd);
 		}
@@ -972,6 +989,22 @@ export function writeSessionFile(
 		throw error;
 	} finally {
 		removeSessionWriteFile(temporaryPath, identity);
+	}
+	try {
+		// rename/link updates ctime, so verify the published inode before using its identity.
+		const publishedIdentity = statSync(filePath, { bigint: true });
+		if (
+			writtenIdentity &&
+			publishedIdentity.dev === writtenIdentity.dev &&
+			publishedIdentity.ino === writtenIdentity.ino &&
+			publishedIdentity.size === writtenIdentity.size &&
+			publishedIdentity.mtimeNs === writtenIdentity.mtimeNs &&
+			summary.projection
+		) {
+			recordSessionSummary(filePath, publishedIdentity, summary.projection);
+		}
+	} catch {
+		// A derived-cache/stat failure must not undo a successful source publication.
 	}
 }
 
@@ -1124,192 +1157,112 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 	}
 }
 
-type MessageWithContent = Exclude<Message, { role: "compaction" }>;
-
-function isMessageWithContent(message: AgentMessage): message is MessageWithContent {
-	return "content" in message;
-}
-
-function extractTextContent(message: MessageWithContent): string {
-	const content = message.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	return content
-		.filter((block): block is TextContent => block.type === "text")
-		.map((block) => block.text)
-		.join(" ");
-}
-
-function getMessageActivityTime(entry: SessionMessageEntry): number | undefined {
-	const message = entry.message;
-	if (!isMessageWithContent(message)) return undefined;
-	if (message.role !== "user" && message.role !== "assistant") return undefined;
-
-	const msgTimestamp = (message as { timestamp?: number }).timestamp;
-	if (typeof msgTimestamp === "number") {
-		return msgTimestamp;
-	}
-
-	const t = new Date(entry.timestamp).getTime();
-	return Number.isNaN(t) ? undefined : t;
-}
-
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
-		const stats = await stat(filePath);
-		let header: SessionHeader | null = null;
-		let messageCount = 0;
-		let firstMessage = "";
-		const allMessages: string[] = [];
-		let name: string | undefined;
-		let lastActivityTime: number | undefined;
-
+		const identity = await stat(filePath, { bigint: true });
+		const cached = getSessionSummary(filePath, identity);
+		if (cached) return sessionInfoFromProjection(filePath, cached, identity);
+		const summary = new SessionSummaryBuilder();
 		const rl = createInterface({
 			input: createReadStream(filePath, { encoding: "utf8" }),
 			crlfDelay: Infinity,
 		});
-
-		for await (const line of rl) {
-			const entry = parseSessionEntryLine(line);
-			if (!entry) continue;
-
-			if (!header) {
-				if (entry.type !== "session") return null;
-				header = entry;
-				continue;
+		try {
+			for await (const line of rl) {
+				const entry = parseSessionEntryLine(line);
+				if (entry) summary.add(entry);
 			}
-
-			// Extract session name (use latest, including explicit clears)
-			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
-			}
-
-			if (entry.type !== "message") continue;
-			messageCount++;
-
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
+		} finally {
+			rl.close();
 		}
-
-		if (!header) return null;
-
-		const cwd = typeof header.cwd === "string" ? header.cwd : "";
-		const parentSessionPath = header.parentSession;
-		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
-				: !Number.isNaN(headerTime)
-					? new Date(headerTime)
-					: stats.mtime;
-
-		return {
-			path: filePath,
-			id: header.id,
-			cwd,
-			name,
-			parentSessionPath,
-			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
-		};
+		// A concurrent rewrite/append must not publish mixed bytes under a new identity.
+		if (!sameSessionFileIdentity(identity, await stat(filePath, { bigint: true }))) return null;
+		if (!summary.projection) return null;
+		recordSessionSummary(filePath, identity, summary.projection, true);
+		return sessionInfoFromProjection(filePath, summary.projection, identity);
 	} catch {
 		return null;
 	}
 }
 
-export type SessionListProgress = (loaded: number, total: number) => void;
+export type SessionListProgress = (loaded: number, total: number, sessions?: readonly SessionInfo[]) => void;
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
 
 async function buildSessionInfosWithConcurrency(
 	files: string[],
-	onLoaded: () => void,
-): Promise<(SessionInfo | null)[]> {
-	const results: (SessionInfo | null)[] = new Array(files.length).fill(null);
+	onProgress?: SessionListProgress,
+	include: (info: SessionInfo) => boolean = () => true,
+): Promise<SessionInfo[]> {
+	const sessions: SessionInfo[] = [];
+	// Preserve discovery order for equal activity timestamps, independent of I/O completion order.
+	const fileOrder = new Map(files.map((file, index) => [file, index]));
+	const compare = (left: SessionInfo, right: SessionInfo): number =>
+		right.modified.getTime() - left.modified.getTime() || fileOrder.get(left.path)! - fileOrder.get(right.path)!;
 	const inFlight = new Set<Promise<void>>();
 	let nextIndex = 0;
+	let loaded = 0;
+	let publishedCount = 0;
+	let hasVisible = false;
+	let publishedVisible = false;
+	let lastPublication = 0;
+	onProgress?.(0, files.length, []);
 
 	const startNext = (): void => {
-		const index = nextIndex++;
-		const file = files[index];
-		if (!file) return;
-
+		const file = files[nextIndex++];
 		let task: Promise<void>;
 		task = buildSessionInfo(file)
 			.then((info) => {
-				results[index] = info;
-			})
-			.catch(() => {
-				results[index] = null;
+				if (info && include(info)) {
+					sessions.push(info);
+					hasVisible ||= info.isMetadataOnly !== true;
+				}
 			})
 			.finally(() => {
 				inFlight.delete(task);
-				onLoaded();
+				loaded++;
+				if (!onProgress) return;
+				const now = Date.now();
+				// First usable row is immediate; subsequent copies/sorts are batched.
+				const publish =
+					loaded === files.length ||
+					(hasVisible && !publishedVisible) ||
+					(sessions.length > publishedCount &&
+						(publishedCount === 0 || now - lastPublication >= 50 || sessions.length - publishedCount >= 32));
+				if (publish) {
+					const partial = [...sessions].sort(compare);
+					onProgress(loaded, files.length, partial);
+					publishedCount = sessions.length;
+					publishedVisible = hasVisible;
+					lastPublication = now;
+				} else onProgress(loaded, files.length);
 			});
 		inFlight.add(task);
 	};
 
-	while (nextIndex < files.length || inFlight.size > 0) {
-		while (nextIndex < files.length && inFlight.size < MAX_CONCURRENT_SESSION_INFO_LOADS) {
-			startNext();
+	try {
+		while (nextIndex < files.length || inFlight.size > 0) {
+			while (nextIndex < files.length && inFlight.size < MAX_CONCURRENT_SESSION_INFO_LOADS) startNext();
+			if (inFlight.size > 0) await Promise.race(inFlight);
 		}
-		if (inFlight.size > 0) {
-			await Promise.race(inFlight);
-		}
+	} finally {
+		flushSessionSummaries();
 	}
-
-	return results;
+	return sessions.sort(compare);
 }
 
 async function listSessionsFromDir(
 	dir: string,
 	onProgress?: SessionListProgress,
-	progressOffset = 0,
-	progressTotal?: number,
+	include?: (info: SessionInfo) => boolean,
 ): Promise<SessionInfo[]> {
-	const sessions: SessionInfo[] = [];
-	if (!existsSync(dir)) {
-		return sessions;
-	}
-
 	try {
-		const dirEntries = await readdir(dir);
-		const files = dirEntries.filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
-		const total = progressTotal ?? files.length;
-
-		let loaded = 0;
-		const results = await buildSessionInfosWithConcurrency(files, () => {
-			loaded++;
-			onProgress?.(progressOffset + loaded, total);
-		});
-		for (const info of results) {
-			if (info) {
-				sessions.push(info);
-			}
-		}
+		const files = (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+		return await buildSessionInfosWithConcurrency(files, onProgress, include);
 	} catch {
-		// Return empty list on error
+		onProgress?.(0, 0, []);
+		return [];
 	}
-
-	return sessions;
 }
 
 /**
@@ -1570,6 +1523,9 @@ export class SessionManager {
 		} finally {
 			closeSync(lockFd);
 			removeSessionWriteFile(lockPath, lockIdentity);
+		}
+		if (!reloaded && this.committedIdentity && committedIdentity) {
+			advanceSessionSummary(this.sessionFile, this.committedIdentity, committedIdentity, stored);
 		}
 		this.committedSize = committedSize;
 		this.committedIdentity = committedIdentity;
@@ -2231,11 +2187,11 @@ export class SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
 		const resolvedCwd = resolvePath(cwd);
-		const sessions = (await listSessionsFromDir(dir, onProgress)).filter(
+		return listSessionsFromDir(
+			dir,
+			onProgress,
 			(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),
 		);
-		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-		return sessions;
 	}
 
 	/**
@@ -2261,6 +2217,7 @@ export class SessionManager {
 
 		try {
 			if (!existsSync(sessionsDir)) {
+				progress?.(0, 0, []);
 				return [];
 			}
 			const entries = await readdir(sessionsDir, { withFileTypes: true });
@@ -2269,36 +2226,17 @@ export class SessionManager {
 				.map((entry) => join(sessionsDir, entry.name));
 
 			// Count total files first for accurate progress
-			let totalFiles = 0;
 			const dirFiles: string[][] = [];
 			for (const dir of dirs) {
 				try {
 					const files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
 					dirFiles.push(files.map((f) => join(dir, f)));
-					totalFiles += files.length;
 				} catch {
 					dirFiles.push([]);
 				}
 			}
 
-			// Process all files with progress tracking
-			let loaded = 0;
-			const sessions: SessionInfo[] = [];
-			const allFiles = dirFiles.flat();
-
-			const results = await buildSessionInfosWithConcurrency(allFiles, () => {
-				loaded++;
-				progress?.(loaded, totalFiles);
-			});
-
-			for (const info of results) {
-				if (info) {
-					sessions.push(info);
-				}
-			}
-
-			sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-			return sessions;
+			return await buildSessionInfosWithConcurrency(dirFiles.flat(), progress);
 		} catch {
 			return [];
 		}

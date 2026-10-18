@@ -255,6 +255,10 @@ pi --fork <path|id>    # Fork specific session file or ID into a new session
 
 Use `/session` in interactive mode to see the current session ID before reusing it with `--session <id>` or `--fork <id>`.
 
+`/resume` reuses a rebuildable summary/search index instead of rescanning unchanged session logs. The first load of unindexed or externally changed files still scans them; available rows appear while the rest load. Existing message-body fuzzy, quoted-phrase and `re:` searches are preserved.
+
+Initialization-only sessions are hidden by default, not deleted. Press `Ctrl+Shift+E` (`app.session.toggleEmptyFilter`, configurable) to show or hide them. Named sessions and sessions with messages, custom content or recovery state remain visible even when the ordinary message count is zero. See [session discovery and its index](docs/session-format.md#session-discovery-index).
+
 ### Branching
 
 **`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history preserved in a single file.

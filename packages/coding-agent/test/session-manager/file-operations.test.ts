@@ -13,9 +13,10 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { APP_NAME } from "../../src/config.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { APP_NAME, ENV_AGENT_DIR } from "../../src/config.ts";
 import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
+import { flushSessionSummaries } from "../../src/core/session-summary-index.ts";
 
 const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
 
@@ -242,6 +243,7 @@ describe("SessionManager custom flat session directory", () => {
 
 	beforeEach(() => {
 		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "session-test-")));
+		vi.stubEnv(ENV_AGENT_DIR, join(tempDir, "agent"));
 		projectA = join(tempDir, "project-a");
 		projectB = join(tempDir, "project-b");
 		mkdirSync(projectA, { recursive: true });
@@ -249,6 +251,8 @@ describe("SessionManager custom flat session directory", () => {
 	});
 
 	afterEach(() => {
+		flushSessionSummaries();
+		vi.unstubAllEnvs();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 

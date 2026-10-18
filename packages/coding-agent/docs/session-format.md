@@ -16,6 +16,18 @@ Sessions can be removed by deleting their `.jsonl` files under `~/.pi/agent/sess
 
 Pi also supports deleting sessions interactively from `/resume` (select a session and press `Ctrl+D`, then confirm). When available, pi uses the `trash` CLI to avoid permanent deletion.
 
+## Session Discovery Index
+
+The resume picker uses a disposable summary/search projection under the resolved agent directory's `session-index/v1/` (easy-pi default: `~/.epi/agent/session-index/v1/`). Each source file has one hashed-path cache entry. A hit requires the source device, inode, byte size, modification time and change time to match; the JSONL remains the authority. Missing, corrupt, outdated or unwritable indexes fall back to scanning the source. The first unindexed load can therefore still take time; available rows are shown while other files load.
+
+The projection preserves the existing user/assistant message-body search text, so fuzzy, quoted-phrase and `re:` searches do not become title-only searches. It does not store tool results, image data or recovery snapshots. **It can contain private conversation text**, so its files/directories are private. Removing this derived directory only makes later listings rebuild it; it does not remove or change sessions. Successful picker deletion also best-effort removes that session's search projection. Manual/external session deletion is detected on lookup, but is not an immediate cache-erasure operation.
+
+Known successful session appends update the in-process projection without rereading old history. Existing full-load and rewrite operations build projections while already reading their entries. Only files used by listing enable disk caching; an existing disk index keeps that interest enabled when a fresh writer loads and appends to the session, even without reopening the picker. Opening a never-listed native child alone does not create a persistent search index for it. Cache publication is atomic and best effort, not part of the session's durability or recovery protocol. External edits, truncation or file replacement cause a rebuild rather than a guessed append-only update. Very large search projections may deliberately bypass the bounded cache without truncating search results.
+
+The picker hides **initialization-only** sessions by default. These have no meaningful name or content beyond their header, model/thinking settings and known initialization metadata. Use `Ctrl+Shift+E` (`app.session.toggleEmptyFilter`) to show/hide them; no session file is deleted. This is not a `messageCount === 0` filter: named sessions, custom messages, checkpoints, labels, recovery state and unknown extension state are conservatively retained. The optional `SessionInfo.isMetadataOnly` flag classifies this state; SDK `list`/`listAll` still return all valid sessions. Progress callbacks may receive a third argument containing the currently available, scope-filtered `SessionInfo` rows; existing two-argument callbacks remain valid.
+
+When no first user text exists, the picker distinguishes `(not started)`, `(session state)` and `(no user text)` without changing the SDK's `firstMessage` fallback. If your terminal cannot distinguish `Ctrl+Shift+E`, remap `app.session.toggleEmptyFilter` in keybindings.
+
 ## Session Version
 
 Sessions have a version field in the header:
@@ -305,7 +317,7 @@ node --import ./scripts/source-resolver.mjs scripts/compact-session-recovery.mjs
 
 The command refuses existing outputs and in-place rewrites. It stages the copy, verifies every logical entry (including IDs, parent links, timestamps, recovery payloads and provenance), checks that the source has not changed, then publishes the output exclusively. Damaged history is rejected rather than silently discarded. Its report contains counts and byte sizes, not conversation content.
 
-The original is never replaced or deleted. The copy retains the original session ID and recovery authority: do not run both copies concurrently. Stop the old driver before choosing which copy to use; installation and backup removal remain explicit user actions. Space is not reclaimed until old files/backups and any open references to their inodes are released. This encoding reduces duplicate storage; it does not replace the `/resume` list's need for a separate metadata index.
+The original is never replaced or deleted. The copy retains the original session ID and recovery authority: do not run both copies concurrently. Stop the old driver before choosing which copy to use; installation and backup removal remain explicit user actions. Space is not reclaimed until old files/backups and any open references to their inodes are released. This encoding reduces duplicate storage; the separate [discovery index](#session-discovery-index) avoids rescanning unchanged logs for `/resume`.
 
 Codex service preference is now remembered in global settings, not session entries. Historical `customType: "codex-service-tier"` entries are retained but ignored for preference resolution and never enter model context; new toggles do not append them. Resuming, branching, forking or cloning uses the current global preference. Codex assistant messages may separately contain `serviceTier: { requested?, sent?, reported?, costEstimated? }`. `reported` is the raw upstream value; missing/null is unknown and never inferred from the preference or compatibility price estimate.
 

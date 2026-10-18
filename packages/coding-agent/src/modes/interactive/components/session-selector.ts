@@ -17,6 +17,7 @@ import {
 import { getAgentDir } from "../../../config.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
+import { forgetSessionSummary } from "../../../core/session-summary-index.ts";
 import {
 	assertSessionTeamDeletionUnchanged,
 	deleteAssociatedSessionTeam,
@@ -26,7 +27,7 @@ import {
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { getSelectListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText } from "./keybinding-hints.ts";
+import { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
@@ -73,12 +74,25 @@ class SessionSelectorHeader implements Component {
 	private statusMessage: { type: "info" | "error"; message: string } | null = null;
 	private statusTimeout: ReturnType<typeof setTimeout> | null = null;
 	private showRenameHint = false;
+	private showEmpty = false;
+	private keybindings: KeybindingsManager;
 
-	constructor(scope: SessionScope, sortMode: SortMode, nameFilter: NameFilter, requestRender: () => void) {
+	constructor(
+		scope: SessionScope,
+		sortMode: SortMode,
+		nameFilter: NameFilter,
+		requestRender: () => void,
+		keybindings: KeybindingsManager,
+	) {
 		this.scope = scope;
 		this.sortMode = sortMode;
 		this.nameFilter = nameFilter;
 		this.requestRender = requestRender;
+		this.keybindings = keybindings;
+	}
+
+	setShowEmpty(show: boolean): void {
+		this.showEmpty = show;
 	}
 
 	setScope(scope: SessionScope): void {
@@ -148,7 +162,7 @@ class SessionSelectorHeader implements Component {
 		let scopeText: string;
 		if (this.loading) {
 			const progressText = this.loadProgress ? `${this.loadProgress.loaded}/${this.loadProgress.total}` : "...";
-			scopeText = `${theme.fg("muted", "○ Current Folder | ")}${theme.fg("accent", `Loading ${progressText}`)}`;
+			scopeText = theme.fg("accent", `Loading ${progressText}`);
 		} else if (this.scope === "current") {
 			scopeText = `${theme.fg("accent", "◉ Current Folder")}${theme.fg("muted", " | ○ All")}`;
 		} else {
@@ -175,7 +189,14 @@ class SessionSelectorHeader implements Component {
 			const pathState = this.showPath ? "(on)" : "(off)";
 			const sep = theme.fg("muted", " · ");
 			const hint1 =
-				keyHint("tui.input.tab", "scope") + sep + theme.fg("muted", 're:<pattern> regex · "phrase" exact');
+				keyHint("tui.input.tab", "scope") +
+				sep +
+				rawKeyHint(
+					this.keybindings.getKeys("app.session.toggleEmptyFilter").join("/"),
+					`empty(${this.showEmpty ? "shown" : "hidden"})`,
+				) +
+				sep +
+				theme.fg("muted", 're:<pattern> regex · "phrase" exact');
 			const hint2Parts = [
 				keyHint("app.session.toggleSort", "sort"),
 				keyHint("app.session.toggleNamedFilter", "named"),
@@ -296,10 +317,13 @@ class SessionList implements Component, Focusable {
 	private allSessions: SessionInfo[] = [];
 	private filteredSessions: FlatSessionNode[] = [];
 	private selectedIndex: number = 0;
+	private selectionTouched = false;
 	private searchInput: Input;
 	private showCwd = false;
 	private sortMode: SortMode = "threaded";
 	private nameFilter: NameFilter = "all";
+	private showEmpty = false;
+	private loading = false;
 	private keybindings: KeybindingsManager;
 	private showPath = false;
 	private confirmingDeletePath: string | null = null;
@@ -310,6 +334,7 @@ class SessionList implements Component, Focusable {
 	public onToggleScope?: () => void;
 	public onToggleSort?: () => void;
 	public onToggleNameFilter?: () => void;
+	public onToggleEmptyFilter?: () => void;
 	public onTogglePath?: (showPath: boolean) => void;
 	public onDeleteConfirmationChange?: (path: string | null) => void;
 	public onDeleteSession?: (sessionPath: string) => Promise<void>;
@@ -366,6 +391,15 @@ class SessionList implements Component, Focusable {
 		this.filterSessions(this.searchInput.getValue());
 	}
 
+	setShowEmpty(show: boolean): void {
+		this.showEmpty = show;
+		this.filterSessions(this.searchInput.getValue());
+	}
+
+	setLoading(loading: boolean): void {
+		this.loading = loading;
+	}
+
 	setSessions(sessions: SessionInfo[], showCwd: boolean): void {
 		this.allSessions = sessions;
 		this.showCwd = showCwd;
@@ -373,9 +407,13 @@ class SessionList implements Component, Focusable {
 	}
 
 	private filterSessions(query: string): void {
+		const selectedPath = this.selectionTouched ? this.getSelectedSessionPath() : undefined;
 		const trimmed = query.trim();
-		const nameFiltered =
-			this.nameFilter === "all" ? this.allSessions : this.allSessions.filter((session) => hasSessionName(session));
+		const nameFiltered = this.allSessions.filter(
+			(session) =>
+				(this.showEmpty || session.isMetadataOnly !== true || hasSessionName(session)) &&
+				(this.nameFilter === "all" || hasSessionName(session)),
+		);
 
 		if (this.sortMode === "threaded" && !trimmed) {
 			// Threaded mode without search: show tree structure
@@ -391,7 +429,13 @@ class SessionList implements Component, Focusable {
 				ancestorContinues: [],
 			}));
 		}
-		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredSessions.length - 1));
+		const selectedIndex = this.filteredSessions.findIndex((node) => node.session.path === selectedPath);
+		this.selectedIndex =
+			selectedIndex >= 0
+				? selectedIndex
+				: this.selectionTouched
+					? Math.max(0, Math.min(this.selectedIndex, this.filteredSessions.length - 1))
+					: 0;
 	}
 
 	private setConfirmingDeletePath(path: string | null): void {
@@ -428,13 +472,21 @@ class SessionList implements Component, Focusable {
 
 		if (this.filteredSessions.length === 0) {
 			let emptyMessage: string;
-			if (this.nameFilter === "named") {
+			if (this.loading) {
+				emptyMessage = "  Loading sessions...";
+			} else if (this.nameFilter === "named") {
 				const toggleKey = keyText("app.session.toggleNamedFilter");
 				if (this.showCwd) {
 					emptyMessage = `  No named sessions found. Press ${toggleKey} to show all.`;
 				} else {
 					emptyMessage = `  No named sessions in current folder. Press ${toggleKey} to show all, or Tab to view all.`;
 				}
+			} else if (
+				!this.showEmpty &&
+				this.allSessions.some((session) => session.isMetadataOnly === true && !hasSessionName(session))
+			) {
+				const toggleKey = this.keybindings.getKeys("app.session.toggleEmptyFilter").join("/");
+				emptyMessage = `  No matching visible sessions. Press ${toggleKey} to show empty sessions.`;
 			} else if (this.showCwd) {
 				// "All" scope - no sessions anywhere that match filter
 				emptyMessage = "  No sessions found";
@@ -466,7 +518,12 @@ class SessionList implements Component, Focusable {
 
 			// Session display text (name or first message)
 			const hasName = !!session.name;
-			const displayText = session.name ?? session.firstMessage;
+			let displayText = session.name ?? session.firstMessage;
+			if (!hasSessionName(session) && session.firstMessage === "(no messages)") {
+				if (session.isMetadataOnly === true) displayText = "(not started)";
+				else if (session.messageCount > 0) displayText = "(no user text)";
+				else if (session.isMetadataOnly === false) displayText = "(session state)";
+			}
 			const normalizedMessage = displayText.replace(/[\x00-\x1f\x7f]/g, " ").trim();
 
 			// Right side: message count and age
@@ -538,6 +595,7 @@ class SessionList implements Component, Focusable {
 	}
 
 	handleInput(keyData: string): void {
+		this.selectionTouched = true;
 		const kb = getKeybindings();
 
 		// Handle delete confirmation state first - intercept all keys
@@ -570,6 +628,11 @@ class SessionList implements Component, Focusable {
 
 		if (this.keybindings.matches(keyData, "app.session.toggleNamedFilter")) {
 			this.onToggleNameFilter?.();
+			return;
+		}
+
+		if (this.keybindings.matches(keyData, "app.session.toggleEmptyFilter")) {
+			this.onToggleEmptyFilter?.();
 			return;
 		}
 
@@ -647,6 +710,15 @@ class SessionList implements Component, Focusable {
 
 type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[]>;
 
+type ScopeLoadState = {
+	seq: number;
+	sessions: SessionInfo[] | null;
+	loading: boolean;
+	progress: { loaded: number; total: number } | null;
+	pending: readonly SessionInfo[] | null;
+	timer: ReturnType<typeof setTimeout> | null;
+};
+
 /**
  * Delete a session file, trying the `trash` CLI first, then falling back to unlink
  */
@@ -692,6 +764,7 @@ async function deleteSessionFile(
  */
 export class SessionSelectorComponent extends Container implements Focusable {
 	handleInput(data: string): void {
+		if (this.disposed) return;
 		if (this.mode === "rename") {
 			const kb = getKeybindings();
 			if (kb.matches(data, "tui.select.cancel")) {
@@ -717,15 +790,16 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private scope: SessionScope = "current";
 	private sortMode: SortMode = "threaded";
 	private nameFilter: NameFilter = "all";
-	private currentSessions: SessionInfo[] | null = null;
-	private allSessions: SessionInfo[] | null = null;
+	private showEmpty = false;
+	private disposed = false;
+	private loads: Record<SessionScope, ScopeLoadState> = {
+		current: { seq: 0, sessions: null, loading: false, progress: null, pending: null, timer: null },
+		all: { seq: 0, sessions: null, loading: false, progress: null, pending: null, timer: null },
+	};
 	private currentSessionsLoader: SessionsLoader;
 	private allSessionsLoader: SessionsLoader;
 	private requestRender: () => void;
 	private renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
-	private currentLoading = false;
-	private allLoading = false;
-	private allLoadSeq = 0;
 
 	private mode: "list" | "rename" | "delete" | "deleting" = "list";
 	private deleteChoice?: SelectList;
@@ -782,8 +856,16 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.agentDir = options?.agentDir ?? getAgentDir();
 		this.currentSessionsLoader = currentSessionsLoader;
 		this.allSessionsLoader = allSessionsLoader;
-		this.requestRender = requestRender;
-		this.header = new SessionSelectorHeader(this.scope, this.sortMode, this.nameFilter, this.requestRender);
+		this.requestRender = () => {
+			if (!this.disposed) requestRender();
+		};
+		this.header = new SessionSelectorHeader(
+			this.scope,
+			this.sortMode,
+			this.nameFilter,
+			this.requestRender,
+			this.keybindings,
+		);
 		const renameSession = options?.renameSession;
 		this.renameSession = renameSession;
 		this.canRename = !!renameSession;
@@ -805,29 +887,35 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			void this.confirmRename(value);
 		};
 
-		// Ensure header status timeouts are cleared when leaving the selector
-		const clearStatusMessage = () => this.header.setStatusMessage(null);
 		this.sessionList.onSelect = (sessionPath) => {
-			clearStatusMessage();
+			if (this.disposed) return;
+			this.dispose();
 			onSelect(sessionPath);
 		};
 		this.sessionList.onCancel = () => {
-			clearStatusMessage();
+			if (this.disposed) return;
+			this.dispose();
 			onCancel();
 		};
 		this.sessionList.onExit = () => {
-			clearStatusMessage();
+			if (this.disposed) return;
+			this.dispose();
 			onExit();
 		};
 		this.sessionList.onToggleScope = () => this.toggleScope();
 		this.sessionList.onToggleSort = () => this.toggleSortMode();
 		this.sessionList.onToggleNameFilter = () => this.toggleNameFilter();
+		this.sessionList.onToggleEmptyFilter = () => {
+			this.showEmpty = !this.showEmpty;
+			this.header.setShowEmpty(this.showEmpty);
+			this.sessionList.setShowEmpty(this.showEmpty);
+			this.requestRender();
+		};
 		this.sessionList.onRenameSession = (sessionPath) => {
 			if (!renameSession) return;
-			if (this.scope === "current" && this.currentLoading) return;
-			if (this.scope === "all" && this.allLoading) return;
+			if (this.loads[this.scope].loading) return;
 
-			const sessions = this.scope === "all" ? (this.allSessions ?? []) : (this.currentSessions ?? []);
+			const sessions = this.loads[this.scope].sessions ?? [];
 			const session = sessions.find((s) => s.path === sessionPath);
 			this.enterRenameMode(sessionPath, session?.name);
 		};
@@ -925,9 +1013,11 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			assertSessionTeamDeletionUnchanged(selected);
 			const result = await deleteSessionFile(selected.path);
 			if (!result.ok) throw new Error(result.error ?? "Session file deletion failed; team deletion can be retried");
-			if (this.currentSessions)
-				this.currentSessions = this.currentSessions.filter((entry) => entry.path !== selected.path);
-			if (this.allSessions) this.allSessions = this.allSessions.filter((entry) => entry.path !== selected.path);
+			forgetSessionSummary(selected.path, { dev: selected.dev, ino: selected.ino });
+			if (this.disposed) return;
+			for (const state of Object.values(this.loads)) {
+				if (state.sessions) state.sessions = state.sessions.filter((entry) => entry.path !== selected.path);
+			}
 			this.header.setStatusMessage(
 				{
 					type: "info",
@@ -944,14 +1034,16 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				message: `Deletion incomplete: ${error instanceof Error ? error.message : String(error)}`,
 			});
 		} finally {
-			this.mode = "list";
-			this.buildBaseLayout(this.sessionList);
-			this.requestRender();
+			if (!this.disposed) {
+				this.mode = "list";
+				this.buildBaseLayout(this.sessionList);
+				this.requestRender();
+			}
 		}
 	}
 
 	private loadCurrentSessions(): void {
-		void this.loadScope("current", "initial");
+		void this.loadScope("current");
 	}
 
 	private enterRenameMode(sessionPath: string, currentName: string | undefined): void {
@@ -1006,68 +1098,90 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			await renameSession(target, next);
 			await this.refreshSessionsAfterMutation();
 		} finally {
-			this.exitRenameMode();
+			if (!this.disposed) this.exitRenameMode();
 		}
 	}
 
-	private async loadScope(scope: SessionScope, reason: "initial" | "refresh" | "toggle"): Promise<void> {
-		const showCwd = scope === "all";
+	private clearPendingLoad(state: ScopeLoadState): void {
+		if (state.timer !== null) clearTimeout(state.timer);
+		state.timer = null;
+		state.pending = null;
+	}
 
-		// Mark loading
-		if (scope === "current") {
-			this.currentLoading = true;
-		} else {
-			this.allLoading = true;
+	private dispose(): void {
+		this.disposed = true;
+		this.header.setStatusMessage(null);
+		for (const state of Object.values(this.loads)) {
+			state.seq++;
+			this.clearPendingLoad(state);
 		}
+	}
 
-		const seq = scope === "all" ? ++this.allLoadSeq : undefined;
-		this.header.setScope(scope);
-		this.header.setLoading(true);
+	private showScope(): void {
+		const state = this.loads[this.scope];
+		this.header.setScope(this.scope);
+		this.header.setLoading(state.loading);
+		if (state.progress) this.header.setProgress(state.progress.loaded, state.progress.total);
+		this.sessionList.setLoading(state.loading);
+		this.sessionList.setSessions(state.sessions ?? [], this.scope === "all");
 		this.requestRender();
+	}
 
-		const onProgress = (loaded: number, total: number) => {
-			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
-			this.header.setProgress(loaded, total);
-			this.requestRender();
+	private publishProgress(scope: SessionScope): void {
+		const state = this.loads[scope];
+		const pending = state.pending;
+		state.pending = null;
+		if (pending !== null) state.sessions = [...pending];
+		if (scope !== this.scope) return;
+		if (state.progress) this.header.setProgress(state.progress.loaded, state.progress.total);
+		if (pending !== null) this.sessionList.setSessions(state.sessions ?? [], scope === "all");
+		this.requestRender();
+	}
+
+	private async loadScope(scope: SessionScope): Promise<void> {
+		if (this.disposed) return;
+		const state = this.loads[scope];
+		this.clearPendingLoad(state);
+		const seq = ++state.seq;
+		state.loading = true;
+		state.progress = null;
+		if (scope === this.scope) this.showScope();
+
+		const isActive = () => !this.disposed && seq === state.seq && state.loading;
+		const onProgress: SessionListProgress = (loaded, total, sessions?: readonly SessionInfo[]) => {
+			if (!isActive()) return;
+			state.progress = { loaded, total };
+			if (sessions !== undefined) state.pending = sessions;
+			// Publish the first result immediately, then coalesce bursts rather than
+			// rebuilding the session tree for every file in a large directory.
+			if (state.timer !== null) return;
+			this.publishProgress(scope);
+			state.timer = setTimeout(() => {
+				state.timer = null;
+				if (isActive()) this.publishProgress(scope);
+			}, 50);
 		};
 
 		try {
 			const sessions = await (scope === "current"
 				? this.currentSessionsLoader(onProgress)
 				: this.allSessionsLoader(onProgress));
-
-			if (scope === "current") {
-				this.currentSessions = sessions;
-				this.currentLoading = false;
-			} else {
-				this.allSessions = sessions;
-				this.allLoading = false;
-			}
-
-			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
-
-			this.header.setLoading(false);
-			this.sessionList.setSessions(sessions, showCwd);
-			this.requestRender();
+			if (!isActive()) return;
+			this.clearPendingLoad(state);
+			state.sessions = sessions;
+			state.loading = false;
+			state.progress = null;
+			if (scope === this.scope) this.showScope();
 		} catch (err) {
-			if (scope === "current") {
-				this.currentLoading = false;
-			} else {
-				this.allLoading = false;
-			}
-
+			if (!isActive()) return;
+			this.publishProgress(scope);
+			this.clearPendingLoad(state);
+			state.loading = false;
+			state.progress = null;
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
-
+			this.showScope();
 			const message = err instanceof Error ? err.message : String(err);
-			this.header.setLoading(false);
 			this.header.setStatusMessage({ type: "error", message: `Failed to load sessions: ${message}` }, 4000);
-
-			if (reason === "initial") {
-				this.sessionList.setSessions([], showCwd);
-			}
 			this.requestRender();
 		}
 	}
@@ -1088,32 +1202,31 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	}
 
 	private async refreshSessionsAfterMutation(): Promise<void> {
-		await this.loadScope(this.scope, "refresh");
+		if (this.disposed) return;
+		// A rename/delete invalidates both projections, including inactive requests.
+		for (const [scope, state] of Object.entries(this.loads)) {
+			state.seq++;
+			this.clearPendingLoad(state);
+			state.loading = false;
+			state.progress = null;
+			if (scope !== this.scope) state.sessions = null;
+		}
+		await this.loadScope(this.scope);
 	}
 
 	private toggleScope(): void {
-		if (this.scope === "current") {
-			this.scope = "all";
-			this.header.setScope(this.scope);
-
-			if (this.allSessions !== null) {
-				this.header.setLoading(false);
-				this.sessionList.setSessions(this.allSessions, true);
-				this.requestRender();
-				return;
-			}
-
-			if (!this.allLoading) {
-				void this.loadScope("all", "toggle");
-			}
-			return;
+		if (this.disposed) return;
+		this.scope = this.scope === "current" ? "all" : "current";
+		const state = this.loads[this.scope];
+		if (state.pending !== null) {
+			state.sessions = [...state.pending];
+			state.pending = null;
 		}
-
-		this.scope = "current";
-		this.header.setScope(this.scope);
-		this.header.setLoading(this.currentLoading);
-		this.sessionList.setSessions(this.currentSessions ?? [], false);
-		this.requestRender();
+		if (state.sessions === null && !state.loading) {
+			void this.loadScope(this.scope);
+		} else {
+			this.showScope();
+		}
 	}
 
 	getSessionList(): SessionList {
