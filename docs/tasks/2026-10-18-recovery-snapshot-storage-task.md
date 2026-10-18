@@ -3,7 +3,7 @@
 - Created: 2026-10-18
 - Workspace: /Users/w/Projects/easy-pi/pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户在恢复快照重复存储分析后授权“执行整改”。
 
 <!-- task-doc-section:background-goal -->
@@ -120,9 +120,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-004 — 独立审查、全仓检查与提交
+### [x] T-004 — 独立审查、全仓检查与提交
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 确认数据安全与集成质量后提交任务专属变更。
 - Inputs and prerequisites: T-001 至 T-003。
@@ -137,7 +137,7 @@
   - 所有必需测试/check 通过，无未处理的数据完整性问题，worktree 不含本任务遗留。
 - Verification method:
   - 定向 Vitest、npm run check、任务文档校验、git diff/status。
-- Validation evidence: root定向18 files/297 passed；最终CLI5/5 passed；`npm run check` exit0（1611 files，No fixes applied，含tsc、依赖/导入/锁文件/browser-smoke检查）；git diff --check通过，修改范围仅本任务11个文件。审查发现已修复，LEARNS新增且root回读核验。临时真实副本已清理；待执行任务专属Git提交。
+- Validation evidence: root定向18 files/297 passed；最终CLI5/5 passed；`npm run check` exit0（1611 files，No fixes applied，含tsc、依赖/导入/锁文件/browser-smoke检查）；git diff --check通过，修改范围仅本任务11个文件。审查发现已修复，LEARNS新增且root回读核验。临时真实副本已清理；代码与文档已提交 `5a8affba5 fix(coding-agent): deduplicate recovery snapshot fields`，提交后worktree clean。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -207,11 +207,12 @@
 - 2026-10-18: root独立相关14文件/241测试通过；真实副本逐记录验证与512MiB heap加载通过，T-003验收。独立审查指出CLI硬链接发布顺序问题，调用顺序回归先红后绿，CLI5/5通过，T-005验收；已委托专属LEARNS收尾记录。
 - 2026-10-18: export实现者报告6/6通过；root已审阅最小方法diff与完整新回归，正在合并运行18文件定向套件。
 - 2026-10-18: root组合定向18文件/297测试通过，T-006验收；T-004开始全仓检查与提交收尾。LEARNS由专属代理新增发布顺序lesson，待root复核。
-- 2026-10-18: npm run check完整通过（1611文件，无改写）；root复核LEARNS、导出/迁移文档与最终diff，CLI5项最终复测通过。验证用1.27GB临时副本及脚本已清理；原始用户文件未改。下一步仅显式暂存11个本任务文件并提交。
+- 2026-10-18: npm run check完整通过（1611文件，无改写）；root复核LEARNS、导出/迁移文档与最终diff，CLI5项最终复测通过。验证用1.27GB临时副本及脚本已清理；原始用户文件未改。
+- 2026-10-18: 显式暂存11个本任务文件，代码提交 `5a8affba5` 成功并确认worktree clean。T-004完成；本次仅更新任务最终状态作独立文档收尾。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: 实现、独立审查、18文件297项Vitest、5项CLI、完整check及真实副本逐记录验证均通过；T-004仅剩Git提交。
+- Result: passed
+- Evidence: T-001至T-006全部完成；实现、独立审查、18文件297项Vitest、5项CLI、完整check及真实副本逐记录验证均通过；代码提交5a8affba5，任务文档校验通过。
 - Limitations: 未运行build/全量测试/真实模型API或物理断电实验；不含用户原始会话原位切换与旧备份清理。512MiB约束仅为V8堆而非进程RSS；体积为逻辑文件字节。新驱动需重启后加载代码，旧会话须显式非破坏迁移才能缩小。
