@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -142,10 +142,12 @@ import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager 
 import {
 	buildSessionContext,
 	CURRENT_SESSION_VERSION,
+	type FileEntry,
 	getLatestCompactionEntry,
 	reclaimSessionAppendLock,
 	type SessionHeader,
 	sessionEntryToContextMessages,
+	writeSessionFile,
 } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { buildSkillPromptExpansion } from "./skill-invocations.ts";
@@ -5414,17 +5416,21 @@ export class AgentSession {
 		};
 
 		const branchEntries = this.sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
+		function* exportEntries(): Generator<FileEntry> {
+			yield header;
+			// Re-chain lazily so decoded recovery snapshots are not retained together.
+			let prevId: string | null = null;
+			for (const entry of branchEntries) {
+				yield { ...entry, parentId: prevId };
+				prevId = entry.id;
+			}
 		}
 
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
+		// Preserve an existing symbolic link; realpath also rejects dangling links.
+		const targetPath = lstatSync(filePath, { throwIfNoEntry: false })?.isSymbolicLink()
+			? realpathSync(filePath)
+			: filePath;
+		writeSessionFile(targetPath, exportEntries());
 		return filePath;
 	}
 

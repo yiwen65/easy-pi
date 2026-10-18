@@ -278,6 +278,35 @@ Version-1 `pi-compaction-diagnostics` entries remain outside provider context, b
 
 Native `pi-task-recovery` entries copied into a new fork/clone carry an optional top-level `sourceSessionId`. They remain historical evidence, including their queued inputs and unresolved effects, but are ignored as executable recovery state in the new session. Reopening the fork does not revive the copied task.
 
+#### Recovery field storage
+
+Recovery records can include a **physical-only** top-level encoding marker:
+
+```json
+{"type":"custom","customType":"pi-task-recovery","id":"snapshot2","parentId":"snapshot1","timestamp":"2026-01-01T00:00:01.000Z","data":{"version":2,"id":"task1","status":"running"},"recoveryStorage":{"version":1,"refs":{"prompt":{"entryId":"snapshot1","sha256":"<64 lowercase hex digits>"}}}}
+```
+
+This abbreviated example illustrates the encoding, not a complete executable task state. Only `prompt`, `systemPrompt`, and `suspendedTasks` may be referenced. The referenced field is omitted from physical `data`; it must exist inline in an earlier recovery record in the same file. The digest is SHA-256 of the field's UTF-8 `JSON.stringify` representation. References are direct, never chains. Fields smaller than 512 bytes, or whose references would cost more space, remain inline.
+
+`SessionManager`, `loadEntriesFromFile()` and `parseSessionEntries()` return the complete logical `data` and omit `recoveryStorage`. Raw `JSON.parse` consumers see the storage representation instead. Missing, malformed, unsupported-version or mismatched references fail loading rather than authorizing tool replay. Content sharing does not share execution authority: branch selection, receipts and `sourceSessionId` remain authoritative.
+
+New appends reuse committed fields; merely opening an old file does not rewrite it. Repair, clone, fork and JSONL export re-encode their selected logical entries into a self-contained file. No sidecar or global object store is required. JSONL export writes records incrementally; normal existing output files can be atomically replaced, existing symbolic links resolve to their target, and multiply hard-linked output files are refused.
+
+Restart old drivers before using reference-encoded files. Older readers do not understand this storage representation. The task-state schema version and session header version are unchanged.
+
+#### Non-destructive recovery-log compaction
+
+From a source checkout, create a smaller **same-identity copy** of a closed/quiescent session:
+
+```bash
+node --import ./scripts/source-resolver.mjs scripts/compact-session-recovery.mjs \
+  /path/to/source.jsonl /path/outside-live-sessions/compacted.jsonl
+```
+
+The command refuses existing outputs and in-place rewrites. It stages the copy, verifies every logical entry (including IDs, parent links, timestamps, recovery payloads and provenance), checks that the source has not changed, then publishes the output exclusively. Damaged history is rejected rather than silently discarded. Its report contains counts and byte sizes, not conversation content.
+
+The original is never replaced or deleted. The copy retains the original session ID and recovery authority: do not run both copies concurrently. Stop the old driver before choosing which copy to use; installation and backup removal remain explicit user actions. Space is not reclaimed until old files/backups and any open references to their inodes are released. This encoding reduces duplicate storage; it does not replace the `/resume` list's need for a separate metadata index.
+
 Codex service preference is now remembered in global settings, not session entries. Historical `customType: "codex-service-tier"` entries are retained but ignored for preference resolution and never enter model context; new toggles do not append them. Resuming, branching, forking or cloning uses the current global preference. Codex assistant messages may separately contain `serviceTier: { requested?, sent?, reported?, costEstimated? }`. `reported` is the raw upstream value; missing/null is unknown and never inferred from the preference or compatibility price estimate.
 
 ### CustomMessageEntry

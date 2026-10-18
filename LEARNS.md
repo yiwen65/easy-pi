@@ -638,3 +638,12 @@
 - Correct approach: 进程组独立 TERM→KILL/收敛；transport 仍要在有界预算内等待 Child 的 stdio close，确认两者后才结束；看到 ESRCH 后不再向旧身份发信号。
 - Prevention: 除 stubborn grandchild 测试外，用受控 Child/PassThrough 制造上述事件顺序，断言 onMessage 先于 onClose、pending client 收到结果，以及不关闭 pipe 时有界失败。
 - Verified by: 2026-10-18 `packages/mcp/test/stdio-close-order.test.ts` 三种末尾响应由0/3成功变为3/3；HTTP/stdio/client 邻域70项通过，未据此宣称逃逸进程组或其他 OS 已验证。
+
+## Session JSONL 独占复制发布——删除 staging 硬链接后再同步目录
+
+- Wrong approach: `scripts/compact-session-recovery.mjs` 初版按 `link(staging, output) → fsync(directory) → finally unlink(staging)` 发布验证副本。
+- Why it failed: 同步的是仍有两个名字的目录状态；随后 unlink 未同步，即使函数成功返回，断电后仍可能保留两个硬链接，而 `SessionManager.open` 明确拒绝 `nlink > 1`。
+- Recognition signal: 正常返回时只剩 output 不足以证明耐久顺序；旧版调用顺序回归记录为 `[directory-sync, directory-sync, staging-unlink]`，最后一次目录同步早于 staging 删除。
+- Correct approach: `link → 按 inode 身份移除 staging → fsync(output 所在目录)`，同步最终单链接状态；finally 仅作失败清理兜底，不能承载成功发布必需的持久化步骤。
+- Prevention: Session JSONL 的 hard-link 独占发布同时检查文件内容同步、最终目录状态和 reader 的链接数限制；回归断言最后一次目录 fsync 晚于 staging unlink，不能只检查 exit0 或最终文件列表。
+- Verified by: 2026-10-18 独立审查指出顺序缺口；协调者记录 `scripts/compact-session-recovery.test.mjs` 的发布顺序测试先红后绿，`node --test scripts/compact-session-recovery.test.mjs` 5/5 通过。证据限于源码持久化顺序与调用顺序回归，未做物理断电测试。

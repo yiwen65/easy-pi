@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type ImageContent, type Message, type TextContent, type Usage, uuidv7 } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import {
+	type BigIntStats,
 	closeSync,
 	constants,
 	createReadStream,
@@ -37,6 +38,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import { isRecoveryEntry, RecoveryStorageIndex } from "./recovery-storage.ts";
 import type { TaskRecoveryState } from "./task-recovery.ts";
 import { assertNativeSessionTeamAvailable, nativeSessionTeamPaths } from "./tool-output-storage-session.ts";
 
@@ -324,18 +326,15 @@ export function migrateSessionEntries(entries: FileEntry[]): void {
 /** Exported for compaction.test.ts */
 export function parseSessionEntries(content: string): FileEntry[] {
 	const entries: FileEntry[] = [];
-	const lines = content.trim().split("\n");
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		try {
-			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
-		} catch {
-			// Skip malformed lines
-		}
+	const source = new RecoveryDataSource();
+	for (const line of content.trim().split("\n")) {
+		const entry = parseSessionEntryLine(line);
+		if (!entry) continue;
+		// Only syntax errors are skippable. Invalid storage references fail closed.
+		if (isRecoveryEntry(entry)) deferRecoveryData(entry, source, line);
+		else source.index.register(entry);
+		entries.push(entry);
 	}
-
 	return entries;
 }
 
@@ -632,35 +631,43 @@ interface TaskRecoveryResultReceipt {
 
 const recoveryResultReceipts = new WeakMap<CustomEntry, readonly TaskRecoveryResultReceipt[]>();
 
+function collectRecoveryReceipts(tasks: Array<Partial<TaskRecoveryState> | undefined>): TaskRecoveryResultReceipt[] {
+	const receipts: TaskRecoveryResultReceipt[] = [];
+	for (const task of tasks) {
+		if (!task || !Array.isArray(task.tools)) continue;
+		const assistantEntryId = task.step?.assistantEntryId;
+		if (typeof assistantEntryId !== "string" || !assistantEntryId) continue;
+		for (const tool of task.tools) {
+			if (
+				typeof tool?.resultEntryId === "string" &&
+				tool.resultEntryId &&
+				typeof tool.call?.id === "string" &&
+				typeof tool.call.name === "string"
+			) {
+				receipts.push({
+					assistantEntryId,
+					resultEntryId: tool.resultEntryId,
+					callId: tool.call.id,
+					toolName: tool.call.name,
+				});
+			}
+		}
+	}
+	return receipts;
+}
+
 /** Only ownership IDs, never tool arguments, results, or other snapshot payloads. */
 export function getTaskRecoveryResultReceipts(entry: CustomEntry): readonly TaskRecoveryResultReceipt[] {
 	const cached = recoveryResultReceipts.get(entry);
 	if (cached) return cached;
-	const receipts: TaskRecoveryResultReceipt[] = [];
 	const state = entry.data as TaskRecoveryState | undefined;
-	if (state && Array.isArray(state.tools)) {
-		const suspended = Array.isArray(state.suspendedTasks) ? state.suspendedTasks.map((task) => task?.state) : [];
-		for (const task of [state, ...suspended]) {
-			if (!task || !Array.isArray(task.tools)) continue;
-			const assistantEntryId = task.step?.assistantEntryId;
-			if (typeof assistantEntryId !== "string" || !assistantEntryId) continue;
-			for (const tool of task.tools) {
-				if (
-					typeof tool?.resultEntryId === "string" &&
-					tool.resultEntryId &&
-					typeof tool.call?.id === "string" &&
-					typeof tool.call.name === "string"
-				) {
-					receipts.push({
-						assistantEntryId,
-						resultEntryId: tool.resultEntryId,
-						callId: tool.call.id,
-						toolName: tool.call.name,
-					});
-				}
-			}
-		}
-	}
+	const receipts =
+		state && Array.isArray(state.tools)
+			? collectRecoveryReceipts([
+					state,
+					...(Array.isArray(state.suspendedTasks) ? state.suspendedTasks.map((task) => task?.state) : []),
+				])
+			: [];
 	recoveryResultReceipts.set(entry, receipts);
 	return receipts;
 }
@@ -668,20 +675,47 @@ export function getTaskRecoveryResultReceipts(entry: CustomEntry): readonly Task
 /** Keep the original inode alive across repair/rename/unlink while any entry still refers to it. */
 const recoverySourceFinalizer = new FinalizationRegistry<number>((fd) => closeSync(fd));
 
-class RecoveryDataSource {
-	private readonly fd: number;
+type RecoveryLocation = { offset: number; length: number } | string;
 
-	constructor(fd: number) {
+class RecoveryDataSource {
+	readonly index = new RecoveryStorageIndex();
+	private readonly fd?: number;
+	private readonly locations = new Map<string, RecoveryLocation>();
+	private readonly suspendedReceipts = new Map<string, readonly TaskRecoveryResultReceipt[]>();
+
+	constructor(fd?: number) {
 		this.fd = fd;
-		recoverySourceFinalizer.register(this, fd, this);
+		if (fd !== undefined) recoverySourceFinalizer.register(this, fd, this);
 	}
 
 	close(): void {
 		recoverySourceFinalizer.unregister(this);
-		closeSync(this.fd);
+		if (this.fd !== undefined) closeSync(this.fd);
 	}
 
-	read(offset: number, length: number): unknown {
+	add(entry: CustomEntry, location: RecoveryLocation): void {
+		const refs = this.index.register(entry);
+		const state = entry.data as TaskRecoveryState | undefined;
+		const suspended = refs.suspendedTasks
+			? this.suspendedReceipts.get(refs.suspendedTasks.entryId)!
+			: collectRecoveryReceipts(
+					Array.isArray(state?.suspendedTasks) ? state.suspendedTasks.map((task) => task?.state) : [],
+				);
+		// Reuse only the tiny projection of referenced suspended tasks, never their payload.
+		this.suspendedReceipts.set(entry.id, suspended);
+		recoveryResultReceipts.set(
+			entry,
+			state && Array.isArray(state.tools) ? [...collectRecoveryReceipts([state]), ...suspended] : [],
+		);
+		this.locations.set(entry.id, location);
+	}
+
+	private readEntry(id: string): CustomEntry {
+		const location = this.locations.get(id);
+		if (location === undefined) throw new Error(`Missing task recovery backing record: ${id}`);
+		if (typeof location === "string") return JSON.parse(location) as CustomEntry;
+		if (this.fd === undefined) throw new Error("Missing task recovery backing file");
+		const { offset, length } = location;
 		const buffer = Buffer.allocUnsafe(length);
 		let read = 0;
 		while (read < length) {
@@ -689,41 +723,56 @@ class RecoveryDataSource {
 			if (bytes === 0) throw new Error("Task recovery backing record was truncated");
 			read += bytes;
 		}
-		return (JSON.parse(buffer.toString("utf8")) as CustomEntry).data;
+		const entry = JSON.parse(buffer.toString("utf8")) as CustomEntry;
+		if (!isRecoveryEntry(entry) || entry.id !== id) throw new Error("Task recovery backing record identity changed");
+		return entry;
+	}
+
+	read(id: string): unknown {
+		return this.index.decode(this.readEntry(id), (sourceId) => this.readEntry(sourceId));
 	}
 }
 
-function isRecoveryEntry(entry: FileEntry): entry is CustomEntry {
-	return entry.type === "custom" && entry.customType === "pi-task-recovery";
-}
-
-function deferRecoveryData(entry: CustomEntry, source: RecoveryDataSource, offset: number, length: number): void {
-	// Receipt lookup is a frequent branch-wide scan; retain its tiny projection
-	// before dropping the payload so it never has to decode historical snapshots.
-	getTaskRecoveryResultReceipts(entry);
-	// Recovery snapshots are immutable journal facts. Do not cache their decoded
-	// payloads: walking the tree must not retain every historical full snapshot.
+function deferRecoveryData(entry: CustomEntry, source: RecoveryDataSource, location: RecoveryLocation): void {
+	source.add(entry, location);
+	// Physical references must never leak through logical exports/spreads.
+	if ("recoveryStorage" in entry) delete entry.recoveryStorage;
+	const id = entry.id;
+	// Recovery snapshots are immutable journal facts. Do not cache their decoded payloads.
 	Object.defineProperty(entry, "data", {
 		configurable: true,
 		enumerable: true,
-		get: () => source.read(offset, length),
+		get: () => source.read(id),
 	});
+}
+
+function sameSessionFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
+	);
 }
 
 function readSessionFile(filePath: string): {
 	entries: FileEntry[];
 	repair: boolean;
+	damagedTail: boolean;
 	size: number;
+	identity?: BigIntStats;
 	recoverySource?: RecoveryDataSource;
 } {
 	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return { entries: [], repair: false, size: 0 };
+	if (!existsSync(resolvedFilePath)) return { entries: [], repair: false, damagedTail: false, size: 0 };
 
 	const entries: FileEntry[] = [];
 	let damagedTail = false;
 	let repair = false;
 	const fd = openSync(resolvedFilePath, "r");
-	const size = fstatSync(fd).size;
+	const identity = fstatSync(fd, { bigint: true });
+	const size = Number(identity.size);
 	let recoverySource: RecoveryDataSource | undefined;
 	let offset = 0;
 	const acceptLine = (bytes: Buffer): void => {
@@ -736,7 +785,9 @@ function readSessionFile(filePath: string): {
 		if (entry) {
 			if (isRecoveryEntry(entry)) {
 				recoverySource ??= new RecoveryDataSource(fd);
-				deferRecoveryData(entry, recoverySource, lineOffset, bytes.length);
+				deferRecoveryData(entry, recoverySource, { offset: lineOffset, length: bytes.length });
+			} else if ("recoveryStorage" in entry) {
+				throw new Error("Invalid task recovery storage: metadata on a non-recovery entry");
 			}
 			entries.push(entry);
 		} else damagedTail = true;
@@ -766,7 +817,8 @@ function readSessionFile(filePath: string): {
 		}
 		if (pendingLength) acceptLine(Buffer.concat(chunks, pendingLength));
 		repair = damagedTail || pendingLength > 0;
-		if (fstatSync(fd).size !== size) throw new Error(`Session changed while loading: ${resolvedFilePath}`);
+		if (!sameSessionFileIdentity(fstatSync(fd, { bigint: true }), identity))
+			throw new Error(`Session changed while loading: ${resolvedFilePath}`);
 	} catch (error) {
 		if (recoverySource) recoverySource.close();
 		else closeSync(fd);
@@ -775,14 +827,14 @@ function readSessionFile(filePath: string): {
 	if (!recoverySource) closeSync(fd);
 
 	// Validate session header
-	if (entries.length === 0) return { entries, repair, size };
+	if (entries.length === 0) return { entries, repair, damagedTail, size };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		recoverySource?.close();
-		return { entries: [], repair, size };
+		return { entries: [], repair, damagedTail, size };
 	}
 
-	return { entries, repair, size, recoverySource };
+	return { entries, repair, damagedTail, size, identity, recoverySource };
 }
 
 function ensureSessionDirectory(directory: string): void {
@@ -869,7 +921,12 @@ function removeSessionWriteFile(path: string, identity: { dev: number; ino: numb
 }
 
 /** Publish a fully synced replacement; readers see either the old file or the complete new file. */
-function writeSessionFile(filePath: string, entries: FileEntry[], exclusive = false): void {
+export function writeSessionFile(
+	filePath: string,
+	entries: Iterable<FileEntry>,
+	exclusive = false,
+	beforePublish?: (temporaryPath: string) => void,
+): void {
 	assertNativeSessionTeamAvailable(filePath);
 	if (existsSync(filePath) && statSync(filePath).nlink > 1) {
 		throw new Error(`Session files with multiple hard links are unsupported: ${filePath}`);
@@ -880,7 +937,13 @@ function writeSessionFile(filePath: string, entries: FileEntry[], exclusive = fa
 	try {
 		try {
 			assertNativeSessionTeamAvailable(filePath);
-			for (const entry of entries) writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			// This dictionary is private to the unpublished replacement, never the live writer.
+			const index = new RecoveryStorageIndex();
+			for (const entry of entries) {
+				const stored = index.encode(entry);
+				index.register(stored);
+				writeFileSync(fd, `${JSON.stringify(stored)}\n`);
+			}
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -889,10 +952,13 @@ function writeSessionFile(filePath: string, entries: FileEntry[], exclusive = fa
 		removeSessionWriteFile(temporaryPath, identity);
 		throw error;
 	}
+	let published = false;
 	try {
+		beforePublish?.(temporaryPath);
 		assertNativeSessionTeamAvailable(filePath);
 		if (exclusive) {
 			linkSync(temporaryPath, filePath);
+			published = true;
 			removeSessionWriteFile(temporaryPath, identity);
 		} else renameSync(temporaryPath, filePath);
 		const directoryFd = openSync(dirname(filePath), "r");
@@ -901,8 +967,42 @@ function writeSessionFile(filePath: string, entries: FileEntry[], exclusive = fa
 		} finally {
 			closeSync(directoryFd);
 		}
+	} catch (error) {
+		if (published) removeSessionWriteFile(filePath, identity);
+		throw error;
 	} finally {
 		removeSessionWriteFile(temporaryPath, identity);
+	}
+}
+
+/** Non-destructive, same-identity rewrite. Unlike a fork, this does not change execution authority. */
+export function rewriteSessionRecoveryFile(sourcePath: string, destinationPath: string): void {
+	const source = resolvePath(sourcePath);
+	const destination = resolvePath(destinationPath);
+	if (source === destination || existsSync(destination))
+		throw new Error("Recovery rewrite destination must not exist");
+	const identity = statSync(source, { bigint: true });
+	if (!identity.isFile()) throw new Error("Recovery rewrite source is not a file");
+	const loaded = readSessionFile(source);
+	try {
+		if (!loaded.entries.length || loaded.damagedTail)
+			throw new Error("Recovery rewrite source is invalid or has a damaged tail");
+		validateSessionGraph(loaded.entries);
+		writeSessionFile(destination, loaded.entries, true, (temporaryPath) => {
+			const verified = readSessionFile(temporaryPath);
+			try {
+				if (verified.repair || verified.entries.length !== loaded.entries.length)
+					throw new Error("Recovery rewrite validation failed");
+				validateSessionGraph(verified.entries);
+			} finally {
+				verified.recoverySource?.close();
+			}
+			const current = statSync(source, { bigint: true });
+			if (!sameSessionFileIdentity(current, identity))
+				throw new Error("Recovery rewrite source changed before publication");
+		});
+	} finally {
+		loaded.recoverySource?.close();
 	}
 }
 
@@ -1230,6 +1330,7 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private committedSize = 0;
+	private committedIdentity?: BigIntStats;
 	private repairPending = false;
 	private recoverySource?: RecoveryDataSource;
 	private fileEntries: FileEntry[] = [];
@@ -1308,6 +1409,11 @@ export class SessionManager {
 		}
 		this.sessionFile = this.persist ? realpathSync(path) : path;
 		this.committedSize = this.persist ? (hadEntries ? loaded.size : statSync(path).size) : 0;
+		this.committedIdentity = this.persist
+			? hadEntries
+				? loaded.identity
+				: statSync(path, { bigint: true })
+			: undefined;
 		this.repairPending = repairPending;
 		this.recoverySource = loaded.recoverySource;
 		this.fileEntries = entries;
@@ -1335,6 +1441,7 @@ export class SessionManager {
 		this.sessionId = sessionId;
 		this.sessionFile = sessionFile ? realpathSync(sessionFile) : undefined;
 		this.committedSize = sessionFile ? statSync(sessionFile).size : 0;
+		this.committedIdentity = sessionFile ? statSync(sessionFile, { bigint: true }) : undefined;
 		this.repairPending = false;
 		this.recoverySource = undefined;
 		this.fileEntries = [header];
@@ -1390,39 +1497,45 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	_persist(entry: SessionEntry): { offset: number; length: number } | undefined {
+	_persist(entry: SessionEntry): { entry: SessionEntry; reloaded?: FileEntry[] } | undefined {
 		if (!this.persist || !this.sessionFile) return;
 		assertNativeSessionTeamAvailable(this.sessionFile);
-		const serialized = Buffer.from(`${JSON.stringify(entry)}\n`);
+		const stored = (this.recoverySource?.index ?? new RecoveryStorageIndex()).encode(entry) as SessionEntry;
+		const serialized = Buffer.from(`${JSON.stringify(stored)}\n`);
 		const lockPath = `${this.sessionFile}.append.lock`;
 		const lockFd = openSync(lockPath, "wx", 0o600);
 		const lockIdentity = fstatSync(lockFd);
 		let committedSize = this.committedSize;
+		let committedIdentity = this.committedIdentity;
+		let reloaded: ReturnType<typeof readSessionFile> | undefined;
 		try {
 			assertNativeSessionTeamAvailable(this.sessionFile);
 			writeFileSync(lockFd, JSON.stringify(process.pid));
 			fsyncSync(lockFd);
-			const fileStats = statSync(this.sessionFile);
-			if (fileStats.nlink > 1) {
+			const fileStats = statSync(this.sessionFile, { bigint: true });
+			if (fileStats.nlink > 1n) {
 				throw new Error(`Session files with multiple hard links are unsupported: ${this.sessionFile}`);
 			}
-			if (fileStats.size !== this.committedSize) {
+			if (!this.committedIdentity || !sameSessionFileIdentity(fileStats, this.committedIdentity)) {
 				throw new Error(`Session changed since it was loaded; reopen before writing: ${this.sessionFile}`);
 			}
 			if (this.repairPending) {
 				writeSessionFile(this.sessionFile, [...this.fileEntries, entry]);
-				this.recoverySource = undefined;
-				committedSize = statSync(this.sessionFile).size;
+				// Re-encoding changes line lengths and reference sources. Bind the new inode/index,
+				// while external historical entries keep their original inode alive.
+				reloaded = readSessionFile(this.sessionFile);
+				committedSize = reloaded.size;
+				committedIdentity = reloaded.identity;
 			} else {
 				const fd = openSync(this.sessionFile, "r+");
 				try {
 					assertNativeSessionTeamAvailable(this.sessionFile);
-					const stats = fstatSync(fd);
-					if (stats.nlink > 1) {
+					const stats = fstatSync(fd, { bigint: true });
+					if (stats.nlink > 1n) {
 						throw new Error(`Session files with multiple hard links are unsupported: ${this.sessionFile}`);
 					}
-					const originalSize = stats.size;
-					if (originalSize !== this.committedSize) {
+					const originalSize = Number(stats.size);
+					if (!sameSessionFileIdentity(stats, fileStats)) {
 						throw new Error(`Session changed since it was loaded; reopen before writing: ${this.sessionFile}`);
 					}
 					try {
@@ -1439,10 +1552,15 @@ export class SessionManager {
 							written += bytes;
 						}
 						fsyncSync(fd);
+						committedIdentity = fstatSync(fd, { bigint: true });
+						if (!sameSessionFileIdentity(committedIdentity, statSync(this.sessionFile, { bigint: true })))
+							throw new Error("Session changed during append; reopen before writing");
 						committedSize = originalSize + serialized.length;
 					} catch (error) {
 						ftruncateSync(fd, originalSize);
 						fsyncSync(fd);
+						// Rollback changed timestamps, but not the committed content or reference dictionary.
+						this.committedIdentity = fstatSync(fd, { bigint: true });
 						throw error;
 					}
 				} finally {
@@ -1454,21 +1572,41 @@ export class SessionManager {
 			removeSessionWriteFile(lockPath, lockIdentity);
 		}
 		this.committedSize = committedSize;
+		this.committedIdentity = committedIdentity;
 		this.repairPending = false;
-		return { offset: committedSize - serialized.length, length: serialized.length };
+		if (reloaded) {
+			this.recoverySource = reloaded.recoverySource;
+			return { entry: reloaded.entries[reloaded.entries.length - 1] as SessionEntry, reloaded: reloaded.entries };
+		}
+		if (isRecoveryEntry(stored)) {
+			this.recoverySource ??= new RecoveryDataSource(openSync(this.sessionFile, "r"));
+			// Commit dictionary changes only after the record's fsync and writer-lock cleanup succeeded.
+			deferRecoveryData(stored, this.recoverySource, {
+				offset: committedSize - serialized.length,
+				length: serialized.length,
+			});
+		}
+		return { entry: stored };
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
 		if (typeof entry.id !== "string" || !entry.id.trim()) throw new Error("Session entry id must be non-empty");
 		if (this.byId.has(entry.id)) throw new Error(`Session entry id already exists: ${entry.id}`);
-		const location = this._persist(entry);
-		if (location && this.sessionFile && isRecoveryEntry(entry)) {
-			this.recoverySource ??= new RecoveryDataSource(openSync(this.sessionFile, "r"));
-			deferRecoveryData(entry, this.recoverySource, location.offset, location.length);
+		const persisted = this._persist(entry);
+		if (persisted?.reloaded) {
+			this.fileEntries = persisted.reloaded;
+			this._buildIndex();
+			return;
 		}
-		this.fileEntries.push(entry);
-		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
+		let accepted = persisted?.entry ?? entry;
+		if (!persisted && isRecoveryEntry(entry)) {
+			this.recoverySource ??= new RecoveryDataSource();
+			accepted = this.recoverySource.index.encode(entry) as CustomEntry;
+			deferRecoveryData(accepted, this.recoverySource, JSON.stringify(accepted));
+		}
+		this.fileEntries.push(accepted);
+		this.byId.set(accepted.id, accepted);
+		this.leafId = accepted.id;
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1928,13 +2066,7 @@ export class SessionManager {
 
 			const fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			writeSessionFile(newSessionFile, fileEntries, true);
-			this.fileEntries = fileEntries;
-			this.sessionId = newSessionId;
-			this.sessionFile = realpathSync(newSessionFile);
-			this.committedSize = statSync(newSessionFile).size;
-			this.repairPending = false;
-			this.recoverySource = undefined;
-			this._buildIndex();
+			this._setSessionFile(newSessionFile);
 
 			return this.sessionFile;
 		}
@@ -1954,7 +2086,15 @@ export class SessionManager {
 			labelEntries.push(labelEntry);
 			parentId = labelEntry.id;
 		}
-		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+		// Re-encode the retained path independently, just like the durable clone.
+		const source = new RecoveryDataSource();
+		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries].map((entry) => {
+			if (!isRecoveryEntry(entry)) return entry;
+			const stored = source.index.encode(entry) as CustomEntry;
+			deferRecoveryData(stored, source, JSON.stringify(stored));
+			return stored;
+		});
+		this.recoverySource = source;
 		this.sessionId = newSessionId;
 		this._buildIndex();
 		return undefined;
