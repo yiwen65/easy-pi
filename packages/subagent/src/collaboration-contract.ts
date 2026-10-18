@@ -1006,10 +1006,25 @@ export interface CollaborationMessage {
 	contextUse?: "initial" | "existing";
 }
 
+/** Host-observed activity is not a child progress claim or proof of health/completion. */
+export interface CollaborationActivity {
+	phase: "preflight" | "model" | "tool" | "compaction" | "retry" | "settled";
+	last_activity_at: number;
+	/** Tool name only; never arguments, output, prompt text or provider payloads. */
+	tool_name?: string;
+}
+export interface CollaborationRuntimeObservation {
+	/** Derived from retained timestamps; null when the start time is unknown. */
+	elapsed_ms: number | null;
+	/** Latest-turn, process-local observation; absent after unload/recovery or for older turns. */
+	activity?: CollaborationActivity;
+}
+
 export interface CollaborationAgentView {
 	task_name: string;
 	status: CollaborationStatus;
 	loaded: boolean;
+	runtime?: CollaborationRuntimeObservation;
 	/** Creation projection only, not current context size or provider token count. */
 	context?: {
 		mode: DelegationContext["mode"];
@@ -1085,8 +1100,13 @@ export interface CollaborationTurnRecord extends CollaborationTurnView {
 }
 export type CollaborationResultQuery =
 	/** Includes invalid fallback output, never silently repaired. */
-	| { state: "found"; turn: CollaborationTurnView; result: NonNullable<CollaborationTurnRecord["result"]> }
-	| { state: "pending" | "no_result"; turn: CollaborationTurnView }
+	| {
+			state: "found";
+			turn: CollaborationTurnView;
+			result: NonNullable<CollaborationTurnRecord["result"]>;
+			runtime?: CollaborationRuntimeObservation;
+	  }
+	| { state: "pending" | "no_result"; turn: CollaborationTurnView; runtime?: CollaborationRuntimeObservation }
 	| { state: "history_unavailable"; target: string; history_coverage: "retained_only" };
 export interface CollaborationTurnPage {
 	target: string;

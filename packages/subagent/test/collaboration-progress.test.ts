@@ -28,7 +28,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	vi.useRealTimers();
 });
-function fixture(file = false) {
+function fixture(file = false, expectedShutdownError?: "storage_error") {
 	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "epi-progress-")));
 	cleanups.push(() => rmSync(cwd, { recursive: true, force: true }));
 	const path = file ? join(cwd, "registry.sqlite") : ":memory:";
@@ -62,7 +62,9 @@ function fixture(file = false) {
 	});
 	cleanups.push(async () => {
 		for (const finish of finishes.values()) finish({ status: "interrupted", text: "cleanup" });
-		await controller.shutdown();
+		if (expectedShutdownError)
+			await expect(controller.shutdown()).rejects.toMatchObject({ code: expectedShutdownError });
+		else await controller.shutdown();
 	});
 	return { cwd, path, store, controller, host, finishes, requests, runs };
 }
@@ -872,7 +874,7 @@ test("unexpected precommit progress failure is not guessed to be admission rejec
 test.each([false, true])(
 	"SQL progress commit failure remains unknown, not an admission rejection (%s)",
 	async (file) => {
-		const f = fixture(file);
+		const f = fixture(file, "storage_error");
 		const receipt = await f.controller.spawnTurn(caller, "a", "task", model);
 		const before = f.store.read();
 		const beforeTurn = f.store.getTurn("/root/a", { turn_id: receipt.turn_id });

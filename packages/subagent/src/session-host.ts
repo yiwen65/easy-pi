@@ -2,6 +2,7 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { Context, Usage } from "@earendil-works/pi-ai";
 import type { PermissionMode } from "@easy-pi/permissions";
 import type {
+	CollaborationActivity,
 	CollaborationMessage,
 	CollaborationProgress,
 	CollaborationStatus,
@@ -51,6 +52,8 @@ export interface ChildSessionCreateOptions extends ChildSessionIdentity {
 	ancestryToolAllowed?: (name: string) => boolean;
 	/** Trusted current-turn protocol callback; not an ordinary delegated tool or authority grant. */
 	reportProgress?: (turnId: string, summary: string) => Promise<CollaborationProgress>;
+	/** Ephemeral host observation only; never a mailbox/progress notification or a storage write. */
+	reportActivity?: (turnId: string, activity: Omit<CollaborationActivity, "last_activity_at">) => void;
 	/** Trusted synchronous refresh, before control-plane observers see an authority mutation. */
 	subscribeAuthority?: (refresh: () => void) => () => void;
 	/** Storage ownership and historical session validation belong to the team store. */

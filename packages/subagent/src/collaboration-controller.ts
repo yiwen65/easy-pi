@@ -6,6 +6,7 @@ import {
 	COLLABORATION_HISTORY_LIMITS,
 	COLLABORATION_LIMITS,
 	COLLABORATION_TEAM_TOOL_NAMES,
+	type CollaborationActivity,
 	CollaborationAdmissionError,
 	type CollaborationArguments,
 	CollaborationError,
@@ -13,11 +14,14 @@ import {
 	type CollaborationProgress,
 	type CollaborationResultQuery,
 	type CollaborationResults,
+	type CollaborationRuntimeObservation,
 	type CollaborationStatus,
 	type CollaborationTargetedWaitResult,
 	type CollaborationTurnPage,
+	type CollaborationTurnView,
 	childAgentPath,
 	type Delegation,
+	formatCollaborationError,
 	parseCollaborationArguments,
 	parseDelegationResultText,
 	resolveAgentPath,
@@ -58,6 +62,7 @@ export class CollaborationController {
 	private readonly checkStorageAdmission: (() => void) | undefined;
 	private readonly sessions = new Map<string, ChildSession>();
 	private readonly active = new Map<string, Promise<void>>();
+	private readonly observedActivity = new Map<string, { turnId: string; activity: CollaborationActivity }>();
 	private queue: Promise<unknown> = Promise.resolve();
 	// Slow native lifecycle work is serialized separately, never holding control admission.
 	private lifecycle: Promise<unknown> = Promise.resolve();
@@ -122,6 +127,32 @@ export class CollaborationController {
 		return record;
 	}
 
+	private runtimeFor(path: string, turn: CollaborationTurnView, loaded: boolean): CollaborationRuntimeObservation {
+		const observed = this.observedActivity.get(path);
+		return {
+			elapsed_ms: turn.started_at === null ? null : Math.max(0, (turn.finished_at ?? Date.now()) - turn.started_at),
+			...(loaded && turn.turn_id === observed?.turnId ? { activity: { ...observed.activity } } : {}),
+		};
+	}
+
+	private recordActivity(path: string, turnId: string, update: Omit<CollaborationActivity, "last_activity_at">): void {
+		// No SQLite access, notifications, inference wakeups or per-token history writes.
+		if (this.stopping || this.failure || !this.active.has(path) || this.observedActivity.get(path)?.turnId !== turnId)
+			return;
+		this.observedActivity.set(path, {
+			turnId,
+			activity: {
+				phase: update.phase,
+				last_activity_at: Date.now(),
+				...(update.phase === "tool" &&
+				update.tool_name &&
+				/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(update.tool_name)
+					? { tool_name: update.tool_name }
+					: {}),
+			},
+		});
+	}
+
 	list(caller: ChildSessionIdentity, prefix?: string): StagedCollaborationAgentView[] {
 		this.assertReady();
 		this.assertCaller(caller);
@@ -143,6 +174,7 @@ export class CollaborationController {
 					task_name: agent.path,
 					status: agent.status,
 					loaded: this.sessions.has(agent.path),
+					runtime: this.runtimeFor(agent.path, turn, agent.status !== "closed" && this.sessions.has(agent.path)),
 					...(agent.delegation
 						? {
 								context: {
@@ -227,9 +259,14 @@ export class CollaborationController {
 				return { state: "history_unavailable", target: agent.path, history_coverage: "retained_only" };
 			throw new CollaborationError("storage_error", "Complete history lacks turn status proof");
 		}
+		const runtime = this.runtimeFor(agent.path, turn, agent.status !== "closed" && this.sessions.has(agent.path));
 		const response: CollaborationResultQuery = result
-			? { state: "found", turn, result }
-			: { state: record.status === "pending" || record.status === "running" ? "pending" : "no_result", turn };
+			? { state: "found", turn, result, runtime }
+			: {
+					state: record.status === "pending" || record.status === "running" ? "pending" : "no_result",
+					turn,
+					runtime,
+				};
 		return this.boundedResponse(response, COLLABORATION_HISTORY_LIMITS.maxResultResponseBytes);
 	}
 
@@ -857,6 +894,7 @@ export class CollaborationController {
 			this.changed();
 		}
 		if (signal.aborted) throw new CollaborationError("interrupted", "Startup cancelled before creation");
+		this.observedActivity.delete(record.path);
 		const session = await this.host.create({
 			signal,
 			rootSessionId: this.store.rootSessionId,
@@ -868,6 +906,7 @@ export class CollaborationController {
 			prefix,
 			reportProgress: (turnId, summary) =>
 				this.reportProgress({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, turnId, summary),
+			reportActivity: (turnId, activity) => this.recordActivity(record.path, turnId, activity),
 			toolAllowed: (name) =>
 				this.toolAllowed({ rootSessionId: this.store.rootSessionId, agentPath: record.path }, name),
 			// Native local grants compose with ancestors, rather than reading their own bound
@@ -961,6 +1000,10 @@ export class CollaborationController {
 	}
 
 	private start(record: StoredCollaborationAgent, session: ChildSession, signal: AbortSignal): string {
+		this.observedActivity.set(record.path, {
+			turnId: record.turnId,
+			activity: { phase: "preflight", last_activity_at: Date.now() },
+		});
 		const taskMessage = record.taskMessage!;
 		this.update(record.path, (current) => {
 			assertAgentTransition(current.status, "running");
@@ -976,7 +1019,11 @@ export class CollaborationController {
 			})
 			.then(
 				(result) => this.finish(record, result),
-				() => this.finish(record, { status: "failed", text: "Child execution failed; inspect its session" }),
+				(error: unknown) =>
+					this.finish(record, {
+						status: "failed",
+						text: `Child execution failed: ${error instanceof CollaborationError ? formatCollaborationError(error) : "execution_error"}. Native diagnostic unavailable; no automatic retry.`,
+					}),
 			)
 			.catch((error: unknown) => {
 				this.failure = error;
@@ -1036,6 +1083,7 @@ export class CollaborationController {
 				...(current.interruption ? { interruption: current.interruption } : {}),
 			});
 			this.persist(snapshot, [{ target: current.path, turn_id: current.turnId, result: { truncated } }]);
+			this.recordActivity(current.path, current.turnId, { phase: "settled" });
 			this.activity.notify(current.parent);
 		});
 	}
@@ -1119,6 +1167,7 @@ export class CollaborationController {
 		if (session) {
 			await session.dispose();
 			this.sessions.delete(path);
+			this.observedActivity.delete(path);
 			this.changed();
 		}
 		return previous;
@@ -1162,10 +1211,12 @@ export class CollaborationController {
 				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");
 			}
 			this.sessions.clear();
+			this.observedActivity.clear();
 			this.authorityObservers.clear();
 			this.liveTools.clear();
 			this.shutdownTools.clear();
 			this.store.close();
+			if (this.failure) throw new CollaborationError("storage_error", "Failed to persist a child result");
 			if (aborts.some((result) => result.status === "rejected")) {
 				throw new CollaborationError("interrupted", "Child shutdown failed; inspect retained sessions");
 			}

@@ -352,6 +352,15 @@
 - Mailbox follow-up: 新 root 同样可能未落盘；接收端不能因 sendCustomMessage 返回或 sessionFile 非空就删除 durable envelope。等 native 文件存在并 sync 后 ack，首条 assistant 或下一请求重试确认；原生消息 ID 防重复。2026-09-07 pi-collaboration-tools.test.ts 验证 idle 不启动、确认失败阻止 provider、显式重启不重复注入，以及后续 checkpoint 不复活原消息。
 - Admission follow-up（2026-10-18）: 只关闭 bind-time 自动恢复仍不足：冷 child 的旧 followUp 会在新 assignment 中多触发一次 provider，steer/nextTurn 也会混入请求。host-controlled 策略必须在新 prompt 组装前清理旧 live mirrors，再以 `inheritQueuedInputs:false` 接纳；旧收据保留历史/悬挂状态，不伪造取消或完成。回归同时断言三种队列的请求正文、调用次数、未知效果保留与普通 root 默认恢复；`pi-child-session-host.test.ts` 和 `harness-audit-host-recovery-policy.test.ts` 先红后绿，组合24文件328项通过。
 
+## Pi 子会话 warm followup——运行后 chmod 会破坏文件身份
+
+- Wrong approach: 用 memory-only 两轮实验排查复用失败；持久化 host 又在每轮完成后冗余 chmod(0600)。
+- Why it failed: SessionManager 的已提交身份包含 ctimeNs；即使权限值未变，chmod 仍改变 ctime，下一轮追加被判为外部修改。控制器通用失败摘要掩盖了该触发链。
+- Recognition signal: 首轮 deliver_result 成功，持久化 warm followup 在 provider 前报 `Session changed since it was loaded`，内存会话或冷重开却通过。
+- Correct approach: 权限在 SessionManager.open 捕获身份前设置；轮末只 sync，不关闭文件身份保护或擅自刷新其私有状态。失败摘要保留安全阶段及 native 诊断引用。
+- Prevention: 子会话复用回归必须包含真实临时文件的 deliver_result→同一实例第二轮，并断言权限仍为0600；memory-only 对照不能替代持久化路径。
+- Verified by: 2026-10-19 `pi-child-observability.test.ts` 持久化两轮在旧代码失败，移除轮末 chmod 并前置权限设置后通过；native host/observability 组合33项通过，无真实 provider。
+
 ## Pi 邮箱注入——持久消息必须先于 compaction preflight
 
 - Wrong approach: 初版邮箱 adapter 在扩展 context 事件里持久化并追加消息。

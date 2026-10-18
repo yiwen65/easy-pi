@@ -29,7 +29,7 @@ function root() {
 }
 const caller: ChildSessionIdentity = { rootSessionId: "team", agentPath: "/root" };
 const model = { provider: "faux", id: "one", thinkingLevel: "off" as const };
-function fixture(file = false) {
+function fixture(file = false, expectedShutdownError?: "storage_error") {
 	const cwd = root();
 	const store = new CollaborationStore({
 		path: file ? join(cwd, "registry.sqlite") : ":memory:",
@@ -70,7 +70,11 @@ function fixture(file = false) {
 		agentDir: cwd,
 		getPermissions: () => ({ mode: "full-access", sessionGrants: [], protectedRoots: [cwd] }),
 	});
-	cleanups.push(() => controller.shutdown());
+	cleanups.push(async () => {
+		if (expectedShutdownError)
+			await expect(controller.shutdown()).rejects.toMatchObject({ code: expectedShutdownError });
+		else await controller.shutdown();
+	});
 	return { cwd, store, controller, host, runs, loads, finishes, disposed };
 }
 
@@ -261,7 +265,7 @@ test("snapshot CAS refuses stale updates and graph validation refuses orphan rec
 });
 
 test("a failed durable update stops other executions instead of retrying or admitting more work", async () => {
-	const f = fixture();
+	const f = fixture(false, "storage_error");
 	await f.controller.spawn(caller, "a", "first", model);
 	vi.spyOn(f.store, "commit").mockImplementationOnce(() => {
 		throw new Error("synthetic disk failure");
@@ -455,7 +459,7 @@ test("completion reserves mailbox capacity before admission, so a full inbox can
 });
 
 test("failed acknowledgement retains pending messages and stops future admission", async () => {
-	const f = fixture();
+	const f = fixture(false, "storage_error");
 	const id = await f.controller.send(caller, "/root", "retained");
 	vi.spyOn(f.store, "commit").mockImplementationOnce(() => {
 		throw new Error("disk failure");
@@ -762,6 +766,63 @@ test("idle unload may await a control operation without deadlocking admission", 
 	expect(f.controller.pending(caller).some((message) => message.text === "unloading a0")).toBe(true);
 	expect(f.disposed).toEqual(["/root/a0"]);
 });
+
+test.each(["before", "during"] as const)(
+	"shutdown reports result persistence failure %s teardown after cleaning up every child",
+	async (timing) => {
+		const f = fixture(true, "storage_error");
+		const events: string[] = [];
+		const create = f.host.create;
+		f.host.create = async (options) => {
+			const session = await create(options);
+			const abort = session.abort;
+			const dispose = session.dispose;
+			session.abort = async () => {
+				events.push(`abort:${options.agentPath}`);
+				await abort();
+			};
+			session.dispose = async () => {
+				events.push(`dispose:${options.agentPath}`);
+				await dispose();
+			};
+			return session;
+		};
+		await f.controller.spawn(caller, "a", "first", model);
+		await f.controller.spawn(caller, "b", "second", model);
+		const close = f.store.close.bind(f.store);
+		vi.spyOn(f.store, "close").mockImplementation(() => {
+			events.push("close");
+			close();
+		});
+		const rawError = "private disk failure /secret/registry.sqlite token=do-not-expose";
+		vi.spyOn(f.store, "commit").mockImplementationOnce(() => {
+			throw new Error(rawError);
+		});
+		if (timing === "before") {
+			f.finishes.get("/root/a")?.({ status: "completed", text: "done" });
+			await expect(f.controller.settled()).rejects.toMatchObject({ code: "storage_error" });
+		}
+		const shutdown = f.controller.shutdown();
+		expect(f.controller.shutdown()).toBe(shutdown);
+		const error: unknown = await shutdown.catch((error: unknown) => error);
+		for (const path of ["/root/a", "/root/b"]) {
+			expect(events.indexOf(`abort:${path}`)).toBeGreaterThanOrEqual(0);
+			expect(events.indexOf(`dispose:${path}`)).toBeGreaterThan(events.indexOf(`abort:${path}`));
+		}
+		expect(f.disposed.sort()).toEqual(["/root/a", "/root/b"]);
+		expect(events.at(-1)).toBe("close");
+		const restored = new CollaborationStore({
+			path: join(f.cwd, "registry.sqlite"),
+			rootSessionId: "team",
+			cwd: f.cwd,
+		});
+		cleanups.push(() => restored.close());
+		expect(error).toBeInstanceOf(CollaborationError);
+		expect(error).toMatchObject({ code: "storage_error", message: "Failed to persist a child result" });
+		expect(String(error)).not.toContain(rawError);
+		expect(error).not.toHaveProperty("cause");
+	},
+);
 
 test("shutdown cancels startup and aborts existing children before waiting for late host cleanup", async () => {
 	const f = fixture();

@@ -99,6 +99,29 @@ Each initial task and explicit followup appends these output instructions after 
 
 `list_agents` exposes creation projection bytes and measurement scope (`messages` or `request_prefix`), the requested prefix policy (`required` is not itself proof of successful execution), result-format state, and available latest-turn provider-reported input/output/cache usage. Missing sizes/usage are unknown, and interrupted zero usage can be incomplete. These are not current context-token estimates or an additional charge added to parent usage. Successful first-prefix checks also write a noncontextual `epi-collaboration-prefix` entry in native child history.
 
+### Host activity and wait expiry
+
+`list_agents` and `get_agent_result` (also the result snapshot returned by targeted
+`wait_agent`) include `runtime.elapsed_ms`, derived from retained start/finish
+timestamps; unknown start time is `null`. When available, `runtime.activity` contains
+`phase`, `last_activity_at` and an optional `tool_name`. Phases are `preflight`,
+`model`, `tool`, `compaction`, `retry` and `settled`. Only names and host timestamps
+are exposed, never tool arguments/output or prompt/provider text.
+
+Activity is an ephemeral host observation, **not** a child progress report, proof
+of health, completion or acceptance. It belongs to the selected latest turn and is
+absent after unload/recovery and for older turns. Missing activity is unknown, not
+proof of inactivity. These observations do not write the team database, enqueue
+mail, wake a wait or start inference on every token/tool event. A wait can expire
+while tools are actively running: inspect `result.turn.status` and
+`result.runtime`, not timeout counts alone. There is no automatic retry or cancel.
+
+For audits, bound the files/questions and pin the evidence version (commit/hash
+when practical). Coordinate edits in the shared cwd. Ask for a bounded stage
+handoff instead of an unbounded complete audit; when evidence changes, report it
+and decide explicitly which checks require rerunning. A time budget is a workflow
+agreement, not a new execution timeout or permission to claim unrun checks passed.
+
 ### Nonterminal progress and interrupt handoff
 
 A child can call `report_progress` without ending its assigned turn:
@@ -335,6 +358,28 @@ Completed turns release execution capacity but retain native sessions for explic
 Child background completion uses `nextRequest`, even when the root selects `wake` or `followUp`. Notifications remain available to an explicit followup; they cannot launch unassigned child inference after a delivered result. The root's delivery setting is unchanged. Explicit close/root shutdown drains owned background processes and transport resources, releases authority and monitoring subscriptions, and retains result/history records. Incomplete native shutdown reports reject disposal. Failed disposal keeps the live team owner and its session references until operator inspection or process exit, instead of letting another controller acquire uncertain resources. Codex native-session cleanup also releases per-session transport counters and sticky SSE fallback markers without clearing another session's metadata.
 
 The opt-in `subagent-lifecycle-real-provider.test.ts` validates pressure unloading, cold followup, background ownership, wake suppression, foreground interrupt, concurrent inference, transport cleanup and cold reopening. `subagent-cli-real-provider.test.ts` runs the source `pi-test.sh --mode rpc` entry with a real root/child model and verifies clean exit plus zero-inference retained-team inspection. Both require `PI_REAL_MODEL_EVAL=1`; user teams are untouched and credentials are referenced, never copied into the tests or their output. These checks do not establish physical Computer/native-app drain, arbitrary extension cooperation, or installed-binary acceptance.
+
+### Safe execution diagnostics
+
+Caught native execution errors and provider failure responses retain their stage
+(`preflight`, `provider`, or `persistence`) and a bounded, noncontextual
+`epi-collaboration-diagnostic` native history entry. Explicit prefix-incompatibility
+failures retain their existing specific message instead. The failed result references its entry ID and preserves whitelisted
+collaboration categories/reasons; unknown failures use `execution_error` or
+`provider_error`. No arbitrary exception message, stack, provider payload or private
+filesystem path is copied into that diagnostic. This is not a repair of malformed
+model output or proof that earlier tool effects did not occur.
+
+If writing the diagnostic itself fails or the child is memory-only, the result
+explicitly says history is unavailable rather than inventing a persisted reference,
+masking failure or retrying. Hosts that reject outside the
+native diagnostic boundary still return a safe category, but do not invent an entry
+reference. Result persistence failures propagate from `shutdown()` **after** resource
+cleanup; a clean resource drain does not mean the result was durably saved.
+
+Persistent child file permissions are set before SessionManager captures the file
+identity. End-of-turn sync must not mutate the tracked ctime with a redundant chmod:
+warm explicit followups reuse the same manager and retain its external-change guard.
 
 ### Safe rejection diagnostics
 

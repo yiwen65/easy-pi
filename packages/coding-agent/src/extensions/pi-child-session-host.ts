@@ -5,6 +5,7 @@ import { AgentToolError } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import {
 	COLLABORATION_LIMITS,
+	type CollaborationActivity,
 	CollaborationAdmissionError,
 	CollaborationError,
 	DELIVER_RESULT_TOOL_NAME,
@@ -190,6 +191,8 @@ export function createPiChildSessionHost(options: {
 						throw new CollaborationError("forbidden", "Stored child identity does not match its owner");
 					}
 					cacheAffinity = readCacheAffinity(stored.cacheAffinity);
+					// Set permissions before SessionManager captures the file's ctime identity.
+					await chmod(sessionFile, 0o600);
 					manager = SessionManager.open(join(directory, basename(sessionFile)), directory);
 				} else {
 					manager = SessionManager.create(cwd, directory);
@@ -244,8 +247,46 @@ export function createPiChildSessionHost(options: {
 			// Protocol delivery capture: set by the deliver_result tool during a turn, read at turn end.
 			let delivered: DelegationResult | undefined;
 			let currentTurnId: string | undefined;
+			const observeActivity = (activity: Omit<CollaborationActivity, "last_activity_at">): void => {
+				if (!currentTurnId) return;
+				try {
+					request.reportActivity?.(currentTurnId, activity);
+				} catch {
+					// A diagnostic observer cannot fail execution or grant authority.
+				}
+			};
 			let interrupted = false;
 			let closed = false;
+			let executionPhase: "preflight" | "provider" | "persistence" = "preflight";
+			const failureResult = (error: unknown, turnId?: string, usage?: Usage): ChildTurnResult => {
+				// Only host-owned categories and whitelisted collaboration hints are retained.
+				// Arbitrary exception messages/stacks may contain credentials or private paths.
+				const category =
+					error instanceof CollaborationError
+						? formatCollaborationError(error)
+						: executionPhase === "provider"
+							? "provider_error"
+							: "execution_error";
+				let entryId: string | undefined;
+				try {
+					const diagnosticId = manager.appendCustomEntry("epi-collaboration-diagnostic", {
+						version: 1,
+						turn_id: turnId ?? null,
+						phase: executionPhase,
+						category,
+					});
+					if (manager.isPersisted()) entryId = diagnosticId;
+				} catch {
+					// Recording diagnostics must not hide the original failed outcome.
+				}
+				return {
+					status: "failed",
+					text: `Child execution failed during ${executionPhase}: ${category}. ${
+						entryId ? `Diagnostic: native history entry ${entryId}.` : "Diagnostic history unavailable."
+					} No automatic retry; inspect retained state.`,
+					...(usage ? { usage } : {}),
+				};
+			};
 			const loader = new DefaultResourceLoader({
 				cwd,
 				agentDir: request.agentDir,
@@ -447,6 +488,8 @@ export function createPiChildSessionHost(options: {
 						bytes: Buffer.byteLength(JSON.stringify(expected.context), "utf8"),
 					});
 				}
+				executionPhase = "provider";
+				observeActivity({ phase: "model" });
 				return stream(model, context, streamOptions);
 			};
 			try {
@@ -490,24 +533,53 @@ export function createPiChildSessionHost(options: {
 					)
 						throw new CollaborationError("forbidden", "Task message identity mismatch");
 					if (closed) throw new CollaborationError("interrupted", "Child session is closed");
-					if (extensionFailed) throw new CollaborationError("forbidden", "Child extension authority failed");
 					if (active) throw new CollaborationError("busy", "Child session is already running");
 					interrupted = false;
 					delivered = undefined;
-					const allowed = currentTools();
-					if (options.getTools) session.setToolAccessByName(allowed);
-					session.setActiveToolsByName([
-						...session.getActiveToolNames().filter((name) => allowed.includes(name)),
-						...allowed.filter(
-							(name) =>
-								!["deferred", "codemode"].includes(session.getToolDefinition(name)?.exposure ?? "direct"),
-						),
-					]);
+					executionPhase = "preflight";
+					try {
+						if (extensionFailed) throw new CollaborationError("forbidden", "Child extension authority failed");
+						const allowed = currentTools();
+						if (options.getTools) session.setToolAccessByName(allowed);
+						session.setActiveToolsByName([
+							...session.getActiveToolNames().filter((name) => allowed.includes(name)),
+							...allowed.filter(
+								(name) =>
+									!["deferred", "codemode"].includes(session.getToolDefinition(name)?.exposure ?? "direct"),
+							),
+						]);
+					} catch (error) {
+						return Promise.resolve(failureResult(error, task?.turnId));
+					}
 					const operation = async (): Promise<ChildTurnResult> => {
 						if (closed || interrupted) return { status: "interrupted", text: "" };
 						let last: AssistantMessage | undefined;
 						let usage: Usage | undefined;
+						const pendingTools = new Map<string, string>();
+						observeActivity({ phase: "preflight" });
 						const unsubscribe = session.subscribe((event) => {
+							switch (event.type) {
+								case "tool_execution_start":
+								case "tool_execution_update":
+									pendingTools.set(event.toolCallId, event.toolName);
+									observeActivity({ phase: "tool", tool_name: event.toolName });
+									break;
+								case "tool_execution_end": {
+									pendingTools.delete(event.toolCallId);
+									const remaining = pendingTools.values().next().value;
+									observeActivity(remaining ? { phase: "tool", tool_name: remaining } : { phase: "model" });
+									break;
+								}
+								case "message_update":
+									if (!pendingTools.size) observeActivity({ phase: "model" });
+									break;
+								case "compaction_start":
+									observeActivity({ phase: "compaction" });
+									break;
+								case "auto_retry_start":
+									observeActivity({ phase: "retry" });
+									break;
+							}
 							if (event.type !== "message_end" || event.message.role !== "assistant") return;
 							last = event.message;
 							if (!usage) usage = structuredClone(last.usage);
@@ -526,8 +598,10 @@ export function createPiChildSessionHost(options: {
 									: text,
 								{ expandPromptTemplates: false, source: "extension" },
 							);
+							if (!interrupted && (!last || last.stopReason === "error") && !prefixRejected)
+								return failureResult(undefined, task?.turnId, usage);
 							if (manager.isPersisted() && session.sessionFile && last) {
-								await chmod(session.sessionFile, 0o600);
+								executionPhase = "persistence";
 								const file = await open(session.sessionFile, "r+");
 								try {
 									await file.sync();
@@ -552,7 +626,12 @@ export function createPiChildSessionHost(options: {
 												.join("\n") ?? ""),
 								...(usage ? { usage } : {}),
 							};
+						} catch (error) {
+							if (interrupted || last?.stopReason === "aborted")
+								return { status: "interrupted", text: "", ...(usage ? { usage } : {}) };
+							return failureResult(error, task?.turnId, usage);
 						} finally {
+							observeActivity({ phase: "settled" });
 							unsubscribe();
 						}
 					};

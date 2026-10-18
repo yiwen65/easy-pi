@@ -42,6 +42,7 @@ async function fixture(
 	beforeBind?: (session: AgentSession) => void,
 	childExtensions: InlineExtension[] = [],
 	observeChild?: (session: AgentSession) => void,
+	expectedShutdownError?: "storage_error",
 ) {
 	const cwd = await realpath(await mkdtemp(join(tmpdir(), "epi-six-tools-")));
 	cleanups.push(() => rm(cwd, { recursive: true, force: true }));
@@ -113,14 +114,19 @@ async function fixture(
 	}));
 	beforeBind?.(session);
 	await session.bindExtensions({ mode: "rpc" });
-	cleanups.push(async () => {
-		await controller.shutdown();
-		session.dispose();
-	});
-	const restart = async () => {
+	const shutdown = async (expectedError?: "storage_error") => {
+		try {
+			if (expectedError) await expect(controller.shutdown()).rejects.toMatchObject({ code: expectedError });
+			else await controller.shutdown();
+		} finally {
+			session.dispose();
+		}
+	};
+	cleanups.push(() => shutdown(expectedShutdownError));
+	const restart = async (shutdownError?: "storage_error") => {
 		const file = session.sessionFile!;
-		await controller.shutdown();
-		session.dispose();
+		await shutdown(shutdownError);
+		expectedShutdownError = undefined;
 		store = new CollaborationStore({
 			path: join(cwd, "team", "registry.sqlite"),
 			cwd,
@@ -149,7 +155,7 @@ const tool = (name: string, args: Record<string, unknown>) =>
 
 test("a collaboration persistence failure remains unknown and never starts or repeats a child", async () => {
 	let children = 0;
-	const f = await fixture(undefined, [], () => children++);
+	const f = await fixture(undefined, [], () => children++, "storage_error");
 	vi.spyOn(f.store, "commit").mockImplementationOnce(() => {
 		throw new Error("synthetic uncertain persistence");
 	});
@@ -343,7 +349,7 @@ test("failed ack stops provider execution and keeps the message for explicit rec
 			.getBranch()
 			.filter((entry) => entry.type === "custom_message" && entry.customType === "epi-collaboration-message"),
 	).toHaveLength(1);
-	const resumed = await f.restart();
+	const resumed = await f.restart("storage_error");
 	expect(f.faux.state.callCount).toBe(1);
 	let captured: Context | undefined;
 	f.faux.setResponses([
@@ -486,7 +492,7 @@ test("a checkpoint after native ingestion does not resurrect raw mailbox text du
 		[{ role: "user", content: "retained summary of prior activity", timestamp: Date.now() }],
 		100,
 	);
-	const restarted = await f.restart();
+	const restarted = await f.restart("storage_error");
 	let captured: Context | undefined;
 	f.faux.setResponses([
 		(context) => {

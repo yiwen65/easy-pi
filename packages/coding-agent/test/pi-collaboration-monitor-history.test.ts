@@ -65,7 +65,11 @@ test("retained monitor queries parse summaries, preserve rows after query revoca
 		expect(page.turns).toHaveLength(10);
 		expect(page.next_cursor).toBeTruthy();
 		expect(monitor.turns("/root/worker", page.next_cursor!).turns).toHaveLength(2);
-		expect(monitor.result("/root/worker", first.turn.turn_id)).toEqual(first);
+		// Retained task/result metadata is stable; latest-turn activity is not historical evidence.
+		expect(monitor.result("/root/worker", first.turn.turn_id)).toEqual({
+			...first,
+			runtime: { elapsed_ms: first.runtime?.elapsed_ms },
+		});
 		expect(monitor.view("/root/worker").resultMetadata).toContain("Usage: unknown");
 		expect(monitor.view("/root/worker").resultMetadata).toContain("Delivery: enqueued (not acceptance)");
 		expect(monitor.view("/root/worker").resultMetadata).toContain("Source: unavailable");
