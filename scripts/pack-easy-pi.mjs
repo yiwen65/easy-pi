@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -49,6 +49,7 @@ for (const name of ["package.json", "dist", "docs", "examples", "README.md", "CH
 cpSync(join(root, "LICENSE"), join(output, "LICENSE"));
 
 const bundleNames = [];
+const bundleVersions = {};
 const bundledExternalDependencies = {};
 for (const [directory, name] of internal) {
 	const source = join(root, directory);
@@ -61,6 +62,7 @@ for (const [directory, name] of internal) {
 	cpSync(join(source, "dist"), join(target, "dist"), { recursive: true });
 	if (existsSync(join(source, "LICENSES"))) cpSync(join(source, "LICENSES"), join(target, "LICENSES"), { recursive: true });
 	bundleNames.push(name);
+	bundleVersions[name] = manifest.version;
 	for (const [dependency, version] of Object.entries({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
 		if (!internal.some(([, internalName]) => internalName === dependency)) {
 			bundledExternalDependencies[dependency] ??= version;
@@ -81,9 +83,31 @@ manifest.homepage = "https://github.com/yiwen65/easy-pi";
 manifest.bundleDependencies = bundleNames;
 manifest.files = manifest.files.filter((name) => name !== "npm-shrinkwrap.json");
 writeFileSync(join(output, "README.md"), "# easy-pi\n\nNative AI coding agent CLI.\n\n```bash\nnpm install -g easy-pi\nepi\n```\n");
-manifest.dependencies = { ...manifest.dependencies, ...bundledExternalDependencies };
+manifest.dependencies = { ...manifest.dependencies, ...bundledExternalDependencies, ...bundleVersions };
 delete manifest.devDependencies;
 delete manifest.scripts;
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, "\t")}\n`);
+
+// npm global installs assume bundled packages include their dependency closure.
+// Resolve public dependencies separately: installing in output can replace our fork
+// with registry versions of internal packages before npm packs them.
+const dependenciesDirectory = mkdtempSync(join(tmpdir(), "easy-pi-dependencies-"));
+try {
+	const dependencies = Object.fromEntries(Object.entries(manifest.dependencies).filter(([name]) => !bundleNames.includes(name)));
+	writeFileSync(join(dependenciesDirectory, "package.json"), `${JSON.stringify({
+		name: "easy-pi-runtime-dependencies", version: "1.0.0", private: true,
+		dependencies, optionalDependencies: manifest.optionalDependencies, overrides: manifest.overrides,
+	}, null, "\t")}\n`);
+	run("npm", ["install", "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund"], dependenciesDirectory);
+	for (const name of bundleNames) {
+		if (existsSync(join(dependenciesDirectory, "node_modules", name))) throw new Error(`External dependencies resolved internal package ${name}`);
+	}
+	for (const name of readdirSync(join(dependenciesDirectory, "node_modules"))) {
+		if (name === ".bin" || name === ".package-lock.json") continue;
+		cpSync(join(dependenciesDirectory, "node_modules", name), join(output, "node_modules", name), { recursive: true, verbatimSymlinks: true });
+	}
+} finally {
+	rmSync(dependenciesDirectory, { recursive: true, force: true });
+}
 run("npm", ["pack", "--ignore-scripts", "--pack-destination", output], output);
 console.log(`Packed easy-pi in ${output}`);

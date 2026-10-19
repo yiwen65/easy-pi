@@ -45,6 +45,14 @@ test("standalone package includes codemode worker, web-search, and MCP licenses 
 	const env = { PATH: process.env.PATH, HOME: home, npm_config_offline: "true", npm_config_ignore_scripts: "true" };
 	try {
 		mkdirSync(home);
+		// This fixture checks archive layout only. The registry tests exercise real
+		// dependency hydration and both local/global lifecycle execution on loopback.
+		const realNpm = spawnSync("which", ["npm"], { encoding: "utf8" });
+		assert.equal(realNpm.status, 0, realNpm.stderr);
+		const bin = join(directory, "bin");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "npm"), `#!/usr/bin/env node\nimport { mkdirSync } from "node:fs";\nimport { spawnSync } from "node:child_process";\nif (process.argv[2] === "install") {\n if (!process.argv.includes("--ignore-scripts")) throw Error("unsafe packaging install");\n mkdirSync("node_modules", { recursive: true });\n} else {\n const result = spawnSync(${JSON.stringify(realNpm.stdout.trim())}, process.argv.slice(2), { stdio: "inherit" });\n process.exit(result.status ?? 1);\n}\n`, { mode: 0o755 });
+		env.PATH = `${bin}:${env.PATH}`;
 		mkdirSync(join(fixture, "scripts"), { recursive: true });
 		copyFileSync(script, join(fixture, "scripts/pack-easy-pi.mjs"));
 		copyFileSync(join(repository, "LICENSE"), join(fixture, "LICENSE"));

@@ -674,14 +674,14 @@
 - Prevention: 图片接线同时覆盖同对象跨两个 owner、共享 SHA 的不同 pending 输出、首图 await 期间第二个 memo owner 被修改，以及“只删派生图→冷加载→原图清单/读取→fork→删除旧会话”。任何 memo 快路径都要比较当前 owner 与 await 前快照。
 - Verified by: 2026-10-18 `image-storage.test.ts` 两个仅派生图失效回归先红后绿；来源 handoff 的 owner/mutation 回归及最终 coding-agent 命名矩阵44文件566项通过，未调用真实模型。
 
-## `pack:easy-pi`——本地 tarball 安装不能替代 registry 安装验证
+## `pack:easy-pi`——必须覆盖 registry 全局安装及真实生命周期
 
-- Wrong approach: 复制上游 coding-agent 的 shrinkwrap 到独立 easy-pi 包，仅用本地 tarball 安装和归档文件列表验收。
-- Why it failed: 独立包的依赖/bundle 图不同；registry 安装把未随包提供的外部依赖标成 inBundle，跳过下载。相同 tarball 直接安装正常，因此本地烟测没有发现问题。
-- Recognition signal: registry 全新安装只装31个包，`epi --version` 因缺 cross-spawn 失败；同一 tarball 本地安装122个包并正常启动。
-- Correct approach: 经用户确认，独立包不再复制这份上游 shrinkwrap；内部运行时仍随包分发，外部直接依赖仍固定版本。只修改 shrinkwrap 根名称、版本和 bundle 列表不足以修复。
-- Prevention: 用本地 HTTP registry 提供真实 packument/tarball，在空 consumer/cache 中安装并执行 CLI；同时验证根依赖与 bundled 子包共享的外部依赖实际可解析。
-- Verified by: 2026-10-19 原始完整包和最小 fixture 均先因缺依赖失败；去掉不匹配的 shrinkwrap 后两者 registry 安装通过。`scripts/pack-easy-pi-registry.test.mjs` 先红后绿，7项打包/发布定向测试及完整 `npm run check` 通过。
+- Wrong approach: 复制上游 shrinkwrap 后仅用本地 tarball 安装验收；移除不匹配的锁后，又仅验证普通 registry 安装并使用 `--ignore-scripts`，没有实际验证推荐给用户的 `npm install -g`。
+- Why it failed: 不匹配的锁使普通 registry 安装跳过外部依赖；移除锁只修复该路径。全局安装仍认为 bundled 内部包的传递依赖已随包提供，但归档只有13个内部包，依赖目录被建立却没有实际文件，postinstall 随后找不到入口。
+- Recognition signal: beta.1/2 普通 registry 安装缺 cross-spawn；beta.3 普通安装通过，但全局安装出现空 protobufjs/cross-spawn 目录，正常安装报 protobufjs `scripts/postinstall` MODULE_NOT_FOUND。
+- Correct approach: 不复制上游锁；仅在独立临时 package 中用 `npm install --ignore-scripts` 补齐外部依赖，再复制到打包目录使 bundle 包含完整依赖闭包。内部直接版本固定，并拒绝外部安装结果覆盖内部包；直接在组装目录 npm install 的实验确实把 pi-ai 换成了 registry 上游版本，不能采用。
+- Prevention: 本地 HTTP registry 同时测试普通安装与 `--global --prefix <私有目录>`，启用自有 fixture 的真实 postinstall 并检查运行标记。发布完整包前，先审查实际生命周期脚本，再经授权执行正常全局安装；验证内部 fork 与 CLI 文件逐字节未变。
+- Verified by: 2026-10-19 最小全局 fixture 先因缺 postinstall 失败、补齐闭包后本地/全局均通过；8项定向测试及完整 check 通过。官方 Node25.4.0/npm11.7.0 完整归档对照中 beta.3 精确复现用户错误，beta.4 的 protobufjs postinstall 返回0，CLI help/version 与 SDK 导入通过。
 
 ## npm 首发——自动审查和可见性必须先于发布完成结论
 
