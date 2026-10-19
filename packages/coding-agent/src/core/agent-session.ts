@@ -297,6 +297,8 @@ export interface ExtensionBindings {
 	abortHandler?: () => void;
 	shutdownHandler?: ShutdownHandler;
 	onError?: ExtensionErrorListener;
+	/** Hydrate host UI after session_start/resource discovery, before automatic task recovery emits events. */
+	beforeTaskRecovery?: () => void;
 }
 
 /** Options for AgentSession.prompt() */
@@ -4279,6 +4281,7 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+		bindings.beforeTaskRecovery?.();
 		const recovery = this._taskRecovery.state;
 		const recoveredFailure =
 			recovery?.status === "interrupted" &&

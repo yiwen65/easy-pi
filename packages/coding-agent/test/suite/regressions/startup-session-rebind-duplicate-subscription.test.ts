@@ -6,7 +6,8 @@ type RebindContext = {
 	unsubscribe?: () => void;
 	applyRuntimeSettings: () => void;
 	renderCurrentSessionState: () => void;
-	bindCurrentSessionExtensions: () => Promise<void>;
+	renderInitialMessages: () => void;
+	bindCurrentSessionExtensions: (beforeTaskRecovery?: () => void) => Promise<void>;
 	subscribeToAgent: () => void;
 	subscribeToBackgroundTasks: () => void;
 	updateAvailableProviderCount: () => Promise<void>;
@@ -43,9 +44,11 @@ describe("overlapping startup and replacement session rebinds", () => {
 			session: startupSession,
 			applyRuntimeSettings: () => {},
 			renderCurrentSessionState: () => {},
-			bindCurrentSessionExtensions: () => {
+			renderInitialMessages: vi.fn(),
+			bindCurrentSessionExtensions: async (beforeTaskRecovery) => {
 				bindCount += 1;
-				return bindCount === 1 ? startupBind : replacementBind;
+				await (bindCount === 1 ? startupBind : replacementBind);
+				beforeTaskRecovery?.();
 			},
 			subscribeToAgent,
 			subscribeToBackgroundTasks,
@@ -69,6 +72,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 		await startupRebind;
 
 		expect(subscribeToAgent).toHaveBeenCalledTimes(1);
+		expect(context.renderInitialMessages).not.toHaveBeenCalled();
 		expect(updateTerminalTitle).not.toHaveBeenCalled();
 
 		resolveReplacementBind();

@@ -1414,11 +1414,8 @@ export class InteractiveMode {
 		this.setupEditorSubmitHandler();
 		this.ui.requestRender();
 
-		// Initialize extensions first so resources are shown before messages
+		// Bind extensions and hydrate the transcript before automatic task recovery starts.
 		await this.rebindCurrentSession();
-
-		// Render initial messages AFTER showing loaded resources
-		this.renderInitialMessages();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -2103,11 +2100,21 @@ export class InteractiveMode {
 	/**
 	 * Initialize the extension system with TUI-based UI context.
 	 */
-	private async bindCurrentSessionExtensions(): Promise<void> {
+	private async bindCurrentSessionExtensions(beforeTaskRecovery?: () => void): Promise<void> {
+		const session = this.session;
 		const uiContext = this.createExtensionUIContext();
-		await this.session.bindExtensions({
+		await session.bindExtensions({
 			uiContext,
 			mode: "tui",
+			beforeTaskRecovery: () => {
+				if (this.session !== session) return;
+				setRegisteredThemes(session.resourceLoader.getThemes().themes);
+				this.setupAutocompleteProvider();
+				this.setupExtensionShortcuts(session.extensionRunner);
+				this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
+				this.showStartupNoticesIfNeeded();
+				beforeTaskRecovery?.();
+			},
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -2170,14 +2177,6 @@ export class InteractiveMode {
 				this.showExtensionError(error.extensionPath, error.error, error.stack);
 			},
 		});
-
-		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-		this.setupAutocompleteProvider();
-
-		const extensionRunner = this.session.extensionRunner;
-		this.setupExtensionShortcuts(extensionRunner);
-		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
-		this.showStartupNoticesIfNeeded();
 	}
 
 	private applyFullscreenScrollbarSetting(): void {
@@ -2221,15 +2220,18 @@ export class InteractiveMode {
 			this.subscribeToAgent();
 		}
 
-		await this.bindCurrentSessionExtensions();
+		await this.bindCurrentSessionExtensions(() => {
+			if (this.session !== session || options.renderBeforeBind) return;
+			// session_start can register renderers; hydrate only after it and resource discovery,
+			// but subscribe before recovery can emit its first assistant/tool event.
+			this.renderInitialMessages();
+			this.subscribeToAgent();
+		});
 
 		if (this.session !== session) {
 			return;
 		}
 
-		if (!options.renderBeforeBind) {
-			this.subscribeToAgent();
-		}
 		this.subscribeToBackgroundTasks();
 
 		await this.updateAvailableProviderCount();

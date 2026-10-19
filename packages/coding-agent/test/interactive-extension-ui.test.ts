@@ -62,6 +62,7 @@ function fixture() {
 		bindExtensions: async (bindings: ExtensionBindings) => {
 			runner.setUIContext(bindings.uiContext, "tui");
 			Reflect.set(runner, "shutdownHandler", bindings.shutdownHandler);
+			bindings.beforeTaskRecovery?.();
 		},
 	};
 	const mode = Object.assign(Object.create(InteractiveMode.prototype) as ModeMethods, {
