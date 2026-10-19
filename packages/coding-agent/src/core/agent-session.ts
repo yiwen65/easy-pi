@@ -1447,7 +1447,10 @@ export class AgentSession {
 			}
 		}
 
-		const resultSourceId = recoveredAssistantEntryId ?? this._taskRecovery.state?.step?.assistantEntryId;
+		const resultSourceId =
+			event.type === "message_end" && event.message.role === "toolResult"
+				? (recoveredAssistantEntryId ?? this._taskRecovery.state?.step?.assistantEntryId)
+				: undefined;
 		// Emit to extensions first (message_end handlers may transform the message)
 		await this._emitExtensionEvent(event);
 		const resultEntryId =
