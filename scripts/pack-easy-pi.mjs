@@ -41,7 +41,9 @@ mkdirSync(join(output, "node_modules"), { recursive: true });
 // The product build is intentionally run separately; this script only packages its output.
 if (!existsSync(join(product, "dist/cli.js"))) throw new Error("coding-agent/dist is missing; run npm run build first");
 // Do not traverse source, tests, credentials, or workspace node_modules.
-for (const name of ["package.json", "dist", "docs", "examples", "README.md", "CHANGELOG.md", "npm-shrinkwrap.json"]) {
+// The upstream shrinkwrap describes a different bundle graph. Shipping it here makes
+// registry installs treat missing external dependencies as already bundled.
+for (const name of ["package.json", "dist", "docs", "examples", "README.md", "CHANGELOG.md"]) {
 	cpSync(join(product, name), join(output, name), { recursive: true });
 }
 cpSync(join(root, "LICENSE"), join(output, "LICENSE"));
@@ -77,6 +79,7 @@ manifest.repository = { type: "git", url: "git+https://github.com/yiwen65/easy-p
 manifest.bugs = { url: "https://github.com/yiwen65/easy-pi/issues" };
 manifest.homepage = "https://github.com/yiwen65/easy-pi";
 manifest.bundleDependencies = bundleNames;
+manifest.files = manifest.files.filter((name) => name !== "npm-shrinkwrap.json");
 writeFileSync(join(output, "README.md"), "# easy-pi\n\nNative AI coding agent CLI.\n\n```bash\nnpm install -g easy-pi\nepi\n```\n");
 manifest.dependencies = { ...manifest.dependencies, ...bundledExternalDependencies };
 delete manifest.devDependencies;

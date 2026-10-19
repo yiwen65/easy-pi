@@ -673,3 +673,28 @@
 - Correct approach: 来源提交 memo 绑定 session owner；未提交原字节用有界、带引用计数的 handoff，失效明确要求重附原图。派生图失败时独立验证原图，保留可读取/复制的关联并显式标明恢复，不把派生图伪装成原图。
 - Prevention: 图片接线同时覆盖同对象跨两个 owner、共享 SHA 的不同 pending 输出、首图 await 期间第二个 memo owner 被修改，以及“只删派生图→冷加载→原图清单/读取→fork→删除旧会话”。任何 memo 快路径都要比较当前 owner 与 await 前快照。
 - Verified by: 2026-10-18 `image-storage.test.ts` 两个仅派生图失效回归先红后绿；来源 handoff 的 owner/mutation 回归及最终 coding-agent 命名矩阵44文件566项通过，未调用真实模型。
+
+## `pack:easy-pi`——本地 tarball 安装不能替代 registry 安装验证
+
+- Wrong approach: 复制上游 coding-agent 的 shrinkwrap 到独立 easy-pi 包，仅用本地 tarball 安装和归档文件列表验收。
+- Why it failed: 独立包的依赖/bundle 图不同；registry 安装把未随包提供的外部依赖标成 inBundle，跳过下载。相同 tarball 直接安装正常，因此本地烟测没有发现问题。
+- Recognition signal: registry 全新安装只装31个包，`epi --version` 因缺 cross-spawn 失败；同一 tarball 本地安装122个包并正常启动。
+- Correct approach: 经用户确认，独立包不再复制这份上游 shrinkwrap；内部运行时仍随包分发，外部直接依赖仍固定版本。只修改 shrinkwrap 根名称、版本和 bundle 列表不足以修复。
+- Prevention: 用本地 HTTP registry 提供真实 packument/tarball，在空 consumer/cache 中安装并执行 CLI；同时验证根依赖与 bundled 子包共享的外部依赖实际可解析。
+- Verified by: 2026-10-19 原始完整包和最小 fixture 均先因缺依赖失败；去掉不匹配的 shrinkwrap 后两者 registry 安装通过。`scripts/pack-easy-pi-registry.test.mjs` 先红后绿，7项打包/发布定向测试及完整 `npm run check` 通过。
+
+## npm 首发——自动审查和可见性必须先于发布完成结论
+
+- Wrong approach: 根据旧 CLI 的 publish 成功提示和随后 registry 404 判断版本不可恢复；在暂存状态仍为 validating 时请求用户完成批准的2FA。
+- Why it failed: npm 自动审查是独立状态，命令成功不等于包已公开。beta.1 后来出现在 registry，证明短期404与“此前已发布”的409不足以推出必须换版本；validating 时的批准明确返回“automated review hasn't finished”。
+- Correct approach: 使用支持 `npm stage` 的 CLI，保存明确 stage ID 与 shasum；先等状态从 validating 变为 staged，再请求批准所需2FA。最终以公开版本/标签、tarball hash和真实 registry 安装为完成门禁。
+- Prevention: 不因暂时404连续重传或升级版本，不在自动审查期间反复催用户授权；若等待窗口内未完成，明确报告外部审查阻塞并保留同一 stage。
+- Verified by: 2026-10-19 beta.2 暂存状态连续为 validating；提前批准在2FA后仍409，状态变为 staged 后批准才成功；公共 registry 随后可见 beta.1 与 beta.2。
+
+## easy-pi 发布 CI——干净 checkout 需要固定模型数据，而非依赖本机 ignored 文件
+
+- Wrong approach: 本机 `build:offline` 成功后直接发布 tag，忽略模型 JSON 未跟踪；失败后试图直接拉取实时模型目录。
+- Why it failed: GitHub runner 缺 `packages/ai/src/providers/data/amazon-bedrock.json`；实时目录又引入当前 provider 类型不支持的新 API，使 opencode-go 编译失败。
+- Correct approach: 用已验证模型值生成标准 normalized snapshot，发布前从该冻结快照 hydrate，再 offline build；手动重发可保留原源代码 tag。
+- Prevention: 在干净目录安装依赖并执行 hydrate/build，不用本机 ignored 缓存证明 CI 可构建；固定快照回灌后与已验数据逐文件比较。
+- Verified by: 2026-10-19 冻结1577模型后回灌数据与原目录 byte-identical，干净构建通过；修复后的 GitHub 发布任务模型准备、构建和打包均成功。
