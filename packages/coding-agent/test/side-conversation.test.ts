@@ -245,6 +245,64 @@ test.each(["openai-codex-responses", "openai-responses"])(
 	},
 );
 
+test.each(["openai-codex-responses", "openai-responses"])(
+	"inactive model-scoped payload hook permits verified side replay for %s",
+	async (api) => {
+		let hookCalls = 0;
+		const f = await fixture({
+			wire: true,
+			api,
+			policy: (pi) => {
+				pi.on("before_provider_request", (event) => {
+					hookCalls++;
+					const payload = event.payload as { model?: string; instructions?: string };
+					if (payload.model?.startsWith("qd/")) return { ...payload, instructions: "Qoder-only policy" };
+					return undefined;
+				});
+			},
+		});
+		await f.parent.prompt("parent cache prefix");
+		await f.side.prompt("side question");
+		expect(hookCalls).toBe(1); // Observe the real parent hook once; do not re-execute it for a side probe.
+		expect(f.bodies).toHaveLength(2);
+		const [parent, side] = f.bodies;
+		expect(side.instructions).toBe(parent.instructions);
+		expect(side.tools).toEqual(parent.tools);
+		expect((side.input as unknown[]).slice(0, (parent.input as unknown[]).length)).toEqual(parent.input);
+		expect(side.prompt_cache_key).toBe(parent.prompt_cache_key);
+	},
+);
+
+test.each(["return", "in-place", "awaited", "throw"])(
+	"a %s payload hook blocks side replay without changing parent execution",
+	async (kind) => {
+		let calls = 0;
+		const f = await fixture({
+			wire: true,
+			policy: (pi) => {
+				pi.on("before_provider_request", async (event) => {
+					calls++;
+					const payload = event.payload as Record<string, unknown>;
+					if (kind === "throw") throw new Error("fixture hook failure");
+					if (kind === "return") return { ...payload, instructions: "modified parent policy" };
+					if (kind === "awaited") await Promise.resolve();
+					payload.instructions = "modified parent policy";
+					return undefined;
+				});
+			},
+		});
+		await f.parent.prompt("parent executes once");
+		expect(f.bodies).toHaveLength(1);
+		if (kind !== "throw") expect(f.bodies[0].instructions).toBe("modified parent policy");
+		await expect(f.side.prompt("must not infer")).rejects.toThrow(
+			kind === "throw" ? /observation or hook execution failed/ : /payload hook changed the request/,
+		);
+		expect(f.bodies).toHaveLength(1);
+		expect(f.sides).toHaveLength(0);
+		expect(calls).toBe(1);
+	},
+);
+
 test("dangerous declarations stay identical but write and shell calls cannot execute", async () => {
 	const f = await fixture();
 	await f.parent.prompt("parent");

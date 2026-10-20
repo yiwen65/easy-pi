@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- Fixed `/side` and `/btw` rejecting model-scoped payload hooks that leave the actual parent request unchanged. Replay now requires observed no-op evidence; changed, failed or unobserved hooks and header hooks remain blocked.
 - Fixed a blocked provider request retrying compaction after the run had already ended: threshold maintenance now stays at the next provider-request boundary, while overflow and length recovery still run after a failed or truncated run.
 - Fixed `find` failing every search outside a git repository on fd builds older than 8.7.0: the tool now probes `fd --help` once per binary and omits `--no-require-git` when the flag is unavailable instead of letting fd reject the argument, and it reports in the result that `.gitignore` files outside git repositories are not applied in that case.
 - Disposing a session now stops delivering host event-bus events to its extensions immediately, instead of only after the asynchronous shutdown drain completed.
