@@ -86,7 +86,9 @@ test("side panel owns its input, displays observed usage and tracks parent state
 	f.panel.focused = true;
 	f.update({ messages: [fauxAssistantMessage("live side answer")] });
 	expect(f.text()).toContain("Side conversation");
-	expect(f.text()).toContain("read-only");
+	expect(f.text()).toContain("parent permissions");
+	expect(f.text()).toContain("shared workspace");
+	expect(f.text()).not.toContain("read-only");
 	expect(f.text()).toContain("main running");
 	expect(f.text()).toContain("cache read 100 / write 20 (observed)");
 	expect(f.text()).toContain("live side answer");

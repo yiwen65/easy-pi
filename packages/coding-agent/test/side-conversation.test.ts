@@ -13,17 +13,26 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { LATEST_PROTOCOL_VERSION } from "@earendil-works/pi-mcp";
+import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
+import { Type } from "typebox";
 import { afterEach, expect, test, vi } from "vitest";
 import { streamSimple as codexStream } from "../../ai/src/api/openai-codex-responses.ts";
 import { streamSimple as responsesStream } from "../../ai/src/api/openai-responses.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
+import type { ExtensionAPI, ExtensionFactory, InlineExtension, ToolDefinition } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { SideConversationController, type SideConversationOptions } from "../src/core/side-conversation.ts";
+import { BACKGROUND_TASK_TOOL_NAMES } from "../src/core/tools/index.ts";
 import { createCodemodeExtension } from "../src/extensions/codemode/index.ts";
+import { createMcpExtension, getSessionMcpConfig } from "../src/extensions/mcp/index.ts";
+import { McpOAuthCredentialStore } from "../src/extensions/mcp/runtime.ts";
+import { registerPiCollaborationRoot } from "../src/extensions/pi-collaboration-root.ts";
+import { createToolSearchExtension } from "../src/extensions/tool-search/index.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -75,6 +84,9 @@ async function fixture(
 		codemode?: boolean;
 		api?: string;
 		policy?: ExtensionFactory;
+		extensions?: (cwd: string) => InlineExtension[];
+		customTools?: ToolDefinition[];
+		tools?: string[];
 		createSession?: SideConversationOptions["createSession"];
 		wire?: boolean;
 	} = {},
@@ -130,18 +142,20 @@ async function fixture(
 			},
 		});
 	} else {
-		runtime.registerNativeProvider(faux.provider);
-		faux.setResponses(
-			Array.from({ length: 16 }, () => (context, streamOptions) => {
+		runtime.registerNativeProvider({
+			...faux.provider,
+			streamSimple(model, context, streamOptions) {
 				requests.push({ context: capture(context), options: streamOptions });
-				return fauxAssistantMessage("answer");
-			}),
-		);
+				return faux.provider.streamSimple!(model, context, streamOptions);
+			},
+		});
+		faux.setResponses(Array.from({ length: 16 }, () => fauxAssistantMessage("answer")));
 	}
 	const extensionsResult = await createTestExtensionsResult(
 		[
 			...(options.codemode ? [{ name: "codemode", factory: createCodemodeExtension() }] : []),
 			...(options.policy ? [{ name: "policy", factory: options.policy }] : []),
+			...(options.extensions?.(cwd) ?? []),
 		],
 		cwd,
 	);
@@ -158,7 +172,15 @@ async function fixture(
 			transport: "sse",
 		}),
 		resourceLoader: createTestResourceLoader({ extensionsResult }),
-		tools: ["read", "write", "bash", ...(options.codemode ? ["codemode"] : [])],
+		tools: options.tools ?? [
+			"read",
+			"write",
+			"edit",
+			"bash",
+			...BACKGROUND_TASK_TOOL_NAMES,
+			...(options.codemode ? ["codemode"] : []),
+		],
+		customTools: options.customTools,
 	});
 	await parent.bindExtensions({ mode: "rpc", recoveryPolicy: "host-controlled" });
 	const sides: AgentSession[] = [];
@@ -303,27 +325,33 @@ test.each(["return", "in-place", "awaited", "throw"])(
 	},
 );
 
-test("dangerous declarations stay identical but write and shell calls cannot execute", async () => {
+test("authorized write, edit and shell tools affect the shared workspace, not parent history", async () => {
 	const f = await fixture();
 	await f.parent.prompt("parent");
+	const before = structuredClone(f.parent.messages);
 	f.faux.setResponses([
 		fauxAssistantMessage(
 			[
-				fauxToolCall("write", { path: join(f.cwd, "forbidden.txt"), content: "bad" }),
-				fauxToolCall("bash", { command: "touch forbidden-shell" }),
+				fauxToolCall("write", { path: join(f.cwd, "result.txt"), content: "first" }),
+				fauxToolCall("bash", { command: "printf shell > shell-effect" }),
 			],
 			{ stopReason: "toolUse" },
 		),
-		fauxAssistantMessage("denied"),
+		fauxAssistantMessage(
+			fauxToolCall("edit", { path: join(f.cwd, "result.txt"), oldText: "first", newText: "edited" }),
+			{ stopReason: "toolUse" },
+		),
+		fauxAssistantMessage("done"),
 	]);
-	await f.side.prompt("do not mutate");
-	expect(existsSync(join(f.cwd, "forbidden.txt"))).toBe(false);
-	expect(existsSync(join(f.cwd, "forbidden-shell"))).toBe(false);
+	await f.side.prompt("write and edit the requested files");
+	expect(await readFile(join(f.cwd, "result.txt"), "utf8")).toBe("edited");
+	expect(await readFile(join(f.cwd, "shell-effect"), "utf8")).toBe("shell");
 	expect(
-		f.side.snapshot.messages.filter((message) => message.role === "toolResult").every((message) => message.isError),
+		f.side.snapshot.messages.filter((message) => message.role === "toolResult").every((message) => !message.isError),
 	).toBe(true);
-	expect(f.side.snapshot.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
-	expect(f.sides[0].backgroundTasks?.list({ activeOnly: false })).toEqual([]);
+	expect(f.parent.messages).toEqual(before);
+	await f.side.close();
+	expect(await readFile(join(f.cwd, "result.txt"), "utf8")).toBe("edited");
 });
 
 test("read uses the side's own builtin and retains the root's read policy", async () => {
@@ -351,21 +379,31 @@ test("read uses the side's own builtin and retains the root's read policy", asyn
 	expect(results.at(-1)?.isError).toBe(true);
 });
 
-test("codemode cannot bypass side policy and owns/deletes its spill directory", async () => {
-	const f = await fixture({ codemode: true });
+test("codemode inherits writes and parent policy while owning/deleting only its spill directory", async () => {
+	const f = await fixture({
+		codemode: true,
+		policy: (pi) => {
+			pi.on("tool_call", (event) =>
+				event.toolName === "write" && String(event.input.path).endsWith("protected")
+					? { block: true, reason: "parent policy" }
+					: undefined,
+			);
+		},
+	});
 	await writeFile(join(f.cwd, "evidence.txt"), "evidence");
 	await f.parent.prompt("parent");
 	f.faux.setResponses([
 		fauxAssistantMessage(
 			fauxToolCall("codemode", {
-				code: `// @options: {"max_output_tokens": 20}\nconst result = await tools.read({path: ${JSON.stringify(join(f.cwd, "evidence.txt"))}});\ntry { await tools.write({path: ${JSON.stringify(join(f.cwd, "forbidden"))}, content: 'bad'}); } catch {}\nreturn result + 'x'.repeat(1000);`,
+				code: `// @options: {"max_output_tokens": 20}\nconst result = await tools.read({path: ${JSON.stringify(join(f.cwd, "evidence.txt"))}});\nawait tools.write({path: ${JSON.stringify(join(f.cwd, "written"))}, content: 'allowed'});\ntry { await tools.write({path: ${JSON.stringify(join(f.cwd, "protected"))}, content: 'bad'}); } catch {}\nreturn result + 'x'.repeat(1000);`,
 			}),
 			{ stopReason: "toolUse" },
 		),
 		fauxAssistantMessage("done"),
 	]);
 	await f.side.prompt("read through script");
-	expect(existsSync(join(f.cwd, "forbidden"))).toBe(false);
+	expect(existsSync(join(f.cwd, "protected"))).toBe(false);
+	expect(await readFile(join(f.cwd, "written"), "utf8")).toBe("allowed");
 	const result = f.side.snapshot.messages.find(
 		(message) => message.role === "toolResult" && message.toolName === "codemode",
 	);
@@ -377,6 +415,519 @@ test("codemode cannot bypass side policy and owns/deletes its spill directory", 
 	await f.side.close();
 	expect(existsSync(dirname(path!))).toBe(false);
 	expect(await readFile(join(f.cwd, "evidence.txt"), "utf8")).toBe("evidence");
+});
+
+test("recreated extension tools bind captured pi and context to the side, not the parent", async () => {
+	const f = await fixture({
+		tools: ["probe"],
+		extensions: () => [
+			{
+				name: "probe",
+				factory: (pi) => {
+					let calls = 0;
+					pi.registerTool({
+						name: "probe",
+						label: "probe",
+						description: "Session probe",
+						parameters: Type.Object({}),
+						async execute(_id, _args, _signal, _update, ctx) {
+							pi.appendEntry("probe-state", { calls: ++calls });
+							return {
+								content: [{ type: "text", text: ctx.sessionManager.getSessionId() }],
+								details: { calls },
+							};
+						},
+					});
+				},
+			},
+		],
+	});
+	await f.parent.prompt("parent");
+	const before = structuredClone(f.parent.sessionManager.getEntries());
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage("done"),
+	]);
+	await f.side.prompt("probe own session");
+	expect(textOf(f.side.snapshot.messages)).toContain(f.sides[0].sessionId);
+	expect(f.sides[0].sessionManager.getEntries()).toContainEqual(
+		expect.objectContaining({ type: "custom", customType: "probe-state", data: { calls: 1 } }),
+	);
+	expect(f.parent.sessionManager.getEntries()).toEqual(before);
+});
+
+test("SDK same-named tools retain their implementation but receive the side's context", async () => {
+	const seen: string[] = [];
+	const f = await fixture({
+		tools: ["write"],
+		customTools: [
+			{
+				name: "write",
+				label: "host write",
+				description: "Host custom write",
+				parameters: Type.Object({}),
+				async execute(_id, _args, _signal, _update, ctx) {
+					seen.push(ctx.sessionManager.getSessionId());
+					return { content: [{ type: "text", text: "host implementation" }], details: {} };
+				},
+			},
+		],
+	});
+	await f.parent.prompt("parent");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("write", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage("done"),
+	]);
+	await f.side.prompt("use custom writer");
+	expect(seen).toEqual([f.sides[0].sessionId]);
+	expect(textOf(f.side.snapshot.messages)).toContain("host implementation");
+});
+
+test("parent policy runs after side-local hooks have finished changing tool arguments", async () => {
+	let executions = 0;
+	const f = await fixture({
+		tools: ["probe"],
+		extensions: () => [
+			{
+				name: "owner",
+				factory: (pi) => {
+					pi.registerTool({
+						name: "probe",
+						label: "probe",
+						description: "Probe",
+						parameters: Type.Object({ value: Type.Integer() }),
+						async execute() {
+							executions++;
+							return { content: [], details: {} };
+						},
+					});
+					pi.on("tool_call", (event) => {
+						if (event.toolName === "probe") event.input.value = Number(event.input.value) + 1;
+					});
+				},
+			},
+			{
+				name: "guard",
+				factory: (pi) => {
+					pi.on("tool_call", (event) =>
+						event.toolName === "probe" && Number(event.input.value) >= 2
+							? { block: true, reason: "final input denied" }
+							: undefined,
+					);
+				},
+			},
+		],
+	});
+	await f.parent.prompt("parent");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("probe", { value: 0 }), { stopReason: "toolUse" }),
+		fauxAssistantMessage("done"),
+	]);
+	await f.side.prompt("check final arguments");
+	expect(executions).toBe(0);
+	expect(f.side.snapshot.messages.filter((message) => message.role === "toolResult").at(-1)).toMatchObject({
+		isError: true,
+	});
+});
+
+test("parent output policy runs after side-local result hooks", async () => {
+	const f = await fixture({
+		tools: ["probe"],
+		extensions: () => [
+			{
+				name: "owner",
+				factory: (pi) => {
+					pi.registerTool({
+						name: "probe",
+						label: "probe",
+						description: "Probe",
+						parameters: Type.Object({}),
+						async execute() {
+							return { content: [{ type: "text", text: "PARENT_REDACTION_SECRET" }], details: {} };
+						},
+					});
+					pi.on("tool_result", () => ({ content: [{ type: "text", text: "PARENT_REDACTION_SECRET" }] }));
+				},
+			},
+			{
+				name: "redaction",
+				factory: (pi) => {
+					pi.on("tool_result", () => ({ content: [{ type: "text", text: "redacted" }] }));
+				},
+			},
+		],
+	});
+	await f.parent.prompt("parent");
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("probe", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage("done"),
+	]);
+	await f.side.prompt("show permitted output only");
+	expect(textOf(f.side.snapshot.messages)).toContain("redacted");
+	expect(textOf(f.side.snapshot.messages)).not.toContain("PARENT_REDACTION_SECRET");
+});
+
+test("failed extension recreation releases already-created side event subscriptions", async () => {
+	const emitters: Array<() => void> = [];
+	let loads = 0;
+	const f = await fixture({
+		tools: ["first", "second"],
+		extensions: () => [
+			{
+				name: "first",
+				factory: (pi) => {
+					pi.events.on("probe", () => {});
+					emitters.push(() => pi.events.emit("probe", undefined));
+					pi.registerTool({
+						name: "first",
+						label: "first",
+						description: "First",
+						parameters: Type.Object({}),
+						async execute() {
+							return { content: [], details: {} };
+						},
+					});
+				},
+			},
+			{
+				name: "second",
+				factory: (pi) => {
+					if (++loads > 1) throw new Error("fixture recreation failure");
+					pi.registerTool({
+						name: "second",
+						label: "second",
+						description: "Second",
+						parameters: Type.Object({}),
+						async execute() {
+							return { content: [], details: {} };
+						},
+					});
+				},
+			},
+		],
+	});
+	await f.parent.prompt("parent");
+	await expect(f.side.open()).rejects.toThrow(/fixture recreation failure/);
+	expect(() => emitters[1]()).toThrow(/stale/);
+	expect(() => emitters[0]()).not.toThrow();
+});
+
+test("no implicit write grant is added to a parent that only allows read and codemode", async () => {
+	const f = await fixture({ codemode: true, tools: ["read", "codemode"] });
+	await f.parent.prompt("parent");
+	f.faux.setResponses([
+		fauxAssistantMessage(
+			[
+				fauxToolCall("write", { path: join(f.cwd, "denied"), content: "bad" }),
+				fauxToolCall("codemode", {
+					code: `return await tools.write({path:${JSON.stringify(join(f.cwd, "denied"))},content:'bad'});`,
+				}),
+			],
+			{ stopReason: "toolUse" },
+		),
+		fauxAssistantMessage("denied"),
+	]);
+	await f.side.prompt("cannot expand permissions");
+	expect(existsSync(join(f.cwd, "denied"))).toBe(false);
+	expect(
+		f.side.snapshot.messages.filter((message) => message.role === "toolResult").every((message) => message.isError),
+	).toBe(true);
+});
+
+test("closing side background Bash stops only side tasks and retains workspace effects", async () => {
+	const f = await fixture();
+	await f.parent.prompt("parent");
+	await f.parent.agent.state.tools
+		.find((tool) => tool.name === "bash")!
+		.execute("parent-bg", { command: "sleep 60", run_in_background: true });
+	f.faux.setResponses([
+		fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 60", run_in_background: true }), {
+			stopReason: "toolUse",
+		}),
+		fauxAssistantMessage("started"),
+	]);
+	await f.side.prompt("background task");
+	expect(f.sides[0].backgroundTasks?.list({ activeOnly: true })).toHaveLength(1);
+	await f.side.close();
+	expect(f.sides[0].backgroundTasks?.list({ activeOnly: true })).toHaveLength(0);
+	expect(f.parent.backgroundTasks?.list({ activeOnly: true })).toHaveLength(1);
+});
+
+test("side tool extension shutdown failures are visible, not swallowed as successful cleanup", async () => {
+	let instance = 0;
+	const f = await fixture({
+		tools: ["probe"],
+		extensions: () => [
+			{
+				name: "probe",
+				factory: (pi) => {
+					const side = ++instance === 2;
+					pi.registerTool({
+						name: "probe",
+						label: "probe",
+						description: "Probe",
+						parameters: Type.Object({}),
+						async execute() {
+							return { content: [], details: {} };
+						},
+					});
+					pi.on("session_shutdown", () => {
+						if (side) throw new Error("fixture shutdown failure");
+					});
+				},
+			},
+		],
+	});
+	await f.parent.prompt("parent");
+	await f.side.open();
+	await expect(f.side.close()).rejects.toThrow(/cleanup is incomplete.*probe/);
+	expect(f.side.snapshot.state).toBe("cleanup-failed");
+	// No external resource exists in this fixture; the recorded failure intentionally remains sticky.
+	const cleanup = cleanups.pop()!;
+	cleanups.push(async () => {
+		await expect(cleanup()).rejects.toThrow(/cleanup is incomplete/);
+		const report = await f.parent.shutdown();
+		expect(report.failedResources).toContain("side-conversation");
+	});
+});
+
+test.each(["deferred", "codemode"] as const)(
+	"side inherits %s MCP tools with approved config and independent connections",
+	async (exposure) => {
+		const pairs: ReturnType<typeof createInMemoryTransportPair>[] = [];
+		const closes: ReturnType<typeof vi.fn>[] = [];
+		const calls: number[] = [];
+		const loadConfig = vi.fn(() => ({
+			servers: [{ name: "docs", source: "approved-fixture", config: { command: "never-executed", exposure } }],
+			errors: [],
+		}));
+		const f = await fixture({
+			codemode: true,
+			tools: ["codemode", "tool_search", "mcp__docs__update"],
+			extensions: (cwd) => [
+				{ name: "tool-search", factory: createToolSearchExtension() },
+				{
+					name: "mcp",
+					factory: createMcpExtension({
+						agentDir: cwd,
+						loadConfig,
+						credentials: new McpOAuthCredentialStore(cwd, new InMemoryAuthStorageBackend()),
+						logPath: join(cwd, "mcp.log"),
+						createTransport: () => {
+							const pair = createInMemoryTransportPair();
+							const index = pairs.push(pair) - 1;
+							closes.push(vi.spyOn(pair.client, "close"));
+							cleanups.unshift(async () => {
+								await pair.server.close();
+							});
+							pair.server.onMessage((message) => {
+								if (!("id" in message) || !("method" in message)) return;
+								if (message.method === "tools/call") calls.push(index);
+								const result =
+									message.method === "initialize"
+										? {
+												protocolVersion: LATEST_PROTOCOL_VERSION,
+												capabilities: { tools: {} },
+												serverInfo: { name: "docs", version: "1" },
+											}
+										: message.method === "tools/list"
+											? {
+													tools: [
+														{
+															name: "update",
+															description: "Update docs",
+															inputSchema: {
+																type: "object",
+																properties: { value: { type: "string" } },
+																required: ["value"],
+															},
+														},
+													],
+												}
+											: { content: [{ type: "text", text: `connection-${index}` }] };
+								void pair.server.send({ jsonrpc: "2.0", id: message.id, result });
+							});
+							void pair.server.start();
+							return pair.client;
+						},
+					}),
+				},
+			],
+		});
+		await vi.waitFor(() => expect(f.parent.getToolDefinition("mcp__docs__update")).toBeDefined());
+		await f.parent.prompt("parent MCP context");
+		const before = structuredClone(f.parent.messages);
+		f.faux.setResponses(
+			exposure === "deferred"
+				? [
+						fauxAssistantMessage(fauxToolCall("tool_search", { query: "update docs" }), {
+							stopReason: "toolUse",
+						}),
+						fauxAssistantMessage(fauxToolCall("mcp__docs__update", { value: "side" }), { stopReason: "toolUse" }),
+						fauxAssistantMessage("done"),
+					]
+				: [
+						fauxAssistantMessage(
+							fauxToolCall("codemode", {
+								code: 'const matches = await searchTools("update", {namespace:"mcp__docs"}); const ns = await describeNamespace("mcp__docs"); if (ns.tools.length !== 1) throw new Error("missing namespace"); return await tools[matches[0].name]({value:"side"});',
+							}),
+							{ stopReason: "toolUse" },
+						),
+						fauxAssistantMessage("done"),
+					],
+		);
+		await f.side.prompt("update docs through the authorized route");
+		expect(calls).toEqual([1]);
+		expect(pairs).toHaveLength(2);
+		expect(loadConfig).toHaveBeenCalledOnce();
+		expect(f.parent.messages).toEqual(before);
+		expect(f.requests[1].context.tools).toEqual(f.requests[0].context.tools);
+		if (exposure === "deferred")
+			expect(f.requests[2].context.tools?.some((tool) => tool.name === "mcp__docs__update")).toBe(true);
+		expect(getSessionMcpConfig(f.sides[0].sessionManager)?.servers.map((server) => server.name)).toEqual(["docs"]);
+		await f.side.close();
+		expect(closes[1]).toHaveBeenCalled();
+		expect(closes[0]).not.toHaveBeenCalled();
+		f.faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("codemode", { code: 'return await tools.mcp__docs__update({value:"parent"});' }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("done"),
+		]);
+		await f.parent.prompt("parent MCP remains usable");
+		expect(calls).toEqual([1, 0]);
+	},
+);
+
+test("withdrawing one parent MCP server revokes side resources even when generic tool identity stays unchanged", async () => {
+	let registrar!: ExtensionAPI;
+	let reads = 0;
+	const f = await fixture({
+		tools: ["read_mcp_resource"],
+		extensions: (cwd) => [
+			{
+				name: "servers",
+				factory: (pi) => {
+					registrar = pi;
+					for (const name of ["a", "b"])
+						pi.registerMcpServer(name, { command: "never-executed", exposure: "direct" });
+				},
+			},
+			{
+				name: "mcp",
+				factory: createMcpExtension({
+					agentDir: cwd,
+					loadConfig: () => ({ servers: [], errors: [] }),
+					credentials: new McpOAuthCredentialStore(cwd, new InMemoryAuthStorageBackend()),
+					logPath: join(cwd, "mcp.log"),
+					createTransport: (entry) => {
+						const pair = createInMemoryTransportPair();
+						cleanups.unshift(async () => {
+							await pair.server.close();
+						});
+						pair.server.onMessage((message) => {
+							if (!("id" in message) || !("method" in message)) return;
+							if (message.method === "resources/read") reads++;
+							const result =
+								message.method === "initialize"
+									? {
+											protocolVersion: LATEST_PROTOCOL_VERSION,
+											capabilities: { tools: {}, resources: {} },
+											serverInfo: { name: entry.name, version: "1" },
+										}
+									: message.method === "tools/list"
+										? { tools: [] }
+										: message.method === "resources/list"
+											? { resources: [{ name: "doc", uri: "docs://doc" }] }
+											: message.method === "resources/templates/list"
+												? { resourceTemplates: [] }
+												: { contents: [{ uri: "docs://doc", text: "resource content" }] };
+							void pair.server.send({ jsonrpc: "2.0", id: message.id, result });
+						});
+						void pair.server.start();
+						return pair.client;
+					},
+				}),
+			},
+		],
+	});
+	await f.parent.prompt("parent resources");
+	const definition = f.parent.getToolDefinition("read_mcp_resource");
+	expect(definition).toBeDefined();
+	const response = () => [
+		fauxAssistantMessage(fauxToolCall("read_mcp_resource", { server: "a", uri: "docs://doc" }), {
+			stopReason: "toolUse",
+		}),
+		fauxAssistantMessage("done"),
+	];
+	f.faux.setResponses(response());
+	await f.side.prompt("read from authorized server a");
+	expect(reads).toBe(1);
+	registrar.unregisterMcpServer("a");
+	await vi.waitFor(() =>
+		expect(getSessionMcpConfig(f.parent.sessionManager)?.servers.map((server) => server.name)).toEqual(["b"]),
+	);
+	expect(f.parent.getToolDefinition("read_mcp_resource")).toBe(definition);
+	f.faux.setResponses(response());
+	await f.side.prompt("server a has been revoked");
+	expect(reads).toBe(1);
+	expect(f.side.snapshot.messages.filter((message) => message.role === "toolResult").at(-1)).toMatchObject({
+		isError: true,
+	});
+});
+
+test("side owns an independent in-memory team and closing it leaves the parent's team usable", async () => {
+	const f = await fixture({
+		tools: ["read", "spawn_agent", "wait_agent", "list_agents"],
+		extensions: (cwd) => [
+			{
+				name: "collaboration-root",
+				factory: (pi) =>
+					registerPiCollaborationRoot(pi, join(cwd, "agent"), () => ({
+						mode: "full-access",
+						sessionGrants: [],
+						protectedRoots: [],
+					})),
+			},
+		],
+	});
+	await f.parent.prompt("parent team context");
+	let sideRequests = 0;
+	f.faux.setResponses(
+		Array.from({ length: 12 }, () => (context) => {
+			if (textOf(context.messages).includes("Current runtime delegation."))
+				return fauxAssistantMessage("child result");
+			if (sideRequests++ === 0)
+				return fauxAssistantMessage(
+					fauxToolCall("spawn_agent", {
+						task_name: "side-worker",
+						task: { objective: "answer this side task" },
+						relationship: "explore",
+						tools: ["read"],
+					}),
+					{ stopReason: "toolUse" },
+				);
+			if (sideRequests === 2)
+				return fauxAssistantMessage(fauxToolCall("wait_agent", { target: "side-worker", timeout_ms: 1000 }), {
+					stopReason: "toolUse",
+				});
+			return fauxAssistantMessage("side done");
+		}),
+	);
+	await f.side.prompt("use a subagent for this side task");
+	const results = f.side.snapshot.messages.filter((message) => message.role === "toolResult");
+	expect(
+		results.some(
+			(message) => message.role === "toolResult" && message.toolName === "spawn_agent" && !message.isError,
+		),
+	).toBe(true);
+	expect(textOf(results)).toContain("side-worker");
+	const rootList = f.parent.agent.state.tools.find((tool) => tool.name === "list_agents")!;
+	expect((await rootList.execute("parent-list", {})).details).toMatchObject({ agents: [] });
+	await f.side.close();
+	expect((await rootList.execute("parent-list-after", {})).details).toMatchObject({ agents: [] });
+	expect(existsSync(join(f.cwd, "agent", "teams"))).toBe(false);
 });
 
 test("plain side input never executes shell escapes or slash commands", async () => {
@@ -505,16 +1056,21 @@ test.each([false, true])("abort seals a reserved prompt before admission (alread
 	expect(textOf(f.side.snapshot.messages)).not.toContain("must not start");
 });
 
-test.each([false, true])(
-	"authorization revoked while a root hook waits is checked at dispatch (nested: %s)",
-	async (nested) => {
+test.each([
+	{ nested: false, toolName: "read" },
+	{ nested: true, toolName: "read" },
+	{ nested: false, toolName: "write" },
+	{ nested: true, toolName: "write" },
+])(
+	"authorization revoked during a parent hook prevents $toolName dispatch (nested: $nested)",
+	async ({ nested, toolName }) => {
 		const entered = deferred();
 		const gate = deferred();
 		const f = await fixture({
 			codemode: nested,
 			policy: (pi) => {
 				pi.on("tool_call", async (event) => {
-					if (event.toolName === "read" && event.toolCallId.startsWith("side/")) {
+					if (event.toolName === toolName && event.toolCallId.startsWith("side/")) {
 						entered.resolve();
 						await gate.promise;
 					}
@@ -527,10 +1083,15 @@ test.each([false, true])(
 		f.faux.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall(
-					nested ? "codemode" : "read",
+					nested ? "codemode" : toolName,
 					nested
-						? { code: `return await tools.read({path:${JSON.stringify(join(f.cwd, "revoked.txt"))}});` }
-						: { path: join(f.cwd, "revoked.txt") },
+						? {
+								code: `return await tools.${toolName}(${JSON.stringify({ path: join(f.cwd, "revoked.txt"), ...(toolName === "write" ? { content: "forbidden mutation" } : {}) })});`,
+							}
+						: {
+								path: join(f.cwd, "revoked.txt"),
+								...(toolName === "write" ? { content: "forbidden mutation" } : {}),
+							},
 				),
 				{ stopReason: "toolUse" },
 			),
@@ -543,6 +1104,7 @@ test.each([false, true])(
 		gate.resolve();
 		await rejected;
 		expect(textOf(f.side.snapshot.messages)).not.toContain("REVOCATION_SECRET");
+		expect(await readFile(join(f.cwd, "revoked.txt"), "utf8")).toBe("REVOCATION_SECRET");
 		expect(f.faux.state.callCount).toBe(2);
 	},
 );

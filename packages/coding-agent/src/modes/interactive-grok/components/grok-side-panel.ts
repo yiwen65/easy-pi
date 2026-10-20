@@ -198,7 +198,9 @@ export class GrokSidePanel implements Component, Focusable {
 			const text = clip(line);
 			return this.theme.bg("selectedBg", text + " ".repeat(Math.max(0, width - visibleWidth(text))));
 		};
-		const header = framed(this.theme.fg("accent", this.theme.bold("Side conversation — read-only · in memory")));
+		const header = framed(
+			this.theme.fg("accent", this.theme.bold("Side conversation — parent permissions · shared workspace")),
+		);
 		const hints = clip(
 			this.theme.fg(
 				"dim",

@@ -1,6 +1,6 @@
 # Side conversations
 
-`/side` and `/btw` open the same temporary, read-only conversation in interactive mode. The main task keeps running. Each main session owns at most one side conversation.
+`/side` and `/btw` open the same temporary conversation with the parent's authorized tool capabilities in interactive mode. The main task keeps running. Each main session owns at most one side conversation.
 
 ```text
 /btw Why did we choose this implementation?
@@ -43,16 +43,22 @@ Matching the prefix and cache route makes reuse possible, **not guaranteed**. Ca
 
 ## Tool authority
 
-Inherited declarations are retained for caching; they are not execution grants. The side can execute only standard local `read`, `grep`, `find` and `ls` tools that the parent authorized, optionally through the built-in `codemode` tool when authorized. It cannot execute Bash, writes, edits, MCP operations, discovery, team tools or subagents.
+The side inherits the parent's concrete authorized tool set at creation, including writes, edits, Bash, custom tools, MCP, discovery and subagents when available. It does not bypass parent policy or gain tools merely because their declarations appear in inherited context. Live parent authorization is rechecked at dispatch, including after asynchronous policy hooks and inside codemode. Revoked or replaced tools become unavailable; capabilities introduced later require closing and reopening the side.
 
-The side rechecks live parent authorization and tool provenance at dispatch, including after asynchronous parent policy hooks and inside nested scripts. A custom same-named tool is not treated as a standard local read capability. Root policy hooks still apply to permitted calls. This is tool-level restriction, not an OS sandbox or isolation from arbitrary trusted extension JavaScript.
+**The workspace is shared, not read-only or isolated.** Side edits and external operations are real, immediately visible to the main task, and may conflict with concurrent parent work. Closing the side does not undo them.
+
+Built-in tools and tool-owning extensions receive fresh session bindings using already-loaded extension code, not a new scan of extension files. MCP uses the parent's approved configuration and adapters but creates side-owned connections. If team tools are authorized, the side gets its own in-memory root team: it can spawn and manage its own children, not inspect or manage the parent's existing team. Fresh tool-owner hooks run before a final pass through the parent's live tool-call and tool-result policies. A tool-owner hook can therefore run in both chains; non-idempotent transformations may run twice or cause a conservative rejection.
+
+SDK-supplied custom tool functions receive the side's tool context, but their external captured state remains embedding-owned. Reinstantiating an extension factory similarly does not clone arbitrary module-level or external state. This is not an OS sandbox.
+
+Explicit side discovery can append newly loaded declarations after the original ordered set. Providers with native deferred-tool receipts can introduce them after the captured messages; other replay paths may change cache reuse on later requests. The first side request still preserves the captured prefix.
 
 ## Persistence and cleanup
 
-The side uses a separate in-memory session and settings snapshot, plus an isolated provider registry view. It creates no side session JSONL or team registry. Hiding the panel releases its UI subscription but retains the conversation; finishing an answer also retains it for follow-up.
+The side uses a separate in-memory session and settings snapshot, plus an isolated provider registry view. It writes no side session JSONL or team registry to disk. Built-in side teams and their child histories are in memory; authorized tools and trusted extensions can still persist their own files or external effects. Hiding the panel releases its UI subscription but retains the conversation; finishing an answer also retains it for follow-up.
 
-Explicit close immediately starts an awaited shutdown rather than a delayed idle-unload timer. It seals admission, cancels/drains work, releases session-owned transport/extension resources, deletes only side-owned codemode spill/image files, and drops transcript references. Cleanup failures remain visible and block creating another side over the retained resources.
+Explicit close immediately starts an awaited shutdown rather than a delayed idle-unload timer. It seals admission, cancels/drains side work (including background Bash and side-owned subagents), releases session-owned transport/extension resources, deletes only side-owned codemode spill/image files, and drops transcript references. Cleanup failures remain visible and block creating another side over the retained resources.
 
 Main-session shutdown, replacement or reload closes its side. Side cleanup is also registered as a parent-owned shutdown resource, so a failed side cleanup makes the parent session's shutdown report incomplete even when an ordinary extension event handler catches its error.
 
-Closing never deletes files referenced from inherited parent history. These lifecycle guarantees are not secure erasure of provider prompt caches, arbitrary external logs, shared credentials or process memory.
+Closing never deletes user workspace changes or files merely referenced from inherited parent history. These lifecycle guarantees are not secure erasure of provider prompt caches, arbitrary external logs, shared credentials or process memory.

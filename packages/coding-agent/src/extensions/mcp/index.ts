@@ -80,6 +80,14 @@ const DEFAULT_STARTUP_WAIT_MS = 10_000;
 
 /** Live, session-approved configuration, not a second read of mutable config files. */
 const sessionConfigViews = new WeakMap<ReadonlySessionManager, () => LoadedMcpConfig>();
+const sessionFactories = new WeakMap<ReadonlySessionManager, () => ExtensionFactory>();
+
+/** New session-owned clients using only the source session's approved configuration and adapters. */
+export function createInheritedMcpExtension(manager: ReadonlySessionManager): ExtensionFactory {
+	const create = sessionFactories.get(manager);
+	if (!create) throw new Error("Parent MCP session configuration is unavailable.");
+	return create();
+}
 
 /** Detached approved configuration for child hosts; excludes connections and OAuth credential storage.
  * Raw headers, env, and clientSecret values remain authorized configuration and may contain secrets.
@@ -436,6 +444,8 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 						// hook waits for a disable/re-enable. Resolve the replacement at execution time.
 						const current = findServer(server);
 						if (!current || !isEnabled(current)) throw new Error(`MCP server "${server}" is disabled.`);
+						if (sessionContext && !canConnect(current.entry, sessionContext))
+							throw new Error(`MCP server "${server}" is no longer authorized.`);
 						const client = current.connection;
 						if (!client) throw new Error(`MCP server "${server}" is still starting.`);
 						if (
@@ -478,7 +488,8 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 					server.connection?.hasResources &&
 					isEnabled(server) &&
 					exposureOf(server.entry) !== "hidden" &&
-					resourcesAllowed(server.entry.name),
+					resourcesAllowed(server.entry.name) &&
+					(!sessionContext || canConnect(server.entry, sessionContext)),
 			);
 		const resourceServers = (): McpServerConnection[] =>
 			serversWithResources().flatMap((server) => (server.connection ? [server.connection] : []));
@@ -1157,6 +1168,24 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 				...(projectConfig ? { projectConfig } : {}),
 			});
 			sessionConfigViews.set(ctx.sessionManager, configView);
+			const approvedView = configView;
+			sessionFactories.set(ctx.sessionManager, () => {
+				const approved = structuredClone(approvedView());
+				return createMcpExtension({
+					...options,
+					loadConfig: () => structuredClone(approved),
+					canConnectServer: (entry) => {
+						const current = servers.find((server) => server.entry.name === entry.name);
+						return (
+							!signal.aborted &&
+							!!current &&
+							isEnabled(current) &&
+							JSON.stringify(current.entry.config) === JSON.stringify(entry.config) &&
+							canConnect(current.entry, ctx)
+						);
+					},
+				});
+			});
 			emitChange();
 			// Tool_search is activated from the config: the first prompt does not wait for
 			// servers whose tools are not declared to the model, and scripts or searches wait for them.
@@ -1305,8 +1334,10 @@ export function createMcpExtension(options: McpExtensionOptions): ExtensionFacto
 
 		pi.on("session_shutdown", async () => {
 			const manager = sessionContext?.sessionManager;
-			if (manager && configView && sessionConfigViews.get(manager) === configView)
+			if (manager && configView && sessionConfigViews.get(manager) === configView) {
 				sessionConfigViews.delete(manager);
+				sessionFactories.delete(manager);
+			}
 			configView = undefined;
 			session.abort();
 			const closing = connections();

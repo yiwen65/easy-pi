@@ -150,6 +150,8 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 let extensionCacheCwd: string | undefined;
 let extensionCacheGeneration = 0;
 const extensionCache = new Map<string, ExtensionFactory>();
+// Session views reuse approved code, not live tools/handlers or newly discovered files.
+const loadedFactories = new WeakMap<Extension, ExtensionFactory>();
 
 interface ExtensionCacheToken {
 	cwd: string;
@@ -585,6 +587,7 @@ async function runExtensionFactory(
 		for (const [name, value] of factoryState.flagDefaults) {
 			if (!runtime.flagValues.has(name)) runtime.flagValues.set(name, value);
 		}
+		loadedFactories.set(extension, factory);
 	} catch (error) {
 		// Unsubscribing cannot stop handlers already suspended in an await.
 		factoryState.failed = true;
@@ -646,6 +649,22 @@ export async function loadExtensionFromFactory(
 	const resolvedCwd = resolvePath(cwd);
 	await runExtensionFactory(factory, extension, resolvedCwd, eventBus, runtime);
 	time(`${extensionPath} factory`, "extensions");
+	return extension;
+}
+
+/** Instantiate approved extension code against a new session-owned runtime. */
+export async function recreateExtension(
+	original: Extension,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+): Promise<Extension> {
+	const factory = loadedFactories.get(original);
+	if (!factory) throw new Error(`Extension ${original.path} has no session recreation factory.`);
+	const extension = await loadExtensionFromFactory(factory, cwd, eventBus, runtime, original.path);
+	extension.resolvedPath = original.resolvedPath;
+	extension.sourceInfo = original.sourceInfo;
+	for (const tool of extension.tools.values()) tool.sourceInfo = original.sourceInfo;
 	return extension;
 }
 

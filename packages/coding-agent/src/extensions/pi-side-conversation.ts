@@ -45,7 +45,7 @@ export function createSideConversationExtension(options?: {
 		});
 		for (const name of ["side", "btw"]) {
 			pi.registerCommand(name, {
-				description: "Open an in-memory, read-only side conversation that preserves the parent request prefix",
+				description: "Open an in-memory side conversation with parent tool permissions and cache-prefix reuse",
 				handler: async (args, ctx) => {
 					if (ctx.mode !== "tui") {
 						ctx.ui.notify("Side conversations are available only in interactive TUI mode.", "warning");

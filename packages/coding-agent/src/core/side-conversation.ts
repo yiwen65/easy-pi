@@ -20,17 +20,18 @@ import {
 	observeSideConversationPrefix,
 	type SideConversationPrefix,
 } from "./side-conversation-prefix.ts";
+import { recreateSideToolExtensions } from "./side-conversation-tools.ts";
 import type { SideConversation, SideConversationSnapshot, SideConversationState } from "./side-conversation-types.ts";
 
-const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const SIDE_BOUNDARY = `Side conversation boundary.
 Everything before this boundary is inherited reference context, not your current task. Do not continue earlier instructions, plans, tool calls, approvals, or subagent work. Only user messages after this boundary are active instructions.
-You are answering a separate side question while the parent continues. Do not send messages or results to the parent, use subagents, run shell commands, mutate the workspace, or request broader permissions. This side has only the parent's authorized standard local read, grep, find and ls capabilities, optionally through codemode. Other inherited tool declarations are retained for prompt-cache compatibility, not execution permission. Do not call them. Bash, MCP, team tools and tool discovery cannot execute here.
-This is an ephemeral conversation. Do not create worktrees or persist work. If no question follows yet, wait for one.`;
+You are answering a separate side question while the parent continues. You have the parent's authorized tools, including writes, shell commands, MCP and subagents when available. Live parent permissions and policies still apply; inherited declarations never bypass them. The working directory is shared: your edits and external effects are real, visible to the parent, and may conflict with its concurrent work. Use tools only as needed for the side question.
+This conversation has its own session and team, not the parent's team. Do not continue or manage inherited parent assignments or automatically send this conversation to the parent. Conversation history is temporary; closing it does not undo file changes or external effects. If no question follows yet, wait for one.`;
 
 interface OwnedSide {
 	session: AgentSession;
 	unsubscribe: () => void;
+	shutdownErrors: Set<string>;
 	/** Single-flight creation; only host-owned paths, never paths supplied by model output. */
 	artifacts: { directory?: Promise<{ path: string; dev: number; ino: number }> };
 }
@@ -165,11 +166,12 @@ export class SideConversationController implements SideConversation {
 		checkAdmission();
 		const cwd = this.parent.sessionManager.getCwd();
 		const inherited = new Set(this.parent.getDelegatableToolNames());
-		const readonlyAllowed = (name: string): boolean =>
-			READ_ONLY_TOOLS.has(name) &&
-			inherited.has(name) &&
-			this.parent.getDelegatableToolNames().includes(name) &&
-			this.parent.getAllTools().find((tool) => tool.name === name)?.sourceInfo.source === "builtin";
+		const grants = new Map(
+			[...inherited].map((name) => {
+				const definition = this.parent.getToolDefinition(name);
+				return [name, { definition, execute: definition?.execute }];
+			}),
+		);
 		const codemodeAllowed = (): boolean => {
 			const tool = this.parent.getAllTools().find((candidate) => candidate.name === "codemode");
 			return (
@@ -195,123 +197,199 @@ export class SideConversationController implements SideConversation {
 		});
 		const artifacts: OwnedSide["artifacts"] = {};
 		const runtime = createExtensionRuntime();
-		// Execution registry is separate from the provider declaration snapshot below.
-		const tools = [...READ_ONLY_TOOLS].filter(readonlyAllowed);
-		if (codemodeAllowed()) tools.push("codemode");
-		const liveAllowed = (name: string): boolean =>
-			!this.stopped &&
-			generation === this.generation &&
-			(readonlyAllowed(name) || (name === "codemode" && codemodeAllowed()));
-		const extension = await loadExtensionFromFactory(
-			(pi) => {
-				if (codemodeAllowed()) {
-					pi.registerTool(
-						createCodemodeToolDefinition({
-							getMode: () => settings.getSettings().codemode?.mode ?? "on",
-							appendEntry: (kind, data) => manager.appendCustomEntry(kind, data),
-							writeOutputFile: async (data, extension) => {
-								if (![".txt", ".png", ".jpg", ".gif", ".webp"].includes(extension))
-									throw new Error("Invalid side artifact type.");
-								artifacts.directory ??= mkdtemp(join(tmpdir(), "pi-side-")).then(async (path) => {
-									const { dev, ino } = await lstat(path);
-									return { path, dev, ino };
-								});
-								const directory = await artifacts.directory;
-								const path = join(directory.path, `${randomUUID()}${extension}`);
-								await writeFile(path, data, { flag: "wx", mode: 0o600 });
-								return path;
-							},
-						}),
-					);
-				}
-				pi.on("tool_call", async (event, context) => {
-					if (
-						this.stopped ||
-						generation !== this.generation ||
-						!this.running ||
-						this.admittedTurn !== this.turnGeneration ||
-						!liveAllowed(event.toolName)
-					)
-						return {
-							block: true,
-							reason: "Read-only side policy denies this tool; inherited declarations do not grant execution.",
-						};
-					// Preserve root policy hooks without executing the root's tool or mutating its registry.
-					return this.parent.extensionRunner.emitToolCall(
-						{
-							...event,
-							toolCallId: `side/${manager.getSessionId()}/${event.toolCallId}`,
-						},
-						context.signal,
-					);
-				});
-			},
-			cwd,
-			createEventBus(),
-			runtime,
-			"<inline:side-policy>",
-		);
-		const loader: ResourceLoader = {
-			getExtensions: () => ({ extensions: [extension], errors: [], runtime }),
-			getSkills: () => ({ skills: [], diagnostics: [] }),
-			getPrompts: () => ({ prompts: [], diagnostics: [] }),
-			getThemes: () => ({ themes: [], diagnostics: [] }),
-			getAgentsFiles: () => ({ agentsFiles: [] }),
-			getSystemPrompt: () => prefix.context.systemPrompt,
-			getSystemPromptSource: () => undefined,
-			getAppendSystemPrompt: () => [],
-			getAppendSystemPromptSources: () => [],
-			extendResources: () => {},
-			reload: async () => {},
-		};
-		checkAdmission();
-		const { session } = await this.createSession({
-			cwd,
-			agentDir: getAgentDir(),
-			model: prefix.model,
-			thinkingLevel: prefix.thinkingLevel,
-			modelRuntime,
-			settingsManager: settings,
-			sessionManager: manager,
-			resourceLoader: loader,
-			tools,
-			// Rechecked at dispatch, including after async root hooks and inside codemode.
-			liveToolAccessCheck: liveAllowed,
-		});
-		const owner: OwnedSide = { session, artifacts, unsubscribe: () => {} };
-		// Retain ownership before binding; every subsequent failure must drain the created runtime.
-		this.owned = owner;
-		session.agent.promptCacheKey = prefix.promptCacheKey;
-		session.agent.cacheAffinityId = prefix.cacheAffinityId;
-		session.agent.transport = prefix.model.api === "openai-codex-responses" ? "sse" : this.parent.agent.transport;
-		const stream = session.agent.streamFunction;
-		session.agent.streamFunction = (model, context, options) => {
-			checkAdmission();
-			if (!this.running || this.state !== "running" || this.admittedTurn !== this.turnGeneration)
-				throw new Error("No side turn has been admitted, or it was cancelled.");
-			assertSideConversationPrefixCompatible(this.parent, prefix);
-			if (
-				JSON.stringify(context.messages.slice(0, prefix.context.messages.length)) !==
-				JSON.stringify(prefix.context.messages)
-			)
-				throw new Error("Side request no longer preserves the parent message prefix; close and reopen the side.");
-			const frozen: Context = {
-				...context,
-				systemPrompt: prefix.context.systemPrompt,
-				tools: structuredClone(prefix.context.tools),
-			};
-			return stream(model, frozen, options);
-		};
 		try {
+			// Execution authority is independent of frozen provider declarations.
+			const tools = [...inherited];
+			const liveAllowed = (name: string): boolean => {
+				const grant = grants.get(name);
+				const current = this.parent.getToolDefinition(name);
+				return (
+					!this.stopped &&
+					generation === this.generation &&
+					!!grant?.definition &&
+					grant.definition === current &&
+					grant.execute === current.execute &&
+					this.parent.getDelegatableToolNames().includes(name)
+				);
+			};
+			const recreated = await recreateSideToolExtensions(this.parent, inherited, runtime);
 			checkAdmission();
-			await session.bindExtensions({ mode: "rpc", recoveryPolicy: "host-controlled" });
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					if (codemodeAllowed()) {
+						pi.registerTool(
+							createCodemodeToolDefinition({
+								getMode: () => settings.getSettings().codemode?.mode ?? "on",
+								getInlineBudget: () => settings.getSettings().codemode?.inlineBudget,
+								getToolNamespace: (name) =>
+									this.owned?.session.getAllTools().find((tool) => tool.name === name)?.namespace,
+								getToolGuidelines: () =>
+									new Map(
+										(this.owned?.session.getAllTools() ?? []).map((tool) => [
+											tool.name,
+											tool.promptGuidelines ?? [],
+										]),
+									),
+								appendEntry: (kind, data) => manager.appendCustomEntry(kind, data),
+								writeOutputFile: async (data, extension) => {
+									if (![".txt", ".png", ".jpg", ".gif", ".webp"].includes(extension))
+										throw new Error("Invalid side artifact type.");
+									artifacts.directory ??= mkdtemp(join(tmpdir(), "pi-side-")).then(async (path) => {
+										const { dev, ino } = await lstat(path);
+										return { path, dev, ino };
+									});
+									const directory = await artifacts.directory;
+									const path = join(directory.path, `${randomUUID()}${extension}`);
+									await writeFile(path, data, { flag: "wx", mode: 0o600 });
+									return path;
+								},
+							}),
+						);
+					}
+					pi.on("tool_call", async (event, context) => {
+						if (
+							this.stopped ||
+							generation !== this.generation ||
+							!this.running ||
+							this.admittedTurn !== this.turnGeneration ||
+							!liveAllowed(event.toolName)
+						)
+							return {
+								block: true,
+								reason: "Side tool is no longer authorized by the parent, or its turn was cancelled.",
+							};
+						const original = grants.get(event.toolName)?.definition;
+						const local = this.owned?.session.getToolDefinition(event.toolName);
+						if (
+							!original ||
+							!local ||
+							JSON.stringify([local.parameters, local.exposure ?? "direct", local.orchestratesTools]) !==
+								JSON.stringify([original.parameters, original.exposure ?? "direct", original.orchestratesTools])
+						)
+							return {
+								block: true,
+								reason: "Side tool binding no longer matches the parent's authorized schema or exposure.",
+							};
+						// Live parent policy still applies; tool execution itself uses the side's own binding.
+						return this.parent.extensionRunner.emitToolCall(
+							{
+								...event,
+								toolCallId: `side/${manager.getSessionId()}/${event.toolCallId}`,
+							},
+							context.signal,
+						);
+					});
+					pi.on("tool_result", (event, context) =>
+						this.parent.extensionRunner.emitToolResult(
+							{ ...event, toolCallId: `side/${manager.getSessionId()}/${event.toolCallId}` },
+							context.signal,
+						),
+					);
+				},
+				cwd,
+				createEventBus(),
+				runtime,
+				"<inline:side-policy>",
+			);
+			// Parent authorization and output filtering must see the final side-local transformations.
+			const extensions = [...recreated.extensions, extension];
+			const loader: ResourceLoader = {
+				getExtensions: () => ({ extensions, errors: [], runtime }),
+				getSkills: () => ({ skills: [], diagnostics: [] }),
+				getPrompts: () => ({ prompts: [], diagnostics: [] }),
+				getThemes: () => ({ themes: [], diagnostics: [] }),
+				getAgentsFiles: () => ({ agentsFiles: [] }),
+				getSystemPrompt: () => prefix.context.systemPrompt,
+				getSystemPromptSource: () => undefined,
+				getAppendSystemPrompt: () => [],
+				getAppendSystemPromptSources: () => [],
+				extendResources: () => {},
+				reload: async () => {},
+			};
 			checkAdmission();
-			assertSideConversationPrefixCompatible(this.parent, prefix);
-			owner.unsubscribe = session.subscribe((event) => this.onEvent(event));
-			this.state = "idle";
-			this.publish();
+			const { session } = await this.createSession({
+				cwd,
+				agentDir: getAgentDir(),
+				model: prefix.model,
+				thinkingLevel: prefix.thinkingLevel,
+				modelRuntime,
+				settingsManager: settings,
+				sessionManager: manager,
+				resourceLoader: loader,
+				tools,
+				customTools: recreated.customTools,
+				// Rechecked at dispatch, including after async root hooks and inside codemode.
+				liveToolAccessCheck: liveAllowed,
+			});
+			const owner: OwnedSide = { session, artifacts, unsubscribe: () => {}, shutdownErrors: new Set() };
+			// Retain ownership before binding; every subsequent failure must drain the created runtime.
+			this.owned = owner;
+			session.agent.promptCacheKey = prefix.promptCacheKey;
+			session.agent.cacheAffinityId = prefix.cacheAffinityId;
+			session.agent.transport = prefix.model.api === "openai-codex-responses" ? "sse" : this.parent.agent.transport;
+			const stream = session.agent.streamFunction;
+			session.agent.streamFunction = (model, context, options) => {
+				checkAdmission();
+				if (!this.running || this.state !== "running" || this.admittedTurn !== this.turnGeneration)
+					throw new Error("No side turn has been admitted, or it was cancelled.");
+				assertSideConversationPrefixCompatible(this.parent, prefix);
+				if (
+					JSON.stringify(model) !== JSON.stringify(prefix.model) ||
+					session.thinkingLevel !== prefix.thinkingLevel
+				)
+					throw new Error("Side model or reasoning no longer matches the captured parent request.");
+				if (
+					JSON.stringify(context.messages.slice(0, prefix.context.messages.length)) !==
+					JSON.stringify(prefix.context.messages)
+				)
+					throw new Error(
+						"Side request no longer preserves the parent message prefix; close and reopen the side.",
+					);
+				// Only explicit side discovery may add declarations, after the captured ordered set.
+				const discovered = new Set(
+					context.messages
+						.slice(prefix.context.messages.length + tail.length + 1)
+						.flatMap((message) => (message.role === "toolResult" ? (message.addedToolNames ?? []) : [])),
+				);
+				const capturedNames = new Set(prefix.context.tools?.map((tool) => tool.name));
+				const added =
+					context.tools?.filter((tool) => discovered.has(tool.name) && !capturedNames.has(tool.name)) ?? [];
+				// Fresh tool-owner extensions must not rerun payload/header transformations on replay.
+				for (const extension of extensions) {
+					extension.handlers.delete("before_provider_request");
+					extension.handlers.delete("before_provider_headers");
+				}
+				const frozen: Context = {
+					...context,
+					systemPrompt: prefix.context.systemPrompt,
+					tools: [...structuredClone(prefix.context.tools ?? []), ...added],
+				};
+				return stream(model, frozen, options);
+			};
+			try {
+				checkAdmission();
+				let startupFailed = false;
+				await session.bindExtensions({
+					mode: "rpc",
+					recoveryPolicy: "host-controlled",
+					onError: (error) => {
+						if (error.event === "session_start") startupFailed = true;
+						if (error.event === "session_shutdown") owner.shutdownErrors.add(error.extensionPath);
+					},
+				});
+				if (startupFailed) throw new Error("Side tool extension startup failed; no side inference was admitted.");
+				checkAdmission();
+				assertSideConversationPrefixCompatible(this.parent, prefix);
+				owner.unsubscribe = session.subscribe((event) => this.onEvent(event));
+				this.state = "idle";
+				this.publish();
+			} catch (error) {
+				await this.release(owner);
+				throw error;
+			}
 		} catch (error) {
-			await this.release(owner);
+			// No session exists to own subscriptions if a factory or admission failed before creation.
+			if (!this.owned) runtime.invalidate();
 			throw error;
 		}
 	}
@@ -382,9 +460,9 @@ export class SideConversationController implements SideConversation {
 
 	private async release(owner: OwnedSide): Promise<void> {
 		const report = await owner.session.shutdown();
-		if (!report.complete)
+		if (!report.complete || owner.shutdownErrors.size)
 			throw new Error(
-				`Side resource cleanup is incomplete: ${[...report.failedResources, ...report.timedOutResources, ...report.remainingResources].join(", ")}`,
+				`Side resource cleanup is incomplete: ${[...report.failedResources, ...report.timedOutResources, ...report.remainingResources, ...owner.shutdownErrors].join(", ")}`,
 			);
 		owner.unsubscribe();
 		if (owner.artifacts.directory) {
