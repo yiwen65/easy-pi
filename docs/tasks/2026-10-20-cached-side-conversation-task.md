@@ -3,7 +3,7 @@
 - Created: 2026-10-20
 - Workspace: /home/w/Project/easy-pi
 - Mode: execute
-- Overall status: in_progress
+- Overall status: done
 - Source: 用户确认缓存优先方案后，明确要求编写开发计划并实施、完成交付。
 
 <!-- task-doc-section:background-goal -->
@@ -165,9 +165,9 @@
 - Blocker: None.
 - Unblock condition: None.
 
-### [ ] T-006 — 文档、全静态检查与提交交付
+### [x] T-006 — 文档、全静态检查与提交交付
 
-- Status: in_progress
+- Status: done
 - Owner: coordinator
 - Objective: 更新用户文档/changelog，验证并提交本次变更。
 - Inputs and prerequisites: T-005 通过。
@@ -182,7 +182,7 @@
   - 计划验证通过、检查通过、提交不包含他人 AI provider 改动。
 - Verification method:
   - 计划 validator；定向测试；npm run check；git status/diff 审核。
-- Validation evidence: 用户文档/README/SDK/changelog已更新；完整 npm run check（task-12）exit 0，1656文件，依赖/import/shrinkwrap/install-lock/tsc/browser smoke均通过；13文件166项通过，末次类型修正后2文件30项复跑通过；AI隔离12文件80pass/661skip；git diff --check通过，等待显式路径提交完成。
+- Validation evidence: 用户文档/README/SDK/changelog已更新；完整 npm run check（task-12）exit 0，1656文件，依赖/import/shrinkwrap/install-lock/tsc/browser smoke均通过；13文件166项通过，末次类型修正后2文件30项复跑通过；AI隔离12文件80pass/661skip；git diff --check通过。功能提交 604aadc25（32个显式自有路径）；提交后仅剩原有AI provider/CHANGELOG/未跟踪provider测试三项改动，未纳入本次提交。
 - Blocker: None.
 - Unblock condition: None.
 
@@ -254,10 +254,11 @@
 - 2026-10-20T21:57+08:00: T-008 in_progress，委派 side-shutdown-owner 独占 AgentSession 资源聚合 API 与新测试；协调器处理 controller live dispatch、入场取消和 fail-closed provider/图片边界。
 - 2026-10-20T22:07+08:00: 第二轮隔离审查无actionable finding；综合13文件166 tests passed。T-005/T-007/T-008 done；T-006 in_progress。完成tmux+真实CLI+faux并行交互smoke并清理临时产物；AI12文件父级无凭据复跑80pass/661skip。准备用户文档、完整静态检查与显式路径提交。
 - 2026-10-20T22:12+08:00: task-10全检查发现3处新测试/类型接线问题（AgentMessage.content需narrow、SDK无hfCompaction参数、background mock缺completed）；已根据实际类型修正，30项相关测试复跑通过。task-12完整npm run check exit 0（含tsc和browser smoke）。所有worker已关闭，临时tmux/fixture已清理。
+- 2026-10-20T22:14+08:00: 显式暂存自有32文件并正常提交604aadc25；提交后git status仅保留初始他人三项改动。T-006 done；全部T-001..T-008完成，关闭本开发计划。
 
 <!-- task-doc-section:final-validation -->
 ## Final validation result
 
-- Result: partial
-- Evidence: 所有实现、两轮审查、定向测试与完整npm run check已通过；T-006尚待提交。
+- Result: passed
+- Evidence: T-001..T-008全部完成；两轮独立审查后无actionable finding；相关13文件166pass、AI12文件80pass/661门控skip、末次2文件30pass、真实CLI离线tmux smoke、完整npm run check与git diff --check均通过；功能提交604aadc25。
 - Limitations: 未调用真实provider，不能把mock/faux cacheRead当服务端命中证明；严格wire复用首版仅两种Responses API、无图片继承前缀，未验证API明确拒绝。
