@@ -19,6 +19,8 @@
 - Added background task stall notices: a running task with no output for `backgroundBashStallTimeoutSeconds` (default 30 minutes, `0` disables) reports to the model and the UI without being stopped; `task_list` rows show `silent=` and the TUI marks stalled tasks with `⏸`.
 - Added inlined output (last ≤4KB) to single-task failure, timeout, and stall notices so the model can diagnose without a second tool call.
 - Added resource bounds for background tasks: `backgroundBashMaxTasks` (default 8 concurrent, `0` = no cap) and `backgroundBashMaxLogBytes` (default 64MB per task log, `0` = unlimited; a capped log ends with a truncation marker and `task_output` warns).
+- Added `/side` and `/btw` interactive, memory-only side conversations that leave the main task running. Strict cache-prefix replay currently supports image-free OpenAI Responses and Codex Responses requests, preserving parent declarations while limiting execution to authorized local read-only tools and codemode. Closing waits for resource cleanup and removes side-owned temporary output; unsupported replay paths fail explicitly. See [side conversations](docs/side-conversations.md).
+- Added `AgentSession.registerShutdownResource()` for host-owned asynchronous cleanup whose failure must appear in the parent shutdown report.
 
 ### Changed
 

@@ -35,6 +35,10 @@ export interface AppKeybindings {
 	"app.agents.interrupt": true;
 	"app.agents.previous": true;
 	"app.agents.next": true;
+	"app.side.hide": true;
+	"app.side.close": true;
+	"app.side.abort": true;
+	"app.side.latest": true;
 	"app.session.toggleNamedFilter": true;
 	"app.session.toggleEmptyFilter": true;
 	"app.editor.external": true;
@@ -125,6 +129,10 @@ export const KEYBINDINGS = {
 	"app.agents.interrupt": { defaultKeys: "ctrl+k", description: "Agent viewer: confirm interrupt" },
 	"app.agents.previous": { defaultKeys: "alt+left", description: "Agent viewer: previous agent" },
 	"app.agents.next": { defaultKeys: "alt+right", description: "Agent viewer: next agent" },
+	"app.side.hide": { defaultKeys: "alt+left", description: "Side conversation: return without closing" },
+	"app.side.close": { defaultKeys: "ctrl+d", description: "Side conversation: close and release resources" },
+	"app.side.abort": { defaultKeys: "escape", description: "Side conversation: cancel its current answer" },
+	"app.side.latest": { defaultKeys: "end", description: "Side conversation: follow newest output" },
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",
 		description: "Toggle named session filter",

@@ -158,7 +158,10 @@ const IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
 };
 
 /** A failed image-file write must not hide already executed tool effects. */
-async function saveImages(items: readonly (TextContent | ImageContent)[]): Promise<(TextContent | ImageContent)[]> {
+async function saveImages(
+	items: readonly (TextContent | ImageContent)[],
+	writeOutputFile: typeof writeCodemodeOutputFile,
+): Promise<(TextContent | ImageContent)[]> {
 	const labels = new Map<string, Promise<string>>();
 	const label = async ({ data, mimeType }: ImageContent): Promise<string> => {
 		const bytes = Buffer.from(data, "base64");
@@ -166,7 +169,7 @@ async function saveImages(items: readonly (TextContent | ImageContent)[]): Promi
 		try {
 			const extension = IMAGE_EXTENSIONS[mimeType];
 			if (!extension) throw new Error(`No file extension for image type ${mimeType}`);
-			return `[Image saved to ${await writeCodemodeOutputFile(bytes, extension)} (${kind})]`;
+			return `[Image saved to ${await writeOutputFile(bytes, extension)} (${kind})]`;
 		} catch (error) {
 			return `[Image (${kind}) could not be saved: ${error instanceof Error ? error.message : String(error)}]`;
 		}
@@ -190,6 +193,7 @@ async function saveImages(items: readonly (TextContent | ImageContent)[]): Promi
 async function truncateOutput(
 	items: (TextContent | ImageContent)[],
 	maxTokens: number,
+	writeOutputFile: typeof writeCodemodeOutputFile,
 ): Promise<{ items: (TextContent | ImageContent)[]; fullOutputPath?: string }> {
 	const texts = items.filter((item): item is TextContent => item.type === "text").map((item) => item.text);
 	const combined = texts.join("\n");
@@ -201,7 +205,7 @@ async function truncateOutput(
 	let text = `Warning: truncated output (original token count: ${Math.ceil(combined.length / CHARS_PER_TOKEN)})\nTotal output lines: ${combined.split("\n").length}\n\n${combined.slice(0, headChars)}…${Math.ceil(removed / CHARS_PER_TOKEN)} tokens truncated…${tailChars > 0 ? combined.slice(-tailChars) : ""}`;
 	let fullOutputPath: string | undefined;
 	try {
-		fullOutputPath = await writeCodemodeOutputFile(combined, ".txt");
+		fullOutputPath = await writeOutputFile(combined, ".txt");
 		text += `\n\n[Full output: ${fullOutputPath} (read with offset/limit)]`;
 	} catch (error) {
 		text += `\n\n[Could not save the full output: ${error instanceof Error ? error.message : String(error)}]`;
@@ -391,11 +395,13 @@ export async function executeCodemode(
 			text: `Script error:\n${failures.join("\n\n")}\n\n${formatCallSummary(calls, omittedCalls)}`,
 		});
 	}
+	const writeOutputFile = options.writeOutputFile ?? writeCodemodeOutputFile;
 	const truncated = await truncateOutput(
 		joinAdjacentText(items),
 		sourceOptions.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+		writeOutputFile,
 	);
-	const output = joinAdjacentText(await saveImages(truncated.items));
+	const output = joinAdjacentText(await saveImages(truncated.items, writeOutputFile));
 	const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
 	const content: (TextContent | ImageContent)[] = [
 		{ type: "text", text: `Script ${successful ? "completed" : "failed"}\nWall time ${wallTime} seconds\nOutput:\n` },

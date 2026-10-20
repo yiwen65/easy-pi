@@ -190,6 +190,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/session` | Show session info (file, ID, messages, tokens, cost) |
 | [`/images`](docs/images.md) | Inspect local image evidence, preview originals, or explicitly exclude historical request images |
 | `/agents` | easy-pi: [watch and control native child sessions](docs/collaboration.md) in Grok-TUI |
+| `/side [question]`, `/btw [question]` | [Temporary read-only side conversation](docs/side-conversations.md) with cache-prefix reuse while the main task runs |
 | `/mcp` | [Manage MCP servers](docs/mcp.md), sign in, reconnect, or change exposure |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/trust` | Save project trust decision for future sessions (restart required) |

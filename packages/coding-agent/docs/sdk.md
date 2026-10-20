@@ -119,6 +119,10 @@ interface AgentSession {
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 
+`dispose()` begins cleanup without waiting. Owners that need acknowledgement must call `await session.shutdown()` and inspect `complete`, `failedResources`, `timedOutResources` and `remainingResources`. A terminal model response or a hidden UI does not mean resource cleanup completed.
+
+Hosts can attach owned asynchronous resources with `session.registerShutdownResource("stable-host-label", async () => { /* drain and close */ })`. Shutdown waits for all registered cleanup callbacks and aggregates failed labels into `failedResources` with `complete: false`; one rejected callback does not skip the others. Registration is rejected after shutdown starts. The returned idempotent disposer releases ownership and should be called only after the resource has closed. Use stable labels, not credentials or arbitrary exception messages. This acknowledgement path is distinct from ordinary extension `session_shutdown` handlers, whose errors are reported through extension error handling.
+
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
 Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.

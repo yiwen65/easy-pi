@@ -467,6 +467,7 @@ export class AgentSession {
 	private _disposed = false;
 	private _lifecycleGeneration = 1;
 	private _shutdownPromise?: Promise<SessionShutdownReport>;
+	private readonly _shutdownResources = new Set<{ name: string; cleanup: () => Promise<void> }>();
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -1681,13 +1682,37 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Register host-owned cleanup that must settle before shutdown completes.
+	 * Use a stable host label, never credentials or arbitrary exception text, as the name.
+	 * The returned disposer releases ownership; call it only after the resource is closed.
+	 */
+	registerShutdownResource(name: string, cleanup: () => Promise<void>): () => void {
+		if (this._disposed) throw new Error("Cannot register resources after AgentSession shutdown has started");
+		const resource = { name, cleanup };
+		this._shutdownResources.add(resource);
+		return () => {
+			this._shutdownResources.delete(resource);
+		};
+	}
+
 	/** Awaitable shutdown report for the resources owned by this session. */
 	async shutdown(): Promise<SessionShutdownReport> {
 		if (!this._shutdownPromise) {
 			// Reserve cleanup even when an externally emitted shutdown hook is the first caller.
 			this._shutdownPromise = Promise.resolve().then(async () => {
 				try {
-					const stopped = await Promise.allSettled([this.abort()]);
+					const resources = [...this._shutdownResources];
+					const [stopped, ...released] = await Promise.allSettled([
+						this.abort(),
+						...resources.map(async (resource) => {
+							await resource.cleanup();
+							this._shutdownResources.delete(resource);
+						}),
+					]);
+					const failedResources = resources
+						.filter((_resource, index) => released[index].status === "rejected")
+						.map((resource) => resource.name);
 					let backgroundReport:
 						| { complete: boolean; failed: string[]; timedOut: string[]; remaining: string[] }
 						| undefined;
@@ -1697,12 +1722,10 @@ export class AgentSession {
 						await this._backgroundTaskManager?.cleanup();
 					}
 					cleanupSessionResources(this.sessionId);
-					for (const result of stopped) {
-						if (result.status === "rejected") throw result.reason;
-					}
+					if (stopped.status === "rejected") throw stopped.reason;
 					return {
-						complete: backgroundReport?.complete ?? true,
-						failedResources: backgroundReport?.failed ?? [],
+						complete: (backgroundReport?.complete ?? true) && failedResources.length === 0,
+						failedResources: [...(backgroundReport?.failed ?? []), ...failedResources],
 						timedOutResources: backgroundReport?.timedOut ?? [],
 						remainingResources: backgroundReport?.remaining ?? [],
 					};

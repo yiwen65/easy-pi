@@ -5,6 +5,7 @@ import { createEasyPiHarness } from "./easy-pi.ts";
 import llamaExtension from "./llama/index.ts";
 import { createMcpExtension } from "./mcp/index.ts";
 import { registerPiBackgroundTasks } from "./pi-background-tasks.ts";
+import { createSideConversationExtension } from "./pi-side-conversation.ts";
 import toolSearchExtension from "./tool-search/index.ts";
 
 /** Instance-bound product features. Custom ResourceLoaders remain host-owned. */
@@ -15,6 +16,7 @@ export function createBuiltInExtensions(
 	return [
 		{ name: "llama.cpp", factory: llamaExtension, hidden: true },
 		{ name: "background-tasks", factory: registerPiBackgroundTasks, hidden: true },
+		{ name: "side-conversation", factory: createSideConversationExtension(), hidden: true },
 		{ name: "web-search", factory: webSearchExtension, hidden: true },
 		...(options?.codemode === false
 			? []

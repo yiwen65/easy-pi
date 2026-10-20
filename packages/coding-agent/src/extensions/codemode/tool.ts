@@ -44,6 +44,8 @@ export interface CodemodeStoreEntryData {
 }
 
 export interface CodemodeToolOptions {
+	/** Host-owned output storage. A temporary session may delete its files after execution drains. */
+	writeOutputFile?: (data: string | Uint8Array, extension: string) => Promise<string>;
 	/** Namespace of a tool, for `searchTools()` ranking and its `namespace` filter. */
 	getToolNamespace?: (toolName: string) => ToolNamespace | undefined;
 	/** Prompt guidelines of every tool, by tool name, shown with declarations by `describeTool()` and `ALL_TOOLS`. */
